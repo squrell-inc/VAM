@@ -1,0 +1,37 @@
+[package]
+name = "vam-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Host-centric telemetry, tracing, W3C context validation, and audit kernel for VAM"
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json = "1.0"
+regex = "1.10"
+vam-spec = { workspace = true }
+vam-security = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sha2.workspace = true
+ed25519-dalek.workspace = true
+tokio = { version = "1.34", features = ["sync", "time", "rt"] }
+prost = "0.12"
+prost-types = "0.12"
+rand = "0.8"
+opentelemetry = { version = "0.32", default-features = false, features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "metrics"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+tracing-opentelemetry = "0.33"
+
+[[bin]]
+name = "verify_chain"
+path = "src/bin/verify_chain.rs"
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio = { version = "1.34", features = ["full"] }

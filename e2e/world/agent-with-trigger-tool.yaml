@@ -1,0 +1,22 @@
+piece: agent-with-trigger-tool
+kind: agent
+release: true
+requires: [trigger-test-broker]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent that can arm a trigger
+    description: Agent offered read_file, write_file, run and the test broker's trigger tool (asked first)
+    role: Tester
+    systemInstructions: Use the tools when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:read_file", decision: allow }
+          - { target: "builtin:write_file", decision: allow }
+          - { target: "builtin:run", decision: allow }
+          - { target: "builtin:step_complete", decision: allow }
+          - { target: "builtin:check_playbook_finish", decision: allow }
+          - { target: "builtin:echo_arm_trigger", decision: ask }

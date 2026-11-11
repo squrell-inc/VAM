@@ -1,0 +1,376 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "vam/v1/evals.proto";
+import "vam/v1/skills.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+enum JoinPolicy {
+  JOIN_POLICY_UNSPECIFIED = 0;
+  JOIN_POLICY_ALL_SUCCESS = 1;            // All dependencies must succeed.
+  JOIN_POLICY_ALL_TERMINAL = 2;           // Every dependency must reach a terminal state.
+  JOIN_POLICY_ANY_SUCCESS = 3;            // First successful dependency makes this node ready.
+  JOIN_POLICY_QUORUM = 4;                 // At least required_successes dependencies must succeed.
+}
+
+enum TaskOutcomeState {
+  TASK_OUTCOME_STATE_UNSPECIFIED = 0;
+  TASK_OUTCOME_STATE_SUCCEEDED = 1;
+  TASK_OUTCOME_STATE_FAILED = 2;
+  TASK_OUTCOME_STATE_SUSPENDED = 3;
+  TASK_OUTCOME_STATE_CANCELLED = 4;
+}
+
+// Step Action: Prompt / Instruction Template
+message PromptAction {
+  string instruction_template = 1;        // Template string, e.g., "Review SQL errors: {{steps.execute-sql.output}}"
+  repeated string inject_context_keys = 2;// Inputs/variables to map into the context window
+}
+
+// Step Action: Direct Static Tool Invocation
+message ToolAction {
+  string tool_name = 1;                   // E.g., "git_checkout" or "bi_publisher_render"
+  google.protobuf.Struct arguments = 2;   // Direct static args passed to the tool
+}
+
+// Step Action: Conditional DAG Branching (using CEL)
+message ConditionalAction {
+  string cel_expression = 1;              // Common Expression Language (CEL) check
+  string true_step_id = 2;
+  string false_step_id = 3;
+}
+
+// Step Action: Explicit Manual Approval Gate (HITL)
+message ApprovalAction {
+  string approval_message_template = 1;   // Prompt displayed to the human reviewer
+  repeated string require_roles = 2;      // Roles permitted to authorize (e.g., ["finance-admin"])
+}
+
+// Retry policy for steps
+message RetryRule {
+  int32 max_attempts = 1;                 // Includes the initial attempt; must be >= 1
+  google.protobuf.Duration initial_backoff = 2;
+  float backoff_multiplier = 3;
+  google.protobuf.Duration max_backoff = 4;
+}
+
+// Who completes the step. Unspecified is treated as `task` and rewritten to
+// `task` when the playbook is published.
+enum StepKind {
+  STEP_KIND_UNSPECIFIED = 0;
+  STEP_KIND_TASK = 1;                     // Agent records one declared outcome.
+  STEP_KIND_GATE = 2;                     // Human decision. The host opens it when ready.
+}
+
+// How a recorded outcome ends the run. Unspecified leaves the run in progress.
+enum OutcomeTerminal {
+  OUTCOME_TERMINAL_UNSPECIFIED = 0;
+  OUTCOME_TERMINAL_SUCCEEDED = 1;         // Clean stop. Remaining steps are skipped.
+  OUTCOME_TERMINAL_FAILED = 2;            // Run ends failed. Remaining steps are skipped.
+}
+
+message StepOutcome {
+  string label = 1;                       // Outcome id, for example "approved" or "done".
+  string description = 2;
+  OutcomeTerminal terminal = 3;           // Optional. Unspecified is not terminal.
+}
+
+// Host-observed tool call required before a non-failed outcome is accepted.
+// Publish checks that `tool` is set. Completion accepts a non-failed outcome
+// only when this run recorded a matching call while the step was available.
+// The implicit task outcome `failed` does not require evidence.
+message StepEvidence {
+  string tool = 1;
+  string result = 2;                      // For example "success".
+}
+
+// Deny-only tool rule evaluated at the PEP in Phase 2.
+message PlaybookGuard {
+  repeated string tools = 1;
+  repeated SideEffectClass side_effects = 2;
+  // Same syntax as PlaybookStep.after. Every entry must hold before the
+  // target is allowed.
+  repeated string allowed_when = 3;
+  repeated GuardArgsWithin args_within = 4;
+}
+
+// Tool argument path must be a member of a step output path.
+message GuardArgsWithin {
+  string argument = 1;                    // For example "issue_key".
+  string within = 2;                      // steps.<id>.output.<path>
+}
+
+// Who supplies the tool and the arguments. `agentic` is the prose-only step:
+// the model chooses both. `bound` and `assisted` name a tool on `binding`.
+enum StepMode {
+  STEP_MODE_UNSPECIFIED = 0;
+  STEP_MODE_BOUND = 1;                    // Author names the tool and the arguments.
+  STEP_MODE_ASSISTED = 2;                 // Author names the tool. The model fills arguments.
+  STEP_MODE_AGENTIC = 3;                  // The model chooses the tool and the arguments.
+}
+
+// Optional tool layer. Absent when the step is prose only.
+message StepBinding {
+  string tool_name = 1;
+  google.protobuf.Struct arguments = 2;
+}
+
+// One playbook step. Prose is always present; a tool binding is optional.
+message PlaybookStep {
+  string id = 1;                          // Unique string ID within this playbook (e.g., "compile-xml-schemas")
+  string description = 2;                 // Human-readable summary of the task
+
+  // Retired ordering edge. Publish copies bare ids into `after` and clears this.
+  repeated string depends_on = 3;
+
+  // Retired with the step_action oneof (DX-80A). A step carries prose and an
+  // optional binding together; those are not alternatives.
+  reserved 4, 5, 6, 7;
+  reserved "prompt_action", "tool_action", "condition", "approval_action";
+
+  // Retired scheduling fields. Rejected at publish when set. Field numbers stay
+  // so older specs still decode.
+  RetryRule retry_policy = 8;
+  string fallback_step_id = 9;
+  JoinPolicy join_policy = 10;
+  int32 required_successes = 11;
+  StepEvaluationPolicy evaluation_policy = 12;
+
+  string instruction = 20;                // Verbal layer. Required for task steps.
+  StepBinding binding = 21;               // Tool layer. Optional. Forbidden on gates.
+  StepMode mode = 22;                     // bound | assisted | agentic
+
+  StepKind kind = 23;                     // task | gate. Unspecified means task.
+  repeated StepOutcome outcomes = 24;     // Declared outcomes. A task with none has "done".
+  repeated string after = 25;             // All must hold. Bare id or "id:outcome".
+  repeated string after_any = 26;         // At least one must hold. Same syntax as after.
+  bool optional = 27;                     // Default false. Required steps block completion.
+  google.protobuf.Struct output_schema = 28;
+  StepEvidence evidence = 29;             // Required for a non-failed outcome when set.
+
+  // Gate fields. The host opens a gate approval when the step is ready.
+  string question = 30;                   // Template shown to the human.
+  google.protobuf.Struct response_schema = 31;
+  repeated StepOutcome options = 32;      // Branch shorthand. Each option is an outcome.
+  string choices_from = 33;               // steps.<id>.output.<path> of a preceding step.
+  google.protobuf.Duration timeout = 34;  // Max 30 days. Runtime default is 72h.
+  string on_timeout = 35;                 // Outcome label recorded when the gate times out.
+  google.protobuf.Duration keep_warm = 36;
+}
+
+// Skills and capabilities a procedure needs. Declared dependencies only.
+// There is no scheduler and no per-step advisory or enforced flag.
+message PlaybookRequirements {
+  repeated ResourceRef skills = 1;        // Skill refs. Version may be omitted; the host pins the latest released.
+  repeated string capabilities = 2;       // tool:, egress:, secret:, or fs: plus a non-empty remainder.
+}
+
+// Immutable, reusable Workflow template definition
+message PlaybookSpec {
+  ResourceId resource_id = 1;             // E.g. "urn:vam:playbook:hub.vam.dev/acme/erp-monthly-close"
+  string display_name = 2;                // Short label
+  string description = 3;                 // Long summary detailing what this workflow automates
+  
+  repeated PlaybookStep steps = 4;        // Steps ordered by after / after_any preconditions.
+
+  google.protobuf.Struct input_schema = 5; // JSON Schema for allowed input variables
+  google.protobuf.Struct output_schema = 6;// JSON Schema for output payload
+
+  ResourceMetadata metadata = 7;          // Revision tracking, ownership labels
+  PlaybookRequirements requires = 8;      // Optional. Skills and capabilities this procedure needs.
+  repeated PlaybookGuard guards = 9;      // Deny-only rules. Enforced in Phase 2.
+  PlaybookActivation activation = 10;     // When the model should start this playbook. `when` is required at publish.
+  // Guidance-only playbook: text added to the conversation on start. Allowed only with zero steps.
+  string guidance = 11;
+}
+
+// Whether the model asks the user before starting a playbook.
+enum ActivationMode {
+  ACTIVATION_MODE_UNSPECIFIED = 0;        // Same as ASK.
+  ACTIVATION_MODE_ASK = 1;                // The user confirms on an ask card first.
+  ACTIVATION_MODE_AUTO = 2;               // Start without asking. Refused for playbooks with mutating steps.
+}
+
+// How a playbook is matched to a request. The agent offers every attached
+// playbook's `when` to the model, which starts one with `start_playbook`.
+message PlaybookActivation {
+  string when = 1;                        // One or two sentences, at most 280 chars. Required at publish.
+  repeated string examples = 2;           // Sample requests. At most 5, each at most 200 chars.
+  ActivationMode mode = 3;                // Default ask.
+}
+
+// Binds an Agent and Playbook to execute a specific task
+message RunSpec {
+  ResourceId run_id = 1;                  // E.g. "urn:vam:run:control.vam.dev/acme/run-abc-123"
+  ResourceRef agent_ref = 2;              // Always pinned (version + digest). Never a floating ref.
+  ResourceRef playbook_ref = 3;           // May omit version on input; host stores the resolved pin
+  
+  google.protobuf.Struct inputs = 4;      // Key-value input parameters matching PlaybookSpec.input_schema
+  
+  // Execution Budgets & Constraints
+  google.protobuf.Duration max_duration = 5; // Hard cutoff of active time; parked waits do not count
+  Cost max_financial_budget = 6;          // Maximum model cost allowed
+  string workspace_ref_uri = 7;           // Path or Drive9 volume representing the workspace storage
+  string idempotency_key = 8;             // Prevents duplicate run triggers
+  string thread_ref = 9;                  // Thread name (after resolution, its directory key); prefer thread_id
+  // Host-resolved pins for unversioned skill / playbook / policy refs loaded by
+  // this run. Each entry has version + digest. Agents are not listed here —
+  // they stay on agent_ref.
+  repeated ResourceRef resolved_refs = 10;
+  // How a message to a thread with a live task is taken in. Empty (UNSPECIFIED)
+  // means STEER. Only read when the thread has a live task.
+  InboxMode inbox_mode = 11;
+  string space_id = 12;                   // wins over workspace_ref_uri when set; must agree if both
+  string thread_id = 13;                  // wins over thread_ref when set; must agree if both
+
+  // STEER delivers at the task's next turn boundary; QUEUE runs as the next
+  // task. Nested so the JSON names are plain `STEER` and `QUEUE`.
+  enum InboxMode {
+    INBOX_MODE_UNSPECIFIED = 0;
+    STEER = 1;
+    QUEUE = 2;
+  }
+}
+
+// Receipt for a message taken into a run's inbox.
+message InboxReceipt {
+  int64 seq = 1;                          // Per-run message number
+  RunSpec.InboxMode mode = 2;
+  ResourceId run_id = 3;                  // QUEUE: the run the message will start; STEER: the live run
+}
+
+// What a run is waiting for while it is parked.
+enum WaitingFor {
+  WAITING_FOR_UNSPECIFIED = 0;
+  WAITING_FOR_APPROVAL = 1;
+  WAITING_FOR_GATE = 2;
+  WAITING_FOR_INPUT = 3;
+  WAITING_FOR_REAUTH = 4;                 // An MCP connection needs signing in again.
+}
+
+// State delta generated by a completed step
+message StateDelta {
+  string step_id = 1;                     // Originating step ID
+  google.protobuf.Struct variables = 2;   // Mutation key-values emitted
+}
+
+// Host-issued authority for exactly one bounded guest task attempt.
+message ExecutionLease {
+  ResourceId run_id = 1;
+  string step_id = 2;
+  ResourceId attempt_id = 3;
+  ResourceId lease_id = 4;
+  int64 lifecycle_generation = 5;
+  bytes fencing_token = 6;
+  google.protobuf.Timestamp expires_at = 7;
+  string idempotency_key = 8;
+}
+
+// Immutable result of a host-authorized task attempt. The guest proposes this
+// outcome; only the host may commit it to workflow state.
+message TaskOutcome {
+  ExecutionLease lease = 1;
+  TaskOutcomeState state = 2;
+  google.protobuf.Struct output = 3;
+  repeated ArtifactRef output_artifacts = 4;
+  ArtifactRef continuation = 5;           // Required for SUSPENDED.
+  ArtifactRef evidence = 6;
+  TokenUsage observed_usage = 7;
+  ErrorStatus error = 8;                  // Required for FAILED or CANCELLED.
+}
+
+// Execution details for a single DAG step
+message StepExecutionStatus {
+  string step_id = 1;
+  enum StepState {
+    STEP_STATE_UNSPECIFIED = 0;
+    STEP_STATE_SKIPPED = 1;
+    STEP_STATE_QUEUED = 2;
+    STEP_STATE_RUNNING = 3;
+    STEP_STATE_PAUSED = 4;
+    STEP_STATE_SUCCESS = 5;
+    STEP_STATE_FAILED = 6;
+    STEP_STATE_CANCELLED = 7;
+    STEP_STATE_TIMED_OUT = 8;
+    // Playbook step whose preconditions hold. Pending maps to QUEUED.
+    // Completed maps to SUCCESS; the outcome label is `outcome`.
+    // SKIPPED means the step can no longer run.
+    STEP_STATE_AVAILABLE = 9;
+  }
+  StepState state = 2;
+  int32 attempt_count = 3;                // Total attempts including the initial attempt
+  google.protobuf.Timestamp started_at = 4;
+  google.protobuf.Timestamp finished_at = 5;
+  google.protobuf.Struct output = 6;
+  ErrorStatus error = 7;                  // Required for FAILED or TIMED_OUT
+  ResourceId active_attempt_id = 8;
+  int64 transition_revision = 9;
+  repeated ArtifactRef output_artifacts = 10;
+  // Outcome label recorded when the step completed. Empty otherwise.
+  string outcome = 11;
+  // Agent-written summary recorded on step completion. Empty when unset.
+  string summary = 12;
+  // Trajectory refs that satisfied `evidence`. Empty when the step has no evidence
+  // requirement or was completed with the implicit `failed` outcome.
+  repeated string evidence_refs = 13;
+}
+
+// Real-time status of a Run
+message RunStatus {
+  ResourceId run_id = 1;
+  enum RunState {
+    RUN_STATE_UNSPECIFIED = 0;
+    RUN_STATE_PENDING = 1;                // Awaiting VM provisioning
+    RUN_STATE_RUNNING = 2;                // Active DAG execution
+    RUN_STATE_PAUSED = 3;                 // Paused on an ApprovalAction (HITL)
+    RUN_STATE_SUCCEEDED = 4;              // Completed successfully
+    RUN_STATE_FAILED = 5;                 // Aborted due to step failure or budget exhaustion
+    RUN_STATE_CANCELLED = 6;              // Explicitly cancelled by operator/user
+    RUN_STATE_TIMED_OUT = 7;              // Run exceeded max duration budget
+    RUN_STATE_EXPIRED = 8;                // Expired prior to execution or HITL response window
+    RUN_STATE_REJECTED = 9;               // Rejected by host admission checks
+  }
+  RunState state = 2;
+  
+  google.protobuf.Timestamp started_at = 3;
+  google.protobuf.Timestamp finished_at = 4;
+  
+  repeated StepExecutionStatus step_statuses = 5; // Trace status of each DAG step
+  repeated StateDelta accumulated_deltas = 6;     // Complete execution log variables
+  
+  TokenUsage total_tokens_used = 7;
+  Cost total_cost_incurred = 8;
+  google.protobuf.Struct final_outputs = 9;       // Outputs produced matching PlaybookSpec.output_schema
+  ResourceRef admitted_agent_instance_ref = 10;   // Reference to the active in-VM AgentInstance
+  ErrorStatus error = 11;                 // Required for FAILED/REJECTED/TIMED_OUT
+  int64 transition_revision = 12;         // Monotonic host-owned run transition revision.
+  ArtifactRef workspace_checkpoint = 13;  // Latest durable checkpoint, if any.
+  string agent_urn = 14;                  // Agent that executed this run (catalog column).
+  string session_id = 15;                 // MicroVM session id when provisioned.
+  string thread_ref = 16;                 // Conversation thread on the workspace (default "main").
+  string workspace_id = 17;               // Volume id parsed from workspaceRefUri.
+  string prompt = 18;                     // User prompt from spec.inputs.prompt.
+  WaitingFor waiting_for = 19;            // Set while state is PAUSED.
+  string space_id = 20;
+  string thread_id = 21;
+  RunSource source = 22;                  // absent for a person
+  int32 resumes = 23;                     // Times the task was picked up again after a crash or restart.
+}
+
+// What started a run when it was not a person.
+message RunSource {
+  string kind = 1;                        // "person" | "trigger"
+  string broker_id = 2;
+  string grant_id = 3;
+  string trigger_ref = 4;
+  google.protobuf.Timestamp fire_at = 5;
+  string fire_kind = 6;                   // "scheduled" | "run_now"
+}

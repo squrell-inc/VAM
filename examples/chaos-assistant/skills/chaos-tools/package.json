@@ -1,0 +1,6 @@
+{
+  "name": "chaos-tools",
+  "version": "1.0.0",
+  "description": "Chaos & Boundary Testing Tools for VAM Agents",
+  "type": "module"
+}

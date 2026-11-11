@@ -1,0 +1,19 @@
+id: vamd-refuses-plain-http-by-default
+title: A default vamd answers over TLS and gives plain HTTP no API answer
+description: >
+  when.0 reads the node through the runner's normal API client, which uses the node's own
+  scheme; once the runner speaks TLS that step can only pass over HTTPS. then.0 sends a
+  plain-HTTP request to the same address with no key and expects no 2xx and no API body.
+  Together they prove both halves.
+tags: [release]
+needs: process
+given:
+  - org-admin
+when:
+  - expect: { node: { fields: { status.guestMode: process } } }
+then:
+  - expect: { plain-http: refused }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/bin/vamd.rs
+status: active

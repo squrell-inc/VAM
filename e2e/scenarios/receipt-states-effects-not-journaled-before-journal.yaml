@@ -1,0 +1,29 @@
+id: receipt-states-effects-not-journaled-before-journal
+title: A receipt of a run that wrote a file says its effects are not journaled, and the pack carries it
+tags: [chat]
+needs: process
+description: "Retired (owner-approved spec change): its `then` stops being true on purpose once the receipt lists effects from the journal. Its two halves moved to receipt-lists-each-external-effect-once (the section) and old-receipt-still-verifies (the old form). Until effects were journaled, the receipt said so in words instead of showing zero effects, and the evidence pack held the receipt and verified."
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: "e2e-step:write Write the note"
+then:
+  - expect: { run: succeeded }
+  - expect:
+      receipt:
+        fields:
+          receipt.effects.journaled: false
+          receipt.effects.statement: "effects not journaled on this version"
+          receipt.effects.duplicates: { absent: true }
+  - verify-receipt: { pack: true }
+guards:
+  - vam:crates/vam-orchestrator/src/evidence.rs
+  - vam:crates/vam-telemetry/src/evidence.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: write, afterTool: write_file }
+    reply: { text: note written }
+  - when: { step: write }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+status: retired

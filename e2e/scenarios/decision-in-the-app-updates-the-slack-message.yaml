@@ -1,0 +1,37 @@
+id: decision-in-the-app-updates-the-slack-message
+title: Approving in the app updates the Slack message to say so
+tags: [notifications, approval]
+needs: process
+description: A tool approval reaches the owner's linked Slack account as one message with Approve and Deny and no always-allow or always-deny buttons. It is approved in the app. Within seconds the same message is updated to name the app and carries no buttons.
+given:
+  - org-admin
+  - agent-with-guarded-tool
+  - slack-bot-token
+  - slack-app-token
+  - notify-broker
+when:
+  - node-notify: { slack: { botToken: slack-bot-token, appToken: slack-app-token }, appUrl: "https://vam.example.test" }
+  - link-contact: { channel: slack, account: "T1/U1", verify: true }
+  - chat: "e2e-step:one Write the first note"
+  - expect: { approval: pending, tool: write_file }
+  - expect:
+      channel-messages: { to: "T1/U1", kind: approval.pending, count: 1, buttons: 2, openInVam: true, within: 20s }
+  - approve: { via: app }
+  - expect: { run: succeeded }
+then:
+  - expect: { channel-messages: { to: "T1/U1", kind: approval.pending, updated: true, buttons: 0, mentions: app, within: 20s } }
+  - expect:
+      notifications:
+        kind: approval.pending
+        run: latest
+        count: 1
+        fields: { resolvedReason: acted, actedSurface: app }
+guards:
+  - vam:brokers/vam-notify/src/**
+  - vam:crates/vam-orchestrator/src/notifications.rs
+mock:
+  - when: { step: one, afterTool: write_file }
+    reply: { text: first written }
+  - when: { step: one }
+    reply: { toolCall: { name: write_file, args: { path: first.txt, content: e2e } } }
+status: active

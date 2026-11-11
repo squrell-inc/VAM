@@ -1,0 +1,71 @@
+id: tool-declared-as-a-read-cannot-send-mail
+title: A tool declared as a read cannot send mail, and a send tool asks first
+description: >
+  The member is connected. The read-declared search tool, told by its arguments to POST
+  /v1.0/me/sendMail and then to GET /v1.0/users, is refused each time with a message that names
+  the declared shape, and records a denied egress decision. A tool that declares no shape is
+  refused the same way on a plain read. The Graph mock saw no request at all. The send tool, which
+  declares a POST to /v1.0/me/sendMail and asks first, parks on an approval; once approved the mock
+  saw exactly one POST carrying the member's current token.
+tags: [connectors, egress, approval]
+needs: process
+given:
+  - org-member
+  - org-administrator
+  - mock-microsoft-login
+  - mock-microsoft-graph
+  - agent-with-m365-probe
+when:
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-administrator }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }
+  - chat: { text: "e2e-step:post Send mail with the search tool", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: declared shape } }
+  - expect: { event: egress.decided, fields: { data.disposition: DENY } }
+  - chat: { text: "e2e-step:users List users with the search tool", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: declared shape } }
+  - chat: { text: "e2e-step:bare Search with the tool that declares nothing", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: declared shape } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: "*", count: 0 } }
+  - chat: { text: "e2e-step:send Send the mail", as: org-member }
+  - expect: { approval: pending, tool: m365_probe_send }
+  - approve: { as: org-member }
+  - expect: { run: succeeded }
+then:
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/sendMail, method: POST, count: 1, has: [bearer=current] } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: "*", method: GET, count: 0 } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/session.rs
+  - vam:crates/vam-network/src/broker.rs
+mock:
+  - when: { step: post, toolName: m365_probe_search }
+    reply: { text: The tool was refused. }
+  - when: { step: post, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_search, args: { method: POST, path: /v1.0/me/sendMail } } }
+  - when: { step: post, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-tool-declared-as-a-read-cannot-send-mail } } }
+  - when: { step: users, toolName: m365_probe_search }
+    reply: { text: The tool was refused. }
+  - when: { step: users, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_search, args: { method: GET, path: /v1.0/users } } }
+  - when: { step: users, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-tool-declared-as-a-read-cannot-send-mail } } }
+  - when: { step: bare, toolName: m365_probe_undeclared }
+    reply: { text: The tool was refused. }
+  - when: { step: bare, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_undeclared, args: { method: GET, path: /v1.0/me/messages } } }
+  - when: { step: bare, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-tool-declared-as-a-read-cannot-send-mail } } }
+  - when: { step: send, lastRole: user, contains: "Human approval was granted" }
+    reply: { text: Sent. }
+  - when: { step: send, toolName: m365_probe_send }
+    reply: { text: Sent. }
+  - when: { step: send, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_send, args: { method: POST, path: /v1.0/me/sendMail } } }
+  - when: { step: send, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-tool-declared-as-a-read-cannot-send-mail } } }
+status: active

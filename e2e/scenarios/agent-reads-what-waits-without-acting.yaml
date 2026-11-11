@@ -1,0 +1,66 @@
+id: agent-reads-what-waits-without-acting
+title: An agent that may read the notification list sees what waits on the user, without acting on it, and a triggered run is refused
+tags: [approval, triggers, notifications]
+needs: process
+description: One agent's run parks on a guarded write. A second agent, allowed the notification list, is asked what waits. Its tool result names the pending approval and holds none of the call's arguments. Afterwards the approval is still pending and the record is unread. A run a trigger started calls the same tool and is refused.
+given:
+  - org-admin
+  - agent-with-guarded-tool
+  - agent-reads-notifications
+  - trigger-test-broker
+when:
+  - chat: { agent: agent-with-guarded-tool, text: "e2e-step:ask Write the note" }
+  - expect: { approval: pending, tool: write_file }
+  - expect: { notifications: { kind: approval.pending, run: latest, count: 1, state: open, unread: true } }
+  - chat: { agent: agent-reads-notifications, text: "e2e-step:peek What is waiting for me?" }
+  - expect: { run: succeeded }
+  - expect: { event: tool.completed, tool: notifications_list }
+  - expect: { thread: { role: tool, contains: approval.pending } }
+  - expect: { thread: { role: tool, contains: pinecone-4821, absent: true } }
+  - expect:
+      notifications:
+        kind: approval.pending
+        state: open
+        count: 1
+        unread: true
+        fields:
+          readAt: { absent: true }
+          resolvedAt: { absent: true }
+  - chat: { agent: agent-reads-notifications, text: "e2e-step:arm Arm the trigger" }
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { run: succeeded }
+  - fire-trigger: { key: fire-1, label: fired }
+then:
+  - expect: { fire: { outcomes: [ACCEPTED] } }
+  - expect: { event: tool.failed, tool: notifications_list }
+  - expect: { run: succeeded }
+  - expect: { notification-summary: { action: 1 } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/workflow.rs
+mock:
+  - when: { step: ask, afterTool: write_file }
+    reply: { text: written }
+  - when: { step: ask }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: pinecone-4821 } } }
+  - when: { step: peek, toolName: notifications_list }
+    reply: { text: Something waits. }
+  - when: { step: peek }
+    reply: { toolCall: { name: notifications_list, args: {} } }
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:fired Read the list mock-script:agent-reads-what-waits-without-acting"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+  - when: { step: fired, toolName: notifications_list }
+    reply: { text: refused }
+  - when: { step: fired, stepStart: true }
+    reply: { toolCall: { name: notifications_list, args: {} } }
+status: active

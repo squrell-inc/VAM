@@ -1,0 +1,11 @@
+---
+description: Phased workstreams — plan-then-build one phase at a time from a tracker under .cursor/workstreams.
+alwaysApply: false
+---
+
+# Phased workstreams
+
+When splitting work into phases, asking what to do next, or implementing from a
+tracker, follow `.cursor/skills/phased-workstream/SKILL.md` and read
+`.cursor/workstreams/<slug>.md` (index: `.cursor/workstreams/README.md`). Do not
+reconstruct phases from chat. Design plans live in `design/`; see `AGENTS.md` §2.1.

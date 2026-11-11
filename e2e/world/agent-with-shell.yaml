@@ -1,0 +1,18 @@
+piece: agent-with-shell
+kind: agent
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent offered read_file, write_file and run
+    description: Agent offered read_file, write_file and run
+    role: Tester
+    systemInstructions: Use read_file, write_file and run when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:read_file", decision: allow }
+          - { target: "builtin:write_file", decision: allow }
+          - { target: "builtin:run", decision: allow }

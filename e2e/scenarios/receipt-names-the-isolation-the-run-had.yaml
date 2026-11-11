@@ -1,0 +1,25 @@
+id: receipt-names-the-isolation-the-run-had
+title: A run on a microVM has a receipt that says firecracker, jailer on, with the image digests
+tags: [chat]
+needs: firecracker
+description: The process scenarios prove "process guest (no isolation)". This one proves the isolation line on a real microVM.
+given:
+  - org-admin
+  - agent-plain
+when:
+  - chat: "e2e-step:hello Say hello"
+then:
+  - expect: { run: succeeded }
+  - expect:
+      receipt:
+        fields:
+          receipt.isolation.summary: "firecracker microVM, jailer on"
+          receipt.isolation.jailer: true
+          receipt.image.rootfsDigest: { present: true }
+guards:
+  - vam:crates/vam-orchestrator/src/isolation.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: hello }
+    reply: { text: Hello from the mock. }
+status: active

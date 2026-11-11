@@ -1,0 +1,26 @@
+id: thread-history-lists-tool-results
+title: A thread's history lists what the agent read and wrote, also after vamd restarts
+tags: [chat, context]
+needs: process
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: "e2e-step:first Save the note"
+  - expect: { file: { path: note.txt, equals: kiwi-42 } }
+  - restart-vamd: {}
+then:
+  - expect: { thread: { role: user, contains: "Save the note" } }
+  - expect: { thread: { role: tool, contains: kiwi-42 } }
+  - expect: { thread: { role: assistant, contains: "Saved." } }
+guards:
+  - vam:crates/vam-storage/src/thread_log.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: first, toolName: read_file }
+    reply: { text: Saved. }
+  - when: { step: first, toolName: write_file }
+    reply: { toolCall: { name: read_file, args: { path: note.txt } } }
+  - when: { step: first, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: kiwi-42 } } }
+status: active

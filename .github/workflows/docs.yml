@@ -1,0 +1,64 @@
+name: Docs
+
+# Docs-only PRs skip rust.yml (its paths-ignore holds docs/**, README.md and the like), so the docs
+# lint and the site build run here. A code PR that breaks a docs proof is caught by the
+# `repo_docs_are_honest` test in the workspace tests.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "README.md"
+      - "e2e/**"
+      - "crates/vam-e2e/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "docs/**"
+      - "README.md"
+      - "e2e/**"
+      - "crates/vam-e2e/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache for this job; PRs restore from the base branch's cache.
+          shared-key: ${{ github.job }}
+      - name: Docs lint (status field and proofs)
+        run: cargo run -p vam-e2e -- check
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: docs/pnpm-lock.yaml
+      - name: Install docs dependencies
+        working-directory: docs
+        run: pnpm install --frozen-lockfile
+      - name: Build the docs site
+        working-directory: docs
+        run: pnpm build

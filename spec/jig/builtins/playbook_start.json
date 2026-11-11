@@ -1,0 +1,30 @@
+{
+  "name": "vam.playbook_start",
+  "doc": "The ask card for starting a playbook: its name, a description and the playbook's input form. The form fields are generated from data.inputs_schema by the same rule as vam.gate_default (see form below); the result is the inputs object.",
+  "inputSchema": {
+    "type": "object",
+    "required": ["playbook", "inputs_schema"],
+    "additionalProperties": false,
+    "properties": {
+      "playbook": { "type": "string", "minLength": 1, "maxLength": 200 },
+      "description": { "type": "string", "maxLength": 2000 },
+      "inputs_schema": { "type": "object" }
+    }
+  },
+  "resultSchema": { "type": "object" },
+  "resultFrom": "/inputs_schema",
+  "form": { "schema": "/inputs_schema", "into": "fields", "submit": "go" },
+  "ir": {
+    "version": 1,
+    "catalog": "vam/1",
+    "jig": "vam.playbook_start",
+    "root": "root",
+    "nodes": {
+      "root": { "type": "Stack", "props": { "gap": "medium" }, "children": ["name", "about", "fields", "go"] },
+      "name": { "type": "Text", "props": { "text": { "$data": "/playbook" }, "emphasis": "strong" } },
+      "about": { "type": "Text", "props": { "text": { "$data": "/description" } }, "visible": { "$data": "/description" } },
+      "fields": { "type": "Stack", "props": { "gap": "small" }, "children": [] },
+      "go": { "type": "Button", "props": { "label": "Start", "tone": "success", "action": { "event": "submit", "with": [] } } }
+    }
+  }
+}

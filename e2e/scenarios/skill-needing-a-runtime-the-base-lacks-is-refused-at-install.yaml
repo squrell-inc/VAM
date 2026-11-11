@@ -1,0 +1,23 @@
+id: skill-needing-a-runtime-the-base-lacks-is-refused-at-install
+title: A skill that needs a runtime the node's base lacks is refused when it is installed, naming the base and the runtime
+description: >
+  The node reports the base it is given (the process node is started with a fixture base
+  manifest naming a base that holds Python 3.13 and no Java). A skill that needs Python 3.11 or
+  newer installs and releases; a skill that needs Java 21 or newer is refused with a 4xx that
+  names the base and the runtime. Both skills are published by steps, so a refusal is a product
+  result and not a setup failure.
+tags: [release]
+needs: process
+given:
+  - org-admin
+  - skill-needs-python
+  - skill-needs-java
+when:
+  - expect: { node: { fields: { status.base.name: vam/base:2 } } }
+then:
+  - publish-skill: { piece: skill-needs-python }
+  - publish-skill: { piece: skill-needs-java, refused: true, contains: [vam/base:2, java] }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/skill_package_admit.rs
+status: active

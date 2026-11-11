@@ -1,0 +1,36 @@
+id: follow-up-continues-after-stop
+title: After a task is stopped mid-way, a follow-up continues from the last finished step
+tags: [chat, context, workspace]
+needs: process
+given:
+  - org-admin
+  - agent-with-shell
+when:
+  - chat: { text: "e2e-step:first Save the note, then run the slow command", wait: false }
+  - expect: { event: tool.completed, tool: read_file }
+  - expect: { event: tool.invoked, tool: run }
+  - stop-session: {}
+  - chat: { text: "e2e-step:next What does the note say?", thread: continue }
+then:
+  - expect: { event: inference.completed, fields: { data.outcomePreview: "The note says kiwi-42." } }
+  - expect: { file: { path: note.txt, equals: kiwi-42 } }
+  - expect: { file: { path: partial.txt, absent: true } }
+guards:
+  - vam:crates/vam-storage/src/thread_log.rs
+  - vam:crates/vam-orchestrator/src/thread_recorder.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/manager.rs
+  - vam:crates/vam-orchestrator/src/api/inbox.rs
+  - vam:crates/vam-orchestrator/src/inbox.rs
+mock:
+  - when: { step: next, anyContains: "kiwi-42" }
+    reply: { text: "The note says kiwi-42." }
+  - when: { step: next }
+    reply: { text: "I do not know." }
+  - when: { step: first, toolName: read_file }
+    reply: { toolCall: { name: run, args: { command: "echo half > partial.txt; sleep 30" } } }
+  - when: { step: first, toolName: write_file }
+    reply: { toolCall: { name: read_file, args: { path: note.txt } } }
+  - when: { step: first, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: kiwi-42 } } }
+status: active

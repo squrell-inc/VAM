@@ -1,0 +1,637 @@
+[
+ {
+  "key": "operator--t1",
+  "error": "null",
+  "events": [
+   {
+    "sequence": "9",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "979",
+      "completionTokens": "2",
+      "durationMs": "26",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "11",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "1005",
+      "completionTokens": "2",
+      "durationMs": "24",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "18",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "1031",
+      "completionTokens": "1",
+      "durationMs": "23",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "26",
+    "eventType": "vam.v1.run.completed",
+    "payload": {
+     "answer": "retried"
+    }
+   }
+  ],
+  "receipt": {
+   "receipt": {
+    "harness": {
+     "profile": "base",
+     "version": "0.1.0",
+     "digest": "sha256:e1d8a6fc83b0c0f6b5b9a9b0d26826b6bee4b6a69d78e16a73b68689d484b7d9"
+    },
+    "metering": {
+     "promptTokens": 3015,
+     "completionTokens": 5,
+     "approvals": 0
+    }
+   }
+  },
+  "thread": {
+   "records": [
+    {
+     "seq": 3,
+     "kind": "message",
+     "message": {
+      "role": "user",
+      "parts": [
+       {
+        "type": "text",
+        "text": "e2e-step:bad Read the note mock-script:invalid-tool-arguments-return-a-typed-err"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 4,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 5,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "invalid arguments for read_file: not valid JSON. Send the arguments as one complete JSON object."
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 6,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 7,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "invalid arguments for read_file: not valid JSON. Send the arguments as one complete JSON object."
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 8,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "text",
+        "text": "retried"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
+  "key": "operator--t2",
+  "error": "null",
+  "events": [
+   {
+    "sequence": "37",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "980",
+      "durationMs": "21",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "39",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "1007",
+      "durationMs": "22",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "46",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "1034",
+      "completionTokens": "1",
+      "durationMs": "24",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "54",
+    "eventType": "vam.v1.run.completed",
+    "payload": {
+     "answer": "retried"
+    }
+   }
+  ],
+  "receipt": {
+   "receipt": {
+    "harness": {
+     "profile": "base",
+     "version": "0.1.0",
+     "digest": "sha256:e1d8a6fc83b0c0f6b5b9a9b0d26826b6bee4b6a69d78e16a73b68689d484b7d9"
+    },
+    "metering": {
+     "promptTokens": 3021,
+     "completionTokens": 1,
+     "approvals": 0
+    }
+   }
+  },
+  "thread": {
+   "records": [
+    {
+     "seq": 3,
+     "kind": "message",
+     "message": {
+      "role": "user",
+      "parts": [
+       {
+        "type": "text",
+        "text": "e2e-step:missing Read the note mock-script:invalid-tool-arguments-return-a-typed"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 4,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 5,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "invalid arguments for read_file: missing required field 'path'. Call read_file again with \"path\" (string)."
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 6,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 7,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "invalid arguments for read_file: missing required field 'path'. Call read_file again with \"path\" (string)."
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 8,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "text",
+        "text": "retried"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
+  "key": "operator--t3",
+  "error": "null",
+  "events": [
+   {
+    "sequence": "65",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "980",
+      "completionTokens": "9",
+      "durationMs": "23",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "67",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "1013",
+      "completionTokens": "9",
+      "durationMs": "26",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "72",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "1047",
+      "completionTokens": "1",
+      "durationMs": "24",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "82",
+    "eventType": "vam.v1.run.completed",
+    "payload": {
+     "answer": "retried"
+    }
+   }
+  ],
+  "receipt": {
+   "receipt": {
+    "harness": {
+     "profile": "base",
+     "version": "0.1.0",
+     "digest": "sha256:e1d8a6fc83b0c0f6b5b9a9b0d26826b6bee4b6a69d78e16a73b68689d484b7d9"
+    },
+    "metering": {
+     "promptTokens": 3040,
+     "completionTokens": 19,
+     "approvals": 0
+    }
+   }
+  },
+  "thread": {
+   "records": [
+    {
+     "seq": 3,
+     "kind": "message",
+     "message": {
+      "role": "user",
+      "parts": [
+       {
+        "type": "text",
+        "text": "e2e-step:badwrite Save a draft mock-script:invalid-tool-arguments-return-a-typed"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 4,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 5,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "invalid arguments for write_file: not valid JSON. Send the arguments as one complete JSON object."
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 6,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 7,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "invalid arguments for write_file: not valid JSON. Send the arguments as one complete JSON object."
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 8,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "text",
+        "text": "retried"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
+  "key": "operator--t4",
+  "error": "null",
+  "events": [
+   {
+    "sequence": "93",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "978",
+      "completionTokens": "9",
+      "durationMs": "22",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "103",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "994",
+      "completionTokens": "9",
+      "durationMs": "23",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "107",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "1009",
+      "completionTokens": "1",
+      "durationMs": "29",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "120",
+    "eventType": "vam.v1.run.completed",
+    "payload": {
+     "answer": "saved"
+    }
+   }
+  ],
+  "receipt": {
+   "receipt": {
+    "harness": {
+     "profile": "base",
+     "version": "0.1.0",
+     "digest": "sha256:e1d8a6fc83b0c0f6b5b9a9b0d26826b6bee4b6a69d78e16a73b68689d484b7d9"
+    },
+    "metering": {
+     "promptTokens": 2981,
+     "completionTokens": 19,
+     "approvals": 0,
+     "turns": 2
+    }
+   }
+  },
+  "thread": {
+   "records": [
+    {
+     "seq": 3,
+     "kind": "message",
+     "message": {
+      "role": "user",
+      "parts": [
+       {
+        "type": "text",
+        "text": "e2e-step:ok Save the note mock-script:invalid-tool-arguments-return-a-typed-erro"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 4,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 5,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "Wrote 4 bytes to note.txt"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 6,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 7,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "Wrote 4 bytes to note.txt"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 8,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "text",
+        "text": "saved"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ }
+]

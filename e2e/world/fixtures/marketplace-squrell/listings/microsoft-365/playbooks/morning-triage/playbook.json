@@ -1,0 +1,46 @@
+{
+  "spec": {
+    "resourceId": {
+      "urn": "urn:vam:playbook:hub.squrell.cloud/squrell/morning-triage"
+    },
+    "displayName": "Morning triage",
+    "description": "Read the mail that arrived overnight and show what needs attention. Reads only: it sends, drafts and books nothing.",
+    "activation": {
+      "when": "Use for the morning mail triage: what arrived since yesterday and what needs an answer."
+    },
+    "requires": {
+      "skills": [
+        {
+          "resourceId": {
+            "urn": "urn:vam:skill:hub.squrell.cloud/squrell/m365-mail"
+          }
+        }
+      ]
+    },
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "lookbackHours": {
+          "type": "integer",
+          "description": "How far back to look, in hours (24 when not given)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "steps": [
+      {
+        "id": "triage",
+        "description": "Search recent mail and show it.",
+        "kind": "STEP_KIND_TASK",
+        "mode": "STEP_MODE_ASSISTED",
+        "binding": {
+          "toolName": "mail_search",
+          "arguments": {
+            "sinceHours": "{{inputs.lookbackHours}}"
+          }
+        },
+        "instruction": "Load the m365-mail skill and call mail_search with no query and sinceHours set to the lookbackHours input (24 when it was not given). The mail card is shown by the tool. Then write a short summary for the member in three groups: needs a reply today, for information, can wait. Name the sender and subject of each item. Use only mail_search and, when a preview is not enough to judge a message, mail_read. Never send, draft or book anything in this playbook. Finish the step with step_complete."
+      }
+    ]
+  }
+}

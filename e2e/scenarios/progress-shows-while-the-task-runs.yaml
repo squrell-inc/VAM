@@ -1,0 +1,32 @@
+id: progress-shows-while-the-task-runs
+title: Progress posted by the agent is readable while the task runs, and card data that breaks its schema is a typed error to the model
+tags: [chat]
+needs: process
+description: The agent posts a message and a progress card while a slow command runs. Both are readable through the run's events before the task ends. A first card whose data breaks the schema is refused to the model with a typed error.
+given:
+  - org-admin
+  - agent-with-shell
+when:
+  - chat: { text: "e2e-step:work Do the two checks", wait: false, harness: { human: { jig: true } } }
+  - expect: { event: outbox.message, fields: { data.text: "Starting: 1 of 2" } }
+  - expect: { event: outbox.card, fields: { data.jig: vam.progress, data.data.done: 1 } }
+  - expect: { run: running }
+then:
+  - expect: { thread: { role: tool, contains: "invalid data for vam.progress" } }
+  - expect: { run: succeeded }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-orchestrator/src/outbox.rs
+mock:
+  - when: { step: work, toolName: post_message }
+    reply: { toolCall: { name: show, args: { jig: vam.progress, data: { label: Checking, done: one, total: 2 } } } }
+  - when: { step: work, toolName: show, contains: "invalid data" }
+    reply: { toolCall: { name: show, args: { jig: vam.progress, data: { label: Checking, done: 1, total: 2 } } } }
+  - when: { step: work, toolName: show }
+    reply: { toolCall: { name: run, args: { command: "sleep 6" } } }
+  - when: { step: work, toolName: run }
+    reply: { text: done }
+  - when: { step: work, stepStart: true }
+    reply: { toolCall: { name: post_message, args: { text: "Starting: 1 of 2" } } }
+status: active

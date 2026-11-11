@@ -1,0 +1,39 @@
+id: grant-token-is-refused-over-http
+title: A grant token is refused as an API bearer, whole or as its bare secret, and starts no run
+tags: [triggers]
+needs: process
+description: A grant opens the trigger gateway only. Presented to the HTTP API as a bearer, in full or as the secret part whose hash is stored, it is refused with 401 and no run is created.
+given:
+  - org-admin
+  - agent-with-trigger-tool
+  - trigger-test-broker
+when:
+  - chat: "e2e-step:arm Arm the trigger"
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: echo_arm_trigger, count: 1 } }
+  - bearer-request: { method: post, path: /v1/runs, token: grant, status: 401 }
+  - bearer-request: { method: post, path: /v1/runs, token: grant-secret, status: 401 }
+then:
+  - expect: { runs: { count: 1 } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/keys.rs
+  - vam:crates/vam-orchestrator/src/api/auth.rs
+mock:
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:grant-token-is-refused-over-http"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+  - when: { step: bearer, stepStart: true }
+    reply: { text: done }
+status: active

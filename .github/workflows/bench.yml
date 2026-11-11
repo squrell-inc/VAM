@@ -1,0 +1,276 @@
+# VAM real-model benchmark on a KVM runner (design/benchmark.md B3, e2e/README.md "Bench on GitHub Actions").
+#
+# SAFETY BY CONSTRUCTION: this workflow is dispatch-only. It has no pull_request or push trigger,
+# so GitHub never hands the repository secret VERCEL_AI_GATEWAY_API_KEY to a fork PR or to any
+# automatic run. Do not add one. The key goes into the environment of one step, is read once by
+# `vam secrets set --from-env` into a throwaway node vault, and is never written to a file that is
+# uploaded. The key grep below fails the job if a key-shaped string reaches the results.
+name: bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to bench (default: the dispatched ref)"
+        required: false
+        default: ""
+      task_set:
+        description: "Pinned task-set version (e2e/task-sets.yaml)"
+        required: false
+        default: "0.1.0"
+      models:
+        description: "Comma list of catalog model ids, e.g. anthropic/claude-sonnet-5.5,zai/glm-5 (ignored when mock)"
+        required: false
+        default: "anthropic/claude-haiku-5.5"
+      profiles:
+        description: "Comma list of harness profiles (base, open-strong, open-small)"
+        required: false
+        default: "base"
+      mode:
+        description: "Machine mode: on (off and both need a runner flag that does not exist yet)"
+        required: false
+        default: "on"
+        type: choice
+        options: ["on", "off", "both"]
+      k:
+        description: "Trials per task and model"
+        required: false
+        default: "5"
+      max_usd_per_job:
+        description: "Spend cap per job in USD (the runner stops starting trials past it)"
+        required: false
+        default: "2"
+      scenarios:
+        description: "Comma list of scenario ids (default: the 0.1.0 bench scenarios)"
+        required: false
+        default: ""
+      mock:
+        description: "Mock dry run: no secret, no spend"
+        required: false
+        default: false
+        type: boolean
+
+# Two benches never overlap, and a started bench is never cancelled.
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        env:
+          MODELS: ${{ inputs.models || 'anthropic/claude-haiku-5.5' }}
+          PROFILES: ${{ inputs.profiles || 'base' }}
+          MODE: ${{ inputs.mode || 'on' }}
+          MOCK: ${{ inputs.mock }}
+        run: |
+          if [ "$MODE" != "on" ]; then
+            echo "::error::mode=$MODE is not available yet: the runner has no machine-off flag (design/benchmark.md B1). Use mode=on."
+            exit 1
+          fi
+          if [ "$MOCK" = "true" ]; then MODELS="mock"; PROFILES="base"; fi
+          matrix=$(jq -cn --arg m "$MODELS" --arg p "$PROFILES" '
+            [($m | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != "")))[] as $model
+             | ($p | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != "")))[] as $profile
+             | {model: $model, profile: $profile}]')
+          [ "$(jq length <<<"$matrix")" -gt 0 ] || { echo "::error::empty models or profiles"; exit 1; }
+          echo "matrix=$(jq -c '{include: .}' <<<"$matrix")" >> "$GITHUB_OUTPUT"
+          jq -r '.[] | "- \(.model) / \(.profile)"' <<<"$matrix" | { echo "### bench plan"; cat; } >> "$GITHUB_STEP_SUMMARY"
+
+  bench:
+    name: bench ${{ matrix.model }} ${{ matrix.profile }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      # One job at a time: a model's rate limits and the runner's microVM stability both want it.
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      VAM_SNAPSHOT_RESTORE: "1"
+      IS_MOCK: ${{ inputs.mock }}
+      TASK_SET: ${{ inputs.task_set || '0.1.0' }}
+      K: ${{ inputs.k || '5' }}
+      MAX_USD: ${{ inputs.max_usd_per_job || '2' }}
+      SCENARIOS_IN: ${{ inputs.scenarios }}
+      MODEL: ${{ matrix.model }}
+      PROFILE: ${{ matrix.profile }}
+    steps:
+      - name: Start timer
+        run: echo "LANE_START=$(date +%s)" >> "$GITHUB_ENV"
+      # The hosted runner has limited disk: remove toolchains this job never uses.
+      - name: Free runner disk
+        run: |
+          df -h /
+          for d in /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL; do sudo rm -rf "$d"; done
+          df -h /
+      # Files enter a jail by hard link, which needs one mount.
+      - name: Filesystems (jailer hard links)
+        run: |
+          for p in / /tmp /srv "$RUNNER_TEMP" /var/lib; do
+            echo "$p: dev=$(stat -c '%d' "$p") $(findmnt -no TARGET,FSTYPE,SOURCE -T "$p" | tr '\n' ' ')"
+          done
+          sudo mkdir -p /srv/jailer
+      - name: KVM access
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || { echo "No /dev/kvm on this runner" | tee -a "$GITHUB_STEP_SUMMARY"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl-tools and e2fsprogs
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools e2fsprogs
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-vm
+      - name: Restore lane assets
+        id: assets-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vam-assets
+          key: fc-assets-${{ hashFiles('scripts/e2e/firecracker-assets.sh', 'scripts/assets.pins', 'scripts/build-rootfs.sh', 'Cargo.lock', 'crates/vam-runtime/**') }}
+          restore-keys: fc-assets-
+      - name: Prepare assets
+        env:
+          VAM_ASSETS_DIR: ${{ runner.temp }}/vam-assets
+        run: |
+          pull() { for i in 1 2 3; do docker pull "$1" && return 0; echo "docker pull $1 failed (try $i)"; sleep $((i * 10)); done; return 1; }
+          pull busybox:musl
+          pull alpine:latest
+          scripts/e2e/firecracker-assets.sh --env-file "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/assets.log"
+      # Built as the runner; the bench itself runs as root (the jailer needs it). `vam` is for the vault bind.
+      - name: Build (microVM node, runner, vam CLI)
+        run: |
+          VAM_E2E_BUILD_ONLY=1 scripts/e2e/run.sh --firecracker
+          cargo build -q -p vam-cli
+      - name: Check inputs
+        run: |
+          if [ "$IS_MOCK" != "true" ] && [ -z "${{ secrets.VERCEL_AI_GATEWAY_API_KEY != '' && 'yes' || '' }}" ]; then
+            echo "::error::secret VERCEL_AI_GATEWAY_API_KEY is not set on this repository (or run with mock: true)"
+            exit 1
+          fi
+          grep -qE "^  - version: ${TASK_SET//./\\.}\$" e2e/task-sets.yaml || { echo "::error::task_set $TASK_SET is not a pinned set in e2e/task-sets.yaml"; exit 1; }
+          case "$K" in ''|*[!0-9]*) echo "::error::k must be a number"; exit 1;; esac
+          echo "BENCH_SCENARIOS=${SCENARIOS_IN:-tool-call-first-try-saves-a-draft,matching-request-starts-the-playbook,greeting-starts-no-playbook,injected-text-cannot-start-a-playbook}" >> "$GITHUB_ENV"
+          echo "OUT=$RUNNER_TEMP/bench" >> "$GITHUB_ENV"
+          echo "ARTIFACT=bench-${TASK_SET}-$(tr '/' '-' <<<"$MODEL")-${PROFILE}-${{ github.run_id }}" >> "$GITHUB_ENV"
+      - name: Bench
+        env:
+          VERCEL_AI_GATEWAY_KEY: ${{ secrets.VERCEL_AI_GATEWAY_API_KEY }}
+        run: |
+          set +x
+          mkdir -p "$OUT" "$RUNNER_TEMP/vmlogs"
+          # Hosted runners ignore `sudo -E`: pass the VAM/VAMD variables explicitly.
+          mapfile -t VENV < <(env | grep -E '^VAMD?_[A-Za-z0-9_]*=')
+          VAMD_BIN="$PWD/target/e2e-bin-vm/vamd"
+          TDIR="$PWD/target/debug"
+          args=(--firecracker --bench --profile "$PROFILE" -k "$K" --max-usd "$MAX_USD" --task-set-version "$TASK_SET" --scenarios "$BENCH_SCENARIOS" --out "$OUT")
+          rc=0
+          if [ "$IS_MOCK" = "true" ]; then
+            sudo env "PATH=$PATH" "${VENV[@]}" VAM_E2E_SKIP_BUILD=1 VAM_E2E_VAMD="$VAMD_BIN" VAM_E2E_TEST_BROKER="$(dirname "$VAMD_BIN")/hsp-echo-broker" \
+              scripts/e2e/run.sh "${args[@]}" --mock 2>&1 | tee "$RUNNER_TEMP/vmlogs/bench.log" || rc=${PIPESTATUS[0]}
+          else
+            # A throwaway vault: fresh master key for this job, masked, never written to a file.
+            MASTER=$(openssl rand -hex 32)
+            echo "::add-mask::$MASTER"
+            STATE="$RUNNER_TEMP/bench-node"
+            mkdir -p "$STATE"
+            mkfifo "$RUNNER_TEMP/node-stdin"
+            # 1. Start the bench node; it stops when a line arrives on its stdin.
+            sudo env "PATH=$PATH" "${VENV[@]}" "VAMD_SECRETS_MASTER_KEY=$MASTER" \
+              "$TDIR/vam-e2e" node --firecracker --state-dir "$STATE" --bin-dir "$(dirname "$VAMD_BIN")" \
+              < "$RUNNER_TEMP/node-stdin" > "$RUNNER_TEMP/vmlogs/node.log" 2>&1 &
+            NODE_PID=$!
+            exec 3> "$RUNNER_TEMP/node-stdin"
+            for i in $(seq 1 120); do grep -q '^node up: ' "$RUNNER_TEMP/vmlogs/node.log" && break; sleep 1; done
+            HOST=$(sed -n 's/^node up: //p' "$RUNNER_TEMP/vmlogs/node.log" | head -n 1)
+            [ -n "$HOST" ] || { echo "::error::bench node did not come up"; tail -n 30 "$RUNNER_TEMP/vmlogs/node.log"; exit 1; }
+            # 2. Bind the gateway key into the node's vault (vercel/api-key). Key stays in this step's env.
+            sudo env "VAM_CA_FILE=$STATE/tls/ca.pem" "VERCEL_AI_GATEWAY_KEY=$VERCEL_AI_GATEWAY_KEY" \
+              bash -c '"$1" secrets set vercel/api-key --from-env VERCEL_AI_GATEWAY_KEY --scope org --host "$2" --token "$(cat "$3/node-key")" >/dev/null' _ "$TDIR/vam" "$HOST" "$STATE"
+            # 3. Stop the node; the key stays in the vault under the master key.
+            echo >&3 || true
+            exec 3>&-
+            wait "$NODE_PID" || true
+            # 4. The bench on that state dir.
+            sudo env "PATH=$PATH" "${VENV[@]}" "VAMD_SECRETS_MASTER_KEY=$MASTER" VAM_E2E_SKIP_BUILD=1 VAM_E2E_VAMD="$VAMD_BIN" VAM_E2E_TEST_BROKER="$(dirname "$VAMD_BIN")/hsp-echo-broker" \
+              scripts/e2e/run.sh "${args[@]}" --real --provider vercel --model "$MODEL" --state-dir "$STATE" 2>&1 | tee "$RUNNER_TEMP/vmlogs/bench.log" || rc=${PIPESTATUS[0]}
+            # The vault is the only place the key lives: never leave it for upload or the cache.
+            sudo rm -rf "$STATE"
+          fi
+          echo "BENCH_RC=$rc" >> "$GITHUB_ENV"
+          echo "bench exit code: $rc"
+      - name: Hand the run back to the runner user
+        if: always()
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/bench" "$RUNNER_TEMP/vmlogs" 2>/dev/null || true
+          ls -A /srv/jailer/firecracker 2>/dev/null | sed 's/^/jail left: /' || true
+      # No key-shaped string may reach the results (H0 report's pattern: sk- or vck_ plus 10+ key characters).
+      - name: Key grep
+        if: always()
+        run: |
+          if grep -rEI '\bsk-[A-Za-z0-9_-]{10,}|vck_[A-Za-z0-9_-]{10,}' "$RUNNER_TEMP/bench" "$RUNNER_TEMP/vmlogs"; then
+            echo "::error::a key-shaped string is in the bench output; not uploading"
+            rm -rf "$RUNNER_TEMP/bench" "$RUNNER_TEMP/vmlogs"
+            exit 1
+          fi
+          echo "key grep: clean"
+      - name: Job summary
+        if: always()
+        run: |
+          f="$RUNNER_TEMP/bench/bench-results.json"
+          {
+            echo "### bench ${MODEL} / ${PROFILE} (task set ${TASK_SET}, k=${K}, mock=${IS_MOCK}, run ${{ github.run_id }})"
+            echo "- job minutes: $(( ($(date +%s) - LANE_START + 59) / 60 )), exit code: ${BENCH_RC:-unknown}"
+            if [ -f "$f" ]; then
+              jq -r '"- stoppedAt: \(.stoppedAt // "no"), spend micro-USD: \(.spendMicro // "n/a"), cap: \(.maxUsd // "n/a")"' "$f"
+              echo
+              echo "| task | model | mode | profile | successes/k | cost per success (micro-USD) |"
+              echo "|---|---|---|---|---|---|"
+              jq -r --arg p "$PROFILE" '.rows[] | "| \(.task) | \(.model) | \(.mode) | \(.harnessProfile // $p) | \(.successes)/\(.k) | \(.costPerSuccess // "n/a") |"' "$f"
+            else
+              echo "- no bench-results.json written"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Fail on a runner error
+        if: always()
+        run: |
+          # 0 = done, 3 = stopped at the spend cap (partial, flagged in the summary, still uploaded).
+          case "${BENCH_RC:-unknown}" in
+            0) ;;
+            3) echo "::warning::stopped at the max-usd cap; the result is partial and not publishable" ;;
+            *) echo "::error::bench exit code ${BENCH_RC:-unknown}"; exit 1 ;;
+          esac
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: |
+            ${{ runner.temp }}/bench/bench-results.json
+            ${{ runner.temp }}/bench/summary.json
+            ${{ runner.temp }}/bench/briefs/
+            ${{ runner.temp }}/bench/vamd/vamd.log
+            ${{ runner.temp }}/vmlogs/
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,8 @@
+piece: pinned-http-auth
+kind: secret
+# An egress secret whose name ends in `auth-header`, so the HTTP host adapter attaches it as the
+# Authorization value. It is pinned to one host, which is not the host the skill's tool is allowed
+# to reach.
+bindingSuffix: "-auth-header"
+secretKind: egress
+allowedDestinations: ["pinned.e2e-http.example"]

@@ -1,0 +1,52 @@
+id: trigger-on-a-busy-workspace-runs-after-the-task
+title: A fire on a busy workspace waits for the running task, then starts as its own run
+tags: [triggers]
+needs: process
+description: A slow task holds the workspace. The fire is queued, not started and not injected into the task; the queued run holds no session while it waits, then starts when the task ends and finishes.
+given:
+  - org-admin
+  - agent-with-trigger-tool
+  - trigger-test-broker
+when:
+  - chat: "e2e-step:arm Arm the trigger"
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: echo_arm_trigger, count: 1 } }
+  - chat: { text: "e2e-step:slow Check slowly", thread: continue, wait: false }
+  - expect: { event: tool.invoked, tool: run }
+  - fire-trigger: { key: fire-1, label: fired }
+  - expect: { fire: { outcomes: [QUEUED] } }
+  - expect:
+      runs:
+        latest:
+          state: RUN_STATE_PENDING
+          sessionId: { absent: true }
+then:
+  - expect: { run: succeeded }
+  - expect: { file: { path: fired.txt, present: true } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/inbox.rs
+mock:
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:trigger-on-a-busy-workspace-runs-after-the-task"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+  - when: { step: slow, toolName: run }
+    reply: { text: done }
+  - when: { step: slow, stepStart: true }
+    reply: { toolCall: { name: run, args: { command: "sleep 8" } } }
+  - when: { step: fired, toolName: write_file }
+    reply: { text: done }
+  - when: { step: fired, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: fired.txt, content: fired } } }
+status: active

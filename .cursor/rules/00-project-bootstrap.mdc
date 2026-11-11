@@ -1,0 +1,11 @@
+---
+description: Session bootstrap — read AGENTS.md before making changes.
+alwaysApply: true
+---
+
+# VAM project bootstrap
+
+Read `AGENTS.md` at the repo root first. It is the canonical guide: architecture,
+crate map (`crates/` and `brokers/`), invariants, verification commands, and where
+active work is tracked (`.cursor/workstreams/`, procedure in
+`.cursor/skills/phased-workstream/SKILL.md`).

@@ -1,0 +1,21 @@
+id: api-rate-limits-a-flood
+title: A key that floods the API is told to slow down, other keys are not, and it is served again after the wait
+description: >
+  A member's key sends 300 quick requests. Some are answered 429 with a Retry-After; the
+  admin's key is answered meanwhile; after the wait the member's key is answered again. It
+  uses a second identity so no other scenario's key is ever throttled.
+tags: [members]
+needs: process
+given:
+  - org-admin
+  - { piece: org-member, as: flooder }
+when:
+  - flood: { as: flooder, path: /v1/node, count: 300 }
+then:
+  - expect: { node: { fields: { status.guestMode: process } } }
+  - expect: { flood: { rateLimited: { atLeast: 20 }, retryAfter: present, recovers: true } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/rate_limit.rs
+  - vam:crates/vam-orchestrator/src/daemon.rs
+status: active

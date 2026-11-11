@@ -1,0 +1,81 @@
+{
+  "allowAnyPlaybook": true,
+  "allowedPlaybookRefs": [],
+  "capabilityPolicy": {
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/chaos-isolated"
+      }
+    },
+    "securityProfileName": "chaos-profile"
+  },
+  "contextPolicy": {
+    "compaction": "COMPACTION_POLICY_SUMMARIZE_MIDDLE",
+    "maxHistoryTurns": 10,
+    "maxTokenCount": 64000
+  },
+  "description": "An agent used to test failure recovery, supervisor timeouts, privilege drops, and environment scrubbing.",
+  "displayName": "Chaos & Boundary Testing Agent",
+  "hitlPolicy": {
+    "monitoredTools": [],
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/high-risk-chaos-actions"
+      }
+    }
+  },
+  "metadata": {
+    "createdBy": {
+      "urn": "urn:vam:user:local.vam.dev/vam/admin"
+    },
+    "revision": 1
+  },
+  "modelRequirements": {
+    "minContextTokens": 128000,
+    "requiredModalities": [
+      "text"
+    ],
+    "requiresStructuredOutput": true,
+    "requiresToolCalling": true
+  },
+  "preferredModels": [
+    {
+      "maxCompletionTokens": 2048,
+      "modelName": "openai/gpt-4o-mini",
+      "provider": "openrouter",
+      "temperature": 0.0
+    }
+  ],
+  "reasoningPolicy": {
+    "maxIterations": 5,
+    "stepTimeout": "60s",
+    "termination": "TERMINATION_POLICY_EXPLICIT_CLAIM"
+  },
+  "resourceId": {
+    "urn": "urn:vam:agent:local.vam.dev/vam/chaos-assistant"
+  },
+  "resourceRequirements": {
+    "memoryMib": 1024,
+    "networkMode": "NETWORK_MODE_ISOLATED",
+    "storageGib": 5,
+    "vcpuCount": 1
+  },
+  "role": "You are a quality-assurance test agent.",
+  "skillRefs": [
+    {
+      "resourceId": {
+        "urn": "urn:vam:skill:local.vam.dev/vam/chaos-tools"
+      }
+    }
+  ],
+  "systemInstructions": "Your purpose is to test the runtime boundaries using chaos-tools ('probe_sandbox', 'check_env', 'sleep_hang'). Verify that your environment is clean, your privileges are dropped, and report your findings.",
+  "telemetryPolicy": {
+    "auditLedgerMode": "AUDIT_LEDGER_MODE_HASH_CHAINED",
+    "piiRedactionEnabled": true,
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/standard-telemetry-compliance"
+      }
+    }
+  }
+}

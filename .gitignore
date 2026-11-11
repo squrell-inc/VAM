@@ -1,0 +1,40 @@
+# Host / guest artifacts (never commit)
+/vamd
+/vam
+/rootfs.ext4
+/*.ext4
+/firecracker
+/jailer
+/vmlinux*
+
+# Rust
+/target/
+**/*.rs.bk
+.env
+.tmp/
+tmp/
+
+# Node / Astro (docs)
+docs/node_modules/
+docs/dist/
+.astro/
+.pnpm-store/
+
+# OS
+.DS_Store
+Thumbs.db
+/dist*
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local daemon logs (never commit)
+vamd.log
+/*.log
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+

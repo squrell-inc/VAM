@@ -1,0 +1,25 @@
+{
+  "spec": {
+    "agentRef": {
+      "resourceId": {
+        "urn": "urn:vam:agent:local.vam.dev/vam/bun-assistant"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0,
+        "patch": 0
+      }
+    },
+    "idempotencyKey": "",
+    "inputs": {
+      "model": "openai/gpt-oss-120b:nitro",
+      "prompt": "Calculate (23 * 45) + 122, write a note named 'result.txt' with the answer using write_file, and then glob '*.txt' in the workspace."
+    },
+    "maxDuration": "1800s",
+    "maxFinancialBudget": {
+      "currency": "USD",
+      "microAmount": "500000"
+    },
+    "workspaceRefUri": "volume://assistant6"
+  }
+}

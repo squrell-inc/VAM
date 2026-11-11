@@ -1,0 +1,29 @@
+id: approval-suspends-and-resumes
+title: A guarded tool call waits for approval, then finishes after Approve
+tags: [approval, chat]
+needs: process
+given:
+  - org-admin
+  - agent-with-guarded-tool
+when:
+  - chat: "e2e-step:ask Write the note"
+  - expect: { approval: pending, tool: write_file }
+  - approve: latest
+then:
+  - expect: { run: succeeded }
+  - expect: { event: tool.completed, tool: write_file }
+guards:
+  - vam:crates/vam-storage/src/thread_log.rs
+  - vam:crates/vam-orchestrator/src/thread_recorder.rs
+  - vam:crates/vam-orchestrator/src/approvals/**
+  - vam:crates/vam-runtime/src/hitl_checkpoint.rs
+  - vam:crates/vam-orchestrator/src/run_checkpoint.rs
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/hitl.rs
+mock:
+  - when: { afterTool: write_file }
+    reply: { text: done }
+  - when: { step: ask }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+status: active

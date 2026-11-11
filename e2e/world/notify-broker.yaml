@@ -1,0 +1,20 @@
+piece: notify-broker
+kind: broker
+# The notification channel broker (`vam-notify-broker`, named by $VAM_E2E_NOTIFY_BROKER, the build
+# with the fake transport). No Slack call leaves the process: each call it would make is written
+# to `<state-dir>/sent.jsonl`, which `expect: { channel-messages }` reads. It is started again
+# with `--gateway-socket <path>` by the `node-notify` step, once vamd reports it. List the
+# `trigger-test-broker` piece before this one when a scenario uses both: `fire-trigger` and
+# `bearer-request` read the first broker started.
+bin: VAM_E2E_NOTIFY_BROKER
+args: ["--socket", "{{socket}}", "--state-dir", "{{dir}}/state", "--fake-transport"]
+body:
+  manifest:
+    brokerId: vam.notify
+    trustTier: TRUST_TIER_FIRST_PARTY
+    secretBindings: []
+    egressDomains: ["slack.com", "wss-primary.slack.com"]
+    identityRequirement: { userId: true, agent: false }
+    notificationChannel: { channel: slack, surface: slack }
+    tools: []
+  unixPath: "{{socket}}"

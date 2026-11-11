@@ -1,0 +1,28 @@
+id: bench-trial-starts-from-a-clean-thread
+title: Each benchmark trial of a task starts on a fresh thread that holds no message of an earlier trial
+tags: [chat]
+needs: process
+description: The isolation proof for the benchmark runner. The first trial's reply carries a marker. If a later trial shared its thread, the model request would hold that reply, the leak rule would answer, and the trial would fail. Run it with --bench --mock and k of at least 2.
+model:
+  task: fresh-trial-isolation
+  version: 0.0.0-lane
+  k: 2
+given:
+  - org-admin
+  - agent-plain
+when:
+  - chat: "e2e-step:probe Say hello"
+then:
+  - expect: { run: succeeded }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: "Clean start, marker-first-trial-only." } }
+guards:
+  - vam:crates/vam-e2e/src/run_cmd.rs
+  - vam:crates/vam-e2e/src/engine.rs
+mock:
+  - when: { step: probe, anyContains: marker-first-trial-only }
+    reply:
+      text: "Leak: an earlier trial's reply is in this thread."
+  - when: { step: probe }
+    reply:
+      text: "Clean start, marker-first-trial-only."
+status: active

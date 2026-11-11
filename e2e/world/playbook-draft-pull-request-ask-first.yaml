@@ -1,0 +1,18 @@
+piece: playbook-draft-pull-request-ask-first
+kind: playbook
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:playbook:local.vam.dev/e2e/draft-pull-request-ask-first" }
+    displayName: Draft a pull request
+    description: Asks before it starts.
+    activation:
+      when: Use when the user wants to draft a pull request.
+      examples: ["Please draft a pull request that fixes the login bug."]
+      mode: ACTIVATION_MODE_ASK
+    steps:
+      - id: draft
+        description: Draft the pull request
+        kind: STEP_KIND_TASK
+        mode: STEP_MODE_AGENTIC
+        instruction: Write the pull request title and description from the user's request.

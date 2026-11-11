@@ -1,0 +1,31 @@
+id: named-profile-prints-on-the-receipt-with-its-own-digest
+title: A run that names a profile prints that profile, its version and its own digest on the receipt
+tags: [chat]
+needs: process
+description: A run naming open-small prints profile open-small, a version and a digest, with no overrides. A run naming open-small and turning loop detection off prints that override.
+given:
+  - org-admin
+  - agent-plain
+when:
+  - chat: { text: "e2e-step:plain Say hi", harness: { profile: open-small } }
+  - expect:
+      receipt:
+        fields:
+          receipt.harness.profile: open-small
+          receipt.harness.version: { present: true }
+          receipt.harness.digest: { present: true }
+          receipt.harness.overrides: { absent: true }
+  - chat: { text: "e2e-step:plain Say hi", harness: { profile: open-small, loop: { detect: false } } }
+then:
+  - expect:
+      receipt:
+        fields:
+          receipt.harness.profile: open-small
+          receipt.harness.overrides.loop.detect: false
+guards:
+  - vam:crates/vam-orchestrator/src/receipt.rs
+  - vam:crates/vam-spec/src/harness.rs
+mock:
+  - when: { step: plain }
+    reply: { text: hi }
+status: active

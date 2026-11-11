@@ -1,0 +1,22 @@
+piece: agent-with-effect-tools
+kind: agent
+release: true
+requires: [effects-test-broker]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent that can create tickets and notes
+    description: Agent offered read_file, write_file, run and the effects test broker's three tools
+    role: Tester
+    systemInstructions: Use the tools when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:read_file", decision: allow }
+          - { target: "builtin:write_file", decision: allow }
+          - { target: "builtin:run", decision: allow }
+          - { target: "builtin:echo_create_ticket", decision: allow }
+          - { target: "builtin:echo_create_note", decision: allow }
+          - { target: "builtin:echo_find_ticket", decision: allow }

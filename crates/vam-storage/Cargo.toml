@@ -1,0 +1,29 @@
+[package]
+name = "vam-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Durable workspace checkpoint barriers for VAM"
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+vam-spec.workspace = true
+vam-vsock = { path = "../vam-vsock" }
+prost = "0.12"
+prost-types = "0.12"
+rusqlite = { workspace = true, features = ["bundled"] }
+tokio = { version = "1.34", features = ["fs", "io-util", "rt", "sync", "macros", "rt-multi-thread"] }
+bytes = "1.10"
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+vam-telemetry.workspace = true
+tracing.workspace = true
+libc = "0.2"
+ext4-view = { version = "=1.0.0", features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3.8"

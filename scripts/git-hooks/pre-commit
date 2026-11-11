@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Optional local hook — install with: ./scripts/install-git-hooks.sh
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo not on PATH; skipping rustfmt check" >&2
+  exit 0
+fi
+
+if ! cargo fmt --all --check; then
+  echo >&2
+  echo "pre-commit: rustfmt check failed. Fix with: cargo fmt --all" >&2
+  exit 1
+fi

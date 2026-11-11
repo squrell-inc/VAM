@@ -1,0 +1,57 @@
+[package]
+name = "vam-notify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "First-party HSP notification channel broker (vam.notify): delivers neutral renderings to channel adapters, Slack first"
+
+# This file declares every dependency the whole of the notify broker needs, so Cargo.lock
+# changes once (wave 0a). The skeleton uses the HSP serving ones; the Slack client (Socket Mode
+# over WSS, Web API) and the delivery log come with waves 4 and 6.
+# A broker never depends on `vam-orchestrator` or on another broker (E10 locked decision 22).
+# No vendor credential is ever read from the environment or from disk: tokens arrive per call.
+
+[dependencies]
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"] }
+# Wave 6: Socket Mode stream handling.
+futures-util = "0.3"
+http = "0.2"
+libc = "0.2"
+prost-types = "0.12"
+# Wave 6: Slack Web API client. Same stack as vam-web (rustls, no OpenSSL).
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+# Wave 4: the delivery log (ids, Slack channel and ts only; no secret column).
+rusqlite.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.34", features = ["full"] }
+# Wave 6: Socket Mode WSS. 0.21 shares tokio-rustls 0.24 and webpki-roots 0.25 with reqwest 0.11.
+tokio-tungstenite = { version = "=0.21.0", features = ["rustls-tls-webpki-roots"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.10", features = ["transport"] }
+tower = "0.4"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url = "2.5"
+vam-spec.workspace = true
+
+[features]
+# Test-only: the fake Slack transport (writes each Web API call to <state-dir>/sent.jsonl, takes
+# clicks and DMs from `fake` subcommands). Off by default and never in a release build. Only
+# scripts/e2e/run.sh and this crate's own tests turn it on; scripts/e2e/check-notify-build.sh
+# proves the default binary lacks it.
+fake-transport = []
+
+[dev-dependencies]
+# Enables `fake-transport` for this package's own tests only.
+vam-notify = { path = ".", features = ["fake-transport"] }
+tempfile = "3.8"
+
+[[bin]]
+name = "vam-notify-broker"
+path = "src/bin/vam-notify-broker.rs"

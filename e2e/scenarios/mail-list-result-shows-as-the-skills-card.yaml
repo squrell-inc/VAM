@@ -1,0 +1,34 @@
+id: mail-list-result-shows-as-the-skills-card
+title: A tool's result shows as the skill's own card, and a result that does not fit the card adds none
+description: >
+  The skill names a card for its mail list. The agent lists the mailbox; the run's events carry a card
+  built from the skill's card and the tool result, and the model made no show call. A second result that
+  breaks the card's schema adds no card, an event names the tool, and the tool result still reaches the model.
+tags: [connectors]
+needs: process
+given:
+  - org-admin
+  - agent-with-mail-calendar-cards
+when:
+  - publish-skill: { piece: skill-mail-calendar-cards }
+  - chat: "e2e-step:list List my mail"
+then:
+  - expect: { run: succeeded }
+  - expect: { event: outbox.card, fields: { data.tool: mail_list, data.data.messages.0.subject: Quarterly plan } }
+  - expect: { event: card.skipped, fields: { data.tool: mail_list } }
+  - expect: { thread: { role: tool, contains: Misfit } }
+guards:
+  - vam:crates/vam-orchestrator/src/outbox.rs
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/skill_package_admit.rs
+  - vam:crates/vam-spec/src/jig.rs
+mock:
+  - when: { step: list, toolName: mail_list, contains: Misfit }
+    reply: { text: Listed both. }
+  - when: { step: list, toolName: mail_list }
+    reply: { toolCall: { name: mail_list, args: { messages: [ { from: 5, subject: Misfit } ] } } }
+  - when: { step: list, toolName: load_skill }
+    reply: { toolCall: { name: mail_list, args: { messages: [ { from: ana@e2e.example, subject: Quarterly plan }, { from: bo@e2e.example, subject: Lunch }, { from: cy@e2e.example, subject: Invoice } ] } } }
+  - when: { step: list, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-mail-calendar-cards-mail-list-result-shows-as-the-skills-card } } }
+status: active

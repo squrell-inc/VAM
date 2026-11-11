@@ -1,0 +1,201 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "vam/v1/workflow.proto";
+import "vam/v1/telemetry.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/struct.proto";
+
+message VamCloudEvent {
+  // Required CloudEvents Metadata
+  string id = 1;                          // UUID of the event
+  ResourceId source = 2;                  // Stable emitter identity
+  string spec_version = 3;                // Static string: "1.0"
+  string type = 4;                        // Event type identifier (e.g., "vam.v1.tool.invoked")
+  
+  // Optional CloudEvents Metadata
+  google.protobuf.Timestamp time = 5;     // When the event occurred
+  ResourceId subject = 6;                 // Target resource identity
+  string data_content_type = 7;           // Static string: "application/x-protobuf" or "application/json"
+  
+  // Payload
+  google.protobuf.Any data = 8;           // Event-type specific payload
+  
+  // VAM Extension Attributes (CloudEvents extensions)
+  ResourceId run_id = 9;                  // Contextual workflow run identifier
+  int64 sequence_number = 10;             // Monotonically increasing counter for ordering
+  TraceContext trace_context = 11;        // Optional distributed trace context
+}
+
+message ToolInvokedPayload {
+  string tool_name = 1;
+  ResourceId caller_agent_id = 2;
+  google.protobuf.Struct arguments = 3;
+  ExecutionLease lease = 4;
+  string args_digest = 5;
+  optional string path = 6;
+}
+
+// Host PEP disposition (no raw args; digest + optional workspace path only).
+message PolicyDecidedPayload {
+  string tool_name = 1;
+  string disposition = 2;
+  string args_digest = 3;
+  optional string path = 4;
+}
+
+message SkillLoadedPayload {
+  string skill_id = 1;
+}
+
+message HostToolCompletedPayload {
+  string tool_name = 1;
+  string adapter_id = 2;
+  string artifact_relpath = 3;
+}
+
+message ToolCompletedPayload {
+  string tool_name = 1;
+  google.protobuf.Struct result = 2;
+  int64 duration_ms = 3;
+  ExecutionLease lease = 4;
+  repeated ArtifactRef output_artifacts = 5;
+}
+
+message HitlPausedPayload {
+  ResourceId token_id = 1;
+  string tool_name = 2;
+  reserved 3; // arguments — do not populate; use requested_args_digest only.
+  reserved "arguments";
+  string reason = 4;
+  ResourceId approval_request_id = 5;
+  ResourceId attempt_id = 6;
+  ArtifactRef workspace_checkpoint = 7;
+  int64 transition_revision = 8;
+  string requested_args_digest = 9;
+}
+
+message HitlDecidedPayload {
+  ResourceId approval_request_id = 1;
+  string decision = 2; // APPROVED | AMENDED | REJECTED
+  string reviewer_principal = 3;
+  string args_digest = 4;
+  int64 transition_revision = 5;
+}
+
+message HitlExpiredPayload {
+  ResourceId approval_request_id = 1;
+  ResourceId run_id = 2;
+  string step_id = 3;
+  ResourceId attempt_id = 4;
+}
+
+message WorkflowTransitionPayload {
+  ResourceId run_id = 1;
+  string step_id = 2;
+  ResourceId attempt_id = 3;
+  ResourceId lease_id = 4;
+  int64 transition_revision = 5;
+  string previous_state = 6;
+  string current_state = 7;
+}
+
+// Append-only thread timeline turn (stored as VamCloudEvent JSONL on the volume).
+message ThreadTurnPayload {
+  string prompt = 1;
+  string answer = 2;
+  string model = 3;
+  string manifest_hash = 4;
+  string prev_hash = 5;
+  optional int64 spend_micro = 6;
+  optional string trajectory_digest = 7;
+  repeated string touched_paths = 8;
+  repeated string skill_ids = 9;
+  repeated string tool_names = 10;
+  // The run's range in the thread log (task_start .. task_end) and the log
+  // head digest after task_end. Absent for turns written before the log.
+  optional uint64 log_seq_from = 11;
+  optional uint64 log_seq_to = 12;
+  optional string log_head_digest = 13;
+  // The workspace HEAD when the task started, and the hash of the files the
+  // task left (`MerkleManifest::files_hash`: no host `.vam/`, so it can sit in
+  // the conversation it belongs to). `manifest_hash` above keeps the same
+  // value as `head_before`. Absent on turns written before these fields.
+  optional string head_before = 14;
+  optional string files_hash = 15;
+}
+
+// Real-Time Event Streaming Service (Telemetry Phase 2)
+service TelemetryStreamService {
+  // Streams real-time lifecycle occurrences and events
+  rpc StreamEvents(StreamEventsRequest) returns (stream VamCloudEvent);
+}
+
+message StreamEventsRequest {
+  string filter_session_id = 1;          // Optional: Filter by specific VM session
+  repeated string filter_event_types = 2; // Optional: Filter by specific event types
+  int64 resume_from_sequence = 3;        // Optional: Cursor sequence index to replay
+}
+
+message InferenceCompletedPayload {
+  string model_name = 1;
+  string provider = 2;
+  int64 prompt_tokens = 3;
+  int64 completion_tokens = 4;
+  int64 total_tokens = 5;
+  int64 duration_ms = 6;
+  optional int64 spend_micro = 7;
+  // Redacted assistant outcome (no prompt). CAS + preview follow VAMD_TELEMETRY_CAPTURE.
+  optional string outcome_preview = 8;
+  optional string tool_calls_preview = 9;
+  optional string outcome_cas = 10;
+  optional string tool_calls_cas = 11;
+  // Provider prompt-cache tokens, when the provider reports them.
+  optional int64 cached_tokens = 12;
+  optional int64 cache_creation_tokens = 13;
+  // The provider reported no cache usage; cached_tokens is unknown, not zero.
+  optional bool cached_tokens_unknown = 14;
+  // Size in bytes of the reasoning the model returned, under every
+  // adapter.thinking mode. Absent when the model returned none.
+  optional int64 reasoning_bytes = 15;
+  // Tool calls found as markup inside the reasoning (recorded, never run).
+  optional int64 reasoning_tool_markup = 16;
+  // Effective thinking mode for the request: drop, strip, keep or off.
+  optional string reasoning_mode = 17;
+  // Adapter options the run asked for that were not sent or applied
+  // (tool_choice_unsupported, effort_unsupported, thinking_off_unsupported,
+  // keep_unsupported, reasoning_missing:N).
+  repeated string adapter_notes = 18;
+  // Resamples made for this inference (adapter.resampleOnInvalid): 1 when this
+  // request is the one resample of an invalid tool call. Absent otherwise.
+  optional int64 resamples = 19;
+}
+
+message EgressDecidedPayload {
+  string domain = 1;
+  uint32 port = 2;
+  string disposition = 3; // "ALLOW" or "DENY"
+  string policy_id = 4;
+  string domain_digest = 5;
+}
+
+message SecretAccessedPayload {
+  string secret_name = 1;
+  string adapter_id = 2;
+  int64 access_time_unix_ms = 3;
+}
+
+message SessionBootedPayload {
+  string session_id = 1;
+  string boot_path = 2; // "claim", "restore", or "cold"
+  int64 boot_duration_ms = 3;
+  optional string snapshot_id = 4;
+}
+

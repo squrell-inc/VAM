@@ -1,0 +1,32 @@
+{
+  "id": "read-only",
+  "name": "Read-only",
+  "description": "Only the read builtins and load_skill are allowed: read_file, glob, grep and load_skill. Every other tool is denied until the author adds a rule. No internet. bySideEffect cannot express this, because it also allows mutable local tools such as write_file and run. load_skill stays allowed so the agent can still read its own skills.",
+  "version": 1,
+  "permissions": {
+    "tools": {
+      "default": "deny",
+      "rules": [
+        {
+          "target": "builtin:read_file",
+          "decision": "allow"
+        },
+        {
+          "target": "builtin:glob",
+          "decision": "allow"
+        },
+        {
+          "target": "builtin:grep",
+          "decision": "allow"
+        },
+        {
+          "target": "builtin:load_skill",
+          "decision": "allow"
+        }
+      ]
+    },
+    "internet": {
+      "default": "deny"
+    }
+  }
+}

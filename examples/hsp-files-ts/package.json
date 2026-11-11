@@ -1,0 +1,23 @@
+{
+  "name": "hsp-files-ts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript HSP file-attachment broker (UDS gRPC; local disk, S3, or OCI)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test dist/index.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.12.6",
+    "@grpc/proto-loader": "^0.7.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
+  }
+}

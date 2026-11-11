@@ -1,0 +1,40 @@
+id: repeated-fire-with-the-same-key-starts-one-run
+title: Three fires with one key start one run, and the other two answer with that run
+tags: [triggers]
+needs: process
+description: A broker retries a fire with the same idempotency key. The first fire starts a run; the retries are answered as duplicates that name the same run, and no second run starts.
+given:
+  - org-admin
+  - agent-with-trigger-tool
+  - trigger-test-broker
+when:
+  - chat: "e2e-step:arm Arm the trigger"
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: echo_arm_trigger, count: 1 } }
+  - fire-trigger: { key: fire-1, times: 3, label: fired }
+then:
+  - expect: { fire: { outcomes: [ACCEPTED, DUPLICATE, DUPLICATE], sameRun: true } }
+  - expect: { run: succeeded }
+  - expect: { runs: { count: 2 } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:repeated-fire-with-the-same-key-starts-one-run"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+  - when: { step: fired, toolName: write_file }
+    reply: { text: done }
+  - when: { step: fired, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: fired.txt, content: fired } } }
+status: active

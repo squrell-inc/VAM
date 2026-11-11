@@ -1,0 +1,53 @@
+id: guest-has-no-route-off-the-vm
+title: In a microVM the guest has no route off the machine, and only the host proxy reaches out
+description: >
+  The agent runs a shell command in the guest. The guest's routing tables have no default route
+  (routes on loopback are not routes off the VM, so the IPv6 reject route on lo does not count),
+  only the loopback interface exists, a direct TCP connect to a public address fails, and the
+  proxy still answers. The guest's only way out is the host's egress proxy. A process guest is a
+  host process with the host's routes, so only a microVM can show this.
+tags: [chat, egress]
+needs: firecracker
+given:
+  - org-admin
+  - agent-with-shell
+when:
+  - chat: "e2e-step:probe Check the guest's routes"
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: default-route-none } }
+  - expect: { thread: { role: tool, contains: interfaces-loopback-only } }
+  - expect: { thread: { role: tool, contains: direct-connect-failed } }
+  - expect: { thread: { role: tool, contains: proxy-answers } }
+guards:
+  - vam:crates/vam-orchestrator/src/golden.rs
+  - vam:crates/vam-runtime/src/bin/guest_init/pid1.rs
+  - vam:crates/vam-runtime/src/egress.rs
+  - vam:scripts/base/Dockerfile
+  - vam:scripts/base/pins
+  - vam:scripts/build-rootfs.sh
+mock:
+  - when: { step: probe, afterTool: run }
+    reply: { text: Probed. }
+  - when: { step: probe }
+    reply:
+      toolCall:
+        name: run
+        args:
+          # The tokens are assembled by the shell so the command text never contains them.
+          command: |
+            echo "== /proc/net/route"; cat /proc/net/route
+            echo "== /proc/net/ipv6_route"; cat /proc/net/ipv6_route 2>&1
+            echo "== /proc/net/dev"; cat /proc/net/dev
+            D=$(awk 'NR>1 && $2=="00000000" && $1!="lo" {n++} END {print n+0}' /proc/net/route)
+            D6=$(if [ -r /proc/net/ipv6_route ]; then awk '$1=="00000000000000000000000000000000" && $2=="00" && $10!="lo" && index("2367abefABEF", substr($9,6,1))==0 {n++} END {print n+0}' /proc/net/ipv6_route; else echo 0; fi)
+            if [ "$D" = 0 ] && [ "$D6" = 0 ]; then echo default-route-"none"; else echo default-route-"found $D $D6"; fi
+            N=$(awk -F: 'NR>2 {gsub(/ /,"",$1); if ($1!="lo") c++} END {print c+0}' /proc/net/dev)
+            if [ "$N" = 0 ]; then echo interfaces-"loopback-only"; else echo interfaces-"other $N"; fi
+            if timeout 6 nc -w 3 1.1.1.1 443 </dev/null >/dev/null 2>&1; then echo direct-connect-"reached"; else echo direct-connect-"failed"; fi
+            HP=${HTTP_PROXY#http://}
+            H=${HP%:*}
+            P=${HP##*:}
+            R=$(printf 'CONNECT example.invalid:443 HTTP/1.1\r\nHost: example.invalid\r\n\r\n' | timeout 5 nc "$H" "$P" 2>/dev/null | head -c 8)
+            case "$R" in HTTP/*) echo proxy-"answers" ;; *) echo proxy-"silent" ;; esac
+status: active

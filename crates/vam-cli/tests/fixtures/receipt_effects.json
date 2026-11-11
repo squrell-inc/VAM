@@ -1,0 +1,203 @@
+{
+  "receipt": {
+    "version": "vam.receipt.v1",
+    "runId": "urn:vam:run:local.vam.dev/acme/demo",
+    "state": "SUCCEEDED",
+    "generation": 1,
+    "requestedBy": "user-1",
+    "requestSurface": "cli",
+    "startedAt": 1700000000,
+    "endedAt": 1700000090,
+    "pins": {
+      "agent": {
+        "urn": "urn:vam:agent:local.vam.dev/acme/closer",
+        "version": "1.0.0",
+        "digest": "sha256:aa"
+      },
+      "playbook": {
+        "urn": "urn:vam:playbook:local.vam.dev/acme/close-prep",
+        "version": "1.2.0",
+        "digest": "sha256:bb"
+      },
+      "other": []
+    },
+    "model": [
+      {
+        "name": "mock-model",
+        "provider": "mock",
+        "endpointHost": "broker.local",
+        "calls": 3,
+        "promptTokens": 120,
+        "completionTokens": 40
+      }
+    ],
+    "isolation": {
+      "summary": "process guest, no microVM",
+      "vmm": "process",
+      "jailer": false,
+      "apiTls": false
+    },
+    "workspace": {
+      "headBefore": "h0",
+      "headAfter": "h1"
+    },
+    "toolCalls": {
+      "counts": {
+        "allowed": 4,
+        "asked": 1,
+        "denied": 1
+      },
+      "lines": [
+        {
+          "seq": 2,
+          "at": 1700000010,
+          "tool": "close_issue",
+          "decision": "denied",
+          "decidedBy": "playbook_guard",
+          "scope": "playbook",
+          "rule": "args_within issue_key in steps.confirm.output.keys",
+          "argsDigest": "sha256:cc",
+          "sideEffect": 3,
+          "gateStep": "confirm"
+        },
+        {
+          "seq": 3,
+          "at": 1700000020,
+          "tool": "write_file",
+          "decision": "asked",
+          "decidedBy": "cedar_rule",
+          "scope": "agent",
+          "rule": "builtin:write_file",
+          "argsDigest": "sha256:dd",
+          "sideEffect": 2,
+          "resolution": "approved-once",
+          "approvedBy": "user-1",
+          "surface": "cli",
+          "approvedAt": 1700000030
+        },
+        {
+          "seq": 5,
+          "at": 1700000040,
+          "tool": "close_issue",
+          "decision": "allowed",
+          "decidedBy": "cedar_rule",
+          "scope": "agent",
+          "rule": "builtin:close_issue",
+          "argsDigest": "sha256:ee",
+          "sideEffect": 3,
+          "gateStep": "confirm",
+          "constraint": "args_within issue_key in steps.confirm.output.keys"
+        }
+      ]
+    },
+    "procedure": {
+      "steps": [
+        {
+          "id": "confirm",
+          "state": "completed",
+          "outcome": "decided",
+          "gate": {
+            "requestId": "g1",
+            "decision": "SUBMITTED",
+            "decidedBy": "user-1",
+            "surface": "cli",
+            "decidedAt": 1700000005,
+            "response": {
+              "option": "go"
+            }
+          }
+        }
+      ]
+    },
+    "metering": {
+      "promptTokens": 120,
+      "completionTokens": 40,
+      "approvals": 2,
+      "turns": 3
+    },
+    "effects": {
+      "journaled": true,
+      "scope": "Lists calls the host mediated and journaled. It cannot see traffic a guest process sends directly, or a vendor applying one request twice; the vendor's own log is the independent count.",
+      "duplicates": 0,
+      "unknown": 1,
+      "counts": {
+        "confirmed": 1,
+        "failed": 1,
+        "reconciled": 1,
+        "notSent": 0,
+        "identicalRepeats": 1,
+        "reads": 2
+      },
+      "lines": [
+        {
+          "seq": 1,
+          "tool": "echo_create_ticket",
+          "adapter": "hsp",
+          "class": "non_idempotent",
+          "state": "reconciled",
+          "attempts": 1,
+          "keyDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "argsDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "checkedBy": "verify",
+          "at": 1700000100
+        },
+        {
+          "seq": 3,
+          "tool": "echo_create_note",
+          "adapter": "hsp",
+          "class": "non_idempotent",
+          "state": "unknown",
+          "attempts": 1,
+          "keyDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "argsDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "at": 1700000101
+        },
+        {
+          "seq": 4,
+          "tool": "echo_create_note",
+          "adapter": "hsp",
+          "class": "non_idempotent",
+          "state": "failed",
+          "attempts": 0,
+          "keyDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "argsDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "hostDerivedId": true,
+          "at": 1700000102
+        },
+        {
+          "seq": 5,
+          "tool": "echo_create_note",
+          "adapter": "hsp",
+          "class": "non_idempotent",
+          "state": "confirmed",
+          "attempts": 1,
+          "keyDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+          "argsDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "resultDigest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "repeatOf": 3,
+          "parentSeq": 1,
+          "at": 1700000103
+        }
+      ]
+    },
+    "trajectoryDigest": "traj-1",
+    "modelAppendixDigest": "sha256:ff"
+  },
+  "modelAppendix": {
+    "label": "written by the model, not verified by the host",
+    "finalReply": "Closed the issue.",
+    "steps": [
+      {
+        "id": "confirm",
+        "summary": "Asked the user."
+      }
+    ]
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "keyId": "ed25519:0123456789abcdef",
+    "publicKey": "00",
+    "receiptDigest": "sha256:99",
+    "value": "00"
+  }
+}

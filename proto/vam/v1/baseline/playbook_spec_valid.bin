@@ -1,0 +1,5 @@
+
+5
+3urn:vam:playbook:hub.vam.dev/acme/erp-monthly-closeERP Monthly Close$Executes monthly closing procedures."3
+step1Inspect schema¢Inspect the schema.°¸"=
+step2Run closing SQL¢Run the closing SQL.°¸Êstep1

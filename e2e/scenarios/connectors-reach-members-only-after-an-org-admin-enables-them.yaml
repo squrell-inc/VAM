@@ -1,0 +1,26 @@
+id: connectors-reach-members-only-after-an-org-admin-enables-them
+title: A connector reaches members only after an org administrator enables it for the node
+description: >
+  A member lists connectors: Linear reads "ask your admin". The member cannot enable it (refused,
+  nothing changes). An org administrator, who holds the users:admin scope and not the operator
+  key, enables it, and the member's list reads "connect". Disabled again, it reads "ask your
+  admin".
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-member
+  - org-administrator
+when:
+  - expect: { connectors: { id: linear, as: org-member, fields: { state: askAdmin } } }
+  - connector-node: { id: linear, enabled: true, as: org-member, refused: true }
+  - expect: { connectors: { id: linear, as: org-member, fields: { state: askAdmin } } }
+  - connector-node: { id: linear, enabled: true, as: org-administrator }
+  - expect: { connectors: { id: linear, as: org-member, fields: { state: connect } } }
+  - connector-node: { id: linear, enabled: false, as: org-administrator }
+then:
+  - expect: { connectors: { id: linear, as: org-member, fields: { state: askAdmin } } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+  - vam:crates/vam-spec/src/connector.rs
+status: active

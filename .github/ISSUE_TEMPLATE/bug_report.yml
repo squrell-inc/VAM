@@ -1,0 +1,49 @@
+name: Bug report
+description: Something VAM does that it should not, or does not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issues do not go here.** Report them privately: see SECURITY.md.
+        Do not paste API keys, tokens or other secrets into this form.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Commands, an agent or run spec, or a scenario under e2e/scenarios/ that shows it.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit
+      description: The commit of VAM you ran (git rev-parse --short HEAD).
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Guest mode
+      options:
+        - microVM (Firecracker)
+        - process mode
+        - not applicable
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: OS, kernel, architecture; Lima or WSL if used.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant vamd or vam output. Remove secrets first.
+      render: text

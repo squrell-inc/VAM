@@ -1,0 +1,49 @@
+id: skipped-schedule-is-told-once-a-day
+title: Two skipped fires on a busy workspace are told to the owner as one record
+tags: [notifications, triggers]
+needs: process
+description: A trigger grant is set to skip when its workspace is busy. A slow task holds the workspace and the grant fires twice; both are answered busy and skipped. The owner has one skipped record that counts two. Revoking the grant, the owner's own act, adds none.
+given:
+  - org-admin
+  - agent-with-trigger-tool
+  - trigger-test-broker
+when:
+  - chat: "e2e-step:arm Arm the trigger"
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { run: succeeded }
+  - chat: { text: "e2e-step:slow Check slowly", thread: continue, wait: false }
+  - expect: { event: tool.invoked, tool: run }
+  - fire-trigger: { key: fire-1, label: fired }
+  - fire-trigger: { key: fire-2, label: fired }
+  - expect: { fire: { outcomes: [BUSY] } }
+  - expect: { notifications: { kind: trigger.skipped, count: 1, fields: { count: 2 } } }
+  - revoke-grant: {}
+then:
+  - expect: { run: succeeded }
+  - expect: { notifications: { kind: trigger.skipped, count: 1, fields: { count: 2 } } }
+guards:
+  - vam:crates/vam-orchestrator/src/gateway.rs
+  - vam:crates/vam-orchestrator/src/notifications.rs
+mock:
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:skipped-schedule-is-told-once-a-day"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+            onBusy: SKIP
+  - when: { step: slow, toolName: run }
+    reply: { text: done }
+  - when: { step: slow, stepStart: true }
+    reply: { toolCall: { name: run, args: { command: "sleep 8" } } }
+  - when: { step: fired, toolName: write_file }
+    reply: { text: done }
+  - when: { step: fired, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: fired.txt, content: fired } } }
+status: active

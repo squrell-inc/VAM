@@ -1,0 +1,45 @@
+[package]
+name = "vam-schedule"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "First-party HSP schedule broker (vam.schedule): schedule_create, _list, _get, _update, _delete, _run_now"
+
+# This file declares every dependency the whole of the schedule broker needs, so Cargo.lock
+# changes once. The stub uses only the HSP serving ones; the rest come with the later waves.
+# A broker never depends on `vam-orchestrator` or on another broker.
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# IANA time zones for `once {at, timezone}` and cron (MIT OR Apache-2.0, released 2025-07-11).
+chrono-tz = "=0.10.4"
+clap = { version = "4.5", features = ["derive"] }
+# Cron expressions, five fields (MIT; 4.0.1 released 2026-10-02, 4.0.2 is under two weeks old).
+croner = "=4.0.1"
+http = "0.2"
+libc = "0.2"
+prost-types = "0.12"
+rand = "0.8"
+rusqlite.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.34", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.10", features = ["transport"] }
+tower = "0.4"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+vam-spec.workspace = true
+
+[dev-dependencies]
+tempfile = "3.8"
+serde_yaml = "0.9"
+
+[[bin]]
+name = "vam-schedule-broker"
+path = "src/bin/vam-schedule-broker.rs"

@@ -1,0 +1,62 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:playbook:local.vam.dev/vam/invoice-approval"
+  },
+  "displayName": "Invoice approval with a branch gate",
+  "description": "Extract the details from an invoice, ask a human whether to pay it, then schedule the payment only when the decision is pay.",
+  "activation": {
+    "when": "Use when the user wants an invoice reviewed and, if approved, scheduled for payment."
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "invoice_url": {
+        "type": "string"
+      }
+    },
+    "required": ["invoice_url"],
+    "additionalProperties": false
+  },
+  "steps": [
+    {
+      "id": "extract-invoice",
+      "description": "Read the invoice and extract vendor, total and due date.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "instruction": "Read {{inputs.invoice_url}} and extract the vendor, total and due date."
+    },
+    {
+      "id": "decide",
+      "description": "Pause for a human to pay or reject the invoice.",
+      "kind": "STEP_KIND_GATE",
+      "after": ["extract-invoice"],
+      "question": "Pay this invoice from {{inputs.invoice_url}}?",
+      "options": [
+        {
+          "label": "pay",
+          "description": "Schedule the payment"
+        },
+        {
+          "label": "reject",
+          "description": "Stop without paying",
+          "terminal": "OUTCOME_TERMINAL_SUCCEEDED"
+        }
+      ]
+    },
+    {
+      "id": "schedule-payment",
+      "description": "Schedule the payment for the extracted amount.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "after": ["decide:pay"],
+      "instruction": "Schedule payment of the extracted total to the extracted vendor."
+    }
+  ],
+  "guards": [
+    {
+      "tools": ["schedule_payment"],
+      "sideEffects": ["SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL"],
+      "allowedWhen": ["decide:pay"]
+    }
+  ]
+}

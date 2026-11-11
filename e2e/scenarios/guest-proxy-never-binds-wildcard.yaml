@@ -1,0 +1,42 @@
+id: guest-proxy-never-binds-wildcard
+title: With the guest's proxy port already taken at boot, the proxy moves to loopback and no wildcard listener appears
+description: >
+  The node is started with mock scripts, so PID 1 occupies 127.0.0.1:3128 before the guest's
+  egress proxy starts. The agent runs a shell command in the guest. The guest has no listener on
+  0.0.0.0 or [::] (read from /proc/net/tcp and tcp6), the proxy address tools are given is no
+  longer port 3128, and a request to that address gets an answer from the proxy.
+tags: [chat, egress]
+needs: firecracker
+given:
+  - org-admin
+  - agent-with-shell
+when:
+  - chat: "e2e-step:probe Check the guest proxy"
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: proxy-answers } }
+  - expect: { thread: { role: tool, contains: proxy-port-moved } }
+  - expect: { thread: { role: tool, contains: wildcard-none } }
+guards:
+  - vam:crates/vam-runtime/src/egress.rs
+  - vam:crates/vam-runtime/src/bin/guest_init/pid1.rs
+  - vam:crates/vam-orchestrator/src/golden.rs
+mock:
+  - when: { step: probe, afterTool: run }
+    reply: { text: Probed. }
+  - when: { step: probe }
+    reply:
+      toolCall:
+        name: run
+        args:
+          # The tokens are assembled by the shell so the command text never contains them
+          # (the thread matcher also reads tool-call arguments).
+          command: |
+            HP=${HTTP_PROXY#http://}
+            H=${HP%:*}
+            P=${HP##*:}
+            R=$(printf 'CONNECT example.invalid:443 HTTP/1.1\r\nHost: example.invalid\r\n\r\n' | timeout 5 nc "$H" "$P" 2>/dev/null | head -c 8)
+            case "$R" in HTTP/*) echo proxy-"answers" ;; *) echo proxy-"silent" ;; esac
+            case "$P" in 3128) echo proxy-port-"held" ;; *) echo proxy-port-"moved" ;; esac
+            awk 'NR>1 && $4=="0A" && $2 ~ /^0+:/ {f=1} END {if (f) print "wildcard-" "found"; else print "wildcard-" "none"}' /proc/net/tcp /proc/net/tcp6
+status: active

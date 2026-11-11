@@ -1,0 +1,21 @@
+id: node-default-model-applies-when-nothing-is-named
+title: The operator's default model runs when neither the caller nor the agent names one
+tags: [chat]
+needs: process
+description: The allowlist lists another model first. The node default, not the first entry, is used.
+given:
+  - org-admin
+  - agent-plain
+when:
+  - set-node: { allowedModels: ["openai/gpt-4o", "mock-model"], defaultModel: mock-model }
+  - chat: { text: "e2e-step:hi Say hi", model: none }
+then:
+  - expect: { run: succeeded }
+  - expect: { event: model.resolved, fields: { model: mock-model, source: node-default } }
+guards:
+  - vam:crates/vam-orchestrator/src/allowed_models.rs
+  - vam:crates/vam-orchestrator/src/api/allowed_models.rs
+mock:
+  - when: { step: hi }
+    reply: { text: hi }
+status: active

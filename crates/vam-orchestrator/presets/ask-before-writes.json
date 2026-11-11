@@ -1,0 +1,10 @@
+{
+  "id": "ask-before-writes",
+  "name": "Ask before writes",
+  "description": "The defaults for a new agent. Read-only and mutable local tools are allowed. Mutable external and unspecified tools ask. The public internet is open.",
+  "version": 1,
+  "permissions": {
+    "tools": { "default": "bySideEffect" },
+    "internet": { "default": "allow" }
+  }
+}

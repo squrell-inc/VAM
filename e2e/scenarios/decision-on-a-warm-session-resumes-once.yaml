@@ -1,0 +1,43 @@
+id: decision-on-a-warm-session-resumes-once
+title: A gate and a question decided together on a kept-alive session resume the run once, and the task sees both decisions
+tags: [gate, approval, playbook]
+needs: process
+description: |
+  The first playbook step is done, so its gate opens, and the task then asks a question: the run parks with both waiting and its session kept alive. The user decides the gate and answers the question at the same moment. The run must resume once, not once per decision: one ticket is made in the world's ledger, the run succeeds, and the single resumed task is told both the gate's outcome and the answer. Before the fix each decision resumed the kept-alive session on its own, so two tasks ran on it and the ticket was made twice.
+given:
+  - org-admin
+  - agent-with-effect-tools-and-playbooks
+  - effects-test-broker
+  - playbook-with-gate
+when:
+  - start-playbook: { playbook: playbook-with-gate, label: run }
+  - expect: { gate: pending, step: confirm }
+  - expect: { approval: pending, tool: ask_user, fields: { kind: APPROVAL_KIND_QUESTION } }
+  - decide-together: { option: go, answer: { answer: Q4 plan } }
+then:
+  - expect: { run: succeeded }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, title: Q4 plan, count: 1 } }
+  - expect: { thread: { role: tool, contains: Q4 plan } }
+  - expect: { thread: { role: user, contains: "Gate 'confirm' was decided with outcome 'go'" } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/decide.rs
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: run, afterTool: echo_create_ticket, toolName: step_complete }
+    reply: { text: "The ticket is made and the playbook is done." }
+  - when: { step: run, lastRole: user, contains: "Missing required steps: finish" }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: done } } }
+  - when: { step: run, toolName: echo_create_ticket }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: "ticket made" } } }
+  - when: { step: run, lastRole: user, contains: "was decided with outcome" }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan } } }
+  - when: { step: run, toolName: ask_user }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan } } }
+  - when: { step: run, afterTool: ask_user, lastRole: user }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan } } }
+  - when: { step: run, toolName: step_complete }
+    reply: { toolCall: { name: ask_user, args: { jig: vam.question, data: { question: "Which title should the ticket have?" } } } }
+  - when: { step: run, stepStart: true }
+    reply: { toolCall: { name: step_complete, args: { step_id: prepare, outcome: done } } }
+status: active

@@ -1,0 +1,21 @@
+piece: agent-reads-notifications
+kind: agent
+release: true
+requires: [trigger-test-broker]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent that can arm a trigger and read the notification list
+    description: Agent offered read_file, write_file, run, the notification list (allowed) and the test broker trigger tool (asked first)
+    role: Tester
+    systemInstructions: Use the tools when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:read_file", decision: allow }
+          - { target: "builtin:write_file", decision: allow }
+          - { target: "builtin:run", decision: allow }
+          - { target: "builtin:notifications_list", decision: allow }
+          - { target: "builtin:echo_arm_trigger", decision: ask }

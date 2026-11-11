@@ -1,0 +1,38 @@
+id: skill-reads-microsoft-graph-as-the-member-without-holding-a-token
+title: A skill reads Microsoft Graph as the member and never holds a token
+description: >
+  The administrator enables Microsoft 365 with consent for tenant T and the member connects.
+  The member asks; the skill's read tool sends only the connector's placeholder through the guest
+  proxy, and the Graph mock sees the member's current access token. The thread holds the two
+  message subjects. The access token is in no thread message, event, receipt or workspace file.
+tags: [connectors, egress]
+needs: process
+given:
+  - org-member
+  - org-administrator
+  - mock-microsoft-login
+  - mock-microsoft-graph
+  - agent-with-m365-probe
+when:
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-administrator }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }
+  - chat: { text: "e2e-step:ask Search my mail", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages, method: GET, count: 1, has: [bearer=current], lacks: [bearer=placeholder] } }
+then:
+  - expect: { thread: { role: tool, contains: Quarterly planning notes } }
+  - expect: { thread: { role: tool, contains: Lunch on Friday } }
+  - expect: { secret-absent: { secret: microsoft-365 } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/brokers.rs
+  - vam:crates/vam-network/src/broker.rs
+  - vam:crates/vam-network/src/secrets.rs
+mock:
+  - when: { step: ask, toolName: m365_probe_search }
+    reply: { text: Found two messages. }
+  - when: { step: ask, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_search, args: { method: GET, path: /v1.0/me/messages } } }
+  - when: { step: ask, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-skill-reads-microsoft-graph-as-the-member-without-holding-a-token } } }
+status: active

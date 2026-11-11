@@ -1,0 +1,5 @@
+piece: org-administrator
+kind: org
+# A second identity with the org-admin role: it holds `users:admin` and not the operator key
+# (`keys:admin`, `brokers:admin`). Not the same as `org-admin`, which is the bootstrap key.
+role: OrgAdmin

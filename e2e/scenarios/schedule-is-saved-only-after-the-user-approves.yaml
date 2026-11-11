@@ -1,0 +1,44 @@
+id: schedule-is-saved-only-after-the-user-approves
+title: A schedule the user denies is never saved and never fires
+tags: [schedule, triggers]
+needs: process
+description: The agent asks for a schedule and the user denies the card. No grant is listed, a follow-up schedule_list answers with an empty schedules list, and nothing starts at the time the schedule would have had.
+given:
+  - org-admin
+  - agent-with-schedule-tools
+  - schedule-broker
+when:
+  - chat: "e2e-step:create Write a note in six seconds"
+  - expect: { approval: pending, tool: schedule_create }
+  - deny: latest
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: schedule_create, absent: true } }
+  - chat: { text: "e2e-step:list What is scheduled", thread: continue }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: '"schedules":[]' } }
+then:
+  - expect: { scheduled-runs: { count: 0, within: 10s } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+mock:
+  - when: { step: create, stepStart: true }
+    reply:
+      toolCall:
+        name: schedule_create
+        args:
+          title: Nightly note
+          when: { once: { in: PT6S } }
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:schedule-is-saved-only-after-the-user-approves"
+            workspace: { mode: SAME }
+            thread: { mode: NEW, name: nightly-note }
+            onBusy: QUEUE
+  - when: { step: create }
+    reply: { text: Not scheduled. }
+  - when: { step: list, stepStart: true }
+    reply: { toolCall: { name: schedule_list, args: {} } }
+  - when: { step: list }
+    reply: { text: Nothing is scheduled. }
+status: active

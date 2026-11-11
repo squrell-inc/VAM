@@ -1,0 +1,28 @@
+id: agent-workspaces-are-isolated
+title: A note written by one agent is not visible to another agent
+tags: [workspace]
+needs: process
+given:
+  - org-admin
+  - { piece: agent-with-builtins, as: writer }
+  - { piece: agent-with-builtins, as: reader }
+when:
+  - chat: { agent: writer, text: "e2e-step:write Save the note" }
+  - expect: { file: { agent: writer, path: note.txt, present: true } }
+  - chat: { agent: reader, text: "e2e-step:read Read the note" }
+then:
+  - expect: { event: tool.failed, tool: read_file }
+  - expect: { file: { agent: reader, path: note.txt, absent: true } }
+guards:
+  - vam:crates/vam-orchestrator/src/workspaces/**
+  - vam:crates/vam-runtime/src/exec.rs
+mock:
+  - when: { step: write, afterTool: write_file }
+    reply: { text: saved }
+  - when: { step: write }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: private } } }
+  - when: { step: read, afterTool: read_file }
+    reply: { text: not found }
+  - when: { step: read }
+    reply: { toolCall: { name: read_file, args: { path: note.txt } } }
+status: active

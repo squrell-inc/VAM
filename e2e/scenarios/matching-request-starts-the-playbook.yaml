@@ -1,0 +1,24 @@
+id: matching-request-starts-the-playbook
+title: A request that matches the attached playbook's description starts it
+tags: [chat, playbook]
+needs: process
+description: The playbook is set to start by itself; a request that matches its description starts it.
+model:
+  task: playbook-match
+  version: 0.1.0
+  k: 5
+given:
+  - org-admin
+  - agent-with-matching-playbook
+when:
+  - chat: "e2e-step:start Please draft a pull request that fixes the login bug."
+then:
+  - expect: { event: playbook.activated, fields: { urn: "urn:vam:playbook:local.vam.dev/e2e/draft-pull-request-matching" } }
+guards:
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: start, afterTool: start_playbook }
+    reply: { text: Drafting the pull request. }
+  - when: { step: start }
+    reply: { toolCall: { name: start_playbook, args: { urn: "urn:vam:playbook:local.vam.dev/e2e/draft-pull-request-matching" } } }
+status: active

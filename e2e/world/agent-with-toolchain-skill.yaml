@@ -1,0 +1,21 @@
+piece: agent-with-toolchain-skill
+kind: agent
+release: true
+requires: [skill-toolchain]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent offered the toolchain skill
+    description: Agent that runs the skill whose tool needs Python with pandas and git in the guest
+    role: Tester
+    systemInstructions: Use the toolchain tool when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    skillRefs:
+      - resourceId: { urn: "{{urn:skill-toolchain}}" }
+        version: { major: 1, minor: 0, patch: 0 }
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:load_skill", decision: allow }
+          - { target: "skill:{{name:skill-toolchain}}/*", decision: allow }

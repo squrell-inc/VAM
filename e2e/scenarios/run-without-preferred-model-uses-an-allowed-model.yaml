@@ -1,0 +1,20 @@
+id: run-without-preferred-model-uses-an-allowed-model
+title: A run that names no model, on an agent with no preferred model, runs on a model the operator allowed
+tags: [chat]
+needs: process
+description: The node publishes an allowlist. Neither the caller nor the agent names a model. The run is not refused; the node picks a model from its list.
+given:
+  - org-admin
+  - agent-plain
+when:
+  - chat: { text: "e2e-step:hi Say hi", model: none }
+then:
+  - expect: { run: succeeded }
+  - expect: { event: model.resolved, fields: { model: mock-model } }
+guards:
+  - vam:crates/vam-orchestrator/src/allowed_models.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: hi }
+    reply: { text: hi }
+status: active

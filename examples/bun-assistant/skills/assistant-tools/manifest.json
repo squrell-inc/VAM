@@ -1,0 +1,26 @@
+{
+  "description": "Offline calculator skill; filesystem and todo tools are runtime builtins.",
+  "resourceId": {
+    "urn": "urn:vam:skill:local.vam.dev/vam/assistant-tools"
+  },
+  "systemExtension": "Use 'calculator' for math. Use runtime primitives (read_file, write_file, glob, todo_write) for workspace files and todos.",
+  "tools": [
+    {
+      "description": "Perform basic arithmetic operations. Input should be a mathematical expression like '23 * 45 + 122'.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"description\":\"The math expression to evaluate\"}},\"required\":[\"expression\"]}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "calculator"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "calculator"
+    }
+  ],
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  }
+}

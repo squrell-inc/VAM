@@ -1,0 +1,42 @@
+id: member-chats-with-a-released-agent
+title: A member's chat on a released agent replies, runs an allowed tool, and gets Allow once only on a guarded one
+tags: [members, chat, approval]
+needs: process
+given:
+  - org-admin
+  - { piece: org-member, as: member }
+  - agent-with-guarded-write-and-delete
+when:
+  - chat: { text: "e2e-step:mw Write note", as: member }
+  - expect: { approval: pending, tool: write_file, fields: { lockedReason: { contains: "once only" } } }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { file: { path: note.txt, present: true } }
+  - chat: { text: "e2e-step:mr Read note", as: member, thread: continue }
+  - expect: { run: succeeded }
+  - expect: { event: tool.completed, tool: read_file }
+  - expect: { event: policy.decided, tool: read_file, fields: { disposition: ALLOW } }
+then:
+  - chat: { text: "e2e-step:aw Write admin", draft: true }
+  - expect: { approval: pending, tool: write_file, fields: { alwaysOffered: true } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/users_admin.rs
+  - vam:crates/vam-orchestrator/src/api/users_keys_admin.rs
+  - vam:crates/vam-orchestrator/src/keys.rs
+  - vam:crates/vam-orchestrator/src/owner.rs
+  - vam:crates/vam-orchestrator/src/api/auth.rs
+  - vam:crates/vam-orchestrator/src/session_targets.rs
+mock:
+  - when: { step: mw, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+  - when: { step: mw }
+    reply: { text: note written }
+  - when: { step: mr, stepStart: true }
+    reply: { toolCall: { name: read_file, args: { path: note.txt } } }
+  - when: { step: mr }
+    reply: { text: note read }
+  - when: { step: aw, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: admin.txt, content: e2e } } }
+  - when: { step: aw }
+    reply: { text: admin written }
+status: active

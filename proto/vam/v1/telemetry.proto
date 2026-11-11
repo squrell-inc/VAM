@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "google/protobuf/duration.proto";
+
+message TraceContext {
+  // Conforms to W3C Trace Context Specification
+  // Format: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+  string traceparent = 1;
+  
+  // Conforms to W3C Tracestate
+  // Format: "rojo=1,congo=2"
+  string tracestate = 2;
+}
+
+message LatencyMetrics {
+  // Time spent waiting for LLM completion API calls
+  google.protobuf.Duration llm_inference_duration = 1;
+  
+  // Time spent executing the actual tool inside the isolated guest VM
+  google.protobuf.Duration in_vm_execution_duration = 2;
+  
+  // Time spent performing Drive9 file layer merges/commits or disk flushes
+  google.protobuf.Duration drive9_sync_duration = 3;
+  
+  // Overhead incurred by VAM framework transport (VSOCK serialization/handshakes)
+  google.protobuf.Duration transport_overhead_duration = 4;
+}
+
+message UsageSummary {
+  // Tokens spent
+  TokenUsage tokens = 1;
+  
+  // Financial cost of LLM tokens (or tool resources) calculated in USD micro-cents
+  Cost estimated_cost = 2;
+  
+  // The identifier of the specific model that was billed (e.g. "gpt-4o")
+  string model_billed = 3;
+}

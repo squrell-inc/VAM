@@ -1,0 +1,471 @@
+[
+ {
+  "key": "operator--t1",
+  "error": "null",
+  "events": [
+   {
+    "sequence": "131",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "980",
+      "completionTokens": "9",
+      "durationMs": "25",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "141",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "995",
+      "completionTokens": "9",
+      "durationMs": "24",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "145",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "1010",
+      "completionTokens": "1",
+      "durationMs": "23",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "158",
+    "eventType": "vam.v1.run.completed",
+    "payload": {
+     "answer": "saved"
+    }
+   }
+  ],
+  "receipt": {
+   "receipt": {
+    "harness": {
+     "profile": "base",
+     "version": "0.1.0",
+     "digest": "sha256:e1d8a6fc83b0c0f6b5b9a9b0d26826b6bee4b6a69d78e16a73b68689d484b7d9"
+    },
+    "metering": {
+     "promptTokens": 2985,
+     "completionTokens": 19,
+     "approvals": 0,
+     "turns": 2
+    }
+   }
+  },
+  "thread": {
+   "records": [
+    {
+     "seq": 3,
+     "kind": "message",
+     "message": {
+      "role": "user",
+      "parts": [
+       {
+        "type": "text",
+        "text": "e2e-step:seed Save the note mock-script:repeated-identical-call-is-caught-and-ob"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 4,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 5,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "Wrote 4 bytes to note.txt"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 6,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 7,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "Wrote 4 bytes to note.txt"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 8,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "text",
+        "text": "saved"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
+  "key": "operator--t2",
+  "error": "null",
+  "events": [
+   {
+    "sequence": "169",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "980",
+      "completionTokens": "4",
+      "durationMs": "33",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "179",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "985",
+      "completionTokens": "4",
+      "durationMs": "22",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "183",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "991",
+      "completionTokens": "4",
+      "durationMs": "21",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "187",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "997",
+      "completionTokens": "4",
+      "durationMs": "23",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "202",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "1003",
+      "completionTokens": "4",
+      "durationMs": "23",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "206",
+    "eventType": "vam.v1.inference.completed",
+    "payload": {
+     "data": {
+      "modelName": "mock-model",
+      "provider": "mock",
+      "promptTokens": "1069",
+      "completionTokens": "4",
+      "durationMs": "22",
+      "spendMicro": "0"
+     }
+    }
+   },
+   {
+    "sequence": "227",
+    "eventType": "vam.v1.run.completed",
+    "payload": {
+     "error": "loop_detected: identical_calls: read_file called with identical arguments 5 times in a row; the task was stopped"
+    }
+   }
+  ],
+  "receipt": {
+   "receipt": {
+    "harness": {
+     "profile": "base",
+     "version": "0.1.0",
+     "digest": "sha256:b43ad270a89da68d9f4fc07c8d06e15c8accfa9aee523b0980ae929d660250d6",
+     "overrides": {
+      "loop": {
+       "detect": true
+      }
+     }
+    },
+    "metering": {
+     "promptTokens": 6025,
+     "completionTokens": 24,
+     "approvals": 0,
+     "turns": 6
+    }
+   }
+  },
+  "thread": {
+   "records": [
+    {
+     "seq": 3,
+     "kind": "message",
+     "message": {
+      "role": "user",
+      "parts": [
+       {
+        "type": "text",
+        "text": "e2e-step:spin Read the note mock-script:repeated-identical-call-is-caught-and-ob"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 4,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 5,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "fern"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 6,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 7,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "fern"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 8,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 9,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "fern"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 10,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 11,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "fern"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 12,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 13,
+     "kind": "message",
+     "message": {
+      "role": "tool",
+      "parts": [
+       {
+        "type": "tool_result",
+        "content": [
+         {
+          "type": "text",
+          "text": "fern"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "seq": 14,
+     "kind": "message",
+     "message": {
+      "role": "user",
+      "parts": [
+       {
+        "type": "text",
+        "text": "Loop detected: you repeated the same call (read_file called with identical argum"
+       }
+      ]
+     }
+    },
+    {
+     "seq": 15,
+     "kind": "message",
+     "message": {
+      "role": "assistant",
+      "parts": [
+       {
+        "type": "tool_use"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ }
+]

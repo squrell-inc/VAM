@@ -1,0 +1,26 @@
+{
+  "spec": {
+    "resourceId": {
+      "urn": "urn:vam:playbook:market.community.example/community/note-digest"
+    },
+    "displayName": "Note digest",
+    "description": "Summarise the notes.",
+    "activation": {
+      "when": "Use for a note digest."
+    },
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "steps": [
+      {
+        "id": "digest",
+        "description": "Summarise.",
+        "kind": "STEP_KIND_TASK",
+        "mode": "STEP_MODE_AGENTIC",
+        "instruction": "Summarise the notes."
+      }
+    ]
+  }
+}

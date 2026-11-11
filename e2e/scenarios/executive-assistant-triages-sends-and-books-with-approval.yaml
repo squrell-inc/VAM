@@ -1,0 +1,86 @@
+id: executive-assistant-triages-sends-and-books-with-approval
+title: The executive assistant triages mail, sends and books only after the member approves
+description: >
+  The admin installs the Microsoft 365 listing and enables the connector; the member connects. A test-only
+  create tool that declares exactly one path and then tries to send its own draft is refused with a message
+  that names the declared shape, and Graph saw no send. Then the installed Executive assistant searches the
+  mail (the skill's mail card), reads one message and finds slots (the slot card). Sending asks with the
+  skill's card; once approved Graph saw exactly one sendMail as the member. Booking asks the same way and Graph
+  saw one event created. The booking run's receipt has an approved-once line and holds no token (each run has its own receipt).
+tags: [connectors, approval, egress]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - marketplace-squrell
+  - mock-microsoft-login
+  - mock-microsoft-graph
+  - agent-with-m365-overreach
+when:
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin }
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-admin }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }
+  # Turns green with the exact-path envelope: the draft tool declares POST /v1.0/me/messages
+  # only, so the send it then attempts on the draft is refused ("declared shape").
+  - publish-skill: { piece: skill-m365-overreach }
+  - chat: { text: "e2e-step:draft Make a draft", agent: agent-with-m365-overreach, as: org-member }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: declared shape } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: "*/send", count: 0 } }
+  - chat: { text: "e2e-step:triage Triage my mail and find a time with Ana", agent: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages, method: GET, has: [bearer=current, search] } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages/m1, method: GET, count: 1 } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/findMeetingTimes, method: POST, count: 1 } }
+  - chat: { text: "e2e-step:send Send the reply to Ana", agent: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", as: org-member }
+  - expect: { approval: pending, tool: mail_send, fields: { card.data.to: ana@e2e.example } }
+  - approve: { as: org-member }
+  - expect: { run: succeeded }
+  - chat: { text: "e2e-step:book Book the first slot", agent: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", as: org-member }
+  - expect: { approval: pending, tool: calendar_create_event }
+  - approve: { as: org-member }
+  - expect: { run: succeeded }
+then:
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/sendMail, method: POST, count: 1, has: [bearer=current] } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/events, method: POST, count: 1, has: [bearer=current] } }
+  - expect: { receipt: { fields: { receipt.toolCalls.lines.0.resolution: approved-once } } }
+  - expect: { secret-absent: { secret: microsoft-365 } }
+guards:
+  - vam:crates/vam-orchestrator/src/connection_egress.rs
+  - vam:crates/vam-network/src/connection.rs
+  - vam:crates/vam-orchestrator/src/catalog_tier.rs
+mock:
+  - when: { step: draft, toolName: probe_create_draft }
+    reply: { text: The tool was refused. }
+  - when: { step: draft, toolName: load_skill }
+    reply: { toolCall: { name: probe_create_draft, args: { subject: Hello } } }
+  - when: { step: draft, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-overreach-executive-assistant-triages-sends-and-books-with-approval } } }
+  - when: { step: triage, toolName: calendar_find_slots }
+    reply: { text: Found two times. }
+  - when: { step: triage, toolName: mail_read }
+    reply: { toolCall: { name: calendar_find_slots, args: { durationMinutes: 30 } } }
+  - when: { step: triage, toolName: mail_search }
+    reply: { toolCall: { name: mail_read, args: { id: m1 } } }
+  - when: { step: triage, toolName: load_skill }
+    reply: { toolCall: { name: mail_search, args: { query: planning } } }
+  - when: { step: triage, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: m365-mail } } }
+  - when: { step: send, lastRole: user, contains: "Human approval was granted" }
+    reply: { text: Sent. }
+  - when: { step: send, toolName: mail_send }
+    reply: { text: Sent. }
+  - when: { step: send, toolName: load_skill }
+    reply: { toolCall: { name: mail_send, args: { to: ana@e2e.example, subject: Planning, body: "Thursday works." } } }
+  - when: { step: send, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: m365-mail } } }
+  - when: { step: book, lastRole: user, contains: "Human approval was granted" }
+    reply: { text: Booked. }
+  - when: { step: book, toolName: calendar_create_event }
+    reply: { text: Booked. }
+  - when: { step: book, toolName: load_skill }
+    reply: { toolCall: { name: calendar_create_event, args: { subject: Planning, start: "2026-11-10T10:00:00", end: "2026-11-10T10:30:00" } } }
+  - when: { step: book, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: m365-mail } } }
+status: active

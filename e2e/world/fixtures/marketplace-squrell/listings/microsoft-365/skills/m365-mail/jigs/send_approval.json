@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "catalog": "vam/1",
+  "root": "root",
+  "state": { "to": "", "subject": "", "body": "" },
+  "nodes": {
+    "root": {
+      "type": "Stack",
+      "props": { "gap": "medium" },
+      "children": ["in_to", "in_subject", "in_body", "row"]
+    },
+    "in_to": { "type": "Input", "props": { "label": "To", "value": { "$state": "to" } } },
+    "in_subject": { "type": "Input", "props": { "label": "Subject", "value": { "$state": "subject" } } },
+    "in_body": { "type": "TextArea", "props": { "label": "Body", "value": { "$state": "body" } } },
+    "row": {
+      "type": "Stack",
+      "props": { "direction": "horizontal", "gap": "small" },
+      "children": ["ok", "no"]
+    },
+    "ok": {
+      "type": "Button",
+      "props": {
+        "label": "Send",
+        "tone": "success",
+        "action": { "event": "submit", "with": ["to", "subject", "body"], "set": { "decision": "approve" } }
+      }
+    },
+    "no": {
+      "type": "Button",
+      "props": {
+        "label": "Deny",
+        "tone": "danger",
+        "action": { "event": "submit", "with": [], "set": { "decision": "deny" } }
+      }
+    }
+  }
+}

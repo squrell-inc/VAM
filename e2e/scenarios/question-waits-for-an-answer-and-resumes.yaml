@@ -1,0 +1,28 @@
+id: question-waits-for-an-answer-and-resumes
+title: A question parks the task until it is answered, refuses an answer that breaks its schema, and resumes on a valid one
+tags: [chat, approval]
+needs: process
+description: The agent asks the user a question. The task waits for input; an answer that breaks the question's schema is refused and the question stays open; a valid answer resumes the task.
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: "e2e-step:ask Greet the user by name"
+  - expect: { approval: pending, tool: ask_user, fields: { kind: APPROVAL_KIND_QUESTION, approvalMessage: "Which name should I use?" } }
+  - answer: { response: { answer: 42 }, refused: true }
+  - answer: { response: { answer: Ada } }
+then:
+  - expect: { run: succeeded }
+  - expect: { file: { path: greeting.txt, equals: "Hello Ada" } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/approvals/**
+  - vam:crates/vam-runtime/src/hitl_checkpoint.rs
+mock:
+  - when: { step: ask, toolName: ask_user, anyContains: Ada }
+    reply: { toolCall: { name: write_file, args: { path: greeting.txt, content: "Hello Ada" } } }
+  - when: { step: ask, toolName: write_file }
+    reply: { text: done }
+  - when: { step: ask, stepStart: true }
+    reply: { toolCall: { name: ask_user, args: { jig: vam.question, data: { question: "Which name should I use?" } } } }
+status: active

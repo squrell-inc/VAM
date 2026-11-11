@@ -1,0 +1,25 @@
+piece: agent-with-schedule-tools
+kind: agent
+release: true
+requires: [schedule-broker]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent that can make schedules
+    description: Agent offered read_file, write_file, run and the schedule broker's tools (reads allowed, writes asked first)
+    role: Tester
+    systemInstructions: Use the tools when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:read_file", decision: allow }
+          - { target: "builtin:write_file", decision: allow }
+          - { target: "builtin:run", decision: allow }
+          - { target: "builtin:schedule_list", decision: allow }
+          - { target: "builtin:schedule_get", decision: allow }
+          - { target: "builtin:schedule_create", decision: ask }
+          - { target: "builtin:schedule_update", decision: ask }
+          - { target: "builtin:schedule_delete", decision: ask }
+          - { target: "builtin:schedule_run_now", decision: ask }

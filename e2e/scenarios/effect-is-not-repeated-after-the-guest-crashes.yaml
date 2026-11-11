@@ -1,0 +1,31 @@
+id: effect-is-not-repeated-after-the-guest-crashes
+title: When the guest dies while an outside call is in flight, the task resumes and the call is not made twice
+tags: [chat]
+needs: process
+description: The task creates a ticket and the broker holds the call open. The guest is killed during the hold, so vamd stays up and the broker's answer still arrives. The task picks up on a new guest, the recorded answer is replayed, and the broker's own ledger counts one create.
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: { text: "e2e-step:make Create the Q4 plan ticket", wait: false }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - kill-guest: {}
+then:
+  - expect: { run: succeeded }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - expect: { event: run.resumed, fields: { data.reason: guest_crashed } }
+  - expect: { event: effect.replayed, fields: { data.tool: echo_create_ticket } }
+  - expect: { thread: { role: tool, contains: T-1 } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/effect_path.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: make, toolName: echo_create_ticket }
+    reply: { text: "Created T-1" }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan, holdMs: 4000 } } }
+status: active

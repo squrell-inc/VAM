@@ -1,0 +1,25 @@
+id: thinking-model-tool-calls-are-not-dropped
+title: A reply with reasoning and a tool call runs the tool and records the size of the reasoning
+tags: [chat]
+needs: process
+description: The model returns reasoning together with a write_file call. The tool runs, no invalid-call error appears in the thread, and the inference event reports how much reasoning came back.
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: "e2e-step:think Save the note"
+  - expect: { event: tool.completed, tool: write_file }
+then:
+  - expect: { file: { path: note.txt, present: true } }
+  - expect: { event: inference.completed, fields: { data.reasoningBytes: "19" } }
+guards:
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-inference/src/provider.rs
+mock:
+  - when: { step: think, afterTool: write_file }
+    reply: { text: saved }
+  - when: { step: think }
+    reply:
+      reasoning: weigh-the-options-7
+      toolCall: { name: write_file, args: { path: note.txt, content: kept } }
+status: active

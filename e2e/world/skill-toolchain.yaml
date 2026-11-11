@@ -1,0 +1,16 @@
+piece: skill-toolchain
+kind: skill
+files:
+  report.py: toolchain/report.py
+  ledger.csv: toolchain/ledger.csv
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: Reads a table with pandas and a repository with git, in the guest (test nodes only)
+    tools:
+      - name: toolchain_report
+        description: Sums the ledger with Python and pandas, then clones a small git repository and prints its latest commit subject
+        inputSchemaJson: "{\"type\":\"object\"}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        localExec: { command: python3, entrypoint: ./report.py }

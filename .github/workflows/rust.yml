@@ -1,0 +1,596 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "design/**"
+      - ".cursor/**"
+      - "**/*.md"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    # A PR is skipped only when every changed file matches; any code change runs CI.
+    paths-ignore:
+      - "docs/**"
+      - "design/**"
+      - ".cursor/**"
+      - "**/*.md"
+
+  workflow_dispatch:
+    inputs:
+      lane_only:
+        description: "Run only the firecracker (microVM) job"
+        type: boolean
+        default: false
+      skip_vm_tests:
+        description: "In the firecracker job, skip the two VM test steps (scenarios only)"
+        type: boolean
+        default: false
+      base:
+        description: "Guest base the firecracker job builds and boots: standard (Debian slim, Python, git, Bun) or minimal (the deprecated busybox image)"
+        type: choice
+        options:
+          - standard
+          - minimal
+        default: standard
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Process-mode tools (the Microsoft 365 skill) run on the host under Bun. The same pin is in
+  # scripts/ci/local.sh.
+  BUN_VERSION: "1.4.4"
+
+permissions:
+  contents: read
+
+jobs:
+  # Decides whether the paid microVM lane is worth running. Plain git diff, no
+  # third-party action. Push and workflow_dispatch always run the lane.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+    outputs:
+      vm: ${{ steps.filter.outputs.vm }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: VM path filter
+        id: filter
+        env:
+          # A PR carrying `skip-vm-lane` never runs the paid lane. Push, workflow_dispatch and
+          # release PRs ignore it. Open such a PR as a draft, add the label, then mark it ready.
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          # A release PR: into main from an epic base (feat/*), or labelled `release`.
+          RELEASE: ${{ github.base_ref == 'main' && (startsWith(github.head_ref, 'feat/') || contains(github.event.pull_request.labels.*.name, 'release')) }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "vm=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # A release PR always runs the lane: no path filter, no label (launch audit S4). The
+          # `release lane (microVM)` job below fails it unless the lane is green.
+          if [ "$RELEASE" = "true" ]; then
+            echo "release PR: vm=true"; echo "vm=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          case ",$PR_LABELS," in
+            *,skip-vm-lane,*) echo "skip-vm-lane label: vm=false"; echo "vm=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          git diff --name-only "origin/${{ github.base_ref }}...HEAD" > "$RUNNER_TEMP/changed.txt"
+          cat "$RUNNER_TEMP/changed.txt"
+          if grep -qE '^(crates/(vam-core|vam-firecracker|vam-runtime|vam-orchestrator|vam-vsock|vam-storage|vam-e2e)/|scripts/e2e/|scripts/build-rootfs[^/]*\.sh$|scripts/base/|e2e/(scenarios|world)/|proto/|Cargo\.lock$|\.github/workflows/rust\.yml$)' "$RUNNER_TEMP/changed.txt"; then
+            echo "vm=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "vm=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Show output
+        run: echo "vm=${{ steps.filter.outputs.vm }}"
+
+  # rustfmt, example JSON protos and the release gate in one job (one checkout,
+  # one toolchain, one billed-minute rounding instead of three).
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.lane_only && github.event.pull_request.draft != true }}
+    timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.job }}
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: example JSON protos
+        run: cargo test -p vam-spec --test examples_json
+      # Process mode must never ship. The manifest check runs on every PR; the
+      # build gate (default vs process-guest vamd and vam-runtime) runs on PRs
+      # into main and on pushes to main.
+      - name: Manifests
+        run: scripts/e2e/check-manifests.sh
+      - name: release gate
+        if: github.event_name == 'push' || github.base_ref == 'main'
+        run: scripts/e2e/check-release-gate.sh
+
+  # Clippy gate (isolation-truth IT-3.10): -D warnings on the default and the
+  # process-guest feature sets. The toolchain is pinned, not `stable`, so a new Rust
+  # release cannot turn PRs red with no code change. Keep the version equal to
+  # CLIPPY_TOOLCHAIN in scripts/ci/local.sh; a Rust bump is one PR that changes both
+  # and fixes the new lints. The explicit `+1.97.0` on each cargo call is what makes
+  # the pin hold: rust-toolchain.toml says `stable` and overrides the rustup default
+  # inside the checkout, so a plain `cargo clippy` would run the runner's stable.
+  # The required-check name is `clippy`.
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.lane_only && github.event.pull_request.draft != true }}
+    timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.job }}
+      - name: clippy (default features)
+        run: cargo +1.97.0 clippy --workspace --all-targets -- -D warnings
+      - name: clippy (process-guest)
+        run: cargo +1.97.0 clippy --workspace --all-targets --features vam-runtime/process-guest,vam-orchestrator/process-guest -- -D warnings
+
+  # Runs the full workspace suite as the non-root runner user, with no exclusions.
+  # hsp_uds::uds_socket_acl_deny_fails_fast expects a 0o000 socket to refuse
+  # connects, which root bypasses. Do not run this job as root.
+  test:
+    name: cargo test (workspace)
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.lane_only && github.event.pull_request.draft != true }}
+    env:
+      # The hosted runner has limited disk, and debug info plus incremental state
+      # for every test binary makes the target directory large. Run 38075017480
+      # failed in the link step (ld: Bus error), which is consistent with a full
+      # disk. These settings keep the target directory small.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      # Hosted /tmp is a separate small tmpfs (vam-storage EDQUOT); use the
+      # runner temp dir. Set here because job-level `env` cannot read `runner`.
+      - name: Use runner temp for TMPDIR
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # Every test binary builds into one target/ here, and the vam-storage
+      # tests that write workspace trees then hit the runner's disk quota
+      # ("Disk quota exceeded"). Remove preinstalled toolchains
+      # this job never uses.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache per job; PRs restore from the base branch's cache.
+          shared-key: ${{ github.job }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Put bun on the guest tool PATH
+        run: sudo install -m 755 "$(command -v bun)" /usr/local/bin/bun
+      - run: cargo test --workspace --no-fail-fast
+      - name: Disk after tests
+        if: always()
+        run: df -h /
+
+  # Process-mode scenarios (design/scenarios.md). The test-only vamd and
+  # vam-runtime (process-guest) are built here and never reach the test job.
+  scenarios:
+    name: scenarios (smoke)
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.lane_only && github.event.pull_request.draft != true }}
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.job }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Put bun on the guest tool PATH
+        run: sudo install -m 755 "$(command -v bun)" /usr/local/bin/bun
+      - name: Marketplace fixture matches its stamp, and its Bun tests
+        run: |
+          scripts/marketplace/check-snapshot.sh
+          (cd e2e/world/fixtures/marketplace-squrell && bun test tests)
+      - name: Run smoke scenarios
+        run: scripts/e2e/run.sh --smoke --out "$RUNNER_TEMP/e2e"
+      # vamd's state holds names upload-artifact refuses (a colon in
+      # drive9/catalog/skills/marketplace:<id>/...), and one refused name fails the whole upload,
+      # briefs included. Pack the state into one tarball; summary and briefs stay plain files.
+      - name: Pack vamd state
+        if: failure()
+        run: |
+          [ -d "$RUNNER_TEMP/e2e/vamd" ] || exit 0
+          tar -czf "$RUNNER_TEMP/e2e/vamd-state.tar.gz" -C "$RUNNER_TEMP/e2e" vamd
+          ls -la "$RUNNER_TEMP/e2e/vamd-state.tar.gz"
+      - name: Upload summary and briefs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenarios-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/e2e/summary.json
+            ${{ runner.temp }}/e2e/briefs/
+            ${{ runner.temp }}/e2e/vamd-state.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Boots real Firecracker microVMs (design/isolation-truth.md). Advisory on ordinary PRs; on a
+  # release PR (into main from feat/*, or labelled `release`) it always runs and
+  # `release lane (microVM)` (end of file) fails the PR unless this job succeeds. Needs no secrets; the VM tests use the mock path only.
+  firecracker:
+    name: firecracker (microVM, advisory)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.vm == 'true' && github.event.pull_request.draft != true }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        # pipefail: a failing step must not be masked by the `| tee` log pipes below.
+        shell: bash -eo pipefail {0}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      VAM_SNAPSHOT_RESTORE: "0"
+      # Which guest base the lane builds and boots (workflow_dispatch input; standard otherwise).
+      VAM_BASE: ${{ inputs.base || 'standard' }}
+    steps:
+      - name: Start timer
+        run: echo "LANE_START=$(date +%s)" >> "$GITHUB_ENV"
+      # The hosted runner has limited disk ("Disk quota exceeded").
+      # Remove preinstalled toolchains this job never uses.
+      # Timed per directory for IT-1.8; trimmed to what the lane needs once the
+      # numbers are in.
+      - name: Free runner disk
+        run: |
+          df -h /
+          for d in /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL; do
+            s=$(date +%s); sudo rm -rf "$d"; echo "rm $d: $(( $(date +%s) - s )) s"; df -h / | tail -n 1
+          done
+      # Files enter a jail by hard link, which needs one mount: show which mounts these are on.
+      - name: Filesystems (jailer hard links)
+        run: |
+          for p in / /tmp /srv "$RUNNER_TEMP" /var/lib; do
+            echo "$p: dev=$(stat -c '%d' "$p") $(findmnt -no TARGET,FSTYPE,SOURCE -T "$p" | tr '\n' ' ')"
+          done
+          sudo mkdir -p /srv/jailer && echo "/srv/jailer: dev=$(stat -c '%d' /srv/jailer)"
+          sysctl fs.protected_hardlinks fs.protected_symlinks || true
+      - name: KVM access
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || { echo "No /dev/kvm on this runner" | tee -a "$GITHUB_STEP_SUMMARY"; exit 1; }
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl-tools and e2fsprogs
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools e2fsprogs
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ github.job }}
+      - name: Restore lane assets
+        id: assets-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vam-assets
+          key: fc-assets-${{ inputs.base || 'standard' }}-${{ hashFiles('scripts/e2e/firecracker-assets.sh', 'scripts/assets.pins', 'scripts/build-rootfs.sh', 'scripts/base/**', 'Cargo.lock', 'crates/vam-runtime/**') }}
+          restore-keys: fc-assets-${{ inputs.base || 'standard' }}-
+      - name: Check assets (cheap, first)
+        env:
+          VAM_ASSETS_DIR: ${{ runner.temp }}/vam-assets
+        run: scripts/e2e/firecracker-assets.sh --check 2>&1 | tee "$RUNNER_TEMP/assets-check.log"
+      - name: Prepare assets
+        env:
+          VAM_ASSETS_DIR: ${{ runner.temp }}/vam-assets
+        run: |
+          pull() { for i in 1 2 3; do docker pull "$1" && return 0; echo "docker pull $1 failed (try $i)"; sleep $((i * 10)); done; return 1; }
+          if [ "$VAM_BASE" = minimal ]; then
+            pull busybox:musl
+            pull alpine:latest
+          else
+            # A pin the author could not resolve offline (the Bun release) is resolved here, so the
+            # first lane run still builds. The resolved values are printed for the author to commit.
+            if grep -q '^[A-Z_]*=UNRESOLVED' scripts/base/pins; then
+              scripts/base/resolve-pins.sh --write
+            fi
+            scripts/base/resolve-pins.sh --check 2>&1 | tee "$RUNNER_TEMP/pins-check.log"
+            . scripts/base/pins
+            pull "debian:${DEBIAN_TAG}@${DEBIAN_DIGEST}"
+          fi
+          scripts/e2e/firecracker-assets.sh --env-file "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/assets.log"
+          # Runner disk: the Docker image, layers and the export staging tree are not needed
+          # again. The ext4 image is what the lane boots.
+          docker rmi -f $(docker images -q 'vam-base-build' 2>/dev/null) 2>/dev/null || true
+          docker image prune -af >/dev/null 2>&1 || true
+          docker builder prune -af >/dev/null 2>&1 || true
+          sudo rm -rf target/rootfs-staging
+          df -h / | tail -n 1
+      - name: VM tests (vam-core)
+        if: ${{ !inputs.skip_vm_tests }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/vmlogs"
+          cargo test -p vam-core --test integration -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/vmlogs/vm-core.log"
+      - name: VM tests (vamd)
+        if: ${{ !inputs.skip_vm_tests }}
+        env:
+          VAM_DRIVE9_ROOT: ${{ runner.temp }}/drive9
+        run: |
+          cargo test -p vam-orchestrator --test e2e_tests test_vamd_real_firecracker_e2e -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/vmlogs/vm-vamd.log"
+      # The jailer needs root, so the jailed tests run as root: build as the runner (the
+      # target dir stays the runner's), then `sudo` the test binary.
+      - name: VM tests (jailer, root)
+        if: ${{ !inputs.skip_vm_tests }}
+        env:
+          VAM_DRIVE9_ROOT: ${{ runner.temp }}/drive9-jailed
+        run: |
+          mkdir -p "$RUNNER_TEMP/vmlogs"
+          # Hosted runners ignore `sudo -E`: pass the VAM/VAMD variables explicitly.
+          mapfile -t VENV < <(env | grep -E '^VAMD?_[A-Za-z0-9_]*=')
+          run_as_root() {
+            bin=$(cargo test -p "$1" --test "$2" --no-run --message-format=json | jq -r --arg t "$2" 'select(.profile.test == true and .target.name == $t) | .executable' | tail -n 1)
+            [ -x "$bin" ] || { echo "no test binary for $1 --test $2"; return 1; }
+            shift 2
+            sudo env "PATH=$PATH" "${VENV[@]}" "$bin" "$@" --ignored --test-threads=1 --nocapture
+          }
+          {
+            run_as_root vam-core jailed
+            run_as_root vam-orchestrator e2e_tests test_vamd_real_firecracker_jailed_e2e
+          } 2>&1 | tee "$RUNNER_TEMP/vmlogs/vm-jailed.log"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/drive9-jailed" 2>/dev/null || true
+      # What a turn commit costs on this runner's volume (reflink or copy, and the
+      # extraction a stop does). TMPDIR is set in the step: a job-level `env` cannot
+      # read the `runner` context (working-agreement.md, CI rule).
+      - name: Turn commit cost probe
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/vmlogs"
+          export TMPDIR="$RUNNER_TEMP"
+          cargo test -p vam-storage --test turn_commit_cost -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/vmlogs/turn-commit-cost.log"
+      # The node runs the jailer (on by default), which needs root: so vamd and the
+      # runner's VMM probe run as root. Built as the runner first.
+      - name: Build (microVM node and runner)
+        # always(): the scenarios run even when a VM test above failed (the job still fails).
+        if: always()
+        run: VAM_E2E_BUILD_ONLY=1 scripts/e2e/run.sh --firecracker
+      - name: Scenarios (microVM)
+        if: always()
+        env:
+          VAM_SNAPSHOT_RESTORE: "1"
+          # Guest serial console in each Firecracker stdout, kept for the diagnostics step.
+          VAM_SERIAL_CONSOLE: "1"
+          VAM_KEEP_VM_LOGS: "1"
+          # Host phase timer: the session-start split in the summary.
+          VAM_TIMING: "1"
+          # Five extra golden bakes at startup, each bake and restore in its own jail
+          # (never publishes; run.sh fails on a leftover jail directory).
+          VAM_GOLDEN_BAKE_SOAK: "5"
+        run: |
+          mkdir -p "$RUNNER_TEMP/vmlogs"
+          # Hosted runners ignore `sudo -E`: pass the VAM/VAMD variables explicitly.
+          mapfile -t VENV < <(env | grep -E '^VAMD?_[A-Za-z0-9_]*=')
+          sudo env "PATH=$PATH" "${VENV[@]}" VAM_E2E_SKIP_BUILD=1 VAM_E2E_VAMD="$PWD/target/e2e-bin-vm/vamd" \
+            VAM_E2E_TEST_BROKER="$PWD/target/e2e-bin-vm/hsp-echo-broker" \
+            scripts/e2e/run.sh --firecracker --out "$RUNNER_TEMP/e2e-fc" 2>&1 | tee "$RUNNER_TEMP/vmlogs/scenarios.log"
+      # Mock bench trials on the vm node: prove the real-model path's plumbing (task on the
+      # microVM lane, `inputs.model`, results file) without a key or a cent. One `--bench` call per
+      # task-set version (the runner refuses to mix versions), each with its own --out.
+      # A failed trial (exit 1) is advisory: a warning. A usage or selection error (exit 2) means
+      # the bench ran nothing, and fails the step.
+      - name: Bench, mock (microVM)
+        if: always()
+        env:
+          VAM_SNAPSHOT_RESTORE: "1"
+        run: |
+          mapfile -t VENV < <(env | grep -E '^VAMD?_[A-Za-z0-9_]*=')
+          bench() { # <out-dir> <scenario>
+            local rc=0
+            sudo env "PATH=$PATH" "${VENV[@]}" VAM_E2E_SKIP_BUILD=1 VAM_E2E_VAMD="$PWD/target/e2e-bin-vm/vamd" \
+              scripts/e2e/run.sh --firecracker --bench --mock --scenarios "$2" -k 1 --out "$1" || rc=$?
+            case "$rc" in
+              0) ;;
+              2) echo "::error::bench $2: the runner refused the run (exit 2); nothing was benched"; return 2 ;;
+              *) echo "::warning::bench $2: exit $rc (advisory)" ;;
+            esac
+          }
+          rc=0
+          bench "$RUNNER_TEMP/e2e-fc-bench" greeting-starts-no-playbook || rc=$?
+          # The toolchain task (task set 0.4.0) needs Python and git: only on the standard base.
+          if [ "$VAM_BASE" != minimal ]; then
+            bench "$RUNNER_TEMP/e2e-fc-bench-toolchain" skill-uses-python-pandas-and-git-on-the-standard-base || rc=$?
+          fi
+          exit "$rc"
+      # The run was root's: hand its files back (the TLS key is 0600) for the steps below.
+      - name: Hand the run back to the runner user
+        if: always()
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/e2e-fc" "$RUNNER_TEMP/e2e-fc-bench" "$RUNNER_TEMP/e2e-fc-bench-toolchain" "$RUNNER_TEMP/vmlogs" 2>/dev/null || true
+          ls -A /srv/jailer/firecracker 2>/dev/null | sed 's/^/jail left: /' || true
+      # The artifact store is not always reachable from review tooling: print the evidence in the log too.
+      - name: Scenario diagnostics
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/e2e-fc"
+          for f in "$out"/briefs/*.md; do [ -f "$f" ] && { echo "::group::brief $(basename "$f")"; head -c 6000 "$f"; echo; echo "::endgroup::"; }; done
+          # The bake lines come first in vamd.log and fall off the tail below once the soak
+          # has run: print them on their own.
+          echo "::group::golden bake, key and soak (vamd.log, head)"
+          sed -E 's/\x1b\[[0-9;]*m//g' "$out/vamd/vamd.log" 2>/dev/null | grep -aE "Golden snapshot|golden bake|golden key: [0-9]+ms cached=false|bake soak" | head -n 40 || true
+          echo "::endgroup::"
+          echo "::group::session start split (VAM_TIMING, first two golden sessions, microseconds)"
+          clean_log() { sed -E 's/\x1b\[[0-9;]*m//g' "$out/vamd/vamd.log" 2>/dev/null; }
+          for id in $(clean_log | grep -a "boot path: golden" | sed -E "s/.*session '([^']+)'.*/\1/" | head -n 2); do
+            echo "$id: $(clean_log | grep -a "Phase step completed" | grep -a "$id" | sed -E 's/.*Phase step completed: ([A-Za-z0-9_]+) in ([0-9]+) us.*/\1=\2/' | paste -sd' ' || true)"
+          done
+          echo "::endgroup::"
+          echo "::group::turn commits and stops (vamd.log: snapshot, stop settled)"
+          sed -E 's/\x1b\[[0-9;]*m//g' "$out/vamd/vamd.log" 2>/dev/null | grep -aE "turn commit snapshot:|stop settled:|commit_failed|turn copy" | head -n 60 || true
+          echo "::endgroup::"
+          echo "::group::vamd.log (golden, boot path, errors)"
+          grep -aiE "golden|boot path|error|warn|fail|isolation|panick|restore timing|reseed timing|bake soak" "$out/vamd/vamd.log" 2>/dev/null | tail -n 80 || true
+          echo "::endgroup::"
+          echo "::group::guest resume timing"
+          grep -ah "resume timing" /tmp/vam-fc-vm-*.stdout* 2>/dev/null | tail -n 20 || true
+          echo "::endgroup::"
+          # The bake VM's console shows how far its guest got before the host paused it
+          # (the `bake:` checkpoints). The real bake in full, each soak bake's last one.
+          for f in /tmp/vam-fc-golden-bake-vm-*.stdout*; do
+            [ -s "$f" ] || continue
+            echo "::group::bake console $f (last checkpoint: $(grep -a 'bake:' "$f" | tail -n 1 | tr -d '\r' || true))"
+            grep -a "guest-agent" "$f" | tr -d '\r' | tail -n 60
+            echo "::endgroup::"
+          done
+          for f in /tmp/vam-fc-golden-soak-bake-*.stdout*; do
+            [ -s "$f" ] || continue
+            echo "soak bake console $(basename "$f"): $(grep -a 'bake:' "$f" | tail -n 1 | tr -d '\r' || true)"
+          done
+          # A restored guest's console has no kernel boot banner. Print its last lines.
+          n=0
+          for f in /tmp/vam-fc-vm-*.stdout*; do
+            [ -s "$f" ] || continue
+            grep -aq "Linux version" "$f" && continue
+            n=$((n + 1)); [ "$n" -le 8 ] || break
+            echo "::group::restored console $f (last checkpoint: $(grep -a 'resume:' "$f" | tail -n 1 | tr -d '\r' || true))"
+            tail -n 30 "$f" | tr -d '\r'
+            echo "::endgroup::"
+          done
+          for f in /tmp/vam-fc-*.stderr; do [ -s "$f" ] && { echo "::group::$f"; tail -n 20 "$f"; echo "::endgroup::"; }; done || true
+          true
+      - name: Summary
+        if: always()
+        run: |
+          end=$(date +%s)
+          {
+            echo "### firecracker lane"
+            echo "- job minutes: $(( (end - LANE_START + 59) / 60 ))"
+            echo "- assets cache hit: ${{ steps.assets-cache.outputs.cache-hit }}"
+            echo "- /dev/kvm: $(ls -l /dev/kvm 2>&1)"
+            echo
+            echo "base (cost, locked decision 3):"
+            m="${VAM_BASE_MANIFEST:-}"
+            if [ -n "$m" ] && [ -f "$m" ]; then
+              field() { sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$m" | head -n 1; }
+              echo "- base name: $(field name) (requested: $VAM_BASE)"
+              echo "- base digest: $(field digest)"
+              echo "- image bytes: $(field imageBytes)"
+              echo "- used bytes: $(field usedBytes)"
+              echo "- from: $(field from), snapshot $(field snapshot), bun $(field bunVersion)"
+            else
+              echo "- no base manifest (requested: $VAM_BASE)"
+            fi
+            grep -hE '^(DEBIAN_DIGEST|SNAPSHOT_TIMESTAMP|BUN_VERSION|BUN_SHA256)=' scripts/base/pins 2>/dev/null | sed 's/^/- pin: /' || true
+            echo
+            echo "| measure | value |"
+            echo "|---|---|"
+            for k in HONEST_COLD_BOOT_LATENCY COLD_BOOT_TO_REGISTERED_LATENCY GUEST_RPC_PING_RTT DAEMON_E2E_REAL_BOOT_TO_RUNNING_LATENCY; do
+              grep -ohE "$k[^:]*: [^ ]+" "$RUNNER_TEMP"/vmlogs/*.log 2>/dev/null | sed -E 's/^([^:]+): (.*)$/| \1 | \2 |/' || true
+            done
+            echo
+            echo "jailer: $(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/e2e-fc/vamd/vamd.log" 2>/dev/null | grep -aE 'jailer on|jailer OFF|node isolation' | head -n 2 | tr '\n' ' ')"
+            echo "jail directories left: $(ls -A /srv/jailer/firecracker 2>/dev/null | wc -l)"
+            echo
+            echo "restore (golden snapshot):"
+            log="$RUNNER_TEMP/e2e-fc/vamd/vamd.log"
+            clean() { sed -E 's/\x1b\[[0-9;]*m//g' "$log" 2>/dev/null; }
+            echo "- boot paths: $(clean | grep -a 'boot path:' | grep -ac 'boot path: golden') golden, $(clean | grep -a 'boot path:' | grep -ac 'boot path: cold') cold"
+            { clean | grep -a 'SLO latency breached' | grep -a 'tier="restore"' | grep -aoE 'observed_ms=[0-9]+' | cut -d= -f2 | sort -n || true; } | awk '{a[NR]=$1} END {if (NR) printf "- restore latency ms (n=%d): min %s, median %s, max %s\n", NR, a[1], a[int((NR+1)/2)], a[NR]; else print "- restore latency: no SLO line (under target or no restore)"}'
+            clean | grep -aE 'restore timing:|reseed timing:' | sed 's/^/    /' || true
+            grep -ah "resume timing" /tmp/vam-fc-vm-*.stdout* 2>/dev/null | sed 's/^/    /' || true
+            echo
+            echo "golden bake (IT-1.10):"
+            echo "- bake timing: $(clean | grep -a 'golden bake timing:' | head -n 1 | sed 's/.*golden bake timing: //')"
+            echo "- guest ready: $(clean | grep -a 'golden bake: guest ready' | head -n 1 | sed 's/.*golden bake: //')"
+            echo "- golden key: first $(clean | grep -a 'golden key:' | head -n 1 | sed 's/.*golden key: //'), last $(clean | grep -a 'golden key:' | tail -n 1 | sed 's/.*golden key: //'), n=$(clean | grep -ac 'golden key:')"
+            echo "- bake soak: $(clean | grep -a 'bake soak: [0-9]*/' | tail -n 1 | sed 's/.*bake soak: //')"
+            clean | grep -aE 'bake soak [0-9]+/[0-9]+:' | sed 's/.*\(bake soak\)/    \1/' || true
+            echo "- session start split (VAM_TIMING, first two golden sessions, microseconds):"
+            for id in $(clean | grep -a "boot path: golden" | sed -E "s/.*session '([^']+)'.*/\1/" | head -n 2); do
+              echo "    $id:"
+              clean | grep -a "Phase step completed" | grep -a "$id" | sed -E 's/.*Phase step completed: ([A-Za-z0-9_]+) in ([0-9]+) us.*/\1=\2/' | paste -sd' ' | fold -w 150 | sed 's/^/      /' || true
+            done
+            echo
+            echo "turn commits (W6b-ii):"
+            { clean | grep -a 'turn commit snapshot:' || true; } | sed -E 's/.*turn commit snapshot: /    snapshot: /' | head -n 20
+            { grep -ah 'turn commit: sync_ms' /tmp/vam-fc-vm-*.stdout* 2>/dev/null || true; } | tr -d '\r' | sed -E 's/.*turn commit: /    freeze: /' | head -n 20
+            { clean | grep -a 'stop settled:' || true; } | sed -E 's/.*stop settled: /    stop settled: /' | head -n 10
+            { grep -h 'turn_commit_cost:' "$RUNNER_TEMP"/vmlogs/turn-commit-cost.log 2>/dev/null || true; } | sed 's/^/    probe: /'
+            echo
+            echo "scenarios (microVM):"
+            grep -hE "^(PASS|FAIL|RED|SKIP)|scenario\(s\):" "$RUNNER_TEMP/vmlogs/scenarios.log" 2>/dev/null | sed 's/^/    /' || true
+            echo
+            grep -h "^test result\|^test .* \.\.\. " "$RUNNER_TEMP"/vmlogs/*.log 2>/dev/null | sed 's/^/    /' || true
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firecracker-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/vmlogs/
+            ${{ runner.temp }}/e2e-fc/briefs/
+            ${{ runner.temp }}/e2e-fc/summary.json
+            ${{ runner.temp }}/e2e-fc/vamd/vamd.log
+            ${{ runner.temp }}/assets-check.log
+            ${{ runner.temp }}/assets.log
+            /tmp/vam-fc-*.stdout
+            /tmp/vam-fc-*.stderr
+          if-no-files-found: warn
+          retention-days: 7
+
+  # The microVM lane blocks releases (launch audit S4). On a release PR (into main from feat/*, or
+  # labelled `release`) the `changes` job forces the lane on (no path filter, no `skip-vm-lane`),
+  # and this job fails unless the lane succeeded. On every other event it passes without looking,
+  # so it can be a required check on main while the lane stays advisory on ordinary PRs, cross-
+  # cutting fix/* PRs into main included. scripts/e2e/check-release-gate.sh checks this wiring.
+  release-lane:
+    name: release lane (microVM)
+    runs-on: ubuntu-latest
+    needs: [changes, firecracker]
+    if: ${{ always() && github.event.pull_request.draft != true }}
+    timeout-minutes: 5
+    steps:
+      - name: A release needs a green microVM lane
+        env:
+          RELEASE: ${{ github.base_ref == 'main' && (startsWith(github.head_ref, 'feat/') || contains(github.event.pull_request.labels.*.name, 'release')) }}
+          LANE: ${{ needs.firecracker.result }}
+        run: |
+          if [ "$RELEASE" != "true" ]; then
+            echo "not a release PR: the microVM lane is advisory here (lane: $LANE)"; exit 0
+          fi
+          if [ "$LANE" != "success" ]; then
+            echo "::error::a release PR needs a green microVM lane; firecracker job result: $LANE"; exit 1
+          fi
+          echo "microVM lane green"

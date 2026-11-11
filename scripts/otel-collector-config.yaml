@@ -1,0 +1,78 @@
+# OpenTelemetry Collector configuration for VAM (host-local sidecar)
+# Listens on loopback 127.0.0.1:4317 (gRPC) and 127.0.0.1:4318 (HTTP).
+# vamd currently exports OTLP/HTTP to :4318 (orchestrator pins tonic 0.10, so
+# vam-telemetry does not enable grpc-tonic). Keep both receivers so other
+# trusted senders can still use gRPC.
+#
+# Product tail sampling lives in vam-telemetry (TailSamplingPolicy). Do not
+# treat collector tail_sampling as the product checkbox.
+#
+# Run inside the same host/Lima VM as vamd. Do not forward 4317/4318 to the Mac.
+#
+# Remote / mTLS notes (comment only — this sample stays loopback plaintext):
+# vamd refuses a non-loopback VAMD_OTLP_ENDPOINT unless VAMD_OTLP_TLS_CA,
+# VAMD_OTLP_TLS_CERT, and VAMD_OTLP_TLS_KEY are set (HTTPS + rustls client
+# identity). Optional VAMD_OTLP_SPIFFE_ID is a string compare in vamd.
+# Do not start SPIRE from this file. To terminate mTLS at the collector,
+# configure otlp receivers with tls.cert_file / tls.key_file / tls.client_ca_file
+# on a non-loopback bind — that is operator config, not product.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 256
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  # Optional second filter. Product sampling is applied in vamd before export.
+  # tail_sampling:
+  #   decision_wait: 10s
+  #   policies:
+  #     - name: errors
+  #       type: status_code
+  #       status_code:
+  #         status_codes: [ERROR]
+
+exporters:
+  debug:
+    verbosity: basic
+
+  prometheus:
+    endpoint: 127.0.0.1:8889
+    namespace: vam
+
+  # --- Unsupported samples (not product). Uncomment and configure at your own risk. ---
+  # No Datadog / ClickHouse / Grafana crates ship in VAM. Fan-out is collector config.
+  # datadog:
+  #   api:
+  #     key: ${env:DD_API_KEY}
+  #     site: datadoghq.com
+  # clickhouse:
+  #   endpoint: tcp://127.0.0.1:9000?dial_timeout=10s
+  #   username: default
+  #   password: ""
+  #   database: otel
+  # otlp/grafana:
+  #   endpoint: grafana.example.com:443
+  #   headers:
+  #     authorization: Bearer ${env:GRAFANA_CLOUD_TOKEN}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, prometheus]

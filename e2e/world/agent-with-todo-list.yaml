@@ -1,0 +1,18 @@
+piece: agent-with-todo-list
+kind: agent
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent that keeps a todo list
+    description: Agent offered read_file, write_file and todo_write
+    role: Tester
+    systemInstructions: Keep your plan with todo_write. Use read_file and write_file when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:read_file", decision: allow }
+          - { target: "builtin:write_file", decision: allow }
+          - { target: "builtin:todo_write", decision: allow }

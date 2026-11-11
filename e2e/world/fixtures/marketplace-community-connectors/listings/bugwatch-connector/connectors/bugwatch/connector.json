@@ -1,0 +1,41 @@
+{
+  "urn": "urn:vam:connector:connectors.community.example/community/bugwatch",
+  "version": "1.0.0",
+  "displayName": "Bugwatch",
+  "publisher": "Community Tools Ltd",
+  "description": "Bugwatch issues in the member's own workspace, through its remote MCP server.",
+  "icon": "bugwatch",
+  "provider": {
+    "kind": "oauth2",
+    "profile": "discover",
+    "clientSecret": "none",
+    "scopes": [
+      "read",
+      "write"
+    ],
+    "orgConsent": "none"
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "whoami.email"
+  },
+  "mcp": {
+    "url": "https://mcp.bugwatch.example/mcp",
+    "tools": [
+      {
+        "remote": "list_issues",
+        "sideEffect": "READ_ONLY"
+      },
+      {
+        "remote": "get_issue",
+        "sideEffect": "READ_ONLY"
+      },
+      {
+        "remote": "save_issue",
+        "sideEffect": "MUTABLE_EXTERNAL",
+        "default": "ask"
+      }
+    ]
+  }
+}

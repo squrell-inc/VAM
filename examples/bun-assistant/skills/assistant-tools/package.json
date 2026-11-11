@@ -1,0 +1,8 @@
+{
+  "name": "@vam-skills/assistant-tools",
+  "version": "1.0.0",
+  "description": "Assistant tools skill for VAM",
+  "main": "execute.js",
+  "type": "module",
+  "dependencies": {}
+}

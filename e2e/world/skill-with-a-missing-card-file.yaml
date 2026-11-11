@@ -1,0 +1,16 @@
+piece: skill-with-a-missing-card-file
+kind: skill
+deferred: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: A skill naming a card file that is not in the package (test nodes only)
+    tools:
+      - name: mail_list
+        description: A tool whose card does not fit
+        inputSchemaJson: "{\"type\":\"object\"}"
+        outputSchemaJson: "{\"type\":\"object\",\"required\":[\"messages\"],\"properties\":{\"messages\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"}}}}}}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        ui: { show: mail_list }
+        host_exec: { adapter_id: echo, config: {} }

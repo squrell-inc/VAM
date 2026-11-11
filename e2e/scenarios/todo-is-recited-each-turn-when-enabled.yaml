@@ -1,0 +1,32 @@
+id: todo-is-recited-each-turn-when-enabled
+title: The agent's todo list is recited to the model each turn only when the run turns recitation on
+tags: [context]
+needs: process
+description: One chat writes a plan with todo_write. A new thread with default switches never shows the plan to the model; a new thread with recitation on does. New threads keep the earlier todo_write call out of the request, so only recitation can put the plan there.
+given:
+  - org-admin
+  - agent-with-todo-list
+when:
+  - chat: "e2e-step:plan Plan the work"
+  - expect: { file: { path: .vam/agent/todos.json, present: true } }
+  - chat: "e2e-step:plain What is next?"
+  - expect: { thread: { role: assistant, contains: "no plan" } }
+  - chat: { text: "e2e-step:recite What is next?", harness: { context: { reciteTodo: true } } }
+  - expect: { thread: { role: assistant, contains: "saw plan" } }
+guards:
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-runtime/src/primitives.rs
+mock:
+  - when: { step: plan, afterTool: todo_write }
+    reply: { text: planned }
+  - when: { step: plan }
+    reply: { toolCall: { name: todo_write, args: { todos: [ { id: "1", content: "water-the-ferns-7", status: pending } ] } } }
+  - when: { step: plain, anyContains: water-the-ferns-7 }
+    reply: { text: saw plan }
+  - when: { step: plain }
+    reply: { text: no plan }
+  - when: { step: recite, anyContains: water-the-ferns-7 }
+    reply: { text: saw plan }
+  - when: { step: recite }
+    reply: { text: no plan }
+status: active

@@ -1,0 +1,46 @@
+{
+  "spec": {
+    "resourceId": {
+      "urn": "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant"
+    },
+    "displayName": "Executive assistant",
+    "description": "Triages the member's mail and calendar, drafts replies, and sends or books only after the member approves on a card.",
+    "role": "Executive assistant",
+    "systemInstructions": "You are the member's executive assistant for Microsoft 365 mail and calendar. Load the m365-mail skill before using its tools. Read freely; draft when the wording matters; never send mail or book an event without the approval card, and do not repeat one the member denied. You can set up a recurring triage with the schedule tools (the member approves each schedule). Be brief, name senders and times exactly, and finish with task_complete.",
+    "allowAnyPlaybook": true,
+    "skillRefs": [
+      {
+        "resourceId": {
+          "urn": "urn:vam:skill:hub.squrell.cloud/squrell/m365-mail"
+        },
+        "version": {
+          "major": 1,
+          "minor": 0,
+          "patch": 0
+        }
+      }
+    ],
+    "permissions": {
+      "tools": {
+        "default": "deny",
+        "rules": [
+          { "target": "builtin:load_skill", "decision": "allow" },
+          { "target": "builtin:step_complete", "decision": "allow" },
+          { "target": "builtin:start_playbook", "decision": "allow" },
+          { "target": "skill:m365-mail/mail_search", "decision": "allow" },
+          { "target": "skill:m365-mail/mail_read", "decision": "allow" },
+          { "target": "skill:m365-mail/calendar_list", "decision": "allow" },
+          { "target": "skill:m365-mail/calendar_find_slots", "decision": "allow" },
+          { "target": "skill:m365-mail/mail_draft", "decision": "allow" },
+          { "target": "skill:m365-mail/mail_send", "decision": "ask" },
+          { "target": "skill:m365-mail/calendar_create_event", "decision": "ask" },
+          { "target": "builtin:schedule_list", "decision": "allow" },
+          { "target": "builtin:schedule_get", "decision": "allow" },
+          { "target": "builtin:schedule_create", "decision": "ask" },
+          { "target": "builtin:schedule_update", "decision": "ask" },
+          { "target": "builtin:schedule_delete", "decision": "ask" }
+        ]
+      }
+    }
+  }
+}

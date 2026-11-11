@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "catalog": "vam/1",
+  "root": "root",
+  "state": {
+    "slot": ""
+  },
+  "nodes": {
+    "root": {
+      "type": "Stack",
+      "props": {
+        "gap": "medium"
+      },
+      "children": [
+        "in_slot",
+        "row"
+      ]
+    },
+    "in_slot": {
+      "type": "Input",
+      "props": {
+        "label": "Slot",
+        "value": {
+          "$state": "slot"
+        }
+      }
+    },
+    "row": {
+      "type": "Stack",
+      "props": {
+        "direction": "horizontal",
+        "gap": "small"
+      },
+      "children": [
+        "ok",
+        "no"
+      ]
+    },
+    "ok": {
+      "type": "Button",
+      "props": {
+        "label": "Book",
+        "tone": "success",
+        "action": {
+          "event": "submit",
+          "with": [
+            "slot"
+          ],
+          "set": {
+            "decision": "approve"
+          }
+        }
+      }
+    },
+    "no": {
+      "type": "Button",
+      "props": {
+        "label": "Deny",
+        "tone": "danger",
+        "action": {
+          "event": "submit",
+          "with": [],
+          "set": {
+            "decision": "deny"
+          }
+        }
+      }
+    }
+  }
+}

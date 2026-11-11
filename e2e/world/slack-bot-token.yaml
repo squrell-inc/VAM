@@ -1,0 +1,3 @@
+piece: slack-bot-token
+kind: secret
+# The bot token of the Slack app: a runner-made value, never printed.

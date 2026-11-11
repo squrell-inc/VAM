@@ -1,0 +1,40 @@
+id: approval-in-another-thread-reaches-the-list
+title: A run that parks in another thread shows up in the user's list, unread, with the ids to act on it
+tags: [approval, notifications]
+needs: process
+description: The user chats with a plain agent in one thread while a run of another agent parks on an approval in a second thread. The user's list holds one unread action record for that approval, with the run, Space, thread and approval ids, and the badge counts it.
+given:
+  - org-admin
+  - agent-plain
+  - agent-with-guarded-tool
+when:
+  - chat: { agent: agent-plain, text: "e2e-step:hello Say hello" }
+  - expect: { run: succeeded }
+  - chat: { agent: agent-with-guarded-tool, text: "e2e-step:ask Write the note" }
+  - expect: { approval: pending, tool: write_file }
+  - expect:
+      notifications:
+        kind: approval.pending
+        run: latest
+        count: 1
+        unread: true
+        approval: latest
+        fields:
+          severity: action
+          count: 1
+          spaceId: { present: true }
+          threadId: { present: true }
+          resolvedAt: { absent: true }
+then:
+  - expect: { notification-summary: { action: 1, unread: 1 } }
+guards:
+  - vam:crates/vam-orchestrator/src/workflow.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: hello }
+    reply: { text: hello }
+  - when: { step: ask, afterTool: write_file }
+    reply: { text: written }
+  - when: { step: ask }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+status: active

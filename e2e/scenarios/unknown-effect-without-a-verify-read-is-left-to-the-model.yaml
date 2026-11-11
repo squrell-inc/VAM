@@ -1,0 +1,31 @@
+id: unknown-effect-without-a-verify-read-is-left-to-the-model
+title: When a create with no declared read is left unanswered, the model is told and an identical retry asks the person
+tags: [chat, approval]
+needs: process
+description: The task creates a note and the broker holds the call open. vamd restarts during the hold. The note tool declares no read, so the model is told the outcome is unknown. Its blind retry with the same arguments asks the person first, who says no; the broker's ledger counts one create.
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: { text: "e2e-step:make Create the Q4 plan note", wait: false }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_note, count: 1 } }
+  - restart-vamd: {}
+  - expect: { approval: pending, tool: echo_create_note, fields: { approvalMessage: { contains: "may already have taken effect" } } }
+  - deny: latest
+then:
+  - expect: { run: succeeded }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_note, count: 1 } }
+  - expect: { thread: { role: tool, contains: "Outcome unknown" } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/reconcile.rs
+mock:
+  - when: { step: make, toolName: echo_create_note, contains: "Outcome unknown" }
+    reply: { toolCall: { name: echo_create_note, args: { title: Q4 plan, holdMs: 6000 } } }
+  - when: { step: make, afterTool: echo_create_note }
+    reply: { text: "Left it" }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: echo_create_note, args: { title: Q4 plan, holdMs: 6000 } } }
+status: active

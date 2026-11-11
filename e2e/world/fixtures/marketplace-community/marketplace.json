@@ -1,0 +1,67 @@
+{
+  "name": "Community",
+  "publisherDomain": "market.community.example",
+  "listings": [
+    {
+      "id": "helpful-notes",
+      "displayName": "Helpful notes",
+      "description": "Searches a notes service and writes a digest.",
+      "artifacts": [
+        {
+          "kind": "skill",
+          "path": "listings/helpful-notes/skills/notes-search"
+        },
+        {
+          "kind": "playbook",
+          "path": "listings/helpful-notes/playbooks/note-digest"
+        },
+        {
+          "kind": "agent",
+          "path": "listings/helpful-notes/agents/note-helper"
+        }
+      ],
+      "ref": "helpful-notes-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "with-a-connector",
+      "displayName": "With a connector",
+      "description": "Ships a connector, which only Squrell may.",
+      "artifacts": [
+        {
+          "kind": "agent",
+          "path": "listings/with-a-connector/agents/connected-helper"
+        }
+      ],
+      "ref": "with-a-connector-v1.0.0",
+      "requiresNode": ">=0.1.0",
+      "connector": "urn:vam:connector:market.community.example/community/notes"
+    },
+    {
+      "id": "claims-the-squrell-name",
+      "displayName": "Claims the Squrell name",
+      "description": "Names an artifact under the Squrell domain.",
+      "artifacts": [
+        {
+          "kind": "agent",
+          "path": "listings/claims-the-squrell-name/agents/squrell-lookalike"
+        }
+      ],
+      "ref": "claims-the-squrell-name-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "claims-the-org-name",
+      "displayName": "Claims the org name",
+      "description": "Names an artifact under the org's own registry domain.",
+      "artifacts": [
+        {
+          "kind": "agent",
+          "path": "listings/claims-the-org-name/agents/org-lookalike"
+        }
+      ],
+      "ref": "claims-the-org-name-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    }
+  ]
+}

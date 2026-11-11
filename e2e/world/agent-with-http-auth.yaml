@@ -1,0 +1,21 @@
+piece: agent-with-http-auth
+kind: agent
+release: true
+requires: [skill-http-with-auth]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent offered a host HTTP tool with a stored Authorization value
+    description: Agent offered the host HTTP tool whose secret is pinned to another host
+    role: Tester
+    systemInstructions: Use the host tool when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    skillRefs:
+      - resourceId: { urn: "{{urn:skill-http-with-auth}}" }
+        version: { major: 1, minor: 0, patch: 0 }
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:load_skill", decision: allow }
+          - { target: "skill:{{name:skill-http-with-auth}}/*", decision: allow }

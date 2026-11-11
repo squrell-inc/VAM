@@ -1,0 +1,34 @@
+id: gate-offers-its-options-and-stop-ends-the-run
+title: A pending gate carries its question and options, refuses an option it lacks, and the terminal option ends the run
+tags: [gate, playbook, chat]
+needs: process
+given:
+  - org-admin
+  - agent-plain
+  - playbook-with-gate
+when:
+  - start-playbook: { playbook: playbook-with-gate, label: run }
+  - expect: { gate: pending, step: confirm, fields: { approvalMessage: "Go on?", requestedArgs.options.0: go, requestedArgs.options.1: stop } }
+  - decide-gate: { option: later, refused: true }
+  - expect: { step: confirm, state: waiting }
+  - decide-gate: { option: stop }
+  - expect: { run: succeeded }
+  - expect: { step: confirm, state: decided }
+  - expect: { step: finish, state: skipped }
+  - chat: { text: "e2e-step:after What happened?", thread: continue }
+then:
+  - expect: { run: succeeded }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: { contains: "the run was stopped" } } }
+guards:
+  - vam:crates/vam-orchestrator/src/workflow.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: run, lastRole: user, contains: "Missing required steps: finish" }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: done } } }
+  - when: { step: run, afterTool: step_complete }
+    reply: { text: step done }
+  - when: { step: run }
+    reply: { toolCall: { name: step_complete, args: { step_id: prepare, outcome: done } } }
+  - when: { step: after }
+    reply: { text: "OK, the run was stopped at the gate." }
+status: active

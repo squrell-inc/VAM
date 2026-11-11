@@ -1,0 +1,41 @@
+id: admin-installs-the-squrell-listing-at-its-tag
+title: An admin installs the Squrell listing at its tag, and nobody can edit what it installed
+description: >
+  The Squrell marketplace is listed from the start, marked Squrell. Its Microsoft 365 listing shows
+  the connector it needs and what it can reach. A member cannot install it. The admin does: the skill,
+  the playbook and the agent are in the catalog under the Squrell domain, each read-only and recording
+  the marketplace, the tag and the commit. A caller cannot put, release or delete any of them. The
+  member chats with the installed agent.
+tags: [connectors, members]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - marketplace-squrell
+when:
+  - expect: { marketplaces: { marketplace: marketplace-squrell, as: org-admin, fields: { name: Squrell, trust: squrell, preconfigured: true, enabled: true } } }
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin, fields: { ref: microsoft-365-v1.0.0, connector: "urn:vam:connector:hub.squrell.cloud/squrell/microsoft-365", installed: null } } }
+  - expect: { catalog: { kind: agent, urnPrefix: "urn:vam:agent:hub.squrell.cloud/squrell/", as: org-admin, count: 0 } }
+  - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-member, refused: true }
+  - expect: { catalog: { kind: agent, urnPrefix: "urn:vam:agent:hub.squrell.cloud/squrell/", as: org-admin, count: 0 } }
+  - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin }
+then:
+  - expect: { listings: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin, fields: { installed.ref: microsoft-365-v1.0.0 } } }
+  - expect: { catalog: { kind: skill, urnPrefix: "urn:vam:skill:hub.squrell.cloud/squrell/", as: org-admin, count: 1, fields: { tier: marketplace, readOnly: true, origin.marketplace: squrell, origin.listing: microsoft-365, origin.ref: microsoft-365-v1.0.0 } } }
+  - expect: { catalog: { kind: playbook, urnPrefix: "urn:vam:playbook:hub.squrell.cloud/squrell/", as: org-admin, count: 1, fields: { tier: marketplace, readOnly: true, origin.ref: microsoft-365-v1.0.0 } } }
+  - expect: { catalog: { kind: agent, urnPrefix: "urn:vam:agent:hub.squrell.cloud/squrell/", as: org-admin, count: 1, fields: { tier: marketplace, readOnly: true, origin.ref: microsoft-365-v1.0.0 } } }
+  - catalog-write: { kind: agent, urn: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", action: put, as: org-admin }
+  - catalog-write: { kind: agent, urn: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", action: release, as: org-admin }
+  - catalog-write: { kind: agent, urn: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", action: delete, as: org-admin }
+  - catalog-write: { kind: skill, urn: "urn:vam:skill:hub.squrell.cloud/squrell/m365-mail", action: delete, as: org-admin }
+  - chat: { text: "e2e-step:hi Hello", agent: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", as: org-member }
+  - expect: { run: succeeded }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog_tier.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-spec/src/origin.rs
+mock:
+  - when: { step: hi, stepStart: true }
+    reply: { text: Hello. }
+status: active

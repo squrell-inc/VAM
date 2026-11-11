@@ -1,0 +1,32 @@
+id: invalid-call-is-resampled-once-before-a-typed-error
+title: With one resample allowed an invalid call is sampled again once; a second bad call gets the typed error
+tags: [chat]
+needs: process
+description: With adapter.resampleOnInvalid 1 an unparsable call is resampled, the valid second call runs and the thread has no typed error. When the resample is also bad, the typed error appears after exactly one resample.
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: { text: "e2e-step:fixable Save the note", harness: { adapter: { resampleOnInvalid: 1 } } }
+  - expect: { event: tool.completed, tool: write_file }
+  - chat: { text: "e2e-step:hopeless Save the draft", harness: { adapter: { resampleOnInvalid: 1 } } }
+then:
+  - expect: { thread: { role: tool, contains: "invalid arguments for write_file: not valid JSON" } }
+  - expect: { event: inference.completed, fields: { data.resamples: "1" } }
+guards:
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-inference/src/provider.rs
+mock:
+  - when: { step: fixable, afterTool: write_file }
+    reply: { text: saved }
+  - when: { step: fixable, resampled: true }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: kept } } }
+  - when: { step: fixable }
+    reply: { toolCall: { name: write_file, rawArgs: '{"path": "note.txt", "content": "ke' } }
+  - when: { step: hopeless, afterTool: write_file }
+    reply: { text: gave up }
+  - when: { step: hopeless, anyContains: "invalid arguments for write_file" }
+    reply: { text: gave up }
+  - when: { step: hopeless }
+    reply: { toolCall: { name: write_file, rawArgs: '{"path": "draft.txt", "content": "dra' } }
+status: active

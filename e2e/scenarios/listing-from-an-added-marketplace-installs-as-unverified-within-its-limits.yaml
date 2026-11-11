@@ -1,0 +1,42 @@
+id: listing-from-an-added-marketplace-installs-as-unverified-within-its-limits
+title: A listing from an added marketplace installs as Unverified, within its own domain and limits
+description: >
+  A member cannot add a marketplace; the admin can. The added marketplace shows as Unverified with the
+  publisher domain the admin confirmed. Its good listing shows a capability summary that names a whole-host
+  path as "any path on" the host, and installs under the marketplace's own domain. Three listings are
+  refused with a reason: one with a connector, one whose artifact is under the Squrell domain, one under the
+  org's own registry domain; nothing of them is installed. Later the added marketplace's index breaks: a refresh
+  shows the error for that marketplace only, and the Squrell marketplace still refreshes.
+tags: [connectors, members]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - marketplace-squrell
+  - marketplace-community
+when:
+  - expect: { marketplaces: { marketplace: marketplace-squrell, as: org-admin, fields: { trust: squrell } } }
+  - marketplace-add: { piece: marketplace-community, as: org-member, refused: true }
+  - marketplace-add: { piece: marketplace-community, as: org-admin }
+  - expect: { marketplaces: { marketplace: marketplace-community, as: org-admin, fields: { trust: unverified, publisherDomain: market.community.example, preconfigured: false, enabled: true } } }
+  - marketplace-refresh: { marketplace: marketplace-community, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-community, listing: helpful-notes, as: org-admin, fields: { installed: null, summary.egress.0.host: notes.example.test, summary.egress.0.anyPath: true } } }
+  - marketplace-install: { marketplace: marketplace-community, listing: helpful-notes, as: org-admin }
+  - expect: { catalog: { kind: agent, urnPrefix: "urn:vam:agent:market.community.example/", as: org-admin, count: 1, fields: { tier: marketplace, readOnly: true, origin.marketplace: { present: true } } } }
+  - marketplace-install: { marketplace: marketplace-community, listing: with-a-connector, as: org-admin, refused: true, contains: connector }
+  - marketplace-install: { marketplace: marketplace-community, listing: claims-the-squrell-name, as: org-admin, refused: true, contains: hub.squrell.cloud }
+  - marketplace-install: { marketplace: marketplace-community, listing: claims-the-org-name, as: org-admin, refused: true, contains: local.vam.dev }
+  - expect: { catalog: { kind: agent, urnPrefix: "urn:vam:agent:hub.squrell.cloud/", as: org-admin, count: 0 } }
+  - expect: { catalog: { kind: agent, urnPrefix: "urn:vam:agent:local.vam.dev/community/", as: org-admin, count: 0 } }
+  - git-tag: { piece: marketplace-community, tag: index-broken, overlay: marketplace-community-broken }
+  - marketplace-refresh: { marketplace: marketplace-community, as: org-admin }
+  - expect: { marketplaces: { marketplace: marketplace-community, as: org-admin, fields: { lastError: { present: true } } } }
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: org-admin }
+then:
+  - expect: { marketplaces: { marketplace: marketplace-squrell, as: org-admin, absent: [lastError] } }
+  - expect: { listings: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin, fields: { ref: microsoft-365-v1.0.0 } } }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog_tier.rs
+  - vam:crates/vam-spec/src/origin.rs
+  - vam:crates/vam-orchestrator/src/skill_package_admit.rs
+status: active

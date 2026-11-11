@@ -1,0 +1,64 @@
+---
+import Default from '@astrojs/starlight/components/PageTitle.astro';
+
+const { status, proves } = Astro.locals.starlightRoute.entry.data;
+const repo = 'https://github.com/squrell-inc/VAM/blob/main/';
+// A scenario id links to its file; a test path links to the file (the `::fn` part is dropped).
+const link = (p: string) =>
+	p.includes('/') || p.endsWith('.rs') || p.includes('::')
+		? repo + p.split('::')[0]
+		: `${repo}e2e/scenarios/${p}.yaml`;
+---
+
+<Default><slot /></Default>
+{
+	status === 'planned' && (
+		<aside class="status status-planned" role="note">
+			<strong>Planned:</strong> VAM does not do this yet.
+		</aside>
+	)
+}
+{
+	status === 'stale' && (
+		<aside class="status status-stale" role="note">
+			<strong>Out of date:</strong> the code exists, but this page says more than it does or has not been
+			updated.
+		</aside>
+	)
+}
+{
+	status === 'shipped' && proves && proves.length > 0 && (
+		<p class="proved-by">
+			Proved by:{' '}
+			{proves.map((p, i) => (
+				<>
+					{i > 0 && ', '}
+					<a href={link(p)}>
+						<code>{p}</code>
+					</a>
+				</>
+			))}
+		</p>
+	)
+}
+
+<style>
+	.status {
+		margin: 1rem 0 0;
+		padding: 0.6rem 0.9rem;
+		border-inline-start: 0.25rem solid;
+		border-radius: 0.25rem;
+		background: var(--sl-color-gray-6);
+	}
+	.status-planned {
+		border-color: var(--sl-color-orange);
+	}
+	.status-stale {
+		border-color: var(--sl-color-red);
+	}
+	.proved-by {
+		margin: 0.75rem 0 0;
+		font-size: var(--sl-text-sm);
+		color: var(--sl-color-gray-2);
+	}
+</style>

@@ -1,0 +1,62 @@
+{
+  "description": "Embedded SQLite database tools for structured agent memory and SQL queries.",
+  "resourceId": {
+    "urn": "urn:vam:skill:local.vam.dev/vam/db-tools"
+  },
+  "systemExtension": "Use 'init_db' to initialize the local memory database. Use 'insert_fact' or 'insert_code_note' to store structured observations. Use 'query_db' to run SQL queries. Use runtime primitives (read_file, write_file) for workspace files and reports.",
+  "tools": [
+    {
+      "description": "Initialize the SQLite memory database schema with tables for facts and code notes.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"db_path\":{\"type\":\"string\",\"description\":\"Optional path to SQLite database, defaults to /tmp/agent_memory.db\"}}}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "init_db"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "init_db"
+    },
+    {
+      "description": "Insert a structured fact (key, value, category) into the SQLite database.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\",\"description\":\"Category of fact (e.g. architecture, dependency, config)\"},\"key\":{\"type\":\"string\",\"description\":\"Unique fact identifier/key\"},\"value\":{\"type\":\"string\",\"description\":\"The fact value or description\"}},\"required\":[\"category\",\"key\",\"value\"]}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "insert_fact"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "insert_fact"
+    },
+    {
+      "description": "Store a code analysis finding or observation into the SQLite database.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"filepath\":{\"type\":\"string\",\"description\":\"Relative path of the source file\"},\"snippet\":{\"type\":\"string\",\"description\":\"Code snippet referenced\"},\"analysis\":{\"type\":\"string\",\"description\":\"Analysis summary or explanation\"},\"severity\":{\"type\":\"string\",\"description\":\"Severity: info, warning, error, or critical\"}},\"required\":[\"filepath\",\"analysis\"]}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "insert_code_note"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "insert_code_note"
+    },
+    {
+      "description": "Execute a SQL SELECT query against the SQLite memory database and return rows as JSON.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The SQL SELECT statement to execute\"}},\"required\":[\"query\"]}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "query_db"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "query_db"
+    }
+  ],
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  }
+}

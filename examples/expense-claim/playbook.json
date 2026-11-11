@@ -1,0 +1,127 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:playbook:local.vam.dev/vam/expense-claim"
+  },
+  "displayName": "Expense claim",
+  "description": "File an expense claim from a receipt. A manager approves claims over the limit.",
+  "activation": {
+    "when": "Use when the user wants to file or submit an expense claim."
+  },
+  "steps": [
+    {
+      "id": "receipt",
+      "description": "Collect the receipt.",
+      "kind": "STEP_KIND_GATE",
+      "question": "Attach the receipt and say what it was for.",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "receipt",
+          "purpose"
+        ],
+        "properties": {
+          "receipt": {
+            "type": "string",
+            "format": "vam-workspace-file",
+            "title": "Receipt"
+          },
+          "purpose": {
+            "type": "string",
+            "title": "What was it for?"
+          }
+        }
+      }
+    },
+    {
+      "id": "extract-receipt",
+      "description": "Read the merchant, total and date from the receipt.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "after": [
+        "receipt"
+      ],
+      "instruction": "Read the receipt at {{steps.receipt.output.receipt}} and report the merchant, the total and the date (YYYY-MM-DD).",
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "merchant",
+          "total",
+          "date"
+        ],
+        "properties": {
+          "merchant": {
+            "type": "string"
+          },
+          "total": {
+            "type": "number"
+          },
+          "date": {
+            "type": "string",
+            "format": "date"
+          }
+        }
+      }
+    },
+    {
+      "id": "policy-check",
+      "description": "Check the claim against the policy limit.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "after": [
+        "extract-receipt"
+      ],
+      "instruction": "The policy limit is 200. Compare {{steps.extract-receipt.output.total}} to it and record within_limit or over_limit.",
+      "outcomes": [
+        {
+          "label": "within_limit"
+        },
+        {
+          "label": "over_limit"
+        }
+      ]
+    },
+    {
+      "id": "manager-approval",
+      "description": "A manager approves claims over the limit.",
+      "kind": "STEP_KIND_GATE",
+      "after": [
+        "policy-check:over_limit"
+      ],
+      "question": "Approve the claim of {{steps.extract-receipt.output.total}} from {{steps.extract-receipt.output.merchant}}?",
+      "options": [
+        {
+          "label": "approve"
+        },
+        {
+          "label": "reject",
+          "terminal": "OUTCOME_TERMINAL_SUCCEEDED"
+        }
+      ]
+    },
+    {
+      "id": "submit",
+      "description": "Submit the claim.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_BOUND",
+      "afterAny": [
+        "policy-check:within_limit",
+        "manager-approval:approve"
+      ],
+      "instruction": "Submit the expense claim.",
+      "binding": {
+        "toolName": "submit_expense_claim",
+        "arguments": {
+          "merchant": "{{steps.extract-receipt.output.merchant}}",
+          "total": "{{steps.extract-receipt.output.total}}",
+          "date": "{{steps.extract-receipt.output.date}}",
+          "purpose": "{{steps.receipt.output.purpose}}",
+          "receipt": "{{steps.receipt.output.receipt}}"
+        }
+      },
+      "evidence": {
+        "tool": "submit_expense_claim",
+        "result": "success"
+      }
+    }
+  ]
+}

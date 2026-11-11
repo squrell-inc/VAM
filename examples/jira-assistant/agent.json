@@ -1,0 +1,123 @@
+{
+  "allowAnyPlaybook": true,
+  "allowedPlaybookRefs": [
+    {
+      "resourceId": {
+        "urn": "urn:vam:playbook:local.vam.dev/vam/jira-sprint-backlog-cleanup"
+      }
+    }
+  ],
+  "capabilityPolicy": {
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/jira-egress-only"
+      }
+    },
+    "securityProfileName": "jira-only-profile"
+  },
+  "contextPolicy": {
+    "compaction": "COMPACTION_POLICY_SUMMARIZE_MIDDLE",
+    "maxHistoryTurns": 30,
+    "maxTokenCount": 96000
+  },
+  "defaultPlaybookRef": {
+    "resourceId": {
+      "urn": "urn:vam:playbook:local.vam.dev/vam/jira-sprint-backlog-cleanup"
+    }
+  },
+  "description": "An autonomous agent designed to automate agile workflows, query sprint backlogs, update Jira issues, and coordinate team deliverables.",
+  "displayName": "Jira Assistant Agent",
+  "hitlPolicy": {
+    "monitoredTools": [
+      "jira_delete_issue",
+      "jira_transition_issue"
+    ],
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/high-risk-jira-actions"
+      }
+    }
+  },
+  "metadata": {
+    "createdBy": {
+      "urn": "urn:vam:user:local.vam.dev/vam/admin"
+    },
+    "labels": [
+      {
+        "key": "environment",
+        "value": "production"
+      },
+      {
+        "key": "domain",
+        "value": "agile-ops"
+      }
+    ],
+    "revision": 1
+  },
+  "modelRequirements": {
+    "minContextTokens": 128000,
+    "requiredModalities": [
+      "text"
+    ],
+    "requiresStructuredOutput": true,
+    "requiresToolCalling": true
+  },
+  "preferredModels": [
+    {
+      "maxCompletionTokens": 4096,
+      "modelName": "openai/gpt-oss-120b:nitro",
+      "provider": "openrouter",
+      "temperature": 0.1
+    },
+    {
+      "maxCompletionTokens": 4096,
+      "modelName": "openai/gpt-4o-mini",
+      "provider": "openrouter",
+      "temperature": 0.1
+    },
+    {
+      "maxCompletionTokens": 8192,
+      "modelName": "gemini-2.5-pro",
+      "provider": "google",
+      "temperature": 0.1
+    },
+    {
+      "maxCompletionTokens": 4096,
+      "modelName": "claude-3-5-sonnet-latest",
+      "provider": "anthropic",
+      "temperature": 0.2
+    }
+  ],
+  "reasoningPolicy": {
+    "maxIterations": 20,
+    "stepTimeout": "300s",
+    "termination": "TERMINATION_POLICY_EXPLICIT_CLAIM"
+  },
+  "resourceId": {
+    "urn": "urn:vam:agent:local.vam.dev/vam/jira-assistant"
+  },
+  "resourceRequirements": {
+    "memoryMib": 2048,
+    "networkMode": "NETWORK_MODE_RESTRICTED_EGRESS",
+    "storageGib": 10,
+    "vcpuCount": 2
+  },
+  "role": "You are a professional Agile Project Assistant and Jira Specialist.",
+  "skillRefs": [
+    {
+      "resourceId": {
+        "urn": "urn:vam:skill:local.vam.dev/vam/jira-integration"
+      }
+    }
+  ],
+  "systemInstructions": "Your baseline mission is to maintain the hygiene of Jira project boards. Call load_skill with catalog id jira-integration before using Jira tools (jira_search_issues, jira_create_issue, jira_transition_issue, jira_add_comment). You are capable of querying sprints, creating tasks, transitioning issues, and commenting with status updates. When performing changes, you must always query current sprint/ticket states first to ensure you have the latest context. You must remain polite, professional, and clear in all ticket comments. Avoid duplicate ticket creation by searching before calling the create tool.",
+  "telemetryPolicy": {
+    "auditLedgerMode": "AUDIT_LEDGER_MODE_HASH_CHAINED",
+    "piiRedactionEnabled": true,
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/standard-telemetry-compliance"
+      }
+    }
+  }
+}

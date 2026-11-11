@@ -1,0 +1,87 @@
+{
+  "allowAnyPlaybook": true,
+  "allowedPlaybookRefs": [],
+  "capabilityPolicy": {
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/linear-mcp-assistant"
+      }
+    },
+    "securityProfileName": "linear-mcp-assistant-profile"
+  },
+  "contextPolicy": {
+    "compaction": "COMPACTION_POLICY_SUMMARIZE_MIDDLE",
+    "maxHistoryTurns": 30,
+    "maxTokenCount": 96000
+  },
+  "description": "Loads the host-seeded mcp-linear skill and calls curated Linear MCP tools (get_issue, list_issues, create_issue).",
+  "displayName": "Linear MCP Assistant",
+  "hitlPolicy": {
+    "monitoredTools": [
+      "linear__create_issue"
+    ],
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/high-risk-assistant-actions"
+      }
+    }
+  },
+  "metadata": {
+    "createdBy": {
+      "urn": "urn:vam:user:local.vam.dev/vam/admin"
+    },
+    "labels": [
+      {
+        "key": "environment",
+        "value": "example"
+      },
+      {
+        "key": "domain",
+        "value": "mcp-linear"
+      }
+    ],
+    "revision": 1
+  },
+  "modelRequirements": {
+    "minContextTokens": 128000,
+    "requiredModalities": [
+      "text"
+    ],
+    "requiresStructuredOutput": true,
+    "requiresToolCalling": true
+  },
+  "preferredModels": [
+    {
+      "maxCompletionTokens": 4096,
+      "modelName": "openai/gpt-4o-mini",
+      "provider": "openrouter",
+      "temperature": 0.1
+    }
+  ],
+  "reasoningPolicy": {
+    "maxIterations": 10,
+    "stepTimeout": "300s",
+    "termination": "TERMINATION_POLICY_EXPLICIT_CLAIM"
+  },
+  "resourceId": {
+    "urn": "urn:vam:agent:local.vam.dev/vam/linear-mcp-assistant"
+  },
+  "resourceRequirements": {
+    "memoryMib": 2048,
+    "networkMode": "NETWORK_MODE_RESTRICTED_EGRESS",
+    "storageGib": 10,
+    "vcpuCount": 2
+  },
+  "role": "Linear MCP guest assistant",
+  "skillRefs": [],
+  "systemInstructions": "You run inside a VAM microVM. If the skill catalog lists mcp-linear, call load_skill with skill mcp-linear before any Linear tool. Then call tools by guest name (linear__get_issue, linear__list_issues, linear__create_issue). Do not answer by grepping or pasting SKILLS.md or manifest.json. After tools return, report title and status briefly.",
+  "telemetryPolicy": {
+    "auditLedgerMode": "AUDIT_LEDGER_MODE_HASH_CHAINED",
+    "piiRedactionEnabled": true,
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/standard-telemetry-compliance"
+      }
+    }
+  }
+}

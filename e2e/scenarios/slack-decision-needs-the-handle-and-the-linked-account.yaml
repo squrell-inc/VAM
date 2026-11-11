@@ -1,0 +1,62 @@
+id: slack-decision-needs-the-handle-and-the-linked-account
+title: A decision from Slack needs the right handle, the linked account and the notification broker's own door
+tags: [notifications, approval, members]
+needs: process
+description: Two members have verified Slack accounts and each has an approval delivered. The owner's approval is acted on four wrong ways, and each is refused with its own answer and leaves the approval pending. A good click then decides it, the receipt names Slack, a replay is refused as already resolved, and the broker's state holds no credential.
+given:
+  - org-admin
+  - { piece: org-member, as: bob }
+  - trigger-test-broker
+  - agent-with-guarded-tool
+  - slack-bot-token
+  - slack-app-token
+  - notify-broker
+when:
+  - node-notify: { slack: { botToken: slack-bot-token, appToken: slack-app-token }, appUrl: "https://vam.example.test" }
+  - link-contact: { channel: slack, account: "T1/U1", verify: true }
+  - link-contact: { channel: slack, account: "T1/U2", as: bob, verify: true }
+  # Bob's run first, so the latest run is the owner's.
+  - chat: { text: "e2e-step:one Write the first note", as: bob }
+  - expect: { approval: pending, tool: write_file }
+  - chat: "e2e-step:one Write the first note"
+  - expect: { approval: pending, tool: write_file }
+  - expect: { channel-messages: { to: "T1/U1", kind: approval.pending, count: 1, buttons: 2, within: 20s } }
+  - expect: { channel-messages: { to: "T1/U2", kind: approval.pending, count: 1, within: 20s } }
+  # Rule: a handle is a secret only vamd can mint; one it never issued decides nothing.
+  - channel-click: { account: "T1/U1", message: approval.pending, action: approve, handle: forged, status: INVALID }
+  - expect: { approval: pending, tool: write_file }
+  # Rule: a handle belongs to one user's record; Bob's handle does not decide the owner's approval.
+  - channel-click: { account: "T1/U1", message: approval.pending, action: approve, handle: "from:T1/U2", status: INVALID }
+  - expect: { approval: pending, tool: write_file }
+  # Rule: only the Slack account linked to the approver may act; a valid handle clicked from another account is refused.
+  - channel-click: { account: "T9/U9", message: approval.pending, action: approve, status: NOT_LINKED }
+  - expect: { approval: pending, tool: write_file }
+  # Rule: only the notification broker may call the notification gateway; the same valid handle on another broker's socket is refused.
+  - channel-click: { account: "T1/U1", message: approval.pending, action: approve, via-socket: trigger-test-broker, status: NOT_PERMITTED }
+  - expect: { approval: pending, tool: write_file }
+  # Positive control: the owner's valid handle, from the linked account, on the notification broker's own socket.
+  - channel-click: { account: "T1/U1", message: approval.pending, action: approve }
+  - expect: { run: succeeded }
+then:
+  # Rule: a handle is single use; the same click again finds the approval already decided.
+  - channel-click: { account: "T1/U1", message: approval.pending, action: approve, handle: replay, status: ALREADY_RESOLVED }
+  # Rule: the decision's surface comes from the handle, not from the adapter or the caller.
+  - expect: { receipt: { fields: { receipt.toolCalls.lines.0.surface: slack } } }
+  - expect:
+      notifications:
+        kind: approval.pending
+        run: latest
+        count: 1
+        fields: { resolvedReason: acted, actedSurface: slack }
+  # Rule: the broker holds no credential between calls; neither token nor any grant secret is in its state.
+  - expect: { broker-state: { piece: notify-broker, lacks: [slack-bot-token, slack-app-token, "vam_na_"] } }
+guards:
+  - vam:brokers/vam-notify/src/**
+  - vam:crates/vam-orchestrator/src/gateway.rs
+  - vam:crates/vam-orchestrator/src/api/decide.rs
+mock:
+  - when: { step: one, afterTool: write_file }
+    reply: { text: first written }
+  - when: { step: one }
+    reply: { toolCall: { name: write_file, args: { path: first.txt, content: e2e } } }
+status: active

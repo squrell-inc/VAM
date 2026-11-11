@@ -1,0 +1,25 @@
+{
+  "spec": {
+    "agentRef": {
+      "resourceId": {
+        "urn": "urn:vam:agent:local.vam.dev/vam/hsp-echo-ts"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0,
+        "patch": 0
+      }
+    },
+    "idempotencyKey": "",
+    "inputs": {
+      "model": "openai/gpt-4o-mini",
+      "prompt": "Load skill hosted-echo-ts, then call echo.ping with message hello-hsp."
+    },
+    "maxDuration": "1800s",
+    "maxFinancialBudget": {
+      "currency": "USD",
+      "microAmount": "500000"
+    },
+    "workspaceRefUri": "volume://hsp-echo-ts"
+  }
+}

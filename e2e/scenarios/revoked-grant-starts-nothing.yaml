@@ -1,0 +1,38 @@
+id: revoked-grant-starts-nothing
+title: After the user revokes a grant, a fire is refused and starts no run
+tags: [triggers]
+needs: process
+description: The user revokes the grant through the keys API. The broker's next fire is denied as revoked and no run starts.
+given:
+  - org-admin
+  - agent-with-trigger-tool
+  - trigger-test-broker
+when:
+  - chat: "e2e-step:arm Arm the trigger"
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: echo_arm_trigger, count: 1 } }
+  - revoke-grant: { via: api }
+  - fire-trigger: { key: fire-1, label: fired }
+then:
+  - expect: { fire: { outcomes: [DENIED], reason: REVOKED } }
+  - expect: { runs: { count: 1 } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:revoked-grant-starts-nothing"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+  - when: { step: fired, stepStart: true }
+    reply: { text: done }
+status: active

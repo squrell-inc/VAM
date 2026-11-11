@@ -1,0 +1,88 @@
+entity Agent;
+entity User;
+// Required attributes. The host always sets each one to "allow", "ask",
+// "deny", or "none". A missing attribute would make Cedar skip a forbid
+// that reads it.
+entity Tool = {
+  agent_rule: String,
+  source_rule: String,
+  org_rule: String,
+  target: String
+};
+entity Host;
+entity Path;
+entity Workspace;
+
+// One playbook step row, exposed on ExecuteTool when the session's run has
+// playbook state. Playbook guards are not Cedar policies; they deny in the PEP
+// after Cedar and cannot be overridden by a permit.
+type PlaybookStepView = {
+  id: String,
+  state: String,
+  outcome: String,
+};
+
+action "ExecuteTool" appliesTo {
+  principal: [Agent, User],
+  resource: [Tool],
+  context: {
+    args_digest?: String,
+    script_digest?: String,
+    side_effect?: Long,
+    iteration?: Long,
+    spend_micro_amount?: Long,
+    token_count?: Long,
+    restored_from_snapshot?: Bool,
+    session_lineage_depth?: Long,
+    lifecycle_generation?: Long,
+    hitl_approved?: Bool,
+    query?: String,
+    path?: String,
+    playbook?: Set<PlaybookStepView>
+  }
+};
+
+action "EgressRequest" appliesTo {
+  principal: [Agent, User],
+  resource: [Host],
+  context: {
+    // Required so `context.host like "..."` validates and evaluates.
+    // Optional `host` would skip a forbid that reads it when the attribute
+    // is absent.
+    host: String,
+    port?: Long,
+    protocol?: String,
+    method?: String
+  }
+};
+
+action "WriteFile" appliesTo {
+  principal: [Agent, User],
+  resource: [Path, Workspace],
+  context: {
+    file_size_bytes?: Long,
+    path?: String
+  }
+};
+
+action "ReadFile" appliesTo {
+  principal: [Agent, User],
+  resource: [Path, Workspace],
+  context: {
+    path?: String
+  }
+};
+
+action "CreateSnapshot" appliesTo {
+  principal: [Agent, User],
+  resource: [Workspace],
+  context: {}
+};
+
+action "RestoreSnapshot" appliesTo {
+  principal: [Agent, User],
+  resource: [Workspace],
+  context: {
+    snapshot_id?: String
+  }
+};

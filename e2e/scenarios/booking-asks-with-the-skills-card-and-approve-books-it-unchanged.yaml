@@ -1,0 +1,36 @@
+id: booking-asks-with-the-skills-card-and-approve-books-it-unchanged
+title: Booking a time shows the free times as a card, asks with the skill's card, and Approve books it unchanged
+description: >
+  Finding free times shows the skill's slot card. Booking waits with the skill's card; Approve with no edit
+  books the requested time and the tool result holds the original arguments.
+tags: [connectors, approval]
+needs: process
+given:
+  - org-admin
+  - agent-with-mail-calendar-cards
+when:
+  - publish-skill: { piece: skill-mail-calendar-cards }
+  - chat: { text: "e2e-step:book Book a time", wait: false }
+  - expect: { run: paused }
+  - expect: { event: outbox.card, fields: { data.tool: calendar_find_slots } }
+  - expect: { approval: pending, tool: calendar_book, fields: { card.data.slot: "2026-12-01T10:00" } }
+  - approve: latest
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "2026-12-01T10:00" } }
+  - expect: { receipt: { fields: { receipt.toolCalls.lines.0.resolution: approved-once } } }
+guards:
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/hitl.rs
+  - vam:crates/vam-orchestrator/src/outbox.rs
+  - vam:crates/vam-spec/src/jig.rs
+mock:
+  - when: { afterTool: calendar_book }
+    reply: { text: Booked. }
+  - when: { step: book, toolName: calendar_find_slots }
+    reply: { toolCall: { name: calendar_book, args: { slot: "2026-12-01T10:00" } } }
+  - when: { step: book, toolName: load_skill }
+    reply: { toolCall: { name: calendar_find_slots, args: { slots: [ { start: "2026-12-01T10:00", end: "2026-12-01T10:30" }, { start: "2026-12-01T14:00", end: "2026-12-01T14:30" } ] } } }
+  - when: { step: book, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-mail-calendar-cards-booking-asks-with-the-skills-card-and-approve-books-it-unchanged } } }
+status: active

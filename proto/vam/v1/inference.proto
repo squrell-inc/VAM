@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "vam/v1/skills.proto";
+import "vam/v1/model_policy.proto";
+
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  string arguments = 3; // JSON-encoded string
+}
+
+message ChatMessage {
+  string role = 1;      // "system", "user", "assistant", "tool"
+  string content = 2;   // text content
+  repeated ToolCall tool_calls = 3;
+  string tool_call_id = 4;
+}
+
+message InferenceRequest {
+  ModelPreference model_preference = 1;
+  repeated ChatMessage messages = 2;
+  repeated ToolSpec tools = 3;
+  // Optional label for the request. Absent or LANE_MAIN: an ordinary model
+  // call. LANE_SUMMARY: the guest declares this call to be the summary
+  // exchange of a compaction (the last message is the instruction). The host
+  // verifies the hint against what it recorded and never trusts it.
+  ContextHint context_hint = 4;
+}
+
+message ContextHint {
+  enum Lane {
+    LANE_UNSPECIFIED = 0;
+    LANE_MAIN = 1;
+    LANE_SUMMARY = 2;
+    // The request's last message is a harness note (the todo recitation) that
+    // is not part of the conversation. The host checks it and records it on
+    // its own lane; the main lane never carries it.
+    LANE_NOTE = 3;
+  }
+  Lane lane = 1;
+  // Index, among the request's messages after the system message, of the first
+  // message of the verbatim tail that survives the compaction.
+  uint32 keep_from_index = 2;
+  // SHA-256 of that message in the canonical wire form; the host checks it
+  // against its own record.
+  string keep_from_msg_sha256 = 3;
+  // "tokens", "bytes" or "provider_limit".
+  string reason = 4;
+}
+
+message InferenceResponseChunk {
+  string delta = 1;
+  repeated ToolCall tool_calls = 2;
+  TokenUsage usage = 3;
+  ErrorStatus error = 4;
+  // Reasoning text the model returned with this chunk. Host-only: the broker
+  // clears it before a chunk goes to the guest, so the guest never sees it.
+  string reasoning = 5;
+}

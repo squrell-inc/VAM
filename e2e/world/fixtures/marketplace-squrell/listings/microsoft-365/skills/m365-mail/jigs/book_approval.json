@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "catalog": "vam/1",
+  "root": "root",
+  "state": { "subject": "", "start": "", "end": "" },
+  "nodes": {
+    "root": {
+      "type": "Stack",
+      "props": { "gap": "medium" },
+      "children": ["in_subject", "in_start", "in_end", "row"]
+    },
+    "in_subject": { "type": "Input", "props": { "label": "Title", "value": { "$state": "subject" } } },
+    "in_start": { "type": "Input", "props": { "label": "Starts", "value": { "$state": "start" } } },
+    "in_end": { "type": "Input", "props": { "label": "Ends", "value": { "$state": "end" } } },
+    "row": {
+      "type": "Stack",
+      "props": { "direction": "horizontal", "gap": "small" },
+      "children": ["ok", "no"]
+    },
+    "ok": {
+      "type": "Button",
+      "props": {
+        "label": "Book",
+        "tone": "success",
+        "action": { "event": "submit", "with": ["subject", "start", "end"], "set": { "decision": "approve" } }
+      }
+    },
+    "no": {
+      "type": "Button",
+      "props": {
+        "label": "Deny",
+        "tone": "danger",
+        "action": { "event": "submit", "with": [], "set": { "decision": "deny" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "description": "Provides capability to search, create, transition, and comment on Jira issues via host-brokered secrets.",
+  "resourceId": {
+    "urn": "urn:vam:skill:local.vam.dev/vam/jira-integration"
+  },
+  "systemExtension": "Use 'jira_search_issues' to query issues, 'jira_create_issue' to file tasks, 'jira_transition_issue' to advance workflows, and 'jira_add_comment' to record progress.",
+  "tools": [
+    {
+      "description": "Queries Jira issues using Jira Query Language (JQL).",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"jql\":{\"type\":\"string\",\"description\":\"The JQL search string\"},\"max_results\":{\"type\":\"integer\",\"description\":\"Maximum number of issues to return\"}},\"required\":[\"jql\"]}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "search"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "jira_search_issues",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY"
+    },
+    {
+      "description": "Creates a new issue inside a specified Jira project.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"project_key\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"issue_type\":{\"type\":\"string\"}},\"required\":[\"project_key\",\"summary\",\"description\"]}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "create"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "jira_create_issue",
+      "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL"
+    },
+    {
+      "description": "Transitions an existing Jira issue into a new status (e.g. In Progress, Done, Backlog).",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"issue_key\":{\"type\":\"string\"},\"transition_id\":{\"type\":\"string\",\"description\":\"Transition ID or target status name (e.g. In Progress, Done)\"}},\"required\":[\"issue_key\",\"transition_id\"]}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "transition"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "jira_transition_issue",
+      "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL"
+    },
+    {
+      "description": "Adds a comment to an existing Jira issue.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"issue_key\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}},\"required\":[\"issue_key\",\"body\"]}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "comment"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "jira_add_comment",
+      "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL"
+    },
+    {
+      "description": "Send an SSRF-safe HTTP GET/HEAD request with host-brokered secrets.",
+      "hostExec": {
+        "adapterId": "http_get",
+        "config": {
+          "allowlist": "*.atlassian.net"
+        }
+      },
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"Target absolute URL or relative path if base-url secret is present\"},\"headers\":{\"type\":\"object\",\"description\":\"Optional headers map\"},\"timeout_ms\":{\"type\":\"integer\"}},\"required\":[\"url\"]}",
+      "name": "http_get",
+      "requiredSecrets": [
+        {
+          "name": "jira/base-url",
+          "required": true
+        },
+        {
+          "name": "jira/auth-header",
+          "required": true
+        }
+      ],
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY"
+    },
+    {
+      "description": "Send an SSRF-safe HTTP POST/PUT/PATCH/DELETE request with host-brokered secrets.",
+      "hostExec": {
+        "adapterId": "http_write",
+        "config": {
+          "allowlist": "*.atlassian.net"
+        }
+      },
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"Target absolute URL or relative path if base-url secret is present\"},\"method\":{\"type\":\"string\",\"description\":\"HTTP method like POST, PUT, PATCH, DELETE\"},\"headers\":{\"type\":\"object\",\"description\":\"Optional headers\"},\"body\":{\"type\":\"string\",\"description\":\"Optional raw body\"},\"json\":{\"type\":\"object\",\"description\":\"Optional JSON body\"},\"timeout_ms\":{\"type\":\"integer\"}},\"required\":[\"url\"]}",
+      "name": "http_write",
+      "requiredSecrets": [
+        {
+          "name": "jira/base-url",
+          "required": true
+        },
+        {
+          "name": "jira/auth-header",
+          "required": true
+        }
+      ],
+      "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL"
+    }
+  ],
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  }
+}

@@ -1,0 +1,591 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "vam/v1/skills.proto";
+import "vam/v1/workflow.proto";
+import "vam/v1/telemetry.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// ---------------------------------------------------------------------------
+// Capability manifest and trust
+// ---------------------------------------------------------------------------
+
+enum TrustTier {
+  TRUST_TIER_UNSPECIFIED = 0;
+  TRUST_TIER_CORE = 1;
+  TRUST_TIER_FIRST_PARTY = 2;
+  TRUST_TIER_OPERATOR = 3;
+  TRUST_TIER_THIRD_PARTY = 4;
+}
+
+enum HookPhase {
+  HOOK_PHASE_UNSPECIFIED = 0;
+  HOOK_PHASE_ON_REQUEST = 1;
+  HOOK_PHASE_ON_COMPLETE = 2;
+  HOOK_PHASE_ON_RESPONSE = 3;
+  // Run entered PAUSED for a human wait (tool-level HITL today).
+  // Fired with vam.v1.hitl.paused. Notification only: a FAIL does not
+  // cancel the approval.
+  HOOK_PHASE_ON_PAUSED = 4;
+}
+
+enum HookDisposition {
+  HOOK_DISPOSITION_UNSPECIFIED = 0;
+  HOOK_DISPOSITION_OK = 1;
+  HOOK_DISPOSITION_DEGRADED = 2;
+  HOOK_DISPOSITION_FAIL = 3;
+}
+
+message ManifestSecretBinding {
+  string logical_name = 1;
+  string vault_key = 2;
+  bool required = 3;
+}
+
+message HookParticipation {
+  HookPhase phase = 1;
+  bool required = 2;
+}
+
+// Where a tool's `url` argument may point (E10 Phase 1).
+enum ToolDestination {
+  // Today's behaviour: URLs in args must match the manifest `egress_domains`.
+  TOOL_DESTINATION_ALLOWLIST = 0;
+  // The tool's `url` argument may name any public host, under host admission
+  // rules. Only valid on a READ_ONLY export of a FIRST_PARTY or OPERATOR
+  // manifest.
+  TOOL_DESTINATION_PUBLIC_WEB = 1;
+}
+
+message ToolExport {
+  string tool_name = 1;
+  SideEffectClass side_effect = 2;
+  repeated string required_secrets = 3;
+  ToolDestination destination_policy = 4;
+  EffectSpec effect = 5;
+}
+
+// Operator-approved identity fields the broker may consume.
+// Empty / unspecified means the broker does not declare an identity need.
+// Host still stamps CallerContext; this is the admission gate (same pattern
+// as secret_bindings and egress_domains).
+message IdentityRequirement {
+  bool tenant_id = 1;
+  bool user_id = 2;
+  bool agent = 3;
+  bool workspace_handle = 4;
+  bool thread_handle = 5;
+}
+
+message CapabilityManifest {
+  string broker_id = 1;
+  TrustTier trust_tier = 2;
+  repeated ManifestSecretBinding secret_bindings = 3;
+  repeated string egress_domains = 4;
+  repeated HookParticipation hooks = 5;
+  repeated ToolExport tools = 6;
+  repeated string depends_on = 7;
+  map<string, string> labels = 8;
+  IdentityRequirement identity_requirement = 9;
+  // Present only on a broker that may ask vamd to start runs (E5). Absent = no.
+  RunRequestPermission run_request_permission = 10;
+  // Present only on a core or first-party broker that delivers notifications (NT-2). Absent = no.
+  NotificationChannel notification_channel = 11;
+}
+
+message NotificationChannel {
+  string channel = 1;                      // closed list: "slack"
+  string surface = 2;                      // receipt surface, [a-z]{3,16}; not cli|app|api|system
+  int32 max_actions_per_minute = 3;        // per broker, enforced by the gateway; 0 = 60
+}
+
+message RunRequestPermission {
+  repeated string grant_tools = 1;         // subset of tools. Their Invoke may carry a RunGrant.
+  int32 max_requests_per_minute = 2;       // per broker, enforced by the gateway; 0 = 60
+  int32 max_requests_per_day = 3;          // 0 = 1440
+  repeated string loop_guarded_tools = 4;  // subset of tools, superset of grant_tools. Refused inside a triggered run.
+  string surface = 5;                      // receipt surface, [a-z]{3,16}; not cli|app|api|system
+  int32 max_active_grants_per_user = 6;    // per owner and broker; 0 = 50
+}
+
+// ---------------------------------------------------------------------------
+// Invoke and structured output
+// ---------------------------------------------------------------------------
+
+message InvokeContext {
+  int32 iteration = 1;
+  SideEffectClass side_effect = 2;
+  int32 timeout_ms = 3;
+}
+
+// Host-stamped only. Never taken from guest args.
+// user_id is the stable control-plane id, not a username.
+message CallerContext {
+  string tenant_id = 1;
+  string user_id = 2;
+  string agent_urn = 3;
+  string agent_version = 4;
+  string agent_digest = 5;
+  string workspace_handle = 6;
+  string thread_handle = 7;
+  string space_id = 8;
+  string thread_id = 9;
+  string run_source = 10;                  // "" for a person; "broker:<id>" for a triggered run
+}
+
+message HostArtifact {
+  string suggested_relpath = 1;
+  bytes bytes = 2;
+}
+
+message Citation {
+  ResourceId source_id = 1;
+  string excerpt = 2;
+  string label = 3;
+}
+
+message TextBlock {
+  string content = 1;
+  repeated Citation citations = 2;
+}
+
+message FileRefBlock {
+  FileRef file = 1;
+  string download_hint = 2;
+}
+
+enum ResultSourceKind {
+  RESULT_SOURCE_KIND_UNSPECIFIED = 0;
+  RESULT_SOURCE_KIND_SEARCH_RESULT = 1;
+  RESULT_SOURCE_KIND_PAGE = 2;
+}
+
+// A source a tool result came from. Deliberately has no snippet field:
+// snippets live only in the result text the model reads and are never
+// persisted by the host.
+message ResultSource {
+  string url = 1;
+  string title = 2;
+  // Page date as the provider reports it; empty when unknown.
+  string published = 3;
+  ResultSourceKind kind = 4;
+}
+
+message OutputBlock {
+  oneof block {
+    TextBlock text = 1;
+    FileRefBlock file_ref = 2;
+  }
+}
+
+message ContextBlock {
+  string content = 1;
+  repeated Citation citations = 2;
+  FileRef source_file = 3;
+}
+
+// ---------------------------------------------------------------------------
+// HostedBroker RPC messages
+// ---------------------------------------------------------------------------
+
+message RegisterRequest {
+  string broker_id = 1;
+  string broker_version = 2;
+  CapabilityManifest manifest = 3;
+}
+
+message RegisterResponse {
+  ErrorStatus error = 1;
+  string session_policy_version = 2;
+}
+
+message ListToolsRequest {
+  string broker_id = 1;
+}
+
+message ListToolsResponse {
+  repeated ToolSpec tools = 1;
+}
+
+message InvokeRequest {
+  string session_id = 1;
+  string run_id = 2;
+  string tool_name = 3;
+  google.protobuf.Struct args = 4;
+  map<string, string> resolved_secrets = 5;
+  InvokeContext context = 6;
+  TraceContext trace_context = 7;
+  CallerContext caller_context = 8;
+  RunGrant run_grant = 9;                  // set only when vamd issued a grant for this call
+  // Stable across retries and resumes of the same call; a broker may use it to dedupe.
+  string idempotency_key = 10;
+}
+
+message InvokeResponse {
+  ToolResult result = 1;
+  repeated OutputBlock output_blocks = 2;
+  HostArtifact artifact = 3;
+  // Sources this result came from (search hits, fetched pages).
+  repeated ResultSource sources = 4;
+}
+
+message OnRequestRequest {
+  string session_id = 1;
+  string run_id = 2;
+  RunSpec run_spec = 3;
+  repeated FileRef attachments = 4;
+  repeated KnowledgeRef knowledge_refs = 5;
+  TraceContext trace_context = 6;
+  CallerContext caller_context = 7;
+}
+
+message OnRequestResponse {
+  ErrorStatus error = 1;
+  repeated ContextBlock injected_context = 2;
+  HookDisposition disposition = 3;
+}
+
+message OnCompleteRequest {
+  string session_id = 1;
+  string run_id = 2;
+  RunStatus status = 3;
+  repeated ArtifactRef output_artifacts = 4;
+  TraceContext trace_context = 5;
+  CallerContext caller_context = 6;
+}
+
+message OnCompleteResponse {
+  ErrorStatus error = 1;
+  repeated Label retention_labels = 2;
+  HookDisposition disposition = 3;
+}
+
+message OnResponseRequest {
+  string session_id = 1;
+  string run_id = 2;
+  RunStatus status = 3;
+  repeated OutputBlock agent_output = 4;
+  TraceContext trace_context = 5;
+  CallerContext caller_context = 6;
+}
+
+message OnResponseResponse {
+  ErrorStatus error = 1;
+  repeated OutputBlock response_blocks = 2;
+  HookDisposition disposition = 3;
+}
+
+// Host → broker when a run enters PAUSED. Carries the tool-level approval
+// identity so a notifier can tell a human what `vam approve` can decide.
+// Raw tool arguments stay on the approval record, not on this RPC.
+message OnPausedRequest {
+  string session_id = 1;
+  string run_id = 2;
+  ResourceId approval_request_id = 3;
+  string tool_name = 4;
+  string reason = 5;
+  TraceContext trace_context = 6;
+  CallerContext caller_context = 7;
+}
+
+message OnPausedResponse {
+  ErrorStatus error = 1;
+  HookDisposition disposition = 2;
+}
+
+// ---------------------------------------------------------------------------
+// HostedBroker service
+// ---------------------------------------------------------------------------
+
+service HostedBroker {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+  rpc Invoke(InvokeRequest) returns (InvokeResponse);
+  rpc OnRequest(OnRequestRequest) returns (OnRequestResponse);
+  rpc OnComplete(OnCompleteRequest) returns (OnCompleteResponse);
+  rpc OnResponse(OnResponseRequest) returns (OnResponseResponse);
+  rpc OnPaused(OnPausedRequest) returns (OnPausedResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Run grants and the trigger gateway (E5; design/hsp-triggers.md amendment 2026-10-29 section 3)
+// ---------------------------------------------------------------------------
+
+message RunGrant {
+  string token = 1;                        // vam_rg_<grant_id>.<secret>; returned once, to this broker
+  string grant_id = 2;                     // rg_<26 chars base32>, CSPRNG
+  google.protobuf.Timestamp issued_at = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  GrantTarget target = 5;                  // what vamd bound, for the broker's display
+}
+
+message GrantTarget {
+  string agent_urn = 1;
+  string space_id = 2;
+  string space_name = 3;
+  string thread_id = 4;
+  string thread_name = 5;
+  OnBusy on_busy = 6;
+  ResourceRef playbook_ref = 7;
+  string request_digest = 8;               // "sha256:<hex>" of the bound request (canonical JSON)
+}
+
+// What a grant tool asks to run. vamd reads it from the tool arguments at key "run".
+message RunGrantRequest {
+  string agent_urn = 1;                    // empty = the calling agent
+  PlaceChoice workspace = 2;               // empty = SAME
+  PlaceChoice thread = 3;                  // empty = NEW
+  string message = 4;                      // at most 32 KiB; required unless playbook_ref
+  ResourceRef playbook_ref = 5;
+  google.protobuf.Struct inputs = 6;       // checked against the playbook's input_schema
+  OnBusy on_busy = 7;                      // empty = QUEUE
+  google.protobuf.Timestamp expires_at = 8;// empty = now + 90 d; capped at now + 365 d
+}
+
+message PlaceChoice {
+  PlaceMode mode = 1;
+  string id = 2;                           // with ID: sp_... or th_...
+  string name = 3;                         // with NEW: the label; else generated
+}
+
+enum PlaceMode {
+  PLACE_MODE_UNSPECIFIED = 0;
+  PLACE_MODE_SAME = 1;
+  PLACE_MODE_NEW = 2;
+  PLACE_MODE_ID = 3;
+}
+
+enum OnBusy {
+  ON_BUSY_UNSPECIFIED = 0;
+  ON_BUSY_QUEUE = 1;
+  ON_BUSY_SKIP = 2;
+}
+
+// Served by vamd, one Unix socket per approved broker.
+service HostedTriggerGateway {
+  rpc RequestRunTrigger(RequestRunTriggerRequest) returns (RequestRunTriggerResponse);
+  rpc RevokeRunGrant(RevokeRunGrantRequest) returns (RevokeRunGrantResponse);
+}
+
+enum FireKind {
+  FIRE_KIND_UNSPECIFIED = 0;
+  FIRE_KIND_SCHEDULED = 1;
+  FIRE_KIND_RUN_NOW = 2;
+  FIRE_KIND_EVENT = 3;
+}
+
+message RequestRunTriggerRequest {
+  string run_grant = 1;
+  string idempotency_key = 2;              // at most 128 chars; the same on every retry of one fire
+  google.protobuf.Timestamp fire_at = 3;   // nominal time
+  string trigger_ref = 4;                  // broker's label; pinned on the first accepted fire
+  FireKind kind = 5;
+  google.protobuf.Timestamp not_after = 6; // a queued fire not started by then ends EXPIRED
+  TraceContext trace_context = 7;
+  reserved 8;                              // event_context: event brokers, fenced (later phase)
+}
+
+enum RunTriggerOutcome {
+  RUN_TRIGGER_OUTCOME_UNSPECIFIED = 0;
+  RUN_TRIGGER_OUTCOME_ACCEPTED = 1;
+  RUN_TRIGGER_OUTCOME_DUPLICATE = 2;
+  RUN_TRIGGER_OUTCOME_BUSY = 3;
+  RUN_TRIGGER_OUTCOME_RATE_LIMITED = 4;
+  RUN_TRIGGER_OUTCOME_UNAVAILABLE = 5;
+  RUN_TRIGGER_OUTCOME_DENIED = 6;
+  RUN_TRIGGER_OUTCOME_QUEUED = 7;
+}
+
+enum BusyReason {
+  BUSY_REASON_UNSPECIFIED = 0;
+  BUSY_REASON_ACTIVE_RUN = 1;
+  BUSY_REASON_SKIPPED = 2;
+  BUSY_REASON_ALREADY_QUEUED = 3;
+}
+
+enum DenyReason {
+  DENY_REASON_UNSPECIFIED = 0;
+  DENY_REASON_REVOKED = 1;
+  DENY_REASON_EXPIRED = 2;
+  DENY_REASON_WRONG_BROKER = 3;
+  DENY_REASON_TOOL_NOT_APPROVED = 4;
+  DENY_REASON_OWNER_DISABLED = 5;
+  DENY_REASON_AGENT_UNAVAILABLE = 6;
+  DENY_REASON_TARGET_GONE = 7;
+  DENY_REASON_INVALID_REQUEST = 8;
+  DENY_REASON_NOT_PERMITTED = 9;
+  DENY_REASON_TRIGGER_REF_MISMATCH = 10;
+}
+
+message RequestRunTriggerResponse {
+  RunTriggerOutcome outcome = 1;
+  ResourceId run_id = 2;
+  string space_id = 3;
+  string thread_id = 4;
+  int32 retry_after_ms = 5;
+  BusyReason busy_reason = 6;
+  DenyReason deny_reason = 7;
+  ErrorStatus error = 8;                   // VAM-composed detail; never broker text
+}
+
+message RevokeRunGrantRequest { string run_grant = 1; }   // proves possession
+message RevokeRunGrantResponse { ErrorStatus error = 1; }
+
+// ---------------------------------------------------------------------------
+// Notification channels (NT-2; design/notifications.md sections 3.5, 3.6, 9)
+// ---------------------------------------------------------------------------
+
+// Served by a channel broker on its HSP socket, beside HostedBroker.
+service HostedNotificationChannel {
+  rpc DeliverNotification(DeliverNotificationRequest) returns (DeliverNotificationResponse);
+}
+
+message AgentText {
+  string label = 1;                        // "written by <agent>, not verified by the host"
+  string text = 2;                         // at most 1 KiB, assembled at delivery time
+}
+
+enum ActionStyle {
+  ACTION_STYLE_UNSPECIFIED = 0;
+  ACTION_STYLE_PRIMARY = 1;
+  ACTION_STYLE_DANGER = 2;
+  ACTION_STYLE_DEFAULT = 3;
+}
+
+message RenderedAction {
+  string id = 1;
+  string label = 2;
+  // APPROVED, REJECTED, SUBMITTED, or a gate option id vamd sent here.
+  string decision = 3;
+  string option = 4;
+  ActionStyle style = 5;
+}
+
+// The neutral rendering of one record. Nothing in vamd knows a channel's format.
+message NotificationRendering {
+  string title = 1;
+  string body = 2;
+  AgentText agent_text = 3;
+  repeated RenderedAction actions = 4;
+  google.protobuf.Struct jig_ir = 5;       // set only when the jig renders natively
+  string open_url = 6;
+  string cli_line = 7;
+}
+
+message DeliverNotificationRequest {
+  string delivery_id = 1;                  // idempotency key; the broker dedupes
+  string channel = 2;                      // adapter, "slack"
+  string channel_address = 3;              // the verified contact (Slack team/user); DM only
+  string notification_id = 4;
+  string kind = 5;
+  NotificationRendering rendering = 6;
+  string action_handle = 7;                // one per delivery, decision kinds only; memory only
+  string update_of = 8;                    // the original delivery_id to edit
+  map<string, string> resolved_secrets = 9;// per call, never kept
+  TraceContext trace_context = 10;
+}
+
+enum DeliverOutcome {
+  DELIVER_OUTCOME_UNSPECIFIED = 0;
+  DELIVER_OUTCOME_SENT = 1;
+  DELIVER_OUTCOME_DUPLICATE = 2;
+  DELIVER_OUTCOME_RETRY = 3;
+  DELIVER_OUTCOME_PERMANENT_FAILURE = 4;
+  DELIVER_OUTCOME_UNSUPPORTED = 5;
+}
+
+message DeliverNotificationResponse {
+  DeliverOutcome outcome = 1;
+  string error_code = 2;                   // vendor-neutral: user_not_found, invalid_auth, not_built, ...
+  string message = 3;
+  int32 retry_after_ms = 4;
+}
+
+// Served by vamd on the per-broker gateway socket, beside HostedTriggerGateway.
+service HostedNotificationGateway {
+  rpc ActOnNotification(ActOnNotificationRequest) returns (ActOnNotificationResponse);
+  rpc LinkChannelAccount(LinkChannelAccountRequest) returns (LinkChannelAccountResponse);
+  rpc GetChannelConfig(GetChannelConfigRequest) returns (GetChannelConfigResponse);
+}
+
+message ExternalAccount {
+  string scope = 1;                        // Slack team id
+  string id = 2;                           // Slack user id
+}
+
+message ActOnNotificationRequest {
+  string handle = 1;                       // vam_na_<id>.<secret>
+  ExternalAccount external_account = 2;
+  // Closed set: APPROVED, REJECTED, SUBMITTED, or a gate option id that vamd sent in the
+  // rendering's actions. Never AMENDED, never a remember or always word. There is no surface
+  // field: vamd takes the surface from the handle it issued.
+  string decision = 3;
+  google.protobuf.Struct response = 4;
+}
+
+enum ActOnOutcome {
+  ACT_ON_OUTCOME_UNSPECIFIED = 0;
+  ACT_ON_OUTCOME_ACCEPTED = 1;
+  ACT_ON_OUTCOME_NOT_PERMITTED = 2;
+  ACT_ON_OUTCOME_INVALID = 3;
+  ACT_ON_OUTCOME_EXPIRED = 4;
+  ACT_ON_OUTCOME_ALREADY_RESOLVED = 5;
+  ACT_ON_OUTCOME_NOT_LINKED = 6;
+  ACT_ON_OUTCOME_RATE_LIMITED = 7;
+  ACT_ON_OUTCOME_UNAVAILABLE = 8;
+}
+
+message ActOnNotificationResponse {
+  ActOnOutcome outcome = 1;
+  string message = 2;
+  int32 retry_after_ms = 3;
+  string decided_by = 4;                   // ALREADY_RESOLVED: display name
+  string decided_surface = 5;
+  google.protobuf.Timestamp decided_at = 6;
+}
+
+message LinkChannelAccountRequest {
+  string code = 1;
+  ExternalAccount external_account = 2;
+  string display = 3;
+}
+
+enum LinkOutcome {
+  LINK_OUTCOME_UNSPECIFIED = 0;
+  LINK_OUTCOME_LINKED = 1;
+  LINK_OUTCOME_INVALID_CODE = 2;
+  LINK_OUTCOME_EXPIRED = 3;
+  LINK_OUTCOME_TOO_MANY_ATTEMPTS = 4;
+  LINK_OUTCOME_ALREADY_LINKED = 5;
+  LINK_OUTCOME_WRONG_WORKSPACE = 6;
+  LINK_OUTCOME_UNAVAILABLE = 7;
+}
+
+message LinkChannelAccountResponse {
+  LinkOutcome outcome = 1;
+  string contact_id = 2;
+}
+
+message GetChannelConfigRequest {
+  string channel = 1;
+  // Why the broker asks. Empty or "connect": the broker is starting or reconnecting; vamd returns
+  // the app-level token and the bot token, revokes the broker's open action handles and queues a
+  // fresh delivery with a new handle for each unresolved decision it already sent (the broker
+  // keeps handles in memory only). "reply": the broker needs the bot token for one reply to a
+  // person; vamd returns the bot token only and changes nothing. The broker drops every token
+  // when the call that needed it ends.
+  string purpose = 2;
+}
+
+message GetChannelConfigResponse {
+  bool enabled = 1;
+  map<string, string> settings = 2;        // non-secret: app URL, pinned workspace
+  map<string, string> resolved_secrets = 3;// per call: "app_token" (connect), "bot_token" (connect and reply), dropped after
+}

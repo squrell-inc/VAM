@@ -1,0 +1,13 @@
+---
+description: Rust workspace conventions for VAM — see AGENTS.md §3–§5.
+globs: **/*.{rs,toml}
+alwaysApply: false
+---
+
+# Rust workspace conventions
+
+Follow `AGENTS.md` §3 (crate catalog: every crate under `crates/` or `brokers/` is a
+workspace member using workspace inheritance), §4 (`thiserror` in libraries, no
+`.unwrap()`/`.expect()` there; `anyhow` in binaries; `vam-runtime` targets
+`x86_64-unknown-linux-musl`) and §5 (verification: `cargo check --workspace`,
+`cargo test -p <crate>`, fmt and clippy).

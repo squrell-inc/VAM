@@ -1,0 +1,25 @@
+id: thread-is-reached-by-its-id
+title: A follow-up names its thread by the id the node gave it, and lands in the same thread
+tags: [chat, workspace]
+needs: process
+description: The node gives every thread an id and keeps the name as a label. A follow-up sent with the thread's id (and its Space's id) continues the conversation, and the Space and thread lists show the ids and the label.
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: "e2e-step:first Remember the number seven"
+  - chat: { text: "e2e-step:byid Remember the number eight", thread: { id: latest } }
+then:
+  - expect: { threads: { count: 1, fields: { threadId: { present: true }, name: t1 } } }
+  - expect: { spaces: { fields: { spaceId: { present: true } } } }
+  - expect: { thread: { role: user, contains: "number seven" } }
+  - expect: { thread: { role: user, contains: "number eight" } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/threads.rs
+  - vam:crates/vam-orchestrator/src/run_context.rs
+mock:
+  - when: { step: first, stepStart: true }
+    reply: { text: Noted seven. }
+  - when: { step: byid, stepStart: true }
+    reply: { text: Noted eight. }
+status: active

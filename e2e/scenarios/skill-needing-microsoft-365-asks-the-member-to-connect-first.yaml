@@ -1,0 +1,46 @@
+id: skill-needing-microsoft-365-asks-the-member-to-connect-first
+title: A skill that needs Microsoft 365 asks the member to connect first, and runs once they have
+description: >
+  Microsoft 365 is enabled with consent but the member has not connected. The search parks (the
+  run is paused and an approval is pending that asks the member to connect) and nothing is sent.
+  The member connects; the same run resumes and succeeds without a new chat, using the connection
+  made after the session started. Once the administrator disables the connector, a new chat's
+  search is refused with a message that sends the member to the administrator, and it does not park.
+tags: [connectors, egress]
+needs: process
+given:
+  - org-member
+  - org-administrator
+  - mock-microsoft-login
+  - mock-microsoft-graph
+  - agent-with-m365-probe
+when:
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-administrator }
+  - chat: { text: "e2e-step:ask Search my mail", as: org-member, wait: false }
+  - expect: { run: paused }
+  - expect: { approval: pending, tool: m365_probe_search }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: "*", count: 0 } }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages, method: GET, count: 1, has: [bearer=current] } }
+  - connector-node: { id: microsoft-365, enabled: false, as: org-administrator }
+  - chat: { text: "e2e-step:ask Search my mail in a new chat", as: org-member }
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: ask your admin } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: "*", count: 1 } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/api/reauth.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+mock:
+  - when: { afterTool: m365_probe_search }
+    reply: { text: Found two messages. }
+  - when: { step: ask, lastRole: tool, contains: ask your admin }
+    reply: { text: Ask your administrator to enable Microsoft 365. }
+  - when: { step: ask, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_search, args: { method: GET, path: /v1.0/me/messages } } }
+  - when: { step: ask, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-skill-needing-microsoft-365-asks-the-member-to-connect-first } } }
+status: active

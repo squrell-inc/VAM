@@ -1,0 +1,95 @@
+{
+  "allowAnyPlaybook": true,
+  "allowedPlaybookRefs": [],
+  "contextPolicy": {
+    "compaction": "COMPACTION_POLICY_SUMMARIZE_MIDDLE",
+    "maxHistoryTurns": 30,
+    "maxTokenCount": 96000
+  },
+  "description": "Sets what the agent may do with permissions rules instead of a Cedar capability or HITL policy.",
+  "displayName": "Permissions Assistant",
+  "metadata": {
+    "createdBy": {
+      "urn": "urn:vam:user:local.vam.dev/vam/admin"
+    },
+    "labels": [
+      {
+        "key": "environment",
+        "value": "example"
+      },
+      {
+        "key": "domain",
+        "value": "permissions"
+      }
+    ],
+    "revision": 1
+  },
+  "modelRequirements": {
+    "minContextTokens": 128000,
+    "requiredModalities": [
+      "text"
+    ],
+    "requiresStructuredOutput": true,
+    "requiresToolCalling": true
+  },
+  "permissions": {
+    "advanced": [],
+    "internet": {
+      "default": "allow",
+      "rules": [
+        {
+          "decision": "deny",
+          "target": "*.pastebin.com"
+        }
+      ]
+    },
+    "tools": {
+      "default": "bySideEffect",
+      "rules": [
+        {
+          "decision": "ask",
+          "target": "skill:jira/create_issue"
+        },
+        {
+          "decision": "allow",
+          "target": "mcp:mcp.atlassian.com/*"
+        },
+        {
+          "decision": "deny",
+          "target": "builtin:run"
+        }
+      ]
+    }
+  },
+  "preferredModels": [
+    {
+      "maxCompletionTokens": 4096,
+      "modelName": "openai/gpt-4o-mini",
+      "provider": "openrouter",
+      "temperature": 0.1
+    }
+  ],
+  "reasoningPolicy": {
+    "maxIterations": 10,
+    "stepTimeout": "300s",
+    "termination": "TERMINATION_POLICY_EXPLICIT_CLAIM"
+  },
+  "resourceId": {
+    "urn": "urn:vam:agent:local.vam.dev/vam/permissions-assistant"
+  },
+  "resourceRequirements": {
+    "memoryMib": 2048,
+    "networkMode": "NETWORK_MODE_RESTRICTED_EGRESS",
+    "storageGib": 10,
+    "vcpuCount": 2
+  },
+  "role": "You are a project assistant whose tool and internet access is declared as permissions data.",
+  "skillRefs": [
+    {
+      "resourceId": {
+        "urn": "urn:vam:skill:local.vam.dev/vam/jira-integration"
+      }
+    }
+  ],
+  "systemInstructions": "Call load_skill with catalog id jira-integration before Jira tools. Ask before skill:jira/create_issue. The Atlassian MCP server is allowed. builtin:run is denied. Any site is allowed except *.pastebin.com."
+}

@@ -1,0 +1,4 @@
+# A pinned task set for the recorded fixtures (synthetic, hand-built; no run produced them).
+sets:
+  - version: 0.1.0
+    tasks: [first-try-tool-use, match-playbook]

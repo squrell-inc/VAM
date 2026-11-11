@@ -1,0 +1,18 @@
+piece: agent-with-guarded-write-and-delete
+kind: agent
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent whose write_file and delete_file wait for approval
+    description: Agent that reads freely and asks before it writes or deletes
+    role: Tester
+    systemInstructions: Read, write and delete files when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:read_file", decision: allow }
+          - { target: "builtin:write_file", decision: ask }
+          - { target: "builtin:delete_file", decision: ask }

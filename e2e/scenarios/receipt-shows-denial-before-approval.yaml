@@ -1,0 +1,56 @@
+id: receipt-shows-denial-before-approval
+title: A run's receipt lists a denied call, an approved ask and the gate decision, each with its rule
+tags: [approval, gate, playbook]
+needs: process
+description: A write is denied by the playbook guard before the gate, then asked and approved after it. The host tier of the receipt names both decisions line by line.
+given:
+  - org-admin
+  - agent-with-guarded-write
+  - playbook-with-guard-and-gate
+when:
+  - start-playbook: { playbook: playbook-with-guard-and-gate, label: run }
+  - expect: { step: confirm, state: waiting }
+  - decide-gate: { option: go }
+  - expect: { approval: pending, tool: write_file }
+  - approve: latest
+then:
+  - expect: { run: succeeded }
+  - expect:
+      receipt:
+        fields:
+          receipt.toolCalls.counts.denied: 1
+          receipt.toolCalls.counts.asked: 1
+          receipt.toolCalls.lines.0.tool: write_file
+          receipt.toolCalls.lines.0.decision: denied
+          receipt.toolCalls.lines.0.scope: playbook
+          receipt.toolCalls.lines.0.rule: { contains: "confirm:go" }
+          receipt.toolCalls.lines.1.tool: write_file
+          receipt.toolCalls.lines.1.decision: asked
+          receipt.toolCalls.lines.1.scope: agent
+          receipt.toolCalls.lines.1.rule: "builtin:write_file"
+          receipt.toolCalls.lines.1.resolution: approved-once
+          receipt.procedure.steps.1.id: confirm
+          receipt.procedure.steps.1.outcome: decided
+          receipt.procedure.steps.1.gate.response.option: go
+guards:
+  - vam:crates/vam-orchestrator/src/workflow.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { lastRole: tool, toolName: step_complete, anyContains: "Gate 'confirm' was decided" }
+    reply: { text: step done }
+  - when: { lastRole: tool, toolName: write_file, anyContains: "Gate 'confirm' was decided" }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: done } } }
+  - when: { lastRole: user, contains: "Human approval was granted", anyContains: "Gate 'confirm' was decided" }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: done } } }
+  - when: { lastRole: user, contains: "Missing required steps: finish", anyContains: "Gate 'confirm' was decided" }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: done } } }
+  - when: { lastRole: user, contains: "Gate 'confirm' was decided" }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+  - when: { lastRole: tool, toolName: step_complete }
+    reply: { text: step done }
+  - when: { lastRole: tool, toolName: write_file }
+    reply: { toolCall: { name: step_complete, args: { step_id: prepare, outcome: done } } }
+  - when: { step: run }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: early } } }
+status: active

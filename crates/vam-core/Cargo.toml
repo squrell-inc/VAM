@@ -1,0 +1,33 @@
+[package]
+name = "vam-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core library for the Virtual Agentic Machine (VAM)"
+
+[lib]
+name = "vam_core"
+path = "src/lib.rs"
+
+[features]
+default = []
+# TEST ONLY (E9 process guests): `ProcessVmm` runs the guest as a host process
+# with no isolation. Never enabled by default or by a workspace dependency.
+process-guest = []
+
+[dependencies]
+thiserror = { workspace = true }
+vam-firecracker = { path = "../vam-firecracker", features = ["_rt-std"] }
+
+[dev-dependencies]
+vam-vsock = { path = "../vam-vsock", default-features = false, features = ["host"] }
+tokio = { version = "1.0", features = ["full"] }
+vam-spec = { path = "../vam-spec" }
+prost = "0.12"
+prost-types = "0.12"
+bytes = "1.0"
+tempfile = "3.8"
+
+

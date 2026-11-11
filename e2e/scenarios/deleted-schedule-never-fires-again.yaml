@@ -1,0 +1,46 @@
+id: deleted-schedule-never-fires-again
+title: A deleted schedule has its access revoked and never starts a run
+tags: [schedule, triggers]
+needs: process
+description: The agent makes a once-schedule and the user approves it. The agent then deletes it (asked, approved). The user's grant list shows the grant revoked, and no run starts at the time the schedule had.
+given:
+  - org-admin
+  - agent-with-schedule-tools
+  - schedule-broker
+when:
+  - chat: "e2e-step:create Write a note in twelve seconds"
+  - expect: { approval: pending, tool: schedule_create }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "sch_" } }
+  - chat: { text: "e2e-step:del Delete that schedule", thread: continue }
+  - expect: { approval: pending, tool: schedule_delete }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: schedule_create, fields: { revokedAt: { present: true } } } }
+then:
+  - expect: { scheduled-runs: { count: 0, within: 15s } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+mock:
+  - when: { step: create, stepStart: true }
+    reply:
+      toolCall:
+        name: schedule_create
+        args:
+          title: Nightly note
+          when: { once: { in: PT12S } }
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:deleted-schedule-never-fires-again"
+            workspace: { mode: SAME }
+            thread: { mode: NEW, name: nightly-note }
+            onBusy: QUEUE
+  - when: { step: create }
+    reply: { text: Scheduled. }
+  - when: { step: del, stepStart: true }
+    reply: { toolCall: { name: schedule_delete, args: { scheduleId: "{{last:sch_}}" } } }
+  - when: { step: del }
+    reply: { text: Deleted. }
+status: active

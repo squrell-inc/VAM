@@ -1,0 +1,6 @@
+{
+  "name": "vam/base:2",
+  "version": "fixture",
+  "digest": "sha256:fixture-not-a-real-pin",
+  "runtimes": { "python": "3.13.5", "bun": "1.2.0" }
+}

@@ -1,0 +1,36 @@
+id: receipt-names-who-decided-and-from-where
+title: A receipt names the member who started the run and decided its gate, and from which surface
+tags: [gate, members, playbook]
+needs: process
+description: A member starts the gate playbook and decides the gate. The receipt names who, from where, when, and the validated answer.
+given:
+  - org-admin
+  - { piece: org-member, as: member }
+  - agent-plain
+  - playbook-with-gate
+when:
+  - start-playbook: { playbook: playbook-with-gate, label: run, as: member }
+  - expect: { step: confirm, state: waiting }
+  - decide-gate: { option: go, as: member }
+then:
+  - expect: { run: succeeded }
+  - expect:
+      receipt:
+        fields:
+          receipt.requestedBy: { present: true }
+          receipt.procedure.steps.1.gate.decidedBy: { present: true }
+          receipt.procedure.steps.1.gate.surface: api
+          receipt.procedure.steps.1.gate.decidedAt: { present: true }
+          receipt.procedure.steps.1.gate.response.option: go
+guards:
+  - vam:crates/vam-orchestrator/src/workflow.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/keys.rs
+mock:
+  - when: { step: run, lastRole: user, contains: "Missing required steps: finish" }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: done } } }
+  - when: { step: run, afterTool: step_complete }
+    reply: { text: step done }
+  - when: { step: run }
+    reply: { toolCall: { name: step_complete, args: { step_id: prepare, outcome: done } } }
+status: active

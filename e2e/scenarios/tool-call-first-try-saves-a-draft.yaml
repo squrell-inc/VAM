@@ -1,0 +1,28 @@
+id: tool-call-first-try-saves-a-draft
+title: An agent with minimal instructions calls the right tool on the first try and does not load a skill
+tags: [chat]
+needs: process
+description: A stand-in for the Notion draft task; the Notion version stays a manual spot check (open the page and confirm one entry). The agent has a one-line instruction (the spec requires one) and one write tool; it must call it with the draft text and never load a skill.
+model:
+  task: first-try-tool-use
+  version: 0.1.0
+  k: 5
+given:
+  - org-admin
+  - agent-with-write-file
+when:
+  - chat: "e2e-step:start Save this draft to drafts/weekly-update.md - Weekly update, all green."
+then:
+  - expect: { run: succeeded }
+  - expect: { event: tool.completed, tool: write_file }
+  - expect: { file: { path: drafts/weekly-update.md, present: true } }
+  - expect: { event: tool.invoked, tool: write_file, fields: { args_preview: { contains: "Weekly update" } } }
+  - expect: { event: tool.invoked, tool: load_skill, absent: true }
+guards:
+  - vam:crates/vam-runtime/src/primitives.rs
+mock:
+  - when: { step: start, afterTool: write_file }
+    reply: { text: Saved the draft. }
+  - when: { step: start }
+    reply: { toolCall: { name: write_file, args: { path: drafts/weekly-update.md, content: "Weekly update - all green." } } }
+status: active

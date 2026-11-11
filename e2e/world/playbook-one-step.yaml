@@ -1,0 +1,20 @@
+piece: playbook-one-step
+kind: playbook
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:playbook:local.vam.dev/e2e/{{name}}" }
+    displayName: Playbook with one step and a required input
+    description: Summarise a topic.
+    activation: { when: Use only in end-to-end scenarios. }
+    inputSchema:
+      type: object
+      properties: { topic: { type: string } }
+      required: [topic]
+      additionalProperties: false
+    steps:
+      - id: summarise
+        description: Summarise the topic.
+        kind: STEP_KIND_TASK
+        mode: STEP_MODE_AGENTIC
+        instruction: "Summarise {{inputs.topic}} in one line."

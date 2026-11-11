@@ -1,0 +1,34 @@
+id: vm-task-killed-mid-effect-finishes-once
+title: A task whose guest dies in the middle of creating a ticket finishes with the ticket made once
+tags: [chat]
+needs: firecracker
+description: The task is asked to create one ticket and then name its id. The broker holds the create open, the VM is killed during the hold, and the task resumes on a new guest. The run succeeds, the broker's ledger holds one create, and the answer names the ticket.
+model:
+  task: u5-kill-mid-task
+  version: 0.3.0
+  k: 5
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: { text: "e2e-step:make Create one ticket titled Q4 plan with the ticket tool, then tell me its id", wait: false }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - kill-guest: {}
+then:
+  - expect: { run: succeeded }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, title: Q4 plan, count: 1 } }
+  - expect: { event: run.resumed, fields: { data.reason: guest_crashed } }
+  - expect: { thread: { role: tool, contains: T-1 } }
+  - expect: { thread: { role: assistant, contains: T-1 } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/resume.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: make, toolName: echo_create_ticket }
+    reply: { text: "Created T-1" }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan, holdMs: 4000 } } }
+status: active

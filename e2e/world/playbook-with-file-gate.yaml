@@ -1,0 +1,32 @@
+piece: playbook-with-file-gate
+kind: playbook
+release: true
+# A gate whose form has a file field: a channel cannot take a file, so its message must open the form in VAM.
+body:
+  spec:
+    resourceId: { urn: "urn:vam:playbook:local.vam.dev/e2e/{{name}}" }
+    displayName: Playbook with a gate that asks for a file
+    description: Prepare, ask a human for a workspace file, then finish.
+    activation: { when: Use only in end-to-end scenarios. }
+    steps:
+      - id: prepare
+        description: Prepare the work.
+        kind: STEP_KIND_TASK
+        mode: STEP_MODE_AGENTIC
+        instruction: Prepare the work and finish.
+      - id: attach
+        description: Pause for a human to pick the file to use.
+        kind: STEP_KIND_GATE
+        after: [prepare]
+        question: Which file should the work use?
+        responseSchema:
+          type: object
+          required: [file]
+          properties:
+            file: { type: string, format: vam-workspace-file }
+      - id: finish
+        description: Finish the work.
+        kind: STEP_KIND_TASK
+        mode: STEP_MODE_AGENTIC
+        after: [attach]
+        instruction: Finish the work.

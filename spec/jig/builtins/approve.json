@@ -1,0 +1,42 @@
+{
+  "name": "vam.approve",
+  "doc": "A tool approval card: what the agent wants to do, and Approve, Deny, Always allow or Always deny.",
+  "inputSchema": {
+    "type": "object",
+    "required": ["tool", "args_summary"],
+    "additionalProperties": false,
+    "properties": {
+      "tool": { "type": "string", "maxLength": 200 },
+      "args_summary": { "type": "string", "maxLength": 2000 },
+      "reason": { "type": "string", "maxLength": 1000 }
+    }
+  },
+  "resultSchema": {
+    "type": "object",
+    "required": ["decision"],
+    "additionalProperties": false,
+    "properties": {
+      "decision": { "type": "string", "enum": ["approve", "deny", "always", "always_deny"] },
+      "reason": { "type": "string", "maxLength": 1000 }
+    }
+  },
+  "ir": {
+    "version": 1,
+    "catalog": "vam/1",
+    "jig": "vam.approve",
+    "root": "root",
+    "state": { "decision": "", "reason": "" },
+    "nodes": {
+      "root": { "type": "Stack", "props": { "gap": "medium" }, "children": ["tool", "summary", "why", "reason", "row"] },
+      "tool": { "type": "Text", "props": { "text": { "$data": "/tool" }, "emphasis": "strong" } },
+      "summary": { "type": "Text", "props": { "text": { "$data": "/args_summary" } } },
+      "why": { "type": "Text", "props": { "text": { "$data": "/reason" }, "tone": "info" }, "visible": { "$data": "/reason" } },
+      "reason": { "type": "Input", "props": { "label": "Note (optional)", "value": { "$state": "reason" } } },
+      "row": { "type": "Stack", "props": { "direction": "horizontal", "gap": "small" }, "children": ["ok", "no", "always", "never"] },
+      "ok": { "type": "Button", "props": { "label": "Approve", "tone": "success", "action": { "event": "submit", "with": ["reason"], "set": { "decision": "approve" } } } },
+      "no": { "type": "Button", "props": { "label": "Deny", "tone": "danger", "action": { "event": "submit", "with": ["reason"], "set": { "decision": "deny" } } } },
+      "always": { "type": "Button", "props": { "label": "Always allow", "action": { "event": "submit", "with": ["reason"], "set": { "decision": "always" } } } },
+      "never": { "type": "Button", "props": { "label": "Always deny", "tone": "danger", "action": { "event": "submit", "with": ["reason"], "set": { "decision": "always_deny" } } } }
+    }
+  }
+}

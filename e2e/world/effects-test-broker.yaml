@@ -1,0 +1,31 @@
+piece: effects-test-broker
+kind: broker
+# A test broker whose creates are counted by the world: every create is written to the broker's
+# own ledger before it answers, so duplicates are counted outside vamd. Tools: echo_create_ticket
+# (mutating, declares an effect with a verify read), echo_create_note (mutating, no verify) and
+# echo_find_ticket
+# (read). `holdMs` keeps a create open, so a kill lands between the effect and its answer.
+args: ["--effects", "--socket", "{{socket}}", "--state-dir", "{{dir}}"]
+body:
+  manifest:
+    brokerId: effects-test-broker
+    trustTier: TRUST_TIER_FIRST_PARTY
+    tools:
+      - toolName: echo_create_ticket
+        sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL
+        # A repeat creates again; a create whose answer was lost is checked with the declared read:
+        # echo_find_ticket with the call's title, found when the answer's `found` is true.
+        effect:
+          class: EFFECT_CLASS_NON_IDEMPOTENT
+          verify:
+            tool: echo_find_ticket
+            argsTemplate:
+              title: "{{args.title}}"
+            found:
+              path: found
+              nonEmpty: true
+      - toolName: echo_create_note
+        sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL
+      - toolName: echo_find_ticket
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+  unixPath: "{{socket}}"

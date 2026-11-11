@@ -1,0 +1,41 @@
+id: work-survives-vamd-restart-mid-task
+title: When vamd restarts in the middle of a task, the task resumes from its last finished step and finishes
+tags: [chat, context, workspace]
+needs: process
+description: The task saves a note, reads it and starts a four-second command. The runner restarts vamd only after the command has been invoked, so the restart always lands while it runs. The same task resumes from its last finished step and finishes; the interrupted command runs again on the files as they were at that step, and a follow-up on the thread still sees the note.
+given:
+  - org-admin
+  - agent-with-shell
+when:
+  - chat: { text: "e2e-step:first Save the note, then run the slow command", wait: false }
+  - expect: { event: tool.completed, tool: read_file }
+  - expect: { event: tool.invoked, tool: run }
+  - restart-vamd: {}
+  - expect: { run: succeeded }
+  - expect: { event: run.resumed, fields: { data.reason: vamd_restarted } }
+  - chat: { text: "e2e-step:next What does the note say?", thread: continue }
+then:
+  - expect: { event: inference.completed, fields: { data.outcomePreview: "The note says kiwi-42." } }
+  - expect: { file: { path: note.txt, equals: kiwi-42 } }
+  - expect: { file: { path: partial.txt, equals: half } }
+guards:
+  - vam:crates/vam-orchestrator/src/reconcile.rs
+  - vam:crates/vam-orchestrator/src/resume.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/session_end.rs
+  - vam:crates/vam-orchestrator/src/thread_recorder.rs
+  - vam:crates/vam-orchestrator/src/manager.rs
+mock:
+  - when: { step: next, anyContains: "kiwi-42" }
+    reply: { text: "The note says kiwi-42." }
+  - when: { step: next }
+    reply: { text: "I do not know." }
+  - when: { step: first, toolName: run }
+    reply: { text: "Done." }
+  - when: { step: first, toolName: read_file }
+    reply: { toolCall: { name: run, args: { command: "printf half > partial.txt; sleep 4" } } }
+  - when: { step: first, toolName: write_file }
+    reply: { toolCall: { name: read_file, args: { path: note.txt } } }
+  - when: { step: first, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: kiwi-42 } } }
+status: active

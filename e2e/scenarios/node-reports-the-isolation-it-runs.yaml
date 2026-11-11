@@ -1,0 +1,19 @@
+id: node-reports-the-isolation-it-runs
+title: The node reports the isolation it runs, read from its running config
+tags: [release]
+needs: firecracker
+given:
+  - org-admin
+when:
+  - expect: { node: { fields: { status.guestMode: vm } } }
+then:
+  - expect:
+      node:
+        fields:
+          status.isolation.summary: "firecracker microVM, jailer on"
+          status.isolation.jailer: true
+          status.isolation.apiTls: true
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/daemon.rs
+status: active

@@ -1,0 +1,107 @@
+name: validate
+
+# Validates every package with the vam CLI at a pinned commit, checks each listing's release tag,
+# and runs the skills' Bun tests. See README.md ("CI").
+
+on:
+  pull_request:
+  push:
+    tags: ["*-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The vam ref (commit, tag or branch) whose `vam catalog validate` is the reference check.
+  # Pin it to a release commit or tag in a pull request.
+  VAM_REPO: squrell-inc/VAM
+  VAM_COMMIT: main
+  BUN_VERSION: "1.4.4"
+  # The one finding the Microsoft 365 listing is allowed to have: Graph's findMeetingTimes is a POST
+  # that only computes suggestions, so the tool is READ_ONLY and declares a POST.
+  ACCEPTED_FINDING: "tool 'calendar_find_slots': a READ_ONLY tool declares an egress method other than GET or HEAD"
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restore the vam CLI
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/vam-cli
+          key: vam-cli-${{ env.VAM_COMMIT }}
+
+      - name: Build the vam CLI at the pinned commit
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/vam"
+          git init -q "$src"
+          git -C "$src" remote add origin "https://github.com/${VAM_REPO}.git"
+          if ! git -C "$src" fetch -q --depth 1 origin "$VAM_COMMIT"; then
+            echo "::error title=Cannot fetch vam::Could not fetch $VAM_COMMIT from $VAM_REPO. Check that the ref exists."
+            exit 1
+          fi
+          git -C "$src" checkout -q --detach FETCH_HEAD
+          (cd "$src" && cargo build --release -p vam-cli)
+          mkdir -p ~/vam-cli
+          cp "$src/target/release/vam" ~/vam-cli/vam
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Validate the repository (strict, one accepted finding)
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/vam-cli:$PATH"
+          "$HOME/vam-cli/vam" --version || true
+          scripts_check() {
+            # $1: directory. Fails on an error or on any finding except the accepted one.
+            local out
+            out="$("$HOME/vam-cli/vam" catalog validate "$1" --json || true)"
+            echo "$out" | jq -r '.findings[] | "\(.level) \(.listing) \(.path): \(.message)"'
+            echo "$out" | jq -e --arg ok "$ACCEPTED_FINDING" '.ok == true and ([.findings[] | select(.message != $ok)] | length) == 0' >/dev/null
+          }
+          scripts_check .
+
+      - name: Check each listing's release tag
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/vam-cli:$PATH"
+          fail=0
+          for row in $(jq -r '.listings[] | "\(.id)=\(.ref)"' marketplace.json); do
+            id="${row%%=*}"; ref="${row#*=}"
+            if ! git rev-parse -q --verify "refs/tags/$ref^{commit}" >/dev/null; then
+              if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+                echo "::error::listing $id names tag $ref, which does not exist"; fail=1
+              else
+                echo "::notice::listing $id names $ref, which is not tagged yet (tag the merge commit to release it)"
+              fi
+              continue
+            fi
+            dir="$RUNNER_TEMP/at-$ref"
+            git worktree add -q --detach "$dir" "refs/tags/$ref"
+            named="$(jq -r --arg id "$id" '.listings[] | select(.id == $id) | .ref' "$dir/marketplace.json")"
+            if [ "$named" != "$ref" ]; then
+              echo "::error::at tag $ref the index names $named for $id; the tag must hold an index that names itself"; fail=1
+            fi
+            out="$("$HOME/vam-cli/vam" catalog validate "$dir" --json || true)"
+            if ! echo "$out" | jq -e --arg ok "$ACCEPTED_FINDING" '.ok == true and ([.findings[] | select(.message != $ok)] | length) == 0' >/dev/null; then
+              echo "::error::$ref does not validate"; echo "$out" | jq -r '.findings[] | "\(.level) \(.path): \(.message)"'; fail=1
+            else
+              echo "$ref validates"
+            fi
+          done
+          exit $fail
+
+      - name: Bun tests
+        run: bun test tests

@@ -1,0 +1,15 @@
+id: old-receipt-still-verifies
+title: A receipt saved before effects were listed still verifies offline against the node's pinned keys, and fails when one byte changes
+tags: [chat]
+needs: process
+description: A guard that must pass before and after the effects section lands. The fixture is a receipt a node issued while receipts still said "effects not journaled on this version", saved with the node's public keys. The built vam verifies it offline with no daemon, pinned to those keys; with one byte changed it fails and names the signature. A stored receipt is never rebuilt, so adding fields to new receipts must not change how an old one verifies.
+given:
+  - org-admin
+when:
+  - verify-receipt: { file: e2e/world/fixtures/receipts/receipt-effects-not-journaled.json, trustedKeys: e2e/world/fixtures/receipts/node-keys.json }
+  - verify-receipt: { file: e2e/world/fixtures/receipts/receipt-effects-not-journaled.json, trustedKeys: e2e/world/fixtures/receipts/node-keys.json, tamper: true }
+guards:
+  - vam:crates/vam-security/src/receipt.rs
+  - vam:crates/vam-orchestrator/src/receipt.rs
+  - vam:crates/vam-cli/src/cmd/receipt.rs
+status: active

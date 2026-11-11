@@ -1,0 +1,18 @@
+piece: skill-with-an-ask-card-for-a-missing-input
+kind: skill
+deferred: true
+files:
+  jigs/send_approval.json: mail-calendar-cards/jigs/bad_submit.json
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: A skill whose ask card submits a field the input lacks (test nodes only)
+    tools:
+      - name: mail_send
+        description: A tool whose card does not fit
+        inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}}}"
+        sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL
+        approvalRequired: true
+        ui: { ask: send_approval }
+        host_exec: { adapter_id: echo, config: {} }

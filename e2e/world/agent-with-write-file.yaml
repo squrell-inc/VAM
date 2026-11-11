@@ -1,0 +1,15 @@
+piece: agent-with-write-file
+kind: agent
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent with minimal instructions, write_file
+    description: Agent with minimal instructions, write_file
+    role: Assistant
+    systemInstructions: Help the user.
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:write_file", decision: allow }

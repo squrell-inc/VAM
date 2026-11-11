@@ -1,0 +1,17 @@
+piece: skill-needs-java
+kind: skill
+deferred: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: A skill that declares it needs Java 21 or newer, which the node's base does not have (test nodes only)
+    requiresRuntime: { java: ">=21" }
+    tools:
+      - name: host_echo
+        description: Echoes its arguments
+        inputSchemaJson: "{\"type\":\"object\"}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        host_exec:
+          adapter_id: echo
+          config: {}

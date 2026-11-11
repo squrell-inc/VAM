@@ -1,0 +1,27 @@
+{
+  "spec": {
+    "agentRef": {
+      "resourceId": {
+        "urn": "urn:vam:agent:local.vam.dev/vam/jira-assistant"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0,
+        "patch": 0
+      }
+    },
+    "idempotencyKey": "",
+    "inputs": {
+      "max_iterations": 15,
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "prompt": "Human-in-the-loop test. Call load_skill with skill jira-integration. Use jira_search_issues with jql \"key = CGA-1298\" to confirm the issue and read its current status. Then call jira_transition_issue with issue_key \"CGA-1298\" and transition_id \"In Progress\" to move it to In Progress. You must call jira_transition_issue even if search succeeds."
+    },
+    "maxDuration": "1800s",
+    "maxFinancialBudget": {
+      "currency": "USD",
+      "microAmount": "1000000"
+    },
+    "threadRef": "thread-hitl-cga-1298",
+    "workspaceRefUri": "volume://jira-hitl-1"
+  }
+}

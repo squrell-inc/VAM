@@ -1,0 +1,35 @@
+id: skill-uses-python-pandas-and-git-on-the-standard-base
+title: A skill's tool reads a table with Python and pandas and clones a repository with git in the microVM
+description: >
+  The agent loads a skill whose tool runs a Python script in the guest. The script sums a CSV
+  with pandas and prints a total it assembles itself, then makes a small git repository, clones
+  it and prints the latest commit subject. The default machine image must carry Python 3 with
+  pandas, and git, for the tool result to hold both lines. Needs a microVM: a process guest uses
+  the host's tools, so only the machine image can fail this way.
+tags: [chat]
+needs: firecracker
+model:
+  task: toolchain
+  version: 0.4.0
+  k: 5
+given:
+  - org-admin
+  - agent-with-toolchain-skill
+when:
+  - chat: "e2e-step:toolchain Total the ledger and read the repository log"
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "toolchain-total-500.00" } }
+  - expect: { thread: { role: tool, contains: "toolchain-commit: Fix rounding in ledger" } }
+guards:
+  - vam:scripts/build-rootfs.sh
+  - vam:scripts/base/Dockerfile
+  - vam:scripts/e2e/firecracker-assets.sh
+mock:
+  - when: { step: toolchain, toolName: toolchain_report }
+    reply: { text: Done. }
+  - when: { step: toolchain, toolName: load_skill }
+    reply: { toolCall: { name: toolchain_report, args: {} } }
+  - when: { step: toolchain, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-toolchain-skill-uses-python-pandas-and-git-on-the-standard-base } } }
+status: active

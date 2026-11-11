@@ -1,0 +1,562 @@
+{
+  "/architecture/component-model/": {
+    "kind": "retired",
+    "to": "/architecture/overview/"
+  },
+  "/architecture/deployment-model/": {
+    "kind": "retired",
+    "to": "/architecture/overview/"
+  },
+  "/architecture/design-principles/": {
+    "kind": "design",
+    "to": "/architecture/overview/"
+  },
+  "/architecture/drive9/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/architecture/firecracker/": {
+    "kind": "retired",
+    "to": "/architecture/isolation/"
+  },
+  "/architecture/session-lifecycle/": {
+    "kind": "design",
+    "to": "/orchestrator/session/"
+  },
+  "/architecture/trust-boundaries/": {
+    "kind": "retired",
+    "to": "/architecture/isolation/"
+  },
+  "/build/errors/": {
+    "kind": "design",
+    "to": "/build/overview/"
+  },
+  "/build/hardening/": {
+    "kind": "design",
+    "to": "/build/overview/"
+  },
+  "/build/invariants/": {
+    "kind": "design",
+    "to": "/build/overview/"
+  },
+  "/build/oci/": {
+    "kind": "design",
+    "to": "/build/overview/"
+  },
+  "/build/optimization/": {
+    "kind": "design",
+    "to": "/build/overview/"
+  },
+  "/build/reproducibility/": {
+    "kind": "design",
+    "to": "/build/overview/"
+  },
+  "/build/security/": {
+    "kind": "design",
+    "to": "/build/overview/"
+  },
+  "/build/signing/": {
+    "kind": "design",
+    "to": "/build/overview/"
+  },
+  "/build/supply-chain/": {
+    "kind": "design",
+    "to": "/build/overview/"
+  },
+  "/build/testing/": {
+    "kind": "design",
+    "to": "/build/overview/"
+  },
+  "/core/api-client/": {
+    "kind": "retired",
+    "to": "/core/overview/"
+  },
+  "/core/config/": {
+    "kind": "retired",
+    "to": "/core/overview/"
+  },
+  "/core/errors/": {
+    "kind": "retired",
+    "to": "/core/overview/"
+  },
+  "/core/health/": {
+    "kind": "retired",
+    "to": "/core/overview/"
+  },
+  "/core/invariants/": {
+    "kind": "retired",
+    "to": "/core/overview/"
+  },
+  "/core/jailer/": {
+    "kind": "retired",
+    "to": "/core/overview/"
+  },
+  "/core/lifecycle/": {
+    "kind": "retired",
+    "to": "/core/overview/"
+  },
+  "/core/ratelimit/": {
+    "kind": "design",
+    "to": "/core/overview/"
+  },
+  "/core/security-model/": {
+    "kind": "retired",
+    "to": "/architecture/isolation/"
+  },
+  "/core/snapshot/": {
+    "kind": "retired",
+    "to": "/architecture/cold-start/"
+  },
+  "/core/testing/": {
+    "kind": "retired",
+    "to": "/architecture/testing/"
+  },
+  "/core/vmm/": {
+    "kind": "retired",
+    "to": "/core/overview/"
+  },
+  "/core/vsock-device/": {
+    "kind": "retired",
+    "to": "/core/overview/"
+  },
+  "/getting-started/coldstart-baseline/": {
+    "kind": "retired",
+    "to": "/architecture/cold-start/"
+  },
+  "/getting-started/workspace/": {
+    "kind": "retired",
+    "to": "/architecture/overview/"
+  },
+  "/hosted/architecture/": {
+    "kind": "retired",
+    "to": "/hosted/overview/"
+  },
+  "/hosted/capability-manifest/": {
+    "kind": "retired",
+    "to": "/hosted/overview/"
+  },
+  "/hosted/first-party/": {
+    "kind": "design",
+    "to": "/hosted/overview/"
+  },
+  "/hosted/hooks/": {
+    "kind": "retired",
+    "to": "/hosted/overview/"
+  },
+  "/hosted/protocol/": {
+    "kind": "retired",
+    "to": "/hosted/overview/"
+  },
+  "/hosted/resources/": {
+    "kind": "design",
+    "to": "/hosted/overview/"
+  },
+  "/hosted/roadmap/": {
+    "kind": "design",
+    "to": "/hosted/overview/"
+  },
+  "/hosted/triggered-runs/": {
+    "kind": "design",
+    "to": "/hosted/overview/"
+  },
+  "/network/architecture/": {
+    "kind": "retired",
+    "to": "/network/overview/"
+  },
+  "/network/contracts/": {
+    "kind": "retired",
+    "to": "/network/overview/"
+  },
+  "/network/dns/": {
+    "kind": "design",
+    "to": "/network/overview/"
+  },
+  "/network/ebpf/": {
+    "kind": "retired",
+    "to": "/network/overview/"
+  },
+  "/network/errors/": {
+    "kind": "retired",
+    "to": "/network/overview/"
+  },
+  "/network/invariants/": {
+    "kind": "retired",
+    "to": "/network/overview/"
+  },
+  "/network/ipam/": {
+    "kind": "retired",
+    "to": "/network/overview/"
+  },
+  "/network/lifecycle/": {
+    "kind": "retired",
+    "to": "/network/overview/"
+  },
+  "/network/modes/": {
+    "kind": "design",
+    "to": "/network/overview/"
+  },
+  "/network/nat/": {
+    "kind": "design",
+    "to": "/network/overview/"
+  },
+  "/network/policy/": {
+    "kind": "retired",
+    "to": "/network/overview/"
+  },
+  "/network/security/": {
+    "kind": "retired",
+    "to": "/network/overview/"
+  },
+  "/network/tap/": {
+    "kind": "design",
+    "to": "/network/overview/"
+  },
+  "/network/telemetry/": {
+    "kind": "retired",
+    "to": "/network/overview/"
+  },
+  "/network/testing/": {
+    "kind": "retired",
+    "to": "/architecture/testing/"
+  },
+  "/network/traffic-control/": {
+    "kind": "design",
+    "to": "/network/overview/"
+  },
+  "/orchestrator/admission/": {
+    "kind": "design",
+    "to": "/orchestrator/overview/"
+  },
+  "/orchestrator/daemon/": {
+    "kind": "retired",
+    "to": "/orchestrator/overview/"
+  },
+  "/orchestrator/draining/": {
+    "kind": "retired",
+    "to": "/orchestrator/overview/"
+  },
+  "/orchestrator/errors/": {
+    "kind": "retired",
+    "to": "/orchestrator/api/"
+  },
+  "/orchestrator/health/": {
+    "kind": "retired",
+    "to": "/orchestrator/overview/"
+  },
+  "/orchestrator/invariants/": {
+    "kind": "retired",
+    "to": "/orchestrator/overview/"
+  },
+  "/orchestrator/lifecycle/": {
+    "kind": "retired",
+    "to": "/orchestrator/session/"
+  },
+  "/orchestrator/pool/": {
+    "kind": "retired",
+    "to": "/architecture/cold-start/"
+  },
+  "/orchestrator/reconciliation/": {
+    "kind": "retired",
+    "to": "/orchestrator/overview/"
+  },
+  "/orchestrator/router/": {
+    "kind": "design",
+    "to": "/orchestrator/overview/"
+  },
+  "/orchestrator/scheduler/": {
+    "kind": "design",
+    "to": "/orchestrator/overview/"
+  },
+  "/orchestrator/security/": {
+    "kind": "retired",
+    "to": "/orchestrator/user-isolation/"
+  },
+  "/orchestrator/telemetry/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/orchestrator/testing/": {
+    "kind": "retired",
+    "to": "/architecture/testing/"
+  },
+  "/runtime/context/": {
+    "kind": "retired",
+    "to": "/runtime/agent/"
+  },
+  "/runtime/drive9-fs/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/runtime/errors/": {
+    "kind": "retired",
+    "to": "/runtime/overview/"
+  },
+  "/runtime/evals/": {
+    "kind": "retired",
+    "to": "/runtime/workflow/"
+  },
+  "/runtime/hitl/": {
+    "kind": "retired",
+    "to": "/runtime/workflow/"
+  },
+  "/runtime/host-tools/": {
+    "kind": "retired",
+    "to": "/runtime/tools/"
+  },
+  "/runtime/init/": {
+    "kind": "retired",
+    "to": "/runtime/overview/"
+  },
+  "/runtime/instruction-template/": {
+    "kind": "retired",
+    "to": "/runtime/agent/"
+  },
+  "/runtime/invariants/": {
+    "kind": "retired",
+    "to": "/runtime/overview/"
+  },
+  "/runtime/mcp/": {
+    "kind": "retired",
+    "to": "/runtime/tools/"
+  },
+  "/runtime/primitives/": {
+    "kind": "retired",
+    "to": "/runtime/tools/"
+  },
+  "/runtime/telemetry/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/runtime/testing/": {
+    "kind": "retired",
+    "to": "/architecture/testing/"
+  },
+  "/runtime/vsock-server/": {
+    "kind": "retired",
+    "to": "/runtime/overview/"
+  },
+  "/security/agent-autonomy-and-governance/": {
+    "kind": "retired",
+    "to": "/security/permissions/"
+  },
+  "/security/audit-log/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/security/cedar/": {
+    "kind": "retired",
+    "to": "/security/permissions/"
+  },
+  "/security/errors/": {
+    "kind": "retired",
+    "to": "/security/permissions/"
+  },
+  "/security/hitl-crypto/": {
+    "kind": "retired",
+    "to": "/runtime/workflow/"
+  },
+  "/security/invariants/": {
+    "kind": "retired",
+    "to": "/security/permissions/"
+  },
+  "/security/key-management/": {
+    "kind": "retired",
+    "to": "/security/secrets-proxy/"
+  },
+  "/security/pii-redaction/": {
+    "kind": "retired",
+    "to": "/security/secrets-proxy/"
+  },
+  "/security/seccomp/": {
+    "kind": "design",
+    "to": "/architecture/isolation/"
+  },
+  "/security/spiffe/": {
+    "kind": "design",
+    "to": "/architecture/isolation/"
+  },
+  "/security/testing/": {
+    "kind": "retired",
+    "to": "/architecture/testing/"
+  },
+  "/security/threat-model/": {
+    "kind": "retired",
+    "to": "/architecture/isolation/"
+  },
+  "/spec/agentic-spec/": {
+    "kind": "retired",
+    "to": "/orchestrator/catalog/"
+  },
+  "/spec/codegen/": {
+    "kind": "retired",
+    "to": "/spec/overview/"
+  },
+  "/spec/common/": {
+    "kind": "retired",
+    "to": "/spec/overview/"
+  },
+  "/spec/conventions/": {
+    "kind": "retired",
+    "to": "/spec/overview/"
+  },
+  "/spec/evals/": {
+    "kind": "retired",
+    "to": "/runtime/workflow/"
+  },
+  "/spec/events/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/spec/hitl/": {
+    "kind": "retired",
+    "to": "/runtime/workflow/"
+  },
+  "/spec/model-policy/": {
+    "kind": "retired",
+    "to": "/runtime/inference/"
+  },
+  "/spec/security/": {
+    "kind": "retired",
+    "to": "/security/permissions/"
+  },
+  "/spec/skills/": {
+    "kind": "retired",
+    "to": "/orchestrator/catalog/"
+  },
+  "/spec/telemetry/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/spec/vsock-rpc/": {
+    "kind": "retired",
+    "to": "/architecture/isolation/"
+  },
+  "/spec/workflow/": {
+    "kind": "retired",
+    "to": "/runtime/workflow/"
+  },
+  "/storage/architecture/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/storage/backend-interface/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/storage/backends/": {
+    "kind": "design",
+    "to": "/storage/overview/"
+  },
+  "/storage/cache/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/storage/checkpoint/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/storage/consistency/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/storage/data-format/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/storage/encryption/": {
+    "kind": "design",
+    "to": "/storage/overview/"
+  },
+  "/storage/errors/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/storage/fuse/": {
+    "kind": "design",
+    "to": "/storage/overview/"
+  },
+  "/storage/invariants/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/storage/overlay/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/storage/quota-gc/": {
+    "kind": "retired",
+    "to": "/storage/overview/"
+  },
+  "/storage/sync/": {
+    "kind": "design",
+    "to": "/storage/overview/"
+  },
+  "/storage/testing/": {
+    "kind": "retired",
+    "to": "/architecture/testing/"
+  },
+  "/telemetry/architecture/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/audit-ledger/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/cloudevents/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/cost-accounting/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/errors/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/invariants/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/latency/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/metrics/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/otel/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/privacy/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/reliability/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/retention/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/roadmap/": {
+    "kind": "design",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/streaming/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  },
+  "/telemetry/testing/": {
+    "kind": "retired",
+    "to": "/architecture/testing/"
+  },
+  "/telemetry/trace-context/": {
+    "kind": "retired",
+    "to": "/telemetry/overview/"
+  }
+}

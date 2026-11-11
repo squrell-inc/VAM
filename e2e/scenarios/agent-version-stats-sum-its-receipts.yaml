@@ -1,0 +1,54 @@
+id: agent-version-stats-sum-its-receipts
+title: An agent version's outcomes add up its receipts - runs, successes, pass^k, tokens and effects - and keep the draft apart from the release
+tags: [chat, release]
+needs: process
+description: Two runs of the released version succeed (one creates a ticket, one only answers) and one run of the draft fails because the model keeps erroring. The outcomes route sums the stored receipts per version - the release has two runs, two successes and a pass^k of 1 at k=2, one confirmed effect and no duplicates; the mock model is unpriced so cost per success is absent and the model is named; the draft is counted on its own.
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: { text: "e2e-step:make Create the Q4 plan ticket", draft: false }
+  - chat: { text: "e2e-step:hello Say hello", draft: false, thread: new }
+  - chat: { text: "e2e-step:broken Do the work", draft: true, thread: new }
+then:
+  - expect:
+      agent-stats:
+        piece: agent-with-effect-tools
+        version: 1.0.0
+        k: 2
+        fields:
+          runs: 2
+          successes: 2
+          failed: 0
+          passK.k: 2
+          passK.value: 1
+          approvalsPerRun: 0
+          tokensPerSuccess: { present: true }
+          costPerSuccessMicroUsd: { absent: true }
+          costMissing.0: mock-model
+          effects.journaledRuns: 2
+          effects.duplicates: 0
+          effects.unknown: 0
+          effects.confirmed: 1
+  - expect:
+      agent-stats:
+        piece: agent-with-effect-tools
+        version: draft
+        fields:
+          runs: 1
+          successes: 0
+          failed: 1
+guards:
+  - vam:crates/vam-orchestrator/src/receipt.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: broken }
+    reply: { fail: { status: 503 } }
+  - when: { step: hello }
+    reply: { text: "Hello from the mock." }
+  - when: { step: make, toolName: echo_create_ticket }
+    reply: { text: "Created T-1" }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan } } }
+status: active

@@ -1,0 +1,46 @@
+id: node-init-run-twice-changes-nothing-and-shows-the-key-once
+title: Installing a node twice shows the admin key once, changes nothing the second time, and keeps the key out of files
+description: >
+  `vam node init --no-systemd` on a ready host installs the node: it prints the admin key once
+  (a line `admin key: <key>` and the words "save it now; it is not shown again") and the
+  `vam config set-host` and `vam config set-ca` lines for signing in from another machine. The
+  key is in no file under the tree. A second run exits 0, reports each step as `ok (unchanged)`,
+  says the node already has an admin key, and prints no key.
+
+  The `--root DIR` flag is a test seam that the install must implement: every host path the
+  command reads or writes (`/dev/kvm`, the cgroup mount, the asset directory, the state
+  directory, `/etc/vam`, the systemd unit directory) is looked up under DIR, and the command
+  never touches the real root, the real `/dev` or needs real root privileges. `--vamd` names the
+  `vamd` binary that the command calls for `--init` and `--preflight`; under `--root` that
+  binary's jailer rules read DIR too. The fixture tree is a ready host: stub `firecracker` and
+  `jailer`, a stub kernel and base image whose manifest matches, and the pins in it are fixtures
+  named `fixture-not-a-real-pin`, never real values.
+tags: [release]
+needs: process
+given: []
+when:
+  - cli:
+      args: [node, init, --root, "{{root}}", --no-systemd, --vamd, "{{vamd}}"]
+      root: { from: node-init/ready }
+      exit: ok
+      capture: "admin key: "
+      contains:
+        - "save it now; it is not shown again"
+        - "vam config set-host"
+        - "vam config set-ca"
+      absentInFiles: ["{{secret}}"]
+then:
+  - cli:
+      args: [node, init, --root, "{{root}}", --no-systemd, --vamd, "{{vamd}}"]
+      root: { same: true }
+      exit: ok
+      contains:
+        - "ok (unchanged)"
+        - "already has an admin key"
+      absent:
+        - "{{secret}}"
+        - "save it now"
+guards:
+  - vam:crates/vam-cli/src/main.rs
+  - vam:crates/vam-orchestrator/src/bin/vamd.rs
+status: active

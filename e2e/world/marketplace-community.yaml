@@ -1,0 +1,7 @@
+piece: marketplace-community
+kind: git-marketplace
+# A second marketplace an admin adds, with four listings (one good, three that must be refused).
+fixture: marketplace-community
+url: https://market.community.example/vam-marketplace
+publisherDomain: market.community.example
+tags: [helpful-notes-v1.0.0, with-a-connector-v1.0.0, claims-the-squrell-name-v1.0.0, claims-the-org-name-v1.0.0]

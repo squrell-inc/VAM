@@ -1,0 +1,18 @@
+piece: skill-with-a-card-bound-to-a-missing-field
+kind: skill
+deferred: true
+files:
+  jigs/mail_list.json: mail-calendar-cards/jigs/bad_binding.json
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: A skill whose list card binds a field the output lacks (test nodes only)
+    tools:
+      - name: mail_list
+        description: A tool whose card does not fit
+        inputSchemaJson: "{\"type\":\"object\"}"
+        outputSchemaJson: "{\"type\":\"object\",\"required\":[\"messages\"],\"properties\":{\"messages\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"}}}}}}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        ui: { show: mail_list }
+        host_exec: { adapter_id: echo, config: {} }

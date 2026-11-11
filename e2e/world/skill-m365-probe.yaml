@@ -1,0 +1,31 @@
+piece: skill-m365-probe
+kind: skill
+files:
+  probe.py: m365-probe/probe.py
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: Calls Microsoft Graph as the member through the connection, holding no token
+    requiresConnector: "urn:vam:connector:hub.squrell.cloud/squrell/microsoft-365"
+    tools:
+      - name: m365_probe_search
+        description: Reads the member's mail (declared as a read)
+        inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"method\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}}}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        localExec: { command: python3, entrypoint: ./probe.py }
+        egress:
+          - { binding: graph, host: graph.microsoft.com, methods: [GET], pathPrefixes: [/v1.0/me/messages] }
+      - name: m365_probe_send
+        description: Sends mail as the member (declared as a send; asks first)
+        inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"method\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}}}"
+        sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL
+        approvalRequired: true
+        localExec: { command: python3, entrypoint: ./probe.py }
+        egress:
+          - { binding: graph, host: graph.microsoft.com, methods: [POST], pathPrefixes: [/v1.0/me/sendMail] }
+      - name: m365_probe_undeclared
+        description: Reads the member's mail but declares no egress shape
+        inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"method\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}}}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        localExec: { command: python3, entrypoint: ./probe.py }

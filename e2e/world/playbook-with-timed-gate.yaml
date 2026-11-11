@@ -1,0 +1,31 @@
+piece: playbook-with-timed-gate
+kind: playbook
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:playbook:local.vam.dev/e2e/{{name}}" }
+    displayName: Playbook with one gate that times out
+    description: Prepare, ask a human whether to go on, then finish.
+    activation: { when: Use only in end-to-end scenarios. }
+    steps:
+      - id: prepare
+        description: Prepare the work.
+        kind: STEP_KIND_TASK
+        mode: STEP_MODE_AGENTIC
+        instruction: Prepare the work and finish.
+      - id: confirm
+        description: Pause for a human to go on or stop; left open, it stops after three seconds.
+        kind: STEP_KIND_GATE
+        after: [prepare]
+        question: Go on?
+        timeout: 3s
+        onTimeout: stop
+        options:
+          - { label: go, description: Finish the work }
+          - { label: stop, description: Stop here, terminal: OUTCOME_TERMINAL_SUCCEEDED }
+      - id: finish
+        description: Finish the work.
+        kind: STEP_KIND_TASK
+        mode: STEP_MODE_AGENTIC
+        after: ["confirm:go"]
+        instruction: Finish the work.

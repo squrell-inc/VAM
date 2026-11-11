@@ -1,0 +1,377 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "vam/v1/skills.proto";
+import "vam/v1/workflow.proto";
+import "vam/v1/telemetry.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/duration.proto";
+
+message Handshake {
+  Version protocol_version = 1;
+  repeated string supported_features = 2; // E.g., ["hitl", "drive9-sync"]
+  map<string, string> metadata = 3;
+  bytes host_challenge = 4;               // Single-use nonce issued for this launch
+}
+
+service VamHostService {
+  // Guest calls this immediately after completing the low-level handshake
+  rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+  
+  // Real-time log/event channel stream from guest to host
+  rpc StreamLogs(stream LogFrame) returns (StreamLogsResponse);
+  
+  // Heartbeat utility to maintain session and detect deadlocks
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // Guest proposes a host-mediated tool effect under an active task lease.
+  // The host may authorize, suspend for HITL, or deny it.
+  rpc RequestToolAuthorization(ToolIntentRequest) returns (ToolIntentResponse);
+
+  // Guest queries the host for Cedar-advertised tool names (catalog ∩ policy dry-run).
+  // Schemas remain guest-side from builtins + skill manifests.
+  rpc ListAdvertisedTools(ListAdvertisedToolsRequest) returns (ListAdvertisedToolsResponse);
+
+  // Guest executes a host-backed tool after RequestToolAuthorization mints a capability token.
+  // The host verifies the token against the replay store before invoking the adapter.
+  rpc ExecuteHostTool(ExecuteHostToolRequest) returns (ExecuteHostToolResponse);
+
+  // Guest uploads the conversation checkpoint when a tool call suspends for HITL.
+  // Chunks are at most 32 KiB, in order, on one connection. The host stores the
+  // assembled bytes (cap 4 MiB) after checking the SHA-256 digest. Resume carries
+  // only that digest; the guest fetches the bytes with FetchRunCheckpoint.
+  rpc UploadRunCheckpoint(UploadRunCheckpointRequest) returns (UploadRunCheckpointResponse);
+
+  // Guest fetches a stored checkpoint by digest. Each response is one chunk of
+  // at most 32 KiB. The guest checks the digest over the assembled bytes.
+  rpc FetchRunCheckpoint(FetchRunCheckpointRequest) returns (FetchRunCheckpointResponse);
+
+  // Guest asks the host to record a turn commit: the checkpoint segment it just
+  // uploaded plus a workspace snapshot, so conversation and files match.
+  rpc CommitTurn(CommitTurnRequest) returns (CommitTurnResponse);
+
+  // Guest pulls steers at a turn boundary: every pending message after
+  // `after_seq`, in order. The last acknowledged seq rides in the checkpoint.
+  rpc PullInbox(PullInboxRequest) returns (PullInboxResponse);
+
+  // Guest posts a progress message or a jig card for the owner. The host
+  // checks the text and card data before it records anything.
+  rpc PostOutbox(PostOutboxRequest) returns (PostOutboxResponse);
+}
+
+message InboxMessage {
+  int64 seq = 1;
+  string text = 2;
+}
+
+message PullInboxRequest {
+  ExecutionLease lease = 1;
+  // Fetch cursor: messages with a seq above it are returned. Never an acknowledgement.
+  int64 after_seq = 2;
+  // Highest seq the guest has applied to its conversation. The host marks messages
+  // delivered through it, and only through it.
+  int64 ack_seq = 3;
+}
+
+message PullInboxResponse {
+  repeated InboxMessage messages = 1;
+  ErrorStatus error = 2;
+}
+
+enum OutboxKind {
+  OUTBOX_KIND_UNSPECIFIED = 0;
+  OUTBOX_KIND_MESSAGE = 1;
+  OUTBOX_KIND_CARD = 2;
+}
+
+message PostOutboxRequest {
+  ExecutionLease lease = 1;
+  OutboxKind kind = 2;
+  string text = 3;                        // MESSAGE
+  string jig = 4;                         // CARD: built-in jig name
+  string data_json = 5;                   // CARD: data, JSON text
+  // The token the host minted for the authorized `post_message` / `show` intent.
+  // Single use; bound to the lease, the tool and the digest of the arguments.
+  SignedEnvelope capability_token = 6;
+}
+
+message PostOutboxResponse {
+  ErrorStatus error = 1;
+}
+
+message RegisterAgentRequest {
+  ResourceId instance_id = 1;             // Unique guest session instance ID
+  Version runtime_version = 2;            // Guest engine version
+  string guest_cid = 3;                   // Must match the host-observed connection CID
+  bytes host_challenge = 4;               // Exact challenge from Handshake
+  SignedEnvelope attestation = 5;         // Domain: "vam.v1.guest-registration"
+}
+
+message RegisterAgentResponse {
+  bool accepted = 1;                      // True if host accepts guest connection
+  ErrorStatus error = 2;                  // Populated when accepted is false
+}
+
+message LogFrame {
+  ResourceId instance_id = 1;             // Log source instance
+  google.protobuf.Timestamp timestamp = 2;// Timestamp of entry
+  string channel = 3;                     // E.g., "stdout", "stderr", "system", "span"
+  bytes chunk = 4;                        // Log chunk bytes
+  uint64 sequence_number = 5;             // Monotonic guest sequence counter
+  TraceContext trace_context = 6;         // Optional distributed trace context
+  uint64 duration_ns = 7;                 // Monotonic duration in nanoseconds
+  string span_name = 8;                   // Optional span/event name
+  map<string, string> attributes = 9;     // Bounded span attributes
+  string clock_domain = 10;               // E.g., "guest_domain"
+  string digest = 11;                     // SHA-256 CAS digest when large stdout/stderr payloads spill
+}
+
+message StreamLogsResponse {
+  bool success = 1;
+  uint64 last_acknowledged_sequence = 2; // Last sequence acknowledged by host
+}
+
+message PingRequest {
+  ResourceId instance_id = 1;
+  google.protobuf.Timestamp sent_at = 2;
+}
+
+message PingResponse {
+  google.protobuf.Timestamp received_at = 1;
+}
+
+service VamGuestService {
+  // Host triggers tool execution inside the VM
+  rpc ExecuteTool(ExecuteToolRequest) returns (ExecuteToolResponse);
+
+  // Executes one bounded host-scheduled task. The guest must validate the
+  // lease and echo it in the proposed outcome.
+  rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
+
+  // Cancels an active task lease without changing authoritative run state.
+  rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
+  
+  // Gracefully halts the runtime engine inside the VM
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+
+  // Host re-seeds guest identity after golden snapshot restore.
+  rpc ResumeFromSnapshot(ResumeFromSnapshotRequest) returns (ResumeFromSnapshotResponse);
+}
+
+message ExecuteToolRequest {
+  string tool_name = 1;                   // Name of tool to execute
+  google.protobuf.Struct arguments = 2;   // JSON-compatible invocation arguments
+  google.protobuf.Duration timeout = 3;   // Hard timeout budget
+  TraceContext trace_context = 4;         // Optional distributed trace context
+}
+
+message ExecuteToolResponse {
+  ToolResult result = 1;
+  ResourceUsage resource_usage = 2;
+}
+
+message ResourceEnvelope {
+  uint64 max_wall_time_ms = 1;
+  uint64 max_cpu_time_ms = 2;
+  uint64 max_memory_bytes = 3;
+  uint32 max_procs = 4;
+  uint32 max_open_files = 5;
+  uint64 max_file_size_bytes = 6;
+  uint64 max_egress_bytes = 7;
+  uint64 max_output_bytes = 8;
+}
+
+message ResourceUsage {
+  uint64 wall_time_ms = 1;
+  uint64 cpu_time_ms = 2;
+  uint64 peak_rss_bytes = 3;
+  uint64 bytes_written = 4;
+  int32 exit_signal = 5;
+  bool limit_exceeded = 6;
+  string limit_type = 7;
+}
+
+message ExecuteTaskRequest {
+  ExecutionLease lease = 1;
+  oneof task_action {
+    PromptAction prompt_action = 2;
+    ToolAction tool_action = 3;
+  }
+  google.protobuf.Struct inputs = 4;
+  google.protobuf.Duration timeout = 5;
+  ResourceRef agent_ref = 6;
+  TraceContext trace_context = 7;         // Optional distributed trace context
+}
+
+message ExecuteTaskResponse {
+  TaskOutcome outcome = 1;
+  ResourceUsage resource_usage = 2;
+}
+
+message CancelTaskRequest {
+  ExecutionLease lease = 1;
+  string reason = 2;
+}
+
+message CancelTaskResponse {
+  bool accepted = 1;
+  ErrorStatus error = 2;
+}
+
+message ToolIntentRequest {
+  ExecutionLease lease = 1;
+  string tool_name = 2;
+  google.protobuf.Struct arguments = 3;
+  Digest arguments_digest = 4;
+  Digest script_digest = 5;
+  // The model's id for this call (empty from a guest that does not send one). Part of the
+  // effect journal key; the host checks it against what it recorded.
+  string call_id = 6;
+}
+
+message ListAdvertisedToolsRequest {
+  ExecutionLease lease = 1; // Optional; host binds by vsock session when omitted.
+}
+
+message ListAdvertisedToolsResponse {
+  repeated string tool_names = 1;
+}
+
+message ExecuteHostToolRequest {
+  ExecutionLease lease = 1;
+  string tool_name = 2;
+  google.protobuf.Struct arguments = 3;
+  SignedEnvelope capability_token = 4;
+  string call_id = 5;                     // Same id as the intent that produced the token.
+}
+
+message ExecuteHostToolResponse {
+  string text_result = 1;
+  string artifact_relpath = 2;            // Suggested relative name under .vam/host-artifacts/
+  bytes artifact_bytes = 3;               // Redacted artifact payload for guest persistence
+  ErrorStatus error = 4;
+  // More files from the same call (an MCP result's non-text parts). The first
+  // file is always in fields 2 and 3, so a guest that predates this field
+  // still writes it. Total payload stays under one 64 KiB vsock frame.
+  repeated HostArtifactFile extra_artifacts = 5;
+}
+
+// One extra file of an ExecuteHostToolResponse.
+message HostArtifactFile {
+  string relpath = 1;                     // Suggested relative name under .vam/host-artifacts/
+  bytes bytes = 2;                        // Redacted payload
+}
+
+// One chunk of a conversation checkpoint. `checkpoint` is at most 32 KiB.
+// Chunks are sent in order on one connection. `digest` is the SHA-256 of the
+// whole checkpoint, not of this chunk. `total_size = 0` is a legacy
+// single-message upload of the whole checkpoint. The host cap is 4 MiB.
+message UploadRunCheckpointRequest {
+  ExecutionLease lease = 1;
+  bytes checkpoint = 2;
+  Digest digest = 3;
+  uint64 offset = 4;
+  uint64 total_size = 5;
+}
+
+message UploadRunCheckpointResponse {
+  bool accepted = 1;
+  string digest = 2;                      // Stored SHA-256 hex when complete
+  ErrorStatus error = 3;
+  uint64 received = 4;                    // Bytes accepted so far for this upload
+  bool complete = 5;                      // True once the checkpoint is stored
+}
+
+// Fetch one chunk of a stored checkpoint. `digest` is the SHA-256 of the whole
+// checkpoint. `offset` is the start of this chunk. Each chunk is at most 32 KiB.
+message FetchRunCheckpointRequest {
+  ExecutionLease lease = 1;
+  Digest digest = 2;
+  uint64 offset = 3;
+}
+
+message FetchRunCheckpointResponse {
+  bytes chunk = 1;
+  uint64 total_size = 2;
+  bool last = 3;
+  ErrorStatus error = 4;
+}
+
+enum TurnCommitState {
+  TURN_COMMIT_STATE_UNSPECIFIED = 0;
+  TURN_COMMIT_STATE_PENDING = 1;
+  TURN_COMMIT_STATE_COMPLETE = 2;
+  TURN_COMMIT_STATE_FAILED = 3;
+}
+
+// `checkpoint_digest` is the SHA-256 of the messages this round appends to the
+// thread log. The host checks it against the log it recorded itself and
+// records its own log head (seq, digest) with the commit, never the guest's.
+message CommitTurnRequest {
+  ExecutionLease lease = 1;
+  Digest checkpoint_digest = 2;
+  uint32 round = 3;                       // Agent-loop round, 1-based
+  bool wrote_files = 4;                   // A tool that may write files ran this round
+}
+
+message CommitTurnResponse {
+  bool accepted = 1;
+  ErrorStatus error = 2;
+  TurnCommitState state = 3;
+  string manifest_hash = 4;               // Empty until the commit is complete
+}
+
+message ToolIntentResponse {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_AUTHORIZED = 1;
+    DISPOSITION_SUSPENDED = 2;
+    DISPOSITION_DENIED = 3;
+    // The call already happened (or was already decided and failed) in this run. The host
+    // answers it from its journal: no decision, no token, nothing is sent again. The recorded
+    // answer is in `replayed`.
+    DISPOSITION_REPLAYED = 4;
+  }
+  Disposition disposition = 1;
+  ResourceId approval_request_id = 2;
+  ErrorStatus error = 3;
+  SignedEnvelope capability_token = 4;
+  ResourceEnvelope resource_envelope = 5;
+  // The recorded answer of a REPLAYED call (already redacted when it was recorded).
+  ExecuteHostToolResponse replayed = 6;
+}
+
+message ShutdownRequest {
+  string reason = 1;                      // Description of shutdown trigger (e.g. "RunComplete")
+  google.protobuf.Duration grace_period = 2;
+}
+
+message ShutdownResponse {
+  bool accepted = 1;
+}
+
+message ResumeFromSnapshotRequest {
+  bytes entropy = 1;              // 256 bytes CSPRNG from host
+  int64 clock_unix_nanos = 2;     // host CLOCK_REALTIME for guest clock_settime
+  int64 lease_min_generation = 3; // fences snapshotted generation-1 leases
+}
+
+message ResumeFromSnapshotResponse {
+  bool accepted = 1;
+}
+
+message VsockEnvelope {
+  string method = 1;                     // The RPC method name, e.g. "RegisterAgent", "Ping"
+  uint32 correlation_id = 2;             // Matches requests to responses
+  bytes payload = 3;                     // Serialized request or response protobuf message
+  ErrorStatus error = 4;                 // Standard gRPC-like ErrorStatus from common.proto if failed
+  TraceContext trace_context = 5;        // Optional distributed trace context
+}
+

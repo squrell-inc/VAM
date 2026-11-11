@@ -1,0 +1,10 @@
+# The Firecracker and guest-kernel pins. One file: scripts/e2e/firecracker-assets.sh sources
+# it and `vam node init` embeds it. Plain KEY="value" lines (no commands), so both can read it.
+# Changing a value changes the lane's asset cache key (see .github/workflows/rust.yml).
+FC_VERSION="v1.16.1"
+FC_SHA256="382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6"
+
+# Firecracker CI object (release-named prefix, not "latest").
+KERNEL_NAME="vmlinux-6.1.155"
+KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/${KERNEL_NAME}"
+KERNEL_SHA256="e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2"

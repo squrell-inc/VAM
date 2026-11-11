@@ -1,0 +1,55 @@
+id: revoked-microsoft-connection-parks-the-call-and-tells-the-member
+title: A revoked Microsoft connection parks the call and tells the member once
+description: >
+  The member connected, then Microsoft revoked the connection. The next search parks (the run is
+  paused and an approval is pending that asks the member to reconnect) and nothing reaches Graph.
+  The tile reads "needs reconnect", one connection.needs_reauth notification is open and one Slack
+  message reaches the linked contact within a minute. A second failure while still revoked (an
+  explicit check) adds no second notification. When the member reconnects, the parked call is decided again and runs, Graph
+  sees exactly one read, and the notification is resolved.
+tags: [connectors, egress, notifications]
+needs: process
+given:
+  - org-member
+  - org-administrator
+  - mock-microsoft-login
+  - mock-microsoft-graph
+  - agent-with-m365-probe
+  - slack-bot-token
+  - slack-app-token
+  - notify-broker
+when:
+  - node-notify: { slack: { botToken: slack-bot-token, appToken: slack-app-token }, appUrl: "https://vam.example.test" }
+  - link-contact: { channel: slack, account: "T1/U1", as: org-member, verify: true }
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-administrator }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, expiresIn: 0, as: org-member }
+  - mock-provider: { piece: mock-microsoft-login, revoke: true }
+  - chat: { text: "e2e-step:ask Search my mail", as: org-member, wait: false }
+  - expect: { run: paused }
+  - expect: { approval: pending, tool: m365_probe_search }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: "*", count: 0 } }
+  - expect: { connectors: { id: microsoft-365, as: org-member, fields: { state: needsReconnect } } }
+  - expect: { notifications: { kind: connection.needs_reauth, as: org-member, count: 1, state: open, within: 30s } }
+  - expect: { channel-messages: { to: "T1/U1", kind: connection.needs_reauth, count: 1, within: 60s } }
+  - connector-check: { id: microsoft-365, as: org-member }
+  - expect: { notifications: { kind: connection.needs_reauth, as: org-member, count: 1, state: open } }
+  - mock-provider: { piece: mock-microsoft-login, revoke: false }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }
+then:
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages, method: GET, count: 1, has: [bearer=current] } }
+  - expect: { notifications: { kind: connection.needs_reauth, as: org-member, state: open, absent: true, within: 30s } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/notifications.rs
+  - vam:crates/vam-orchestrator/src/api/reauth.rs
+  - vam:brokers/vam-notify/src/**
+mock:
+  - when: { afterTool: m365_probe_search }
+    reply: { text: Found two messages. }
+  - when: { step: ask, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_search, args: { method: GET, path: /v1.0/me/messages } } }
+  - when: { step: ask, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-revoked-microsoft-connection-parks-the-call-and-tells-the-member } } }
+status: active

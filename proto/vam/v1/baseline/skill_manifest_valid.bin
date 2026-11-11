@@ -1,0 +1,6 @@
+
++
+)urn:vam:skill:hub.vam.dev/acme/oracle-sql6Enables PL/SQL query execution and schema inspections."AYou can execute PL/SQL queries using the oracle_sql_execute tool.*¡
+oracle_sql_execute0Execute a PL/SQL command on the target database.?{"type": "object", "properties": {"query": {"type": "string"}}}"
+node
+./index.js8J

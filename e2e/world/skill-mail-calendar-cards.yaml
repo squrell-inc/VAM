@@ -1,0 +1,44 @@
+piece: skill-mail-calendar-cards
+kind: skill
+deferred: true
+files:
+  jigs/mail_list.json: mail-calendar-cards/jigs/mail_list.json
+  jigs/send_approval.json: mail-calendar-cards/jigs/send_approval.json
+  jigs/slot_list.json: mail-calendar-cards/jigs/slot_list.json
+  jigs/book_approval.json: mail-calendar-cards/jigs/book_approval.json
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: Mail and calendar tools whose results and approvals show as the skill's own cards (test nodes only)
+    tools:
+      - name: mail_list
+        description: Lists the mailbox
+        inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"messages\":{\"type\":\"array\"}}}"
+        outputSchemaJson: "{\"type\":\"object\",\"required\":[\"messages\"],\"properties\":{\"messages\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"}}}}}}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        ui: { show: mail_list }
+        host_exec: { adapter_id: echo, config: {} }
+      - name: mail_send
+        description: Sends a mail (asks first)
+        inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}}}"
+        outputSchemaJson: "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}}}"
+        sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL
+        approvalRequired: true
+        ui: { ask: send_approval }
+        host_exec: { adapter_id: echo, config: {} }
+      - name: calendar_find_slots
+        description: Finds free times
+        inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"slots\":{\"type\":\"array\"}}}"
+        outputSchemaJson: "{\"type\":\"object\",\"required\":[\"slots\"],\"properties\":{\"slots\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"start\":{\"type\":\"string\"},\"end\":{\"type\":\"string\"}}}}}}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        ui: { show: slot_list }
+        host_exec: { adapter_id: echo, config: {} }
+      - name: calendar_book
+        description: Books a time (asks first)
+        inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"string\"}}}"
+        outputSchemaJson: "{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"string\"}}}"
+        sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL
+        approvalRequired: true
+        ui: { ask: book_approval }
+        host_exec: { adapter_id: echo, config: {} }

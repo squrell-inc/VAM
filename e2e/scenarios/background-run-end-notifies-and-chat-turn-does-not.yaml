@@ -1,0 +1,56 @@
+id: background-run-end-notifies-and-chat-turn-does-not
+title: A run a trigger started leaves a finished notification with its receipt digest; a chat turn that did not wait leaves none
+tags: [triggers, approval, notifications]
+needs: process
+description: The arming turn parks on an approval, so its end is listed. The trigger then starts a run, whose end is listed with the digest of its receipt. A later plain chat turn in the same thread, which never waited on anyone, adds nothing, so there are two finished records in all, never one per turn.
+given:
+  - org-admin
+  - agent-with-trigger-tool
+  - trigger-test-broker
+when:
+  - chat: "e2e-step:arm Arm the trigger"
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - expect: { notifications: { kind: approval.pending, run: latest, count: 1, state: open } }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: echo_arm_trigger, count: 1 } }
+  - fire-trigger: { key: fire-1, label: fired }
+  - expect: { fire: { outcomes: [ACCEPTED] } }
+  - expect: { run: succeeded }
+then:
+  - expect:
+      notifications:
+        kind: run.finished
+        run: latest
+        count: 1
+        digest: receipt
+        within: 30s
+        fields: { severity: info }
+  - chat: { text: "e2e-step:talk Say hello", thread: continue }
+  - expect: { run: succeeded }
+  - expect: { receipt: { fields: { signature.receiptDigest: { present: true } } } }
+  - expect: { notifications: { kind: run.finished, run: latest, absent: true } }
+  - expect: { notifications: { kind: run.finished, count: 2 } }
+guards:
+  - vam:crates/vam-orchestrator/src/receipt.rs
+  - vam:crates/vam-orchestrator/src/workflow.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+mock:
+  - when: { step: talk }
+    reply: { text: hello }
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:background-run-end-notifies-and-chat-turn-does-not"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+  - when: { step: fired, toolName: write_file }
+    reply: { text: done }
+  - when: { step: fired, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: fired.txt, content: fired } } }
+status: active

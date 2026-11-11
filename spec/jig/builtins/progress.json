@@ -1,0 +1,32 @@
+{
+  "name": "vam.progress",
+  "doc": "A progress card: a label and done of total. Shown with show(); a later show with the same card_id updates the card in place. Nothing is asked, so there is no result.",
+  "inputSchema": {
+    "type": "object",
+    "required": ["label", "done", "total"],
+    "additionalProperties": false,
+    "properties": {
+      "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+      "done": { "type": "integer", "minimum": 0 },
+      "total": { "type": "integer", "minimum": 0 },
+      "message": { "type": "string", "maxLength": 500 },
+      "card_id": { "type": "string", "minLength": 1, "maxLength": 64 }
+    }
+  },
+  "resultSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "ir": {
+    "version": 1,
+    "catalog": "vam/1",
+    "jig": "vam.progress",
+    "root": "root",
+    "nodes": {
+      "root": { "type": "Stack", "props": { "gap": "small" }, "children": ["bar", "msg"] },
+      "bar": { "type": "ProgressBar", "props": { "value": { "$data": "/done" }, "max": { "$data": "/total" }, "label": { "$data": "/label" } } },
+      "msg": { "type": "Text", "props": { "text": { "$data": "/message" }, "tone": "neutral" }, "visible": { "$data": "/message" } }
+    }
+  }
+}

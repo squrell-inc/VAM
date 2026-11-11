@@ -1,0 +1,10 @@
+{
+  "id": "open-internet",
+  "name": "Open internet",
+  "description": "Every tool is allowed and every public host is reachable. A skill approvalRequired mark or an org rule can still ask or deny. Proposed: distinct from Ask before writes, which still asks before mutable external tools.",
+  "version": 1,
+  "permissions": {
+    "tools": { "default": "allow" },
+    "internet": { "default": "allow" }
+  }
+}

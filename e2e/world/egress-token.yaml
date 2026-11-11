@@ -1,0 +1,8 @@
+piece: egress-token
+kind: secret
+# An egress secret: the host proxy swaps the placeholder `vamsec_e2e_oversize_echo` (the binding id
+# with `/` and `-` as `_`) for the value on requests to the fixture origin. The id is fixed so a
+# mock script can write the placeholder.
+egress:
+  bindingId: e2e/oversize-echo
+  allowedDestinations: [oversize.e2e.test]

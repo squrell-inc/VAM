@@ -1,0 +1,24 @@
+id: gateway-model-id-routes-to-the-gateway
+title: A gateway model id the catalog prices goes to the gateway, decided by the host
+tags: [chat]
+needs: process
+description: >-
+  The caller names anthropic/claude-haiku-5.5. The catalog maps it to the gateway at the
+  maker's list price, so the host picks vercel before the run starts and the guest never
+  guesses from the slash. The process node serves only the mock model, so the run is refused
+  after the choice; the refusal carries the provider the host chose.
+given:
+  - org-admin
+  - agent-plain
+when:
+  - set-node: { allowedModels: ["mock-model", "anthropic/claude-haiku-5.5"], defaultModel: mock-model, defaultGateway: openrouter }
+  - chat: { text: "e2e-step:hi Say hi", model: "anthropic/claude-haiku-5.5", refused: true }
+then:
+  - expect: { refused: true, contains: "provider: vercel" }
+guards:
+  - vam:crates/vam-orchestrator/src/allowed_models.rs
+  - vam:crates/vam-inference/src/catalog.rs
+mock:
+  - when: { step: hi }
+    reply: { text: hi }
+status: active

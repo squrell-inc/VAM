@@ -1,0 +1,32 @@
+id: rejected-question-ends-the-run-within-three-turns
+title: A question the user turns down cannot trap a playbook run in the finish check; the run ends failed and names what is missing
+tags: [gate, playbook, approval]
+needs: process
+description: |
+  The task asks a question before it has done its first playbook step, and the user turns the question down. The task is told to answer without more tools, and it does. The run must end then: failed, because the steps are still missing, and the failure names them. The finish check must not send the task back to "do this step yourself" after the user said no, so no repeated finish nudge reaches the model. Before the fix the two nudges contradicted each other and the task looped until its turn cap.
+given:
+  - org-admin
+  - agent-plain
+  - playbook-with-gate
+when:
+  - start-playbook: { playbook: playbook-with-gate, label: run }
+  - expect: { approval: pending, tool: ask_user, fields: { kind: APPROVAL_KIND_QUESTION } }
+  - deny: latest
+then:
+  - expect: { run: failed }
+  - expect: { event: run.completed, fields: { error: { contains: "playbook incomplete: missing required steps: prepare" } } }
+  - expect: { thread: { role: user, contains: "Playbook finish is incomplete", absent: true } }
+  - expect: { thread: { role: assistant, contains: "I could not ask" } }
+guards:
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-orchestrator/src/workflow.rs
+mock:
+  - when: { step: run, lastRole: user, contains: "Playbook finish is incomplete" }
+    reply: { text: "Still not done: prepare is missing." }
+  - when: { step: run, lastRole: user, contains: "denied your tool request" }
+    reply: { text: "I could not ask, so the work is not prepared." }
+  - when: { step: run, lastRole: user, contains: "Answer the user now" }
+    reply: { text: "I could not ask, so the work is not prepared." }
+  - when: { step: run, stepStart: true }
+    reply: { toolCall: { name: ask_user, args: { jig: vam.question, data: { question: "Which period should I prepare?" } } } }
+status: active

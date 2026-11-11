@@ -1,0 +1,192 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:skill:hub.squrell.cloud/squrell/m365-mail"
+  },
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "description": "Read the member's Microsoft 365 mail and calendar; draft, send and book only with their approval.",
+  "requiresConnector": "urn:vam:connector:hub.squrell.cloud/squrell/microsoft-365",
+  "tools": [
+    {
+      "name": "mail_search",
+      "description": "Searches the member's mailbox. With `query` it is a Microsoft Graph search over subject, sender and body (relevance order); without it, it lists the newest mail from the last `sinceHours` hours. Returns id, sender, subject, time and a short preview.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"sinceHours\":{\"type\":\"integer\"},\"top\":{\"type\":\"integer\"}}}",
+      "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"messages\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"from\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"receivedAt\":{\"type\":\"string\"},\"preview\":{\"type\":\"string\"},\"unread\":{\"type\":\"boolean\"}}}}},\"required\":[\"messages\"]}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "bun",
+        "entrypoint": "./mail_search.ts"
+      },
+      "egress": [
+        {
+          "binding": "graph",
+          "host": "graph.microsoft.com",
+          "methods": [
+            "GET"
+          ],
+          "pathPrefixes": [
+            "/v1.0/me/messages"
+          ]
+        }
+      ],
+      "ui": {
+        "show": "mail_list"
+      }
+    },
+    {
+      "name": "mail_read",
+      "description": "Reads one message in full (plain text) by the id mail_search returned.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}",
+      "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"from\":{\"type\":\"string\"},\"to\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"cc\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"subject\":{\"type\":\"string\"},\"receivedAt\":{\"type\":\"string\"},\"conversationId\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"},\"truncated\":{\"type\":\"boolean\"}}}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "bun",
+        "entrypoint": "./mail_read.ts"
+      },
+      "egress": [
+        {
+          "binding": "graph",
+          "host": "graph.microsoft.com",
+          "methods": [
+            "GET"
+          ],
+          "pathPrefixes": [
+            "/v1.0/me/messages"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "calendar_list",
+      "description": "Lists the member's calendar events between `start` and `end` (default: the next seven days).",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"start\":{\"type\":\"string\"},\"end\":{\"type\":\"string\"},\"top\":{\"type\":\"integer\"}}}",
+      "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"events\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"start\":{\"type\":\"string\"},\"end\":{\"type\":\"string\"},\"timeZone\":{\"type\":\"string\"},\"location\":{\"type\":\"string\"},\"allDay\":{\"type\":\"boolean\"},\"showAs\":{\"type\":\"string\"},\"organizer\":{\"type\":\"string\"}}}}},\"required\":[\"events\"]}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "bun",
+        "entrypoint": "./calendar_list.ts"
+      },
+      "egress": [
+        {
+          "binding": "graph",
+          "host": "graph.microsoft.com",
+          "methods": [
+            "GET"
+          ],
+          "pathPrefixes": [
+            "/v1.0/me/calendarView"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "calendar_find_slots",
+      "description": "Suggests free meeting times for the member and optional `attendees` (email addresses) between `start` and `end` (default: the next seven days). Read only: it books nothing.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"durationMinutes\":{\"type\":\"integer\"},\"start\":{\"type\":\"string\"},\"end\":{\"type\":\"string\"},\"attendees\":{\"type\":\"string\"},\"maxCandidates\":{\"type\":\"integer\"}}}",
+      "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"slots\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"start\":{\"type\":\"string\"},\"end\":{\"type\":\"string\"},\"timeZone\":{\"type\":\"string\"}}}},\"reason\":{\"type\":\"string\"}},\"required\":[\"slots\"]}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "bun",
+        "entrypoint": "./calendar_find_slots.ts"
+      },
+      "egress": [
+        {
+          "binding": "graph",
+          "host": "graph.microsoft.com",
+          "methods": [
+            "POST"
+          ],
+          "paths": [
+            "/v1.0/me/findMeetingTimes"
+          ]
+        }
+      ],
+      "ui": {
+        "show": "slot_list"
+      }
+    },
+    {
+      "name": "mail_draft",
+      "description": "Saves a draft in the member's Drafts folder. A draft reaches no one. Use it to show wording before a send.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\"},\"cc\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}},\"required\":[\"to\",\"subject\",\"body\"]}",
+      "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"saved\":{\"type\":\"boolean\"}},\"required\":[\"id\"]}",
+      "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL",
+      "localExec": {
+        "command": "bun",
+        "entrypoint": "./mail_draft.ts"
+      },
+      "egress": [
+        {
+          "binding": "graph",
+          "host": "graph.microsoft.com",
+          "methods": [
+            "POST"
+          ],
+          "paths": [
+            "/v1.0/me/messages"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "mail_send",
+      "description": "Sends a mail as the member. Always asks the member first and shows the message on an approval card.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\"},\"cc\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}},\"required\":[\"to\",\"subject\",\"body\"]}",
+      "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"sent\":{\"type\":\"boolean\"},\"to\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"}},\"required\":[\"sent\"]}",
+      "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL",
+      "approvalRequired": true,
+      "localExec": {
+        "command": "bun",
+        "entrypoint": "./mail_send.ts"
+      },
+      "egress": [
+        {
+          "binding": "graph",
+          "host": "graph.microsoft.com",
+          "methods": [
+            "POST"
+          ],
+          "paths": [
+            "/v1.0/me/sendMail"
+          ]
+        }
+      ],
+      "ui": {
+        "ask": "send_approval"
+      }
+    },
+    {
+      "name": "calendar_create_event",
+      "description": "Books an event on the member's calendar (start and end like 2026-11-10T10:00:00, `timeZone` default UTC, optional `attendees` who are invited). Always asks the member first and shows the event on an approval card.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"subject\":{\"type\":\"string\"},\"start\":{\"type\":\"string\"},\"end\":{\"type\":\"string\"},\"timeZone\":{\"type\":\"string\"},\"attendees\":{\"type\":\"string\"},\"location\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"}},\"required\":[\"subject\",\"start\",\"end\"]}",
+      "outputSchemaJson": "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"start\":{\"type\":\"string\"},\"end\":{\"type\":\"string\"},\"timeZone\":{\"type\":\"string\"},\"created\":{\"type\":\"boolean\"}},\"required\":[\"id\"]}",
+      "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL",
+      "approvalRequired": true,
+      "effect": {
+        "class": "EFFECT_CLASS_IDEMPOTENT"
+      },
+      "localExec": {
+        "command": "bun",
+        "entrypoint": "./calendar_create_event.ts"
+      },
+      "egress": [
+        {
+          "binding": "graph",
+          "host": "graph.microsoft.com",
+          "methods": [
+            "POST"
+          ],
+          "paths": [
+            "/v1.0/me/events"
+          ]
+        }
+      ],
+      "ui": {
+        "ask": "book_approval"
+      }
+    }
+  ]
+}

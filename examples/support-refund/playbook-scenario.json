@@ -1,0 +1,47 @@
+{
+  "actions": [
+    {
+      "tool": {
+        "name": "get_order",
+        "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+        "result": "success",
+        "arguments": {}
+      }
+    },
+    {
+      "stepComplete": {
+        "stepId": "fetch-order",
+        "outcome": "done",
+        "output": {
+          "status": "delivered",
+          "delivered_on": "2026-10-01",
+          "total": 42.5
+        }
+      }
+    },
+    {
+      "stepComplete": {
+        "stepId": "assess-eligibility",
+        "outcome": "not_eligible"
+      }
+    }
+  ],
+  "expect": {
+    "steps": [
+      {
+        "id": "assess-eligibility",
+        "state": "completed",
+        "outcome": "not_eligible"
+      },
+      {
+        "id": "refund-amount",
+        "state": "skipped"
+      },
+      {
+        "id": "issue-refund",
+        "state": "skipped"
+      }
+    ],
+    "finish": "complete"
+  }
+}

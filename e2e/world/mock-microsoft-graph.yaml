@@ -1,0 +1,8 @@
+piece: mock-microsoft-graph
+kind: mock-provider
+# A runner-hosted loopback Microsoft Graph: messages (list, `$search`, by id), `calendarView`,
+# `findMeetingTimes`, a draft (`POST /v1.0/me/messages`, id d1), `…/messages/{id}/send`, `POST /v1.0/me/events`
+# and `POST /v1.0/me/sendMail`, which a `mock-provider: { hold: true }` step holds after logging it.
+# It logs the method and whether the bearer was the login mock's current token, a stale one, a
+# placeholder or none; never a token value.
+provider: microsoft-graph

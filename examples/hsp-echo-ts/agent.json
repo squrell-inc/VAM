@@ -1,0 +1,87 @@
+{
+  "allowAnyPlaybook": true,
+  "allowedPlaybookRefs": [],
+  "capabilityPolicy": {
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/hsp-echo-ts"
+      }
+    },
+    "securityProfileName": "hsp-echo-ts-profile"
+  },
+  "contextPolicy": {
+    "compaction": "COMPACTION_POLICY_SUMMARIZE_MIDDLE",
+    "maxHistoryTurns": 30,
+    "maxTokenCount": 96000
+  },
+  "description": "Loads the hosted-echo-ts skill and invokes echo.ping through the TypeScript HSP broker.",
+  "displayName": "HSP echo-ts Agent",
+  "hitlPolicy": {
+    "monitoredTools": [],
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/high-risk-assistant-actions"
+      }
+    }
+  },
+  "metadata": {
+    "createdBy": {
+      "urn": "urn:vam:user:local.vam.dev/vam/admin"
+    },
+    "labels": [
+      {
+        "key": "environment",
+        "value": "example"
+      }
+    ],
+    "revision": 1
+  },
+  "modelRequirements": {
+    "minContextTokens": 128000,
+    "requiredModalities": [
+      "text"
+    ],
+    "requiresStructuredOutput": true,
+    "requiresToolCalling": true
+  },
+  "preferredModels": [
+    {
+      "maxCompletionTokens": 4096,
+      "modelName": "openai/gpt-4o-mini",
+      "provider": "openrouter",
+      "temperature": 0.1
+    }
+  ],
+  "reasoningPolicy": {
+    "maxIterations": 10,
+    "stepTimeout": "300s",
+    "termination": "TERMINATION_POLICY_EXPLICIT_CLAIM"
+  },
+  "resourceId": {
+    "urn": "urn:vam:agent:local.vam.dev/vam/hsp-echo-ts"
+  },
+  "resourceRequirements": {
+    "memoryMib": 2048,
+    "networkMode": "NETWORK_MODE_RESTRICTED_EGRESS",
+    "storageGib": 10,
+    "vcpuCount": 2
+  },
+  "role": "HSP echo-ts guest",
+  "skillRefs": [
+    {
+      "resourceId": {
+        "urn": "urn:vam:skill:local.vam.dev/vam/hosted-echo-ts"
+      }
+    }
+  ],
+  "systemInstructions": "You run inside a VAM microVM. First call load_skill with catalog id hosted-echo-ts. Then invoke echo.ping with the user's message (default hello-hsp). Do not skip load_skill. After echo.ping returns, report the echoed payload briefly.",
+  "telemetryPolicy": {
+    "auditLedgerMode": "AUDIT_LEDGER_MODE_HASH_CHAINED",
+    "piiRedactionEnabled": true,
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/standard-telemetry-compliance"
+      }
+    }
+  }
+}

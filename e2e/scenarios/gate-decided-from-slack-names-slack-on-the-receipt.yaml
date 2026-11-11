@@ -1,0 +1,62 @@
+id: gate-decided-from-slack-names-slack-on-the-receipt
+title: A gate started by a trigger is decided from Slack, and the receipt names Slack
+tags: [notifications, gate, triggers]
+needs: process
+description: Slack is enabled for the node and the owner's Slack account is verified. A trigger starts a playbook run and its gate parks. One message reaches the owner's Slack account with the gate's options as buttons and an Open in VAM link. The linked account clicks go; the run finishes, the record closes as acted from Slack, the receipt names Slack, and the message is updated without buttons.
+given:
+  - org-admin
+  - trigger-test-broker
+  - agent-with-trigger-tool
+  - playbook-with-named-gate
+  - slack-bot-token
+  - slack-app-token
+  - notify-broker
+when:
+  # Slack is switched on for the node with the two credentials as vault refs.
+  - node-notify: { slack: { botToken: slack-bot-token, appToken: slack-app-token }, appUrl: "https://vam.example.test" }
+  - link-contact: { channel: slack, account: "T1/U1", verify: true }
+  - chat: "e2e-step:arm Arm the trigger"
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { run: succeeded }
+  # The trigger, not a person, starts the playbook run.
+  - fire-trigger: { key: fire-1, label: gated }
+  - expect: { gate: pending }
+  - expect:
+      channel-messages: { to: "T1/U1", kind: gate.opened, count: 1, buttons: 2, openInVam: true, within: 20s }
+  - channel-click: { account: "T1/U1", message: gate.opened, action: go }
+then:
+  - expect: { run: succeeded }
+  - expect: { receipt: { fields: { receipt.procedure.steps.1.gate.surface: slack } } }
+  - expect:
+      notifications:
+        kind: gate.opened
+        run: latest
+        count: 1
+        fields: { resolvedReason: acted, actedSurface: slack }
+  - expect: { notification-summary: { action: 0 } }
+  - expect: { channel-messages: { to: "T1/U1", kind: gate.opened, updated: true, buttons: 0, within: 20s } }
+guards:
+  - vam:brokers/vam-notify/src/**
+  - vam:crates/vam-orchestrator/src/notifications.rs
+  - vam:crates/vam-orchestrator/src/api/decide.rs
+mock:
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:gated Run the gate playbook mock-script:gate-decided-from-slack-names-slack-on-the-receipt"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+            playbookRef: { resourceId: { urn: "urn:vam:playbook:local.vam.dev/e2e/gate-started-by-a-trigger" } }
+  - when: { step: gated, lastRole: user, contains: "Missing required steps: finish" }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: done } } }
+  - when: { step: gated, afterTool: step_complete }
+    reply: { text: step done }
+  - when: { step: gated }
+    reply: { toolCall: { name: step_complete, args: { step_id: prepare, outcome: done } } }
+status: active

@@ -1,0 +1,66 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:playbook:local.vam.dev/vam/pr-review"
+  },
+  "displayName": "PR review with approval",
+  "description": "Summarise a pull request, ask a human to approve, then post the review. The posting tool is denied until the gate is approved.",
+  "activation": {
+    "when": "Use when the user wants a pull request reviewed and the review posted after approval."
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "pr_url": {
+        "type": "string"
+      }
+    },
+    "required": ["pr_url"],
+    "additionalProperties": false
+  },
+  "steps": [
+    {
+      "id": "review-change",
+      "description": "Read the pull request and summarise the change.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "instruction": "Read {{inputs.pr_url}} and summarise what the change does. Call the read tool first: the host records that call as evidence.",
+      "evidence": {
+        "tool": "read_pull_request",
+        "result": "success"
+      }
+    },
+    {
+      "id": "approve",
+      "description": "Pause for a human to approve the review before anything is posted.",
+      "kind": "STEP_KIND_GATE",
+      "after": ["review-change"],
+      "question": "Post this review to {{inputs.pr_url}}?",
+      "options": [
+        {
+          "label": "approved",
+          "description": "Post the review comment"
+        },
+        {
+          "label": "changes-requested",
+          "description": "Do not post. The author updates the pull request first.",
+          "terminal": "OUTCOME_TERMINAL_SUCCEEDED"
+        }
+      ]
+    },
+    {
+      "id": "post-review",
+      "description": "Post the approved review comment.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "after": ["approve:approved"],
+      "instruction": "Post the review comment on {{inputs.pr_url}}."
+    }
+  ],
+  "guards": [
+    {
+      "tools": ["post_review_comment"],
+      "sideEffects": ["SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL"],
+      "allowedWhen": ["approve:approved"]
+    }
+  ]
+}

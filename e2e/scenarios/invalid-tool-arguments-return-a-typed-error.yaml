@@ -1,0 +1,41 @@
+id: invalid-tool-arguments-return-a-typed-error
+title: A tool call with unparsable or incomplete arguments gets a typed error and the tool does not run
+tags: [chat]
+needs: process
+description: An unparsable call and a call missing a required field each get a typed error that names the problem, the tool does not run, and the next valid call runs.
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: "e2e-step:bad Read the note"
+  - expect: { thread: { role: tool, contains: "invalid arguments for read_file: not valid JSON" } }
+  - chat: "e2e-step:missing Read the note"
+  - expect: { thread: { role: tool, contains: "invalid arguments for read_file: missing required field 'path'" } }
+  - chat: "e2e-step:badwrite Save a draft"
+  - expect: { thread: { role: tool, contains: "invalid arguments for write_file: not valid JSON" } }
+  - chat: "e2e-step:ok Save the note"
+then:
+  - expect: { event: tool.completed, tool: write_file }
+  - expect: { file: { path: note.txt, present: true } }
+  - expect: { file: { path: draft.txt, absent: true } }
+guards:
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-runtime/src/primitives.rs
+mock:
+  - when: { step: bad, afterTool: read_file }
+    reply: { text: retried }
+  - when: { step: bad }
+    reply: { toolCall: { name: read_file, rawArgs: '{"path": ' } }
+  - when: { step: missing, afterTool: read_file }
+    reply: { text: retried }
+  - when: { step: missing }
+    reply: { toolCall: { name: read_file, args: {} } }
+  - when: { step: badwrite, afterTool: write_file }
+    reply: { text: retried }
+  - when: { step: badwrite }
+    reply: { toolCall: { name: write_file, rawArgs: '{"path": "draft.txt", "content": "dra' } }
+  - when: { step: ok, afterTool: write_file }
+    reply: { text: saved }
+  - when: { step: ok }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: kept } } }
+status: active

@@ -1,0 +1,24 @@
+id: unknown-slash-model-uses-the-node-default-gateway
+title: A provider/model id the catalog does not know goes to the node's default gateway
+tags: [chat]
+needs: process
+description: >-
+  The operator sets defaultGateway to openrouter. The caller names someone/some-model, which
+  no catalog entry covers. The host sends it to the default gateway, not to a guess made in the
+  guest. The process node serves only the mock model, so the run is refused after the choice;
+  the refusal carries the provider.
+given:
+  - org-admin
+  - agent-plain
+when:
+  - set-node: { allowedModels: ["mock-model", "someone/some-model"], defaultModel: mock-model, defaultGateway: openrouter }
+  - chat: { text: "e2e-step:hi Say hi", model: "someone/some-model", refused: true }
+then:
+  - expect: { refused: true, contains: "provider: openrouter" }
+guards:
+  - vam:crates/vam-orchestrator/src/allowed_models.rs
+  - vam:crates/vam-orchestrator/src/api/allowed_models.rs
+mock:
+  - when: { step: hi }
+    reply: { text: hi }
+status: active

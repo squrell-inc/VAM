@@ -1,0 +1,27 @@
+id: badge-counts-what-waits-on-you
+title: The app's badge counts what waits on the user, draws the approve card, and clears after the user decides
+tags: [approval, notifications]
+needs: ui
+description: |
+  Arranged through the API (a run parks on a guarded write), then checked on the screen of the app. The badge equals the action and warn counts of the summary. The list draws the existing approve card for the record. Deciding from the card clears the badge on the next poll, and the decide request carries the app surface header. No UI runner exists yet, so this file stays pending; the proof is the app's unit tests and the close checklist.
+given:
+  - org-admin
+  - agent-with-guarded-tool
+when:
+  - chat: "e2e-step:ask Write the note"
+  - expect: { approval: pending, tool: write_file }
+  - expect: { notifications: { kind: approval.pending, run: latest, count: 1, state: open, unread: true } }
+then:
+  - expect: { notification-summary: { action: 1 } }
+  - approve: { via: app }
+  - expect: { run: succeeded }
+  - expect: { notification-summary: { action: 0, within: 20s } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: ask, afterTool: write_file }
+    reply: { text: written }
+  - when: { step: ask }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+status: pending
+expectFail: { step: when.2, class: product }

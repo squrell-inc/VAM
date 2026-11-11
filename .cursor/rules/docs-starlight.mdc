@@ -1,0 +1,44 @@
+---
+description: Starlight docs conventions — content paths, sidebar sync, prefer Markdown.
+globs: docs/**
+alwaysApply: false
+---
+
+# Starlight docs conventions
+
+## Content location
+
+All documentation pages live in `docs/src/content/docs/`. Do not put doc content
+elsewhere in the repo.
+
+## File format
+
+- Prefer `.md` for documentation pages.
+- Use `.mdx` only when Starlight components are required (e.g. splash landing with `<Card>`).
+
+## Sidebar sync
+
+When adding, renaming, or removing a page, register the slug in
+`docs/astro.config.mjs` so navigation links resolve. The site uses the
+**`starlight-sidebar-topics`** plugin (not a flat `sidebar` array). Add new
+pages under the appropriate topic's `items` tree — e.g. **Developer Docs →
+Getting Started** for onboarding pages.
+
+Current topics:
+
+- **Developer Docs** (default) — Getting Started, Authoring, Tools, etc.
+- **Architecture & RFCs** — subsystem RFCs and deep architecture
+- **Agent Spec & LLMs** — AI agent reference
+
+## Frontmatter
+
+Every doc page needs at least `title` and `description` in YAML frontmatter.
+
+## Package
+
+The docs package is `@vam/docs`. Run commands from `docs/`:
+
+```bash
+pnpm dev
+pnpm build
+```

@@ -1,0 +1,140 @@
+{
+  "brokerId": "files-ts",
+  "egressDomains": [
+    "oraclecloud.com",
+    "amazonaws.com"
+  ],
+  "hooks": [
+    {
+      "phase": 1,
+      "required": false
+    },
+    {
+      "phase": 2,
+      "required": false
+    },
+    {
+      "phase": 3,
+      "required": false
+    }
+  ],
+  "secretBindings": [
+    {
+      "logicalName": "oci-tenancy",
+      "required": false,
+      "vaultKey": "oci/tenancy"
+    },
+    {
+      "logicalName": "oci-user",
+      "required": false,
+      "vaultKey": "oci/user"
+    },
+    {
+      "logicalName": "oci-fingerprint",
+      "required": false,
+      "vaultKey": "oci/fingerprint"
+    },
+    {
+      "logicalName": "oci-private-key",
+      "required": false,
+      "vaultKey": "oci/api-private-key"
+    },
+    {
+      "logicalName": "oci-region",
+      "required": false,
+      "vaultKey": "oci/region"
+    },
+    {
+      "logicalName": "oci-namespace",
+      "required": false,
+      "vaultKey": "oci/namespace"
+    },
+    {
+      "logicalName": "oci-bucket",
+      "required": false,
+      "vaultKey": "oci/bucket"
+    },
+    {
+      "logicalName": "s3-access-key",
+      "required": false,
+      "vaultKey": "s3/access-key"
+    },
+    {
+      "logicalName": "s3-secret-key",
+      "required": false,
+      "vaultKey": "s3/secret-key"
+    },
+    {
+      "logicalName": "s3-region",
+      "required": false,
+      "vaultKey": "s3/region"
+    },
+    {
+      "logicalName": "s3-bucket",
+      "required": false,
+      "vaultKey": "s3/bucket"
+    },
+    {
+      "logicalName": "s3-endpoint",
+      "required": false,
+      "vaultKey": "s3/endpoint"
+    }
+  ],
+  "tools": [
+    {
+      "requiredSecrets": [
+        "oci-tenancy",
+        "oci-user",
+        "oci-fingerprint",
+        "oci-private-key",
+        "oci-region",
+        "oci-namespace",
+        "oci-bucket",
+        "s3-access-key",
+        "s3-secret-key",
+        "s3-region",
+        "s3-bucket",
+        "s3-endpoint"
+      ],
+      "sideEffect": 3,
+      "toolName": "files.put"
+    },
+    {
+      "requiredSecrets": [
+        "oci-tenancy",
+        "oci-user",
+        "oci-fingerprint",
+        "oci-private-key",
+        "oci-region",
+        "oci-namespace",
+        "oci-bucket",
+        "s3-access-key",
+        "s3-secret-key",
+        "s3-region",
+        "s3-bucket",
+        "s3-endpoint"
+      ],
+      "sideEffect": 1,
+      "toolName": "files.list"
+    },
+    {
+      "requiredSecrets": [
+        "oci-tenancy",
+        "oci-user",
+        "oci-fingerprint",
+        "oci-private-key",
+        "oci-region",
+        "oci-namespace",
+        "oci-bucket",
+        "s3-access-key",
+        "s3-secret-key",
+        "s3-region",
+        "s3-bucket",
+        "s3-endpoint"
+      ],
+      "sideEffect": 1,
+      "toolName": "files.get"
+    }
+  ],
+  "trustTier": 3
+}

@@ -1,0 +1,17 @@
+piece: agent-with-builtins
+kind: agent
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent offered read_file and write_file
+    description: Agent offered read_file and write_file
+    role: Tester
+    systemInstructions: Use read_file and write_file when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:read_file", decision: allow }
+          - { target: "builtin:write_file", decision: allow }

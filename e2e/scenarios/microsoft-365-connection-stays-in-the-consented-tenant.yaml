@@ -1,0 +1,32 @@
+id: microsoft-365-connection-stays-in-the-consented-tenant
+title: A Microsoft 365 connection stays in the consented tenant and refreshes without a resource
+description: >
+  The administrator enables Microsoft 365 with consent for tenant T. Tokens from another tenant
+  are refused and the tile stays "connect". Tokens from T give "connected as <upn>". A check
+  refreshes at the mock's tenant endpoint, which sees the configured client id and no resource
+  and no client secret. When the mock revokes, a check gives "needs reconnect". No token value is
+  in any listing.
+tags: [connectors, members, egress]
+needs: process
+given:
+  - org-member
+  - org-administrator
+  - mock-microsoft-login
+when:
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-administrator }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 22222222-2222-4222-8222-222222222222, upn: someone@other.example, as: org-member, refused: true }
+  - expect: { connectors: { id: microsoft-365, as: org-member, fields: { state: connect } } }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }
+  - expect: { connectors: { id: microsoft-365, as: org-member, fields: { state: connected, label: member@e2e.example } } }
+  - connector-check: { id: microsoft-365, as: org-member }
+  - expect: { mock-requests: { piece: mock-microsoft-login, path: /11111111-1111-4111-8111-111111111111/oauth2/v2.0/token, count: 1, has: [grant_type=refresh_token, refresh_token], lacks: [resource, client_secret] } }
+  - mock-provider: { piece: mock-microsoft-login, revoke: true }
+  - connector-check: { id: microsoft-365, as: org-member }
+then:
+  - expect: { connectors: { id: microsoft-365, as: org-member, fields: { state: needsReconnect } } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+  - vam:crates/vam-orchestrator/src/mcp_oauth_refresh.rs
+  - vam:crates/vam-orchestrator/src/secrets.rs
+status: active

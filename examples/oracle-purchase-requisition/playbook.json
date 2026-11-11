@@ -1,0 +1,232 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:playbook:local.vam.dev/vam/oracle-purchase-requisition"
+  },
+  "displayName": "Oracle purchase requisition",
+  "description": "Raise a purchase requisition in Oracle: choose guided entry or attach an invoice, pick the supplier, confirm the summary, then create it.",
+  "activation": {
+    "when": "Use when the user wants to raise a purchase requisition in Oracle.",
+    "examples": [
+      "Raise a purchase requisition in Oracle",
+      "I need to order laptops through Oracle"
+    ],
+    "mode": "ACTIVATION_MODE_ASK"
+  },
+  "steps": [
+    {
+      "id": "mode",
+      "description": "Ask how to fill the requisition.",
+      "kind": "STEP_KIND_GATE",
+      "question": "Do you want to be guided through the requisition, or attach an invoice to read it from?",
+      "options": [
+        {
+          "label": "guided",
+          "description": "Answer the questions"
+        },
+        {
+          "label": "invoice",
+          "description": "Attach an invoice"
+        }
+      ]
+    },
+    {
+      "id": "get-invoice",
+      "description": "Collect the invoice file.",
+      "kind": "STEP_KIND_GATE",
+      "after": [
+        "mode:invoice"
+      ],
+      "question": "Attach the invoice.",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "invoice"
+        ],
+        "properties": {
+          "invoice": {
+            "type": "string",
+            "format": "vam-workspace-file",
+            "title": "Invoice"
+          }
+        }
+      }
+    },
+    {
+      "id": "extract-invoice",
+      "description": "Read the supplier, lines and amount from the invoice.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "after": [
+        "get-invoice"
+      ],
+      "instruction": "Read the invoice at {{steps.get-invoice.output.invoice}} and report the supplier name, the lines as short text, and the total amount.",
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "supplier",
+          "lines",
+          "amount"
+        ],
+        "properties": {
+          "supplier": {
+            "type": "string"
+          },
+          "lines": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "id": "supplier-name",
+      "description": "Collect the supplier name to search for.",
+      "kind": "STEP_KIND_GATE",
+      "afterAny": [
+        "mode:guided",
+        "extract-invoice"
+      ],
+      "question": "Which supplier is this for?",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Supplier name",
+            "default": "{{steps.extract-invoice.output.supplier}}"
+          }
+        }
+      }
+    },
+    {
+      "id": "find-suppliers",
+      "description": "Search Oracle for suppliers with that name.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_BOUND",
+      "after": [
+        "supplier-name"
+      ],
+      "instruction": "Search the supplier list for {{steps.supplier-name.output.name}}.",
+      "binding": {
+        "toolName": "oracle_search_suppliers",
+        "arguments": {
+          "query": "{{steps.supplier-name.output.name}}"
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "suppliers"
+        ],
+        "properties": {
+          "suppliers": {
+            "type": "array"
+          }
+        }
+      }
+    },
+    {
+      "id": "pick-supplier",
+      "description": "Let the user pick the supplier.",
+      "kind": "STEP_KIND_GATE",
+      "after": [
+        "find-suppliers"
+      ],
+      "question": "Which supplier do you mean?",
+      "choicesFrom": "steps.find-suppliers.output.suppliers",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "supplier_id"
+        ],
+        "properties": {
+          "supplier_id": {
+            "type": "string",
+            "title": "Supplier"
+          }
+        }
+      }
+    },
+    {
+      "id": "details",
+      "description": "Collect items, cost centre and need-by date.",
+      "kind": "STEP_KIND_GATE",
+      "after": [
+        "pick-supplier"
+      ],
+      "question": "What are you ordering, for which cost centre, and by when?",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "items",
+          "cost_centre",
+          "need_by"
+        ],
+        "properties": {
+          "items": {
+            "type": "string",
+            "title": "Items",
+            "default": "{{steps.extract-invoice.output.lines}}"
+          },
+          "cost_centre": {
+            "type": "string",
+            "title": "Cost centre"
+          },
+          "need_by": {
+            "type": "string",
+            "format": "date",
+            "title": "Need-by date"
+          }
+        }
+      }
+    },
+    {
+      "id": "confirm",
+      "description": "Confirm the summary.",
+      "kind": "STEP_KIND_GATE",
+      "after": [
+        "details"
+      ],
+      "question": "Create a purchase requisition for supplier {{steps.pick-supplier.output.supplier_id}}: {{steps.details.output.items}} (cost centre {{steps.details.output.cost_centre}}, needed by {{steps.details.output.need_by}})?",
+      "options": [
+        {
+          "label": "approve",
+          "description": "Create it"
+        },
+        {
+          "label": "change",
+          "description": "Stop here and start again with changes",
+          "terminal": "OUTCOME_TERMINAL_SUCCEEDED"
+        }
+      ]
+    },
+    {
+      "id": "create-pr",
+      "description": "Create the purchase requisition in Oracle.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_BOUND",
+      "after": [
+        "confirm:approve"
+      ],
+      "instruction": "Create the purchase requisition from the captured values.",
+      "binding": {
+        "toolName": "oracle_create_purchase_requisition",
+        "arguments": {
+          "supplier_id": "{{steps.pick-supplier.output.supplier_id}}",
+          "items": "{{steps.details.output.items}}",
+          "cost_centre": "{{steps.details.output.cost_centre}}",
+          "need_by": "{{steps.details.output.need_by}}"
+        }
+      },
+      "evidence": {
+        "tool": "oracle_create_purchase_requisition",
+        "result": "success"
+      }
+    }
+  ]
+}

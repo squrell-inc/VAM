@@ -1,0 +1,23 @@
+id: greeting-starts-no-playbook
+title: A greeting gets a plain reply and starts no playbook
+tags: [chat, playbook]
+needs: process
+description: The playbook is attached and set to start by itself; a greeting does not match it.
+model:
+  task: playbook-no-match
+  version: 0.1.0
+  k: 5
+given:
+  - org-admin
+  - agent-with-unmatched-playbook
+when:
+  - chat: "e2e-step:start Hi"
+then:
+  - expect: { run: succeeded }
+  - expect: { event: playbook.activated, absent: true }
+guards:
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: start }
+    reply: { text: "Hello! How can I help?" }
+status: active

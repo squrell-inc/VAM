@@ -1,0 +1,6 @@
+{
+  "name": "db-tools",
+  "version": "1.0.0",
+  "description": "SQLite Memory & Code Analysis Tools for VAM Agents",
+  "type": "module"
+}

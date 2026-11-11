@@ -1,0 +1,56 @@
+id: always-allow-and-always-deny-are-remembered
+title: Always allow and Always deny on the owner's draft are saved and decide later calls without asking; the release still asks
+tags: [approval, permissions]
+needs: process
+given:
+  - org-admin
+  - agent-with-guarded-write-and-delete
+when:
+  - chat: { text: "e2e-step:a1 Write note", draft: true }
+  - expect: { approval: pending, tool: write_file, fields: { alwaysOffered: true, target: "builtin:write_file" } }
+  - approve: { always: true }
+  - expect: { run: succeeded }
+  - chat: { text: "e2e-step:a2 Write note two", draft: true, thread: continue }
+  - expect: { run: succeeded }
+  - expect: { event: policy.decided, tool: write_file, fields: { disposition: ALLOW } }
+  - chat: { text: "e2e-step:a3 Delete note", draft: true }
+  - expect: { approval: pending, tool: delete_file, fields: { alwaysOffered: true } }
+  - deny: { always: true }
+  - expect: { run: succeeded }
+  - chat: { text: "e2e-step:a4 Write third", draft: true }
+then:
+  - expect: { run: succeeded }
+  - expect: { event: policy.decided, tool: write_file, fields: { disposition: ALLOW } }
+  - expect: { file: { path: note.txt, present: true } }
+  - expect: { file: { path: third.txt, present: true } }
+  - chat: { text: "e2e-step:a5 Write released", draft: false }
+  - expect: { approval: pending, tool: write_file, fields: { lockedReason: { contains: "once only" } } }
+guards:
+  - vam:crates/vam-orchestrator/src/session_targets.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/catalog_resolve.rs
+  - vam:crates/vam-orchestrator/src/policy_legacy.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-security/src/permissions.rs
+mock:
+  - when: { step: a1, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+  - when: { step: a1 }
+    reply: { text: note written }
+  - when: { step: a2, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: note2.txt, content: e2e } } }
+  - when: { step: a2 }
+    reply: { text: note two written }
+  - when: { step: a3, stepStart: true }
+    reply: { toolCall: { name: delete_file, args: { path: note.txt } } }
+  - when: { step: a3 }
+    reply: { text: delete refused }
+  - when: { step: a4, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: third.txt, content: e2e } } }
+  - when: { step: a4 }
+    reply: { text: third written }
+  - when: { step: a5, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: released.txt, content: e2e } } }
+  - when: { step: a5 }
+    reply: { text: released written }
+status: active

@@ -1,0 +1,39 @@
+id: expired-microsoft-token-is-refreshed-before-the-call
+title: An expired Microsoft token is refreshed before the call, once per lifetime
+description: >
+  The member connects with an access token that has already expired. One search makes the login
+  mock log exactly one refresh at the consent tenant's endpoint, with no resource and no client
+  secret, and the Graph mock sees the refreshed token, never the stale one. A second search inside
+  the new lifetime adds no refresh.
+tags: [connectors, egress]
+needs: process
+given:
+  - org-member
+  - org-administrator
+  - mock-microsoft-login
+  - mock-microsoft-graph
+  - agent-with-m365-probe
+when:
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-administrator }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, expiresIn: 0, as: org-member }
+  - chat: { text: "e2e-step:ask Search my mail", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-microsoft-login, path: /11111111-1111-4111-8111-111111111111/oauth2/v2.0/token, count: 1, has: [grant_type=refresh_token, refresh_token], lacks: [resource, client_secret] } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages, method: GET, count: 1, has: [bearer=current], lacks: [bearer=stale] } }
+  - chat: { text: "e2e-step:ask Search my mail again", as: org-member }
+  - expect: { run: succeeded }
+then:
+  - expect: { mock-requests: { piece: mock-microsoft-login, path: /11111111-1111-4111-8111-111111111111/oauth2/v2.0/token, count: 1 } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages, count: 2, lacks: [bearer=stale] } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/mcp_oauth_refresh.rs
+  - vam:crates/vam-network/src/broker.rs
+mock:
+  - when: { step: ask, toolName: m365_probe_search }
+    reply: { text: Found two messages. }
+  - when: { step: ask, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_search, args: { method: GET, path: /v1.0/me/messages } } }
+  - when: { step: ask, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-expired-microsoft-token-is-refreshed-before-the-call } } }
+status: active

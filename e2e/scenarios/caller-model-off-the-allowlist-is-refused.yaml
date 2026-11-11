@@ -1,0 +1,18 @@
+id: caller-model-off-the-allowlist-is-refused
+title: A caller who names a model the operator did not allow is refused, and told which models are allowed
+tags: [chat]
+needs: process
+description: The one refusal of the model rule. The answer names the allowed models.
+given:
+  - org-admin
+  - agent-plain
+when:
+  - chat: { text: "e2e-step:hi Say hi", model: "openai/gpt-4o", refused: true }
+then:
+  - expect: { refused: true, contains: "allowed: mock-model" }
+guards:
+  - vam:crates/vam-orchestrator/src/allowed_models.rs
+mock:
+  - when: { step: hi }
+    reply: { text: hi }
+status: active

@@ -1,0 +1,12 @@
+piece: agent-plain
+kind: agent
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Plain chat agent
+    description: Plain chat agent
+    role: Tester
+    systemInstructions: Answer briefly. Finish with task_complete.
+    allowAnyPlaybook: true
+

@@ -1,0 +1,28 @@
+{
+  "name": "vam.gate_default",
+  "doc": "The generated form for a playbook gate that has only a response_schema. The IR depends on the gate, so the file holds the static frame plus the generator rule 'form'. Rule, for each property of data.response_schema (required ones first, then the rest, each in name order, because a protobuf Struct keeps no order): string with enum -> Select; string, format date -> DateInput; string, format vam-workspace-file -> FileInput; string with maxLength over 200 -> TextArea; other string -> Input; number or integer -> NumberInput (minimum and maximum become min and max); boolean -> Toggle; array of strings with items.enum -> MultiSelect; anything else is refused. The label is the property's title, else its name. The state default is the property's default, else '' / 0 (or minimum) / false / []. The submit button lists every property in 'with'. The result is validated against data.response_schema itself, so a selection can hold only offered items.",
+  "inputSchema": {
+    "type": "object",
+    "required": ["question", "response_schema"],
+    "additionalProperties": false,
+    "properties": {
+      "question": { "type": "string", "minLength": 1, "maxLength": 2000 },
+      "response_schema": { "type": "object" }
+    }
+  },
+  "resultSchema": { "type": "object" },
+  "resultFrom": "/response_schema",
+  "form": { "schema": "/response_schema", "into": "fields", "submit": "send" },
+  "ir": {
+    "version": 1,
+    "catalog": "vam/1",
+    "jig": "vam.gate_default",
+    "root": "root",
+    "nodes": {
+      "root": { "type": "Stack", "props": { "gap": "medium" }, "children": ["q", "fields", "send"] },
+      "q": { "type": "Text", "props": { "text": { "$data": "/question" }, "emphasis": "strong" } },
+      "fields": { "type": "Stack", "props": { "gap": "small" }, "children": [] },
+      "send": { "type": "Button", "props": { "label": "Submit", "action": { "event": "submit", "with": [] } } }
+    }
+  }
+}

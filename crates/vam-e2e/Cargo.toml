@@ -1,0 +1,38 @@
+[package]
+name = "vam-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "E2E scenario catalog, check and runner seams for VAM"
+
+[lib]
+name = "vam_e2e"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vam-e2e"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+base64 = "0.22"
+flate2 = "1.0"
+regex = "1"
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+tar = "0.4"
+# Mock rule types, to validate inline `mock:` blocks. Never depend on vam-orchestrator,
+# vam-core or vam-runtime here (S5: the process-guest feature must not unify into workspace builds).
+vam-inference = { path = "../vam-inference" }
+# The stable prefixes the thread is counted by (H-0.8). No host crates.
+vam-spec.workspace = true
+
+[dev-dependencies]
+axum = "0.6"
+tempfile = "3.8"
+tokio = { version = "1.34", features = ["full"] }

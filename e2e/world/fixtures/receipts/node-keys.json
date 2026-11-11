@@ -1,0 +1,9 @@
+{
+  "signingKeys": [
+    {
+      "keyId": "ed25519:2ed92b267cc683f3",
+      "publicKey": "26c8bff291186bbea9b2cbe045fe0b0a30d28fea8a5831ec9f590cced4cc83a2",
+      "state": "active"
+    }
+  ]
+}

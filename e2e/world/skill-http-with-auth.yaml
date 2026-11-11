@@ -1,0 +1,18 @@
+piece: skill-http-with-auth
+kind: skill
+requires: [pinned-http-auth]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: A host HTTP tool whose Authorization secret is pinned to another host than the tool may reach
+    tools:
+      - name: host_http_get
+        description: Fetches a URL with the stored Authorization value
+        inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        host_exec:
+          adapter_id: http_get
+          config: { allowlist: "target.e2e-http.example" }
+        required_secrets:
+          - { name: "{{name:pinned-http-auth}}-auth-header", required: true }

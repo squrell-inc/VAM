@@ -1,0 +1,49 @@
+[package]
+name = "vam-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "First-party HSP web broker: web_search and web_fetch behind a provider interface"
+
+[dependencies]
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"] }
+encoding_rs = "0.8"
+# HTML to markdown (Apache-2.0). Pinned: the newest release is days old. The DOM crate is the
+# one htmd already builds on, named here so we can inspect and prune the tree.
+htmd = "=0.5.5"
+markup5ever_rcdom = "0.38"
+prost-types = "0.12"
+# gzip: the body cap counts decoded bytes, so a compression bomb stops at the cap.
+reqwest = { version = "0.11", features = ["json", "rustls-tls", "gzip"], default-features = false }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.34", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.10", features = ["transport"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url = "2.5"
+# Shared SSRF guard (pinning on every hop of the fetch engine, AR-1.3).
+vam-security = { workspace = true, features = ["ssrf-guard"] }
+vam-spec.workspace = true
+
+[features]
+# Test-only seams (fake resolver, connect address, any port) for integration
+# tests that need their own process. Off by default; the binary never uses it.
+test-support = []
+
+[dev-dependencies]
+# Enables `test-support` for this package's own tests only.
+vam-web = { path = ".", features = ["test-support"] }
+httpmock = "0.7"
+flate2 = "1"
+tempfile = "3.8"
+
+[[bin]]
+name = "vam-web-broker"
+path = "src/bin/vam-web-broker.rs"

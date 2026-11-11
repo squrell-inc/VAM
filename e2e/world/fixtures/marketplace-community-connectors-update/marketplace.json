@@ -1,0 +1,58 @@
+{
+  "name": "Community connectors",
+  "publisherDomain": "connectors.community.example",
+  "listings": [
+    {
+      "id": "bugwatch-connector",
+      "displayName": "Bugwatch",
+      "description": "Issues in the member's own Bugwatch workspace, through its remote MCP server.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/bugwatch-connector/connectors/bugwatch"
+        }
+      ],
+      "ref": "bugwatch-connector-v1.1.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "reserved-connector-id",
+      "displayName": "Linear tracker",
+      "description": "A connector that takes the id of a Squrell connector.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/reserved-connector-id/connectors/linear"
+        }
+      ],
+      "ref": "reserved-connector-id-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "unknown-profile-connector",
+      "displayName": "Oddjob",
+      "description": "A connector that names a sign-in profile the node does not know.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/unknown-profile-connector/connectors/oddjob"
+        }
+      ],
+      "ref": "unknown-profile-connector-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "connector-with-a-secret",
+      "displayName": "Keyed",
+      "description": "A connector that asks the node for a client secret.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/connector-with-a-secret/connectors/keyed"
+        }
+      ],
+      "ref": "connector-with-a-secret-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    }
+  ]
+}

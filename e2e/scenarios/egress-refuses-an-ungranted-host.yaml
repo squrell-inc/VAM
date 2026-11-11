@@ -1,0 +1,54 @@
+id: egress-refuses-an-ungranted-host
+title: The guest's proxy refuses the cloud metadata address and a host the agent was never granted
+description: >
+  The agent has no internet granted. Its shell asks the guest proxy for the cloud metadata
+  address and for a public host. Both requests are refused, the tool output in the thread says
+  so, and the run events record a deny for each host and no allow. A process guest runs the same
+  host-side gate as a microVM guest, so this proves the gate, not the guest's lack of a route
+  (see `guest-has-no-route-off-the-vm`).
+tags: [chat, egress]
+needs: process
+given:
+  - org-admin
+  - agent-with-shell-and-no-internet
+when:
+  - chat: "e2e-step:probe Ask for two hosts"
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: metadata-refused } }
+  - expect: { thread: { role: tool, contains: ungranted-refused } }
+  - expect: { event: egress.decided, fields: { data.domain: 169.254.169.254, data.disposition: DENY } }
+  - expect: { event: egress.decided, fields: { data.domain: example.com, data.disposition: DENY } }
+  - expect: { event: egress.decided, absent: true, fields: { data.disposition: ALLOW } }
+guards:
+  - vam:crates/vam-network/src/broker.rs
+  - vam:crates/vam-runtime/src/egress.rs
+  - vam:crates/vam-orchestrator/src/brokers.rs
+mock:
+  - when: { step: probe, afterTool: run }
+    reply: { text: Asked. }
+  - when: { step: probe }
+    reply:
+      toolCall:
+        name: run
+        args:
+          # The tokens are assembled by the shell so the command text never contains them
+          # (the thread matcher also reads tool-call arguments).
+          command: |
+            HP=${HTTP_PROXY#http://}
+            H=${HP%:*}
+            P=${HP##*:}
+            ask() {
+              n=0
+              while [ "$n" -lt 3 ]; do
+                out=$(printf 'GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$1" "$2" | timeout 20 nc "$H" "$P" 2>/dev/null | head -c 12)
+                [ -n "$out" ] && break
+                n=$((n + 1))
+                sleep 1
+              done
+              printf '%s' "$out"
+            }
+            verdict() { case "${1#HTTP/* }" in 4*|5*) echo "$2"-"refused" ;; 2*) echo "$2"-"served" ;; *) echo "$2"-"silent" ;; esac; }
+            verdict "$(ask http://169.254.169.254/latest/meta-data/ 169.254.169.254)" metadata
+            verdict "$(ask http://example.com/ example.com)" ungranted
+status: active

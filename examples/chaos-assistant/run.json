@@ -1,0 +1,22 @@
+{
+  "spec": {
+    "agentRef": {
+      "resourceId": {
+        "urn": "urn:vam:agent:local.vam.dev/vam/chaos-assistant"
+      }
+    },
+    "inputs": {
+      "max_iterations": 4,
+      "model": "openai/gpt-4o-mini",
+      "system_instructions": "Run probe_sandbox and check_env to verify runtime isolation, then summarize findings."
+    },
+    "maxDuration": "120s",
+    "maxFinancialBudget": {
+      "currency": "USD",
+      "microAmount": "100000"
+    },
+    "runId": {
+      "urn": "urn:vam:run:chaos-test-001"
+    }
+  }
+}

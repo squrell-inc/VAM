@@ -1,0 +1,25 @@
+id: model-task-runs-k-trials-on-the-mock
+title: A scenario with a model block is a benchmark task that --bench runs k times against the mock
+tags: [chat]
+needs: process
+description: The lane proof for the benchmark runner. The task is one chat with a scripted reply; a trial passes when every then holds. Under --bench --mock it runs k times and the results are marked mock and unscored.
+model:
+  task: mock-chat-reply
+  version: 0.0.0-lane
+  k: 2
+given:
+  - org-admin
+  - agent-plain
+when:
+  - chat: "e2e-step:hello Say hello"
+then:
+  - expect: { run: succeeded }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: "Hello from the task." } }
+guards:
+  - vam:crates/vam-e2e/src/bench.rs
+  - vam:crates/vam-e2e/src/usage.rs
+mock:
+  - when: { step: hello }
+    reply:
+      text: Hello from the task.
+status: active

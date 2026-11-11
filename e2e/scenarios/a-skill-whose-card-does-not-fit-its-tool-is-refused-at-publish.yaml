@@ -1,0 +1,28 @@
+id: a-skill-whose-card-does-not-fit-its-tool-is-refused-at-publish
+title: A skill whose card does not fit its tool is refused when it is published
+description: >
+  The skill with good cards publishes. Four skills with a card that cannot work are each refused with a message
+  that names the tool, the card file and the place in it: a card file that is missing, a primitive the catalog
+  lacks, a binding to a field the tool's output lacks, and an ask card that submits a field the tool's input lacks.
+tags: [connectors]
+needs: process
+given:
+  - org-admin
+  - skill-mail-calendar-cards
+  - skill-with-a-missing-card-file
+  - skill-with-an-unknown-primitive-card
+  - skill-with-a-card-bound-to-a-missing-field
+  - skill-with-an-ask-card-for-a-missing-input
+when:
+  - publish-skill: { piece: skill-mail-calendar-cards }
+then:
+  - publish-skill: { piece: skill-with-a-missing-card-file, refused: true, contains: jigs/mail_list.json }
+  - publish-skill: { piece: skill-with-an-unknown-primitive-card, refused: true, contains: Carousel }
+  - publish-skill: { piece: skill-with-a-card-bound-to-a-missing-field, refused: true, contains: /messages }
+  - publish-skill: { piece: skill-with-an-ask-card-for-a-missing-input, refused: true, contains: cc }
+guards:
+  - vam:crates/vam-orchestrator/src/skill_package_admit.rs
+  - vam:crates/vam-spec/src/jig.rs
+  - vam:crates/vam-spec/src/validation.rs
+  - vam:crates/vam-spec/src/package.rs
+status: active

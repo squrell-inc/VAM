@@ -1,0 +1,114 @@
+{
+  "actions": [
+    {
+      "gate": {
+        "stepId": "mode",
+        "decision": "SUBMITTED",
+        "response": {
+          "option": "guided"
+        }
+      }
+    },
+    {
+      "gate": {
+        "stepId": "supplier-name",
+        "decision": "SUBMITTED",
+        "response": {
+          "name": "Acme"
+        }
+      }
+    },
+    {
+      "tool": {
+        "name": "oracle_search_suppliers",
+        "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+        "result": "success",
+        "arguments": {}
+      }
+    },
+    {
+      "stepComplete": {
+        "stepId": "find-suppliers",
+        "outcome": "done",
+        "output": {
+          "suppliers": [
+            "SUP-1",
+            "SUP-2"
+          ]
+        }
+      }
+    },
+    {
+      "gate": {
+        "stepId": "pick-supplier",
+        "decision": "SUBMITTED",
+        "response": {
+          "supplier_id": "SUP-2"
+        }
+      }
+    },
+    {
+      "gate": {
+        "stepId": "details",
+        "decision": "SUBMITTED",
+        "response": {
+          "items": "10 laptops",
+          "cost_centre": "CC-42",
+          "need_by": "2026-12-01"
+        }
+      }
+    },
+    {
+      "gate": {
+        "stepId": "confirm",
+        "decision": "SUBMITTED",
+        "response": {
+          "option": "approve"
+        }
+      }
+    },
+    {
+      "tool": {
+        "name": "oracle_create_purchase_requisition",
+        "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL",
+        "result": "success",
+        "arguments": {}
+      }
+    },
+    {
+      "stepComplete": {
+        "stepId": "create-pr",
+        "outcome": "done"
+      }
+    }
+  ],
+  "expect": {
+    "steps": [
+      {
+        "id": "mode",
+        "state": "completed",
+        "outcome": "guided"
+      },
+      {
+        "id": "get-invoice",
+        "state": "skipped"
+      },
+      {
+        "id": "pick-supplier",
+        "state": "completed",
+        "outcome": "submitted"
+      },
+      {
+        "id": "confirm",
+        "state": "completed",
+        "outcome": "approve"
+      },
+      {
+        "id": "create-pr",
+        "state": "completed",
+        "outcome": "done"
+      }
+    ],
+    "finish": "complete"
+  }
+}

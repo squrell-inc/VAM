@@ -1,0 +1,21 @@
+piece: agent-with-m365-probe
+kind: agent
+release: true
+requires: [skill-m365-probe]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent offered the Microsoft 365 probe skill
+    description: Agent that reads and sends mail through the member's Microsoft 365 connection
+    role: Tester
+    systemInstructions: Use the probe tools when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    skillRefs:
+      - resourceId: { urn: "{{urn:skill-m365-probe}}" }
+        version: { major: 1, minor: 0, patch: 0 }
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:load_skill", decision: allow }
+          - { target: "skill:{{name:skill-m365-probe}}/*", decision: allow }

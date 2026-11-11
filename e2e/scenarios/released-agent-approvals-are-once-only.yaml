@@ -1,0 +1,37 @@
+id: released-agent-approvals-are-once-only
+title: On a released agent an approval names its lock, refuses Always, saves nothing, and Deny keeps the tool from running
+tags: [approval, chat]
+needs: process
+given:
+  - org-admin
+  - agent-with-guarded-tool
+when:
+  - chat: "e2e-step:w1 Write first"
+  - expect: { approval: pending, tool: write_file, fields: { lockedReason: { contains: "once only" } } }
+  - approve: { always: true, refused: true }
+  - expect: { approval: pending, tool: write_file }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { file: { path: first.txt, present: true } }
+  - chat: "e2e-step:w2 Write second"
+  - expect: { approval: pending, tool: write_file }
+  - deny: latest
+then:
+  - expect: { run: succeeded }
+  - expect: { event: hitl.decided, fields: { data.decision: REJECTED } }
+  - expect: { file: { path: second.txt, absent: true } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/session_targets.rs
+  - vam:crates/vam-orchestrator/src/workflow.rs
+  - vam:crates/vam-runtime/src/hitl_checkpoint.rs
+mock:
+  - when: { step: w1, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: first.txt, content: e2e } } }
+  - when: { step: w1 }
+    reply: { text: first written }
+  - when: { step: w2, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: second.txt, content: e2e } } }
+  - when: { step: w2 }
+    reply: { text: second not written }
+status: active

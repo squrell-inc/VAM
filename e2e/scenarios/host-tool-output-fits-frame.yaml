@@ -1,0 +1,32 @@
+id: host-tool-output-fits-frame
+title: A host tool that returns 200 KB gives the model a truncated result and the run carries on
+description: >
+  The host tool returns 200000 bytes, more than one vsock frame holds. The run succeeds, the
+  tool result the model sees ends with the truncation note and is at most 64 KiB, and the next
+  tool call in the run works.
+tags: [chat, context]
+needs: process
+given:
+  - org-admin
+  - skill-host-fixtures
+  - agent-with-host-fixtures
+when:
+  - chat: "e2e-step:big Fetch the big result, then echo"
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "[truncated: kept", maxBytes: 65536 } }
+  - expect: { thread: { role: tool, contains: host-echo-ok } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/brokers.rs
+  - vam:crates/vam-vsock/src/frame.rs
+mock:
+  - when: { step: big, toolName: host_echo }
+    reply: { text: Both worked. }
+  - when: { step: big, toolName: host_bulk_output }
+    reply: { toolCall: { name: host_echo, args: { marker: host-echo-ok } } }
+  - when: { step: big, toolName: load_skill }
+    reply: { toolCall: { name: host_bulk_output, args: {} } }
+  - when: { step: big, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-host-fixtures-host-tool-output-fits-frame } } }
+status: active

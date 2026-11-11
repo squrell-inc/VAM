@@ -1,0 +1,59 @@
+id: simple-jigs-render-in-slack-and-the-rest-open-in-vam
+title: A simple gate or approval shows as buttons in Slack; a gate that asks for a file only opens in VAM
+tags: [notifications, gate, approval]
+needs: process
+description: A tool approval and an option gate reach Slack as native buttons plus an Open in VAM link. A gate whose form asks for a file reaches Slack as the host's title and body with only the Open in VAM link, with no inputs and no submit. A click on an action the message did not offer is refused.
+given:
+  - org-admin
+  - agent-with-guarded-tool
+  - playbook-with-gate
+  - playbook-with-file-gate
+  - agent-plain
+  - slack-bot-token
+  - slack-app-token
+  - notify-broker
+when:
+  - node-notify: { slack: { botToken: slack-bot-token, appToken: slack-app-token }, appUrl: "https://vam.example.test" }
+  - link-contact: { channel: slack, account: "T1/U1", verify: true }
+  - chat: { agent: agent-with-guarded-tool, text: "e2e-step:one Write the first note" }
+  - expect: { approval: pending, tool: write_file }
+  - expect: { channel-messages: { to: "T1/U1", kind: approval.pending, count: 1, buttons: 2, openInVam: true, within: 20s } }
+  - approve: { via: app }
+  - expect: { run: succeeded }
+  - start-playbook: { playbook: playbook-with-gate, label: option-gate, agent: agent-plain }
+  - expect: { gate: pending }
+  - expect: { channel-messages: { to: "T1/U1", kind: gate.opened, count: 1, buttons: 2, openInVam: true, within: 20s } }
+  - decide-gate: { option: go }
+  - expect: { run: succeeded }
+  - start-playbook: { playbook: playbook-with-file-gate, label: file-gate, agent: agent-plain }
+  - expect: { gate: pending }
+  - expect: { channel-messages: { to: "T1/U1", kind: gate.opened, count: 2, within: 20s } }
+  - expect: { channel-messages: { to: "T1/U1", kind: gate.opened, buttons: 0, inputs: 0, openInVam: true } }
+then:
+  # An action the message never offered is refused, whatever the handle.
+  - channel-click: { account: "T1/U1", message: gate.opened, action: submit, status: INVALID }
+  - expect: { gate: pending }
+guards:
+  - vam:brokers/vam-notify/src/**
+  - vam:crates/vam-spec/src/jig/**
+  - vam:crates/vam-orchestrator/src/notifications.rs
+  - vam:crates/vam-spec/src/jig.rs
+  - vam:crates/vam-orchestrator/src/notify_delivery.rs
+mock:
+  - when: { step: one, afterTool: write_file }
+    reply: { text: first written }
+  - when: { step: one }
+    reply: { toolCall: { name: write_file, args: { path: first.txt, content: e2e } } }
+  - when: { step: option-gate, lastRole: user, contains: "Missing required steps: finish" }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: done } } }
+  - when: { step: option-gate, afterTool: step_complete }
+    reply: { text: step done }
+  - when: { step: option-gate }
+    reply: { toolCall: { name: step_complete, args: { step_id: prepare, outcome: done } } }
+  - when: { step: file-gate, lastRole: user, contains: "Missing required steps: finish" }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: done } } }
+  - when: { step: file-gate, afterTool: step_complete }
+    reply: { text: step done }
+  - when: { step: file-gate }
+    reply: { toolCall: { name: step_complete, args: { step_id: prepare, outcome: done } } }
+status: active

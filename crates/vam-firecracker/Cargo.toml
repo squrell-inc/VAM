@@ -1,0 +1,36 @@
+[package]
+name = "vam-firecracker"
+version = "0.1.0"
+edition = "2021"
+authors = ["Xue Haonan <xuehaonan27@gmail.com>", "VAM Contributors"]
+description = "Hardened fork of firecracker-rs-sdk for VAM VM isolation"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "vam_firecracker"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = "1.10"
+httparse = "1.10"
+log = "0.4"
+paste = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1.34", features = [
+    "net",
+    "time",
+    "io-util",
+    "rt",
+    "macros",
+    "rt-multi-thread",
+], optional = true }
+
+[features]
+default = []
+_rt-std = []
+_rt-tokio = ["tokio"]
+_rt-async = []
+_rt-async-std = []

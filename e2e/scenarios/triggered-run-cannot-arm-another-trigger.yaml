@@ -1,0 +1,48 @@
+id: triggered-run-cannot-arm-another-trigger
+title: A run a trigger started cannot ask for another trigger
+tags: [triggers, approval]
+needs: process
+description: The fired run calls the same grant tool. The user may approve the call, but the host refuses it because the run was started by a trigger, so the tool fails and the user still holds exactly one grant.
+given:
+  - org-admin
+  - agent-with-trigger-tool
+  - trigger-test-broker
+when:
+  - chat: "e2e-step:arm Arm the trigger"
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: echo_arm_trigger, count: 1 } }
+  - fire-trigger: { key: fire-1, label: fired }
+then:
+  - expect: { fire: { outcomes: [ACCEPTED] } }
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { event: tool.failed, tool: echo_arm_trigger }
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: echo_arm_trigger, count: 1 } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: done }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:fired Arm another trigger mock-script:triggered-run-cannot-arm-another-trigger"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+  - when: { step: fired, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "Arm yet another trigger"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+status: active

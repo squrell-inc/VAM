@@ -1,0 +1,30 @@
+id: reasoning-is-recorded-and-never-replayed-when-stripped
+title: With thinking stripped the next request does not carry the reasoning, and the run still records it
+tags: [chat]
+needs: process
+description: By default the follow-up request carries no reasoning. With adapter.thinking strip the follow-up still carries none, and the run records how much reasoning came back.
+given:
+  - org-admin
+  - agent-plain
+when:
+  - chat: "e2e-step:think Say hi"
+  - chat: "e2e-step:after What was said?"
+  - expect: { thread: { role: assistant, contains: clean } }
+  - chat: { text: "e2e-step:thinkstrip Say hi", harness: { adapter: { thinking: strip } } }
+  - expect: { event: inference.completed, fields: { data.reasoningBytes: "25", data.reasoningMode: strip } }
+  - chat: "e2e-step:after What was said?"
+then:
+  - expect: { thread: { role: assistant, contains: clean } }
+guards:
+  - vam:crates/vam-inference/src/provider.rs
+  - vam:crates/vam-orchestrator/src/thread_recorder.rs
+mock:
+  - when: { step: think }
+    reply: { reasoning: secret-reasoning-marker-9, text: hi }
+  - when: { step: thinkstrip }
+    reply: { reasoning: secret-reasoning-marker-9, text: hi }
+  - when: { step: after, anyContains: secret-reasoning-marker-9 }
+    reply: { text: leaked }
+  - when: { step: after }
+    reply: { text: clean }
+status: active

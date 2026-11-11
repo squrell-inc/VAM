@@ -1,0 +1,32 @@
+piece: skill-host-fixtures
+kind: skill
+requires: [api-token]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: Host tools whose replies a careless adapter could produce (test nodes only)
+    tools:
+      - name: host_secret_forms
+        description: Returns the API token in several encoded forms
+        inputSchemaJson: "{\"type\":\"object\"}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        host_exec:
+          adapter_id: secret_forms
+          config: { forms: "raw,base64,base64url,hex,percent,json,split,basic,skew" }
+        required_secrets:
+          - { name: "{{name:api-token}}", required: true }
+      - name: host_bulk_output
+        description: Returns 200000 bytes of text
+        inputSchemaJson: "{\"type\":\"object\"}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        host_exec:
+          adapter_id: bulk_output
+          config: { bytes: "200000" }
+      - name: host_echo
+        description: Echoes its arguments
+        inputSchemaJson: "{\"type\":\"object\"}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        host_exec:
+          adapter_id: echo
+          config: {}

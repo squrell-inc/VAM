@@ -1,0 +1,840 @@
+{
+ "taskSetVersion": "0.1.0",
+ "trials": [
+  {
+   "task": "first-try-tool-use",
+   "model": "claude-sonnet-5-5",
+   "mode": "on",
+   "pass": true,
+   "wallMs": 4000,
+   "error": "",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-sonnet-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1200,
+       "completionTokens": 150,
+       "durationMs": 900,
+       "spendMicro": 3600
+      }
+     }
+    },
+    {
+     "sequence": 2,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-sonnet-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1500,
+       "completionTokens": 80,
+       "durationMs": 900,
+       "spendMicro": 3300,
+       "cachedTokens": 750
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 2
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "invalid arguments for write_file: missing required field 'path'"
+          }
+         ]
+        }
+       ]
+      }
+     },
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "saved"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "first-try-tool-use",
+   "model": "claude-sonnet-5-5",
+   "mode": "on",
+   "pass": true,
+   "wallMs": 4000,
+   "error": "",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-sonnet-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1100,
+       "completionTokens": 120,
+       "durationMs": 900,
+       "spendMicro": 3100
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 1
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "saved"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "first-try-tool-use",
+   "model": "claude-sonnet-5-5",
+   "mode": "on",
+   "pass": false,
+   "wallMs": 4000,
+   "error": "loop_detected: repeated",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-sonnet-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1100,
+       "completionTokens": 200,
+       "durationMs": 900,
+       "spendMicro": 3300
+      }
+     }
+    },
+    {
+     "sequence": 2,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-sonnet-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1400,
+       "completionTokens": 200,
+       "durationMs": 900,
+       "spendMicro": 4800,
+       "cachedTokens": 700
+      }
+     }
+    },
+    {
+     "sequence": 3,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-sonnet-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1700,
+       "completionTokens": 100,
+       "durationMs": 900,
+       "spendMicro": 4400,
+       "cachedTokens": 850
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 3
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "nothing"
+          }
+         ]
+        }
+       ]
+      }
+     },
+     {
+      "kind": "message",
+      "message": {
+       "role": "user",
+       "parts": [
+        {
+         "type": "text",
+         "text": "Loop detected: you repeated the same call"
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "match-playbook",
+   "model": "claude-sonnet-5-5",
+   "mode": "on",
+   "pass": true,
+   "wallMs": 2500,
+   "error": "",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-sonnet-5-5",
+       "provider": "anthropic",
+       "promptTokens": 900,
+       "completionTokens": 60,
+       "durationMs": 900,
+       "spendMicro": 2000
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 1
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "saved"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "match-playbook",
+   "model": "claude-sonnet-5-5",
+   "mode": "on",
+   "pass": true,
+   "wallMs": 2500,
+   "error": "",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-sonnet-5-5",
+       "provider": "anthropic",
+       "promptTokens": 900,
+       "completionTokens": 60,
+       "durationMs": 900,
+       "spendMicro": 2000
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 1
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "saved"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "match-playbook",
+   "model": "claude-sonnet-5-5",
+   "mode": "on",
+   "pass": true,
+   "wallMs": 2500,
+   "error": "",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-sonnet-5-5",
+       "provider": "anthropic",
+       "promptTokens": 900,
+       "completionTokens": 60,
+       "durationMs": 900,
+       "spendMicro": 2000
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 1
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "saved"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "first-try-tool-use",
+   "model": "claude-haiku-5-5",
+   "mode": "on",
+   "pass": true,
+   "wallMs": 4000,
+   "error": "",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-haiku-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1200,
+       "completionTokens": 150,
+       "durationMs": 900
+      }
+     }
+    },
+    {
+     "sequence": 2,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-haiku-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1500,
+       "completionTokens": 80,
+       "durationMs": 900,
+       "cachedTokens": 750
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 2
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "invalid arguments for write_file: missing required field 'path'"
+          }
+         ]
+        }
+       ]
+      }
+     },
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "saved"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "first-try-tool-use",
+   "model": "claude-haiku-5-5",
+   "mode": "on",
+   "pass": true,
+   "wallMs": 4000,
+   "error": "",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-haiku-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1100,
+       "completionTokens": 120,
+       "durationMs": 900
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 1
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "saved"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "first-try-tool-use",
+   "model": "claude-haiku-5-5",
+   "mode": "on",
+   "pass": false,
+   "wallMs": 4000,
+   "error": "loop_detected: repeated",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-haiku-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1100,
+       "completionTokens": 200,
+       "durationMs": 900
+      }
+     }
+    },
+    {
+     "sequence": 2,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-haiku-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1400,
+       "completionTokens": 200,
+       "durationMs": 900,
+       "cachedTokens": 700
+      }
+     }
+    },
+    {
+     "sequence": 3,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-haiku-5-5",
+       "provider": "anthropic",
+       "promptTokens": 1700,
+       "completionTokens": 100,
+       "durationMs": 900,
+       "cachedTokens": 850
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 3
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "nothing"
+          }
+         ]
+        }
+       ]
+      }
+     },
+     {
+      "kind": "message",
+      "message": {
+       "role": "user",
+       "parts": [
+        {
+         "type": "text",
+         "text": "Loop detected: you repeated the same call"
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "match-playbook",
+   "model": "claude-haiku-5-5",
+   "mode": "on",
+   "pass": true,
+   "wallMs": 2500,
+   "error": "",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-haiku-5-5",
+       "provider": "anthropic",
+       "promptTokens": 900,
+       "completionTokens": 60,
+       "durationMs": 900
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 1
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "saved"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "match-playbook",
+   "model": "claude-haiku-5-5",
+   "mode": "on",
+   "pass": true,
+   "wallMs": 2500,
+   "error": "",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-haiku-5-5",
+       "provider": "anthropic",
+       "promptTokens": 900,
+       "completionTokens": 60,
+       "durationMs": 900
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 1
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "saved"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "task": "match-playbook",
+   "model": "claude-haiku-5-5",
+   "mode": "on",
+   "pass": true,
+   "wallMs": 2500,
+   "error": "",
+   "events": [
+    {
+     "sequence": 1,
+     "eventType": "vam.v1.inference.completed",
+     "payload": {
+      "data": {
+       "modelName": "claude-haiku-5-5",
+       "provider": "anthropic",
+       "promptTokens": 900,
+       "completionTokens": 60,
+       "durationMs": 900
+      }
+     }
+    }
+   ],
+   "receipt": {
+    "receipt": {
+     "harness": {
+      "profile": "base",
+      "version": "1",
+      "digest": "sha256:synthetic",
+      "overrides": {}
+     },
+     "metering": {
+      "turns": 1
+     }
+    }
+   },
+   "thread": {
+    "records": [
+     {
+      "kind": "message",
+      "message": {
+       "role": "tool",
+       "parts": [
+        {
+         "type": "tool_result",
+         "content": [
+          {
+           "type": "text",
+           "text": "saved"
+          }
+         ]
+        }
+       ]
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

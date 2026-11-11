@@ -1,0 +1,23 @@
+id: playbook-run-starts-with-inputs
+title: A playbook run starts with its required input; a start without it is refused
+tags: [playbook]
+needs: process
+given:
+  - org-admin
+  - agent-plain
+  - playbook-one-step
+when:
+  - start-playbook: { playbook: playbook-one-step }
+  - expect: { refused: true }
+  - start-playbook: { playbook: playbook-one-step, label: run, inputs: { topic: mocks } }
+then:
+  - expect: { run: succeeded }
+  - expect: { step: summarise, state: succeeded }
+guards:
+  - vam:crates/vam-orchestrator/src/playbooks/**
+mock:
+  - when: { step: run, afterTool: step_complete }
+    reply: { text: summarised }
+  - when: { step: run }
+    reply: { toolCall: { name: step_complete, args: { step_id: summarise, outcome: done } } }
+status: active

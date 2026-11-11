@@ -1,0 +1,255 @@
+syntax = "proto3";
+
+package vam.v1;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+// The run receipt: one document per run. The host tier (`RunReceipt`) is what
+// the node observed and is covered by the signature. The model appendix is
+// model-written text, included in the host tier only by digest.
+//
+// These messages type what the node emits. Verification never decodes through
+// them: `vam_spec::receipt` and `vam_security::receipt` work on the emitted
+// JSON, so a field a newer node adds cannot break an older verifier. Integers
+// only (no floats); digests, keys and signatures are lowercase hex strings.
+//
+// Phase 1 fields only. App, notify and effect-journal fields come later.
+
+message RunReceipt {
+  ReceiptHeader header = 1;
+  // The user who started the run and the surface they declared.
+  ReceiptRequester requested_by = 2;
+  ReceiptPins pins = 3;
+  // The models the broker actually served.
+  repeated ReceiptModel model = 4;
+  ReceiptWorkspace workspace = 5;
+  ReceiptIsolation isolation = 6;
+  // Kernel and rootfs digests; absent in process mode.
+  ReceiptImage image = 7;
+  // Absent for a plain chat run.
+  ReceiptProcedure procedure = 8;
+  ReceiptToolCalls tool_calls = 9;
+  ReceiptEffects effects = 10;
+  ReceiptSpend spend = 11;
+  // "sha256:<hex>" of the canonical form of the model appendix.
+  string model_appendix_digest = 12;
+  // The run's effective harness (H-0.3). Absent for a run created before the
+  // harness input existed.
+  ReceiptHarness harness = 13;
+}
+
+// The profile the run used and what the caller changed in it. The full switch
+// tree stays on the run record; `digest` binds it.
+message ReceiptHarness {
+  // "base" until profiles are pinned in the catalog.
+  string profile = 1;
+  string version = 2;
+  // "sha256:<hex>" of the canonical form of {profile, version, switches}.
+  string digest = 3;
+  // Only the switches that differ from the profile, nested like the switch
+  // tree, e.g. {"loop": {"detect": true}}. Absent when none differ. Integers only.
+  google.protobuf.Struct overrides = 4;
+}
+
+message ReceiptHeader {
+  // Receipt format, "vam.receipt.v1".
+  string version = 1;
+  string run_id = 2;
+  string node_id = 3;
+  // Lifecycle generation this receipt covers.
+  int64 generation = 4;
+  string terminal_state = 5;
+  // Unix milliseconds.
+  int64 started_at_ms = 6;
+  int64 ended_at_ms = 7;
+}
+
+message ReceiptRequester {
+  string user = 1;
+  string surface = 2;
+}
+
+message ReceiptPin {
+  string urn = 1;
+  string version = 2;
+  string digest = 3;
+}
+
+message ReceiptPins {
+  ReceiptPin agent = 1;
+  ReceiptPin playbook = 2;
+  repeated ReceiptPin skills = 3;
+  ReceiptPin policy = 4;
+}
+
+message ReceiptModel {
+  string name = 1;
+  string provider = 2;
+  // Host name only, never a path or query.
+  string endpoint_host = 3;
+  int64 calls = 4;
+}
+
+message ReceiptWorkspace {
+  string head_before = 1;
+  string head_after = 2;
+}
+
+message ReceiptIsolation {
+  string vmm = 1;
+  bool jailer = 2;
+  bool api_tls = 3;
+  string summary = 4;
+  // The API rate-limit setting the node ran this run under ("on (...)" or "off");
+  // "unknown" for a run recorded before the node reported it.
+  string rate_limits = 5;
+}
+
+message ReceiptImage {
+  string kernel_digest = 1;
+  string rootfs_digest = 2;
+}
+
+message ReceiptGateResponse {
+  string option = 1;
+}
+
+message ReceiptGate {
+  string decided_by = 1;
+  // "cli", "app" or "api", as declared by the client.
+  string surface = 2;
+  int64 decided_at_ms = 3;
+  ReceiptGateResponse response = 4;
+}
+
+message ReceiptStep {
+  string id = 1;
+  string outcome = 2;
+  ReceiptGate gate = 3;
+}
+
+message ReceiptProcedure {
+  repeated ReceiptStep steps = 1;
+}
+
+message ReceiptToolCallCounts {
+  int64 allowed = 1;
+  int64 asked = 2;
+  int64 denied = 3;
+}
+
+message ReceiptToolCall {
+  string tool = 1;
+  // "allowed", "asked" or "denied".
+  string decision = 2;
+  string scope = 3;
+  string rule = 4;
+  // For an ask: "approved-once", "approved-always", "denied", ...
+  string resolution = 5;
+  // "sha256:<hex>"; never the arguments.
+  string args_digest = 6;
+}
+
+message ReceiptToolCalls {
+  ReceiptToolCallCounts counts = 1;
+  repeated ReceiptToolCall lines = 2;
+}
+
+// Documentation of the JSON the host writes (the receipt is built as JSON, never through
+// prost, so `false` and zero survive). Fields 1-2 are the Phase 1 object, written for a run
+// created before the node first started with the effects section. Fields 3+ are the
+// journaled form: `journaled` true, no `statement`.
+message ReceiptEffects {
+  // False for a run from before the effects section (then only `statement` follows).
+  bool journaled = 1;
+  string statement = 2;
+  // What the journal cannot see (direct guest egress, a vendor applying a request twice).
+  string scope = 3;
+  // Sends beyond the first of one decided non-idempotent call (sum of attempts - 1).
+  int64 duplicates = 4;
+  // Non-read calls whose outcome is not known, including `sent` with no answer at the end.
+  int64 unknown = 5;
+  ReceiptEffectCounts counts = 6;
+  // One line per non-read journal row, oldest first.
+  repeated ReceiptEffectLine lines = 7;
+}
+
+// Disjoint: `confirmed` excludes `reconciled`. Reads (verify reads included) are only counted.
+message ReceiptEffectCounts {
+  int64 confirmed = 1;
+  int64 failed = 2;
+  // Confirmed by a check (a verify read).
+  int64 reconciled = 3;
+  // Decided and recorded, never left the host.
+  int64 not_sent = 4;
+  // Non-idempotent calls sent with the same tool and arguments digest as an earlier sent,
+  // not-failed call of the run.
+  int64 identical_repeats = 5;
+  int64 reads = 6;
+}
+
+// Never carries a call id, detail text, or a raw argument or result.
+message ReceiptEffectLine {
+  // 1-based position in the run's journal (reads included).
+  int64 seq = 1;
+  string tool = 2;
+  // "host", "hsp", "mcp" or "internal".
+  string adapter = 3;
+  // "idempotent" or "non_idempotent".
+  string class = 4;
+  // "confirmed", "reconciled", "failed", "unknown" or "notSent".
+  string state = 5;
+  int64 attempts = 6;
+  // "sha256:<hex>" of the idempotency key.
+  string key_digest = 7;
+  string args_digest = 8;
+  // Present when the call has a recorded result.
+  string result_digest = 9;
+  // "verify" when a check ran (also on a check that found nothing).
+  string checked_by = 10;
+  // The line's calling step, when nested.
+  int64 parent_seq = 11;
+  // The earlier line this one repeats exactly.
+  int64 repeat_of = 12;
+  // True when the host derived the call id (the guest sent none).
+  bool host_derived_id = 13;
+  // Seconds since the epoch.
+  int64 at = 14;
+}
+
+message ReceiptSpend {
+  int64 prompt_tokens = 1;
+  int64 completion_tokens = 2;
+  int64 turns = 3;
+  int64 approvals = 4;
+}
+
+// Model-written text. Not verified by the host.
+message ModelAppendix {
+  string label = 1;
+  string final_reply = 2;
+  repeated string step_summaries = 3;
+}
+
+message ReceiptSignature {
+  // "ed25519".
+  string algorithm = 1;
+  // "ed25519:<first 16 hex of sha256(public key)>".
+  string key_id = 2;
+  // Lowercase hex, 32 bytes.
+  string public_key = 3;
+  // "sha256:<hex>" of the canonical form of `receipt`.
+  string receipt_digest = 4;
+  // Lowercase hex, 64 bytes.
+  string value = 5;
+}
+
+message ReceiptDocument {
+  RunReceipt receipt = 1;
+  ModelAppendix model_appendix = 2;
+  ReceiptSignature signature = 3;
+}

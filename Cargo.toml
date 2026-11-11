@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vam-core",
+    "crates/vam-spec",
+    "crates/vam-security",
+    "crates/vam-storage",
+    "crates/vam-orchestrator",
+    "crates/vam-runtime",
+    "crates/vam-firecracker",
+    "crates/vam-vsock",
+    "crates/vam-network",
+    "crates/vam-inference",
+    "crates/vam-cli",
+    "crates/vam-e2e",
+    "crates/vam-telemetry",
+    "brokers/vam-web",
+    "brokers/vam-schedule",
+    "brokers/vam-notify",
+]
+# Vendored third-party crate with a local patch (see third_party/ext4-view/VAM-PATCH.txt).
+exclude = ["third_party/ext4-view"]
+
+[profile.release-guest]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "unwind"
+strip = true
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/squrell-inc/VAM"
+authors = ["Squrell and VAM contributors"]
+
+
+[workspace.dependencies]
+ed25519-dalek = "2.1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+vam-security = { path = "crates/vam-security" }
+vam-telemetry = { path = "crates/vam-telemetry" }
+
+vam-spec = { path = "crates/vam-spec" }
+vam-storage = { path = "crates/vam-storage" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# ext4-view 1.0.0 with one fix: a zero (hole) pointer in a block-mapped file's indirect
+# levels read block 0 and failed. Drop this when upstream releases the fix.
+[patch.crates-io]
+ext4-view = { path = "third_party/ext4-view" }

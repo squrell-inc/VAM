@@ -1,0 +1,50 @@
+{
+  "description": "Chaos and boundary test tools for verifying timeouts, privilege drops, environment scrubbing, and sandbox limits.",
+  "resourceId": {
+    "urn": "urn:vam:skill:local.vam.dev/vam/chaos-tools"
+  },
+  "systemExtension": "Use 'sleep_hang' to trigger supervisor timeouts, 'probe_sandbox' to verify privilege isolation, and 'check_env' to verify environment scrubbing.",
+  "tools": [
+    {
+      "description": "Sleep indefinitely or for a long period to test escalating kill timeouts.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"seconds\":{\"type\":\"number\",\"description\":\"Number of seconds to sleep\"}}}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "sleep_hang"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "sleep_hang"
+    },
+    {
+      "description": "Inspect sandbox privileges (UID/GID) and test filesystem permission boundaries.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"target_path\":{\"type\":\"string\",\"description\":\"Path to probe (e.g. /etc/shadow or /root)\"}}}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "probe_sandbox"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "probe_sandbox"
+    },
+    {
+      "description": "Inspect all environment variables visible to the unprivileged tool process.",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{}}",
+      "localExec": {
+        "command": "bun",
+        "defaultArgs": [
+          "check_env"
+        ],
+        "entrypoint": "./execute.js"
+      },
+      "name": "check_env"
+    }
+  ],
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  }
+}

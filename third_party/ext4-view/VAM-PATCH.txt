@@ -1,0 +1,9 @@
+ext4-view 1.0.0 (MIT OR Apache-2.0, https://github.com/nicholasbishop/ext4-view-rs), vendored.
+
+Local change (one place): src/iters/file_blocks/block_map.rs, IndirectBlockIter::new.
+A zero block pointer is a hole. The upstream code read "block 0" for it, which fails with
+"invalid read of length 4096 from block 0". Any sparse file of more than 12 blocks on a
+block-mapped (ext2-style, no extents) filesystem could not be read. A zero pointer now gives
+a block of zeros. The double and triple indirect iterators reuse this constructor.
+
+Remove this directory and the [patch.crates-io] entry once upstream releases the fix.

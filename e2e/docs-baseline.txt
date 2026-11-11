@@ -1,0 +1,32 @@
+# Docs pages that fail `vam-e2e check --docs` today. A page here is exempt; a page here that
+# passes is an error, so this list only shrinks. Each docs wave deletes its pages' lines.
+README.md
+authoring/agent-package.md
+authoring/agent-spec.md
+authoring/model.md
+authoring/playbook-spec.md
+authoring/playbook-tutorial.md
+authoring/publish-skill.md
+authoring/run-spec.md
+authoring/skill-manifest.md
+core/prerequisites.md
+getting-started/cli.md
+getting-started/introduction.md
+getting-started/macos-lima.md
+getting-started/platform-tour.md
+getting-started/project-status.md
+getting-started/quickstart.md
+getting-started/users-and-roles.md
+getting-started/windows-wsl.md
+index.mdx
+integrations/egress-proxy-deepdive.md
+integrations/jira-assistant-walkthrough.md
+reference/agent-cheat-sheet.md
+security/cedar-and-hitl.md
+security/hitl-lifecycle.md
+security/secret-management.md
+spec/glossary.md
+tools/tool-runtimes.md
+tools/writing-tools.md
+tutorials/bun-assistant.md
+tutorials/jira-assistant.md

@@ -1,0 +1,20 @@
+{
+  "urn": "urn:vam:connector:hub.squrell.cloud/squrell/microsoft-365",
+  "version": "1.0.0",
+  "displayName": "Microsoft 365",
+  "publisher": "Squrell",
+  "description": "Mail and calendar in the member's own Microsoft 365 account, through Microsoft Graph.",
+  "icon": "microsoft-365",
+  "provider": {
+    "kind": "oauth2",
+    "profile": "entra",
+    "clientId": "082509e4-090b-47d8-878f-eb6b3b0985d2",
+    "clientSecret": "none",
+    "scopes": ["openid", "profile", "email", "offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite"],
+    "orgConsent": "admin_required"
+  },
+  "connection": { "holder": "user", "multiAccount": false, "label": "/me/mail" },
+  "bindings": [
+    { "name": "graph", "placeholder": "vamsec_m365_graph", "value": "access_token", "inject": "bearer", "hosts": ["graph.microsoft.com"] }
+  ]
+}

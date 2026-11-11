@@ -1,0 +1,29 @@
+id: unknown-effect-is-reconciled-by-a-verify-read
+title: When vamd restarts while a create is unanswered, a declared read finds it and nothing is sent again
+tags: [chat]
+needs: process
+description: The task creates a ticket and the broker holds the call open. vamd restarts during the hold, so the outcome is unknown. The tool declares a read that finds a ticket by title; the read finds the ticket, the model is told it is confirmed, and the broker's ledger counts one create and one find.
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: { text: "e2e-step:make Create the Q4 plan ticket", wait: false }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - restart-vamd: {}
+then:
+  - expect: { run: succeeded }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_find_ticket, count: 1 } }
+  - expect: { event: effect.reconciled, fields: { data.by: verify, data.outcome: confirmed } }
+  - expect: { thread: { role: tool, contains: "confirmed by a check" } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/reconcile.rs
+  - vam:crates/vam-orchestrator/src/session_end.rs
+mock:
+  - when: { step: make, toolName: echo_create_ticket }
+    reply: { text: "Created T-1" }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan, holdMs: 6000 } } }
+status: active

@@ -1,0 +1,44 @@
+---
+title: Virtual Agentic Machine
+description: Documentation for VAM — a Rust workspace for microVM-based agent workloads.
+template: splash
+hero:
+  tagline: Run autonomous AI agent workloads inside Firecracker microVMs, with egress governed per agent and Cedar permission policies.
+  image:
+    file: ../../assets/houston.webp
+  actions:
+    - text: Quickstart (5 Min)
+      link: /getting-started/quickstart/
+      icon: rocket
+    - text: CLI Reference
+      link: /getting-started/cli/
+      icon: right-arrow
+      variant: secondary
+    - text: Architecture Overview
+      link: /architecture/overview/
+      icon: document
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Developer Guides & Hub
+
+<CardGrid stagger>
+	<Card title="Quickstart (5 Min)" icon="rocket">
+		Start the `vamd` daemon, configure LLM secrets, launch an autonomous assistant, and test HITL approval in our
+		[Quickstart Guide](/getting-started/quickstart/).
+	</Card>
+	<Card title="Installation & CLI" icon="laptop">
+		Learn how to build `vam-cli`, configure API keys, and connect remote developers to the control plane in
+		[Installation](/getting-started/installation/) and the [CLI Reference](/getting-started/cli/).
+	</Card>
+	<Card title="Agent & Spec Authoring" icon="open-book">
+		Understand how to author `agent.json`, `run.json`, `playbook.json`, and YAML frontmatter skills in our
+		[Authoring Guides](/getting-started/introduction/).
+	</Card>
+	<Card title="Platform Architecture & RFCs" icon="setting">
+		Explore the internal subsystem RFCs, Firecracker microVM isolation, Drive9 storage, and brokered networking in the
+		[Architecture Overview](/architecture/overview/).
+	</Card>
+</CardGrid>

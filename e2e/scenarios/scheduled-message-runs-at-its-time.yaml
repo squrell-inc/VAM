@@ -1,0 +1,62 @@
+id: scheduled-message-runs-at-its-time
+title: An approved schedule starts a run by itself at its time, and the receipt names the schedule
+tags: [schedule, triggers]
+needs: process
+description: The agent makes a once-schedule ten seconds ahead and the user approves it. Until the time nothing exists in the node but the chat's run. Then a run starts by itself in a new thread labelled as asked, writes its file and succeeds; its status and receipt name the surface schedule, the schedule id, the grant and the broker.
+given:
+  - org-admin
+  - agent-with-schedule-tools
+  - schedule-broker
+when:
+  - chat: "e2e-step:create Write a note in ten seconds"
+  - expect: { approval: pending, tool: schedule_create }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "sch_" } }
+  - expect: { grant: { tool: schedule_create, count: 1 } }
+  - expect: { runs: { count: 1 } }
+  - wait-scheduled-run: { within: 30s, label: fired }
+then:
+  - expect: { run: succeeded }
+  - expect: { file: { path: fired.txt, present: true } }
+  - expect: { threads: { fields: { name: nightly-note } } }
+  - expect:
+      runs:
+        latest:
+          source.kind: trigger
+          source.brokerId: vam.schedule
+          source.triggerRef: { contains: "sch_" }
+          source.grantId: { contains: "rg_" }
+          source.fireKind: scheduled
+  - expect:
+      receipt:
+        fields:
+          receipt.requestSurface: schedule
+          receipt.requestTrigger.brokerId: vam.schedule
+          receipt.requestTrigger.triggerRef: { contains: "sch_" }
+          receipt.requestTrigger.grantId: { contains: "rg_" }
+          receipt.requestTrigger.fireKind: scheduled
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+mock:
+  - when: { step: create, stepStart: true }
+    reply:
+      toolCall:
+        name: schedule_create
+        args:
+          title: Nightly note
+          when: { once: { in: PT10S } }
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:scheduled-message-runs-at-its-time"
+            workspace: { mode: SAME }
+            thread: { mode: NEW, name: nightly-note }
+            onBusy: QUEUE
+  - when: { step: create }
+    reply: { text: Scheduled. }
+  - when: { step: fired, toolName: write_file }
+    reply: { text: done }
+  - when: { step: fired, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: fired.txt, content: fired } } }
+status: active

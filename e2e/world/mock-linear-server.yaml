@@ -1,0 +1,5 @@
+piece: mock-linear-server
+kind: mock-provider
+# A runner-hosted loopback MCP server with list_issues, get_issue, save_issue, save_comment and
+# one tool the connector does not vet. It requires a runner-made bearer.
+provider: linear-server

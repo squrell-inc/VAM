@@ -1,0 +1,1 @@
+{"domain":"vam.v1.hitl-token","envelopeVersion":{"major":1},"claims":"AQIDBA==","signature":{"algorithm":"SIGNATURE_ALGORITHM_ED25519","keyId":"key-123","value":"DA0ODw=="}}

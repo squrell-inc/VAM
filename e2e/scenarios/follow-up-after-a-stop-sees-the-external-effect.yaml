@@ -1,0 +1,34 @@
+id: follow-up-after-a-stop-sees-the-external-effect
+title: After a stop, a follow-up still sees the outside call that finished, and does not make it again
+tags: [chat, context]
+needs: process
+description: Round one writes a.txt, which is a finished step. Round two creates a ticket and the broker holds the call open; the user stops the task during the hold. The files roll back to the last finished step, but the create happened and stays in the conversation, so a follow-up that asks again is told it exists and the ledger counts one create.
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: { text: "e2e-step:make Save a.txt, then create the Q4 plan ticket", wait: false }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - stop: {}
+  - chat: { text: "e2e-step:next Is the Q4 plan ticket there?", thread: continue }
+then:
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - expect: { file: { path: a.txt, equals: first } }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: "T-1 already exists" } }
+guards:
+  - vam:crates/vam-orchestrator/src/thread_recorder.rs
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: next, anyContains: "T-1" }
+    reply: { text: "T-1 already exists" }
+  - when: { step: next, toolName: echo_create_ticket }
+    reply: { text: "Created it again" }
+  - when: { step: next }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan } } }
+  - when: { step: make, toolName: write_file }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan, holdMs: 4000 } } }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: a.txt, content: first } } }
+status: active

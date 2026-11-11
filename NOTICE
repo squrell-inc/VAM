@@ -1,0 +1,25 @@
+VAM (Virtual Agentic Machine)
+Copyright 2026 Squrell and VAM contributors
+
+Licensed under either of the Apache License, Version 2.0 (LICENSE-APACHE)
+or the MIT license (LICENSE-MIT), at your option.
+
+This repository includes third-party code that keeps its own licence:
+
+* third_party/ext4-view
+  ext4-view 1.0.0, https://github.com/nicholasbishop/ext4-view-rs
+  Copyright 2023 Google LLC
+  Licensed under MIT OR Apache-2.0; see third_party/ext4-view/LICENSE-MIT
+  and third_party/ext4-view/LICENSE-APACHE.
+  Vendored with one local fix, described in third_party/ext4-view/VAM-PATCH.txt.
+
+* crates/vam-firecracker
+  A fork of firecracker-rs-sdk (formerly rustcracker) by Xue Haonan,
+  https://github.com/xuehaonan27/rustcracker
+  Licensed under MIT OR Apache-2.0. VAM's changes are under the same terms.
+  Its API model types and their documentation follow the Firecracker API
+  definition, https://github.com/firecracker-microvm/firecracker
+  (Copyright Amazon.com, Inc. or its affiliates, Apache-2.0).
+
+Third-party dependencies fetched by Cargo, pnpm or Bun are not part of this
+repository and are distributed under their own licences.

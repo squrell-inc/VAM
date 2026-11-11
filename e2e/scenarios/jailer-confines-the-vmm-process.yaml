@@ -1,0 +1,28 @@
+id: jailer-confines-the-vmm-process
+title: On a default node the microVM's Firecracker process runs jailed
+description: >
+  While a run's microVM is up (parked on an approval) the host's process table shows its
+  Firecracker process chrooted under the jailer directory, as a non-root uid, in its own PID
+  and mount namespaces, under a seccomp filter.
+tags: [approval, chat]
+needs: firecracker
+given:
+  - org-admin
+  - agent-with-guarded-tool
+when:
+  - chat: "e2e-step:ask Write the note"
+  - expect: { approval: pending, tool: write_file }
+then:
+  - expect: { vmm: { jailed: true, seccomp: filter } }
+  - approve: latest
+  - expect: { run: succeeded }
+guards:
+  - vam:crates/vam-core/src/vmm.rs
+  - vam:crates/vam-firecracker/src/jailer.rs
+  - vam:crates/vam-orchestrator/src/daemon.rs
+mock:
+  - when: { afterTool: write_file }
+    reply: { text: done }
+  - when: { step: ask }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+status: active

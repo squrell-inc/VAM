@@ -1,0 +1,23 @@
+id: plain-chat-gets-a-reply
+title: A chat message starts a run, the mock answers, and the reply is in the events
+tags: [chat]
+needs: process
+given:
+  - org-admin
+  - agent-plain
+when:
+  - chat: "e2e-step:hello Say hello"
+then:
+  - expect: { run: succeeded }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: "Hello from the mock." } }
+guards:
+  - vam:crates/vam-orchestrator/src/runs/**
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-inference/src/provider.rs
+  - vam:crates/vam-inference/src/broker.rs
+  - vam:crates/vam-inference/src/catalog.rs
+mock:
+  - when: { step: hello }
+    reply:
+      text: Hello from the mock.
+status: active

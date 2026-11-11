@@ -1,0 +1,33 @@
+# Virtual Agentic Machine (VAM) Documentation for LLMs
+
+> VAM is a Rust workspace for designing and running autonomous AI agents inside isolated Firecracker microVMs with AWS Cedar security policies, zero-trust egress proxies, and Drive9 storage.
+
+## Agent Reference Endpoints
+- Complete Agent Cheatsheet: https://vam.dev/agent.md
+- Full LLM Documentation Bundle: https://vam.dev/llms-full.txt
+
+## Developer Guides & Getting Started
+- Quickstart (5 Min): https://vam.dev/getting-started/quickstart/ - 5-minute guide to boot daemon, store secrets, run agent, and test HITL approval.
+- Installation & Setup: https://vam.dev/getting-started/installation/ - How to build vam CLI, configure VAM_HOST, and connect remote clients.
+- CLI Command Reference: https://vam.dev/getting-started/cli/ - Complete command reference for runs, approvals, secrets, sessions, keys, and catalog specs.
+
+## Specification Authoring
+- Agent Specifications (agent.json): https://vam.dev/authoring/agent-spec/ - Defining agent identities, system instructions, model preferences, reasoning budgets, and skill pins.
+- Skills & Frontmatter (SKILL.md): https://vam.dev/authoring/skill-manifest/ - Authoring YAML frontmatter tool schemas, unprivileged execution runners, and Layer 2 instructions.
+- Run Specifications (run.json): https://vam.dev/authoring/run-spec/ - Binds agents to Drive9 volumes, threads, and prompts with execution budgets.
+- Playbooks (playbook.json): https://vam.dev/authoring/playbook-spec/ - Prose on every step, with an optional tool binding and mode bound, assisted, or agentic.
+
+## In-VM Tool Development & Zero-Trust Proxies
+- Writing In-VM Tools: https://vam.dev/tools/writing-tools/ - MicroVM sandbox environment, dropped privileges (uid=1000, gid=100), and stdin/stdout JSON protocol.
+- Tool Runtime Templates: https://vam.dev/tools/tool-runtimes/ - Ready-to-use boilerplates for Bun, Node.js, Python 3, and Bash executors.
+- Zero-Trust Egress Proxy Architecture: https://vam.dev/integrations/egress-proxy-deepdive/ - Host-brokered secret injection, scheme-less placeholders (vamsec_*), X-Target-Url routing, and domain allowlists.
+- Jira Assistant Integration Walkthrough: https://vam.dev/integrations/jira-assistant-walkthrough/ - Step-by-step case study tracing SKILLS.md, execute.js proxy calls, vault secrets, and Cedar rules.
+
+## Security Governance & HITL
+- Cedar Security Policies & HITL: https://vam.dev/security/cedar-and-hitl/ - Authoring AWS Cedar policies for ExecuteTool, ReadFile, and WriteFile with hitl_approved gating.
+- Human-in-the-Loop (HITL) Lifecycle: https://vam.dev/security/hitl-lifecycle/ - The two-pass execution model: Suspend -> vam approve decide -> Resume.
+- Secrets Vault Management: https://vam.dev/security/secret-management/ - Storing inference API keys and zero-trust egress tokens with encryption at rest and redaction.
+
+## Tutorials & Recipes
+- Jira Assistant Tutorial: https://vam.dev/tutorials/jira-assistant/ - Hands-on tutorial running the autonomous Jira Assistant and completing an HITL approval.
+- Bun Assistant Tutorial: https://vam.dev/tutorials/bun-assistant/ - Multi-turn workspace file creation and thread persistence on Drive9 volumes.

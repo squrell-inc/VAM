@@ -1,0 +1,41 @@
+{
+  "urn": "urn:vam:connector:connectors.community.example/community/keyed",
+  "version": "1.0.0",
+  "displayName": "Keyed",
+  "publisher": "Community Tools Ltd",
+  "description": "Keyed issues in the member's own workspace, through its remote MCP server.",
+  "icon": "keyed",
+  "provider": {
+    "kind": "oauth2",
+    "profile": "discover",
+    "clientSecret": "squrell_relay",
+    "scopes": [
+      "read",
+      "write"
+    ],
+    "orgConsent": "none"
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "whoami.email"
+  },
+  "mcp": {
+    "url": "https://mcp.keyed.example/mcp",
+    "tools": [
+      {
+        "remote": "list_issues",
+        "sideEffect": "READ_ONLY"
+      },
+      {
+        "remote": "get_issue",
+        "sideEffect": "READ_ONLY"
+      },
+      {
+        "remote": "save_issue",
+        "sideEffect": "MUTABLE_EXTERNAL",
+        "default": "ask"
+      }
+    ]
+  }
+}

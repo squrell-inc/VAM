@@ -1,0 +1,56 @@
+id: guest-cannot-use-an-mcp-token-placeholder
+title: A guest that guesses an MCP token's placeholder is refused at the MCP host, so nothing is injected
+description: >
+  The org has an OAuth MCP connection whose access token is a host-only credential. The agent
+  sends a plain-HTTP request to the MCP host through the guest's egress proxy, with the
+  placeholder an egress secret of that name would have (`vamsec_` and the vault id with `/` and
+  `-` as `_`). The egress gate refuses any request that carries a known placeholder over plain
+  HTTP, before it looks the host up. The connection is not a guest egress binding, so the gate
+  does not know the string: the request goes on to name resolution, which fails because the
+  test node has no network and the name is reserved. The refusal text for a known placeholder
+  is therefore the thing that must not appear. No form of the connection's tokens is in the
+  thread, the events, the receipt or the workspace.
+tags: [egress, chat]
+needs: process
+given:
+  - org-admin
+  - mcp-oauth-connection
+  - agent-with-shell
+when:
+  - chat: "e2e-step:probe Try the MCP token placeholder"
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: Failed to resolve host } }
+  - expect: { thread: { role: tool, contains: Secret placeholder refused, absent: true } }
+  - expect: { secret-absent: { secret: mcp-oauth-connection } }
+guards:
+  - vam:crates/vam-orchestrator/src/secrets.rs
+  - vam:crates/vam-orchestrator/src/brokers.rs
+  - vam:crates/vam-orchestrator/src/mcp_registry.rs
+  - vam:crates/vam-network/src/secrets.rs
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+  - vam:crates/vam-orchestrator/src/connection_egress.rs
+  - vam:crates/vam-network/src/broker.rs
+mock:
+  - when: { step: probe, toolName: run }
+    reply: { text: Probed. }
+  - when: { step: probe, stepStart: true }
+    reply:
+      toolCall:
+        name: run
+        args:
+          # The proxy address is read from the environment the guest gives tools. The words that
+          # decide the check are assembled by the shell so the command text never contains them
+          # (the thread matcher also reads tool-call arguments).
+          command: |
+            bash <<'EOS'
+            HP=${HTTP_PROXY#http://}
+            H=${HP%:*}
+            P=${HP##*:}
+            exec 3<>/dev/tcp/$H/$P
+            printf 'GET http://mcp.e2e-mcp.example/mcp HTTP/1.1\r\nHost: mcp.e2e-mcp.example\r\nAuthorization: vamsec_e2e_mcp_oauth_access_token\r\nConnection: close\r\n\r\n' >&3
+            R=$(timeout 5 head -c 400 <&3 | tr "\r\n" "  ")
+            echo probe-"answer:$R"
+            EOS
+status: active

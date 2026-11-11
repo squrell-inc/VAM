@@ -1,0 +1,17 @@
+# gitleaks configuration: the default rules, plus an allowlist for fixtures that only look like
+# secrets. Each entry names what it matches; keep it narrow. Used by scripts/export-public.sh.
+title = "vam"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and documentation examples"
+regexTarget = "match"
+regexes = [
+    # Idempotency keys in tests and the run-spec docs are request ids, not credentials. The rule's
+    # match can start mid-word ("empotency_key"), hence no leading "idem".
+    '''(?i)potency[_-]?key"?\s*[:=]''',
+    # Placeholder API keys in the node-install test script and the OpenAPI example.
+    '''vam_sk_(SECRET123|948fbc102e3b4a)''',
+]

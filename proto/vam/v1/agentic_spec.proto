@@ -1,0 +1,198 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "vam/v1/model_policy.proto";
+import "google/protobuf/timestamp.proto";
+
+// Immutable, reusable Agent definition
+message AgentSpec {
+  ResourceId resource_id = 1;             // E.g. "urn:vam:agent:hub.vam.dev/acme/oracle-developer"
+  string display_name = 2;                // Short label
+  string description = 3;                 // Long summary detailing what class of problems this agent solves
+
+  string role = 4;                        // Professional baseline definition (e.g., "Oracle Developer")
+  oneof instruction_source {
+    string system_instructions = 5;       // Inline base system prompt guidelines
+    ResourceRef instruction_artifact = 19;// Pinned external instruction artifact (e.g. from OCI)
+  }
+
+  ModelRequirements model_requirements = 6; // Portable inference capabilities required
+  repeated ModelPreference preferred_models = 7; // Optional provider/model preferences in order of choice
+
+  ContextPolicy context_policy = 8;       // Context compaction and turn budget
+  ReasoningPolicy reasoning_policy = 9;   // ReAct loop brakes and termination rules
+
+  repeated ResourceRef skill_refs = 10;   // Skill dependencies. Version may be omitted; host resolves to latest released and records the pin on the run.
+
+  // Host-governed policies referenced by custom reference types.
+  // Deprecated: design/agent-experience.md Part IV. Read only on the legacy
+  // compatibility path. New drafts use `permissions`.
+  CapabilityPolicyRef capability_policy = 11; // AWS Cedar security and network egress profile
+  // Deprecated: design/agent-experience.md Part IV. `monitored_tools` are read
+  // only on the legacy compatibility path. New drafts use `permissions`.
+  HitlPolicyRef hitl_policy = 12;              // Human-in-the-loop validation triggers
+  TelemetryPolicyRef telemetry_policy = 13;    // PII redaction and audit logging level
+
+  ResourceRequirements resource_requirements = 14; // CPU, RAM, disk, and network mode requests
+  CompletionPolicyRef completion_policy = 15; // Criteria for independent completion evaluation
+
+  // Reusable defaults & execution constraints
+  ResourceRef default_playbook_ref = 16;  // Pinned default playbook reference
+  repeated ResourceRef allowed_playbook_refs = 17; // Pinned allowed playbook references
+  bool allow_any_playbook = 20;           // Security override: explicit escape hatch (fail-closed default if allowed_playbook_refs is empty and this is false)
+
+  ResourceMetadata metadata = 18;         // Provenance, revision tracking, and labels
+
+  // Pinned upstream agent this definition inherits. Inheritance, not a call:
+  // the child does not invoke the parent, and this is not delegation.
+  // Version and digest are required. The URN kind must be `agent`.
+  // Chains name one parent at a time and stop at 8 hops.
+  ResourceRef extends = 21;
+
+  // Delta applied to `extends`. Illegal when `extends` is absent.
+  // Instructions append or replace; skills add or remove; capabilities grant or revoke.
+  AgentOverlay overlay = 22;
+
+  // Rules as data (design/agent-experience.md Part IV). Absent on legacy agents,
+  // which keep `capability_policy` and `hitl_policy`.
+  AgentPermissions permissions = 23;
+}
+
+// A rule is (target, decision). Author JSON is design §IV.2
+// (`"default": "bySideEffect"`, `"decision": "ask"`). Enum values use the
+// package prefix because proto3 still uses C++ scoping (names are unique in
+// `vam.v1`). `vam-spec` encoding maps the §IV.2 spelling onto these names.
+// `_UNSPECIFIED = 0` is omitted from JSON.
+message AgentPermissions {
+  ToolPermissions tools = 1;
+  InternetPermissions internet = 2;
+  // Optional hand-written Cedar policy artifacts (§IV.6).
+  repeated ResourceRef advanced = 3;
+  // Web access (search and fetch). Absent means off.
+  WebPermissions web = 4;
+}
+
+message WebPermissions {
+  bool enabled = 1;
+}
+
+message ToolPermissions {
+  ToolDefault default = 1;
+  repeated PermissionRule rules = 2;
+}
+
+message InternetPermissions {
+  HostDefault default = 1;
+  repeated PermissionRule rules = 2;
+}
+
+message PermissionRule {
+  string target = 1;
+  PermissionDecision decision = 2;
+}
+
+enum PermissionDecision {
+  PERMISSION_DECISION_UNSPECIFIED = 0;
+  PERMISSION_DECISION_ALLOW = 1;
+  PERMISSION_DECISION_ASK = 2;
+  PERMISSION_DECISION_DENY = 3;
+}
+
+enum ToolDefault {
+  TOOL_DEFAULT_UNSPECIFIED = 0;
+  TOOL_DEFAULT_ALLOW = 1;
+  TOOL_DEFAULT_ASK = 2;
+  TOOL_DEFAULT_DENY = 3;
+  TOOL_DEFAULT_BY_SIDE_EFFECT = 4;
+}
+
+enum HostDefault {
+  HOST_DEFAULT_UNSPECIFIED = 0;
+  HOST_DEFAULT_ALLOW = 1;
+  HOST_DEFAULT_DENY = 2;
+}
+
+// How an extending agent combines with its parent.
+// Merge rules are locked as developer-experience decision 20.
+message AgentOverlay {
+  InstructionOverlay instructions = 1;
+  SkillOverlay skills = 2;
+  CapabilityOverlay capabilities = 3;
+}
+
+// Append joins the parent text, a blank line, and this text.
+// Replace keeps this text and drops the parent text.
+// Absent means inherit the parent text. Append and inherit fail when the
+// parent instructions are only an external artifact; replace still succeeds.
+message InstructionOverlay {
+  oneof change {
+    string append = 1;
+    string replace = 2;
+  }
+}
+
+// Skill identity is the URN. The pin is version plus digest.
+// `remove` is applied before `add` and matches the URN only.
+// Adding a URN the parent already pinned differently fails unless `remove`
+// dropped that URN first. Removing a URN that is absent is a no-op.
+message SkillOverlay {
+  repeated ResourceRef add = 1;
+  repeated ResourceRef remove = 2;
+}
+
+// Grant then revoke. Revoke of a token a remaining skill still requires fails.
+// Revoke of a token nothing requires is a no-op. The same token in both lists fails.
+message CapabilityOverlay {
+  repeated string grant = 1;
+  repeated string revoke = 2;
+}
+
+// Stateful realization of an Agent in a VAM session
+message AgentInstance {
+  ResourceId instance_id = 1;             // E.g. "urn:vam:session:control.vam.dev/acme/sess-123"
+  ResourceRef agent_ref = 2;              // Pinned reference to the executing AgentSpec version
+
+  google.protobuf.Timestamp booted_at = 3; // Timestamp of guest registration
+  string guest_cid = 4;                   // VSOCK Context Identifier assigned by host
+  CompatibilityRange runtime_compatibility = 5; // Enforced VM/runtime version compatibility bounds
+}
+
+// Status condition payload detailing granular lifecycle health
+message StatusCondition {
+  string type = 1;                        // E.g., "VM_PROVISIONED", "GUEST_HANDSHAKE", "SKILLS_MOUNTED"
+  bool status = 2;                        // True if condition is satisfied
+  string reason = 3;                      // CamelCase machine-readable short reason (e.g. "VsockConnected")
+  string message = 4;                     // Human-readable detailed explanation
+  google.protobuf.Timestamp last_transition_time = 5;
+}
+
+// Host-observed real-time status of the Agent
+message AgentStatus {
+  ResourceId instance_id = 1;
+  enum AgentState {
+    AGENT_STATE_UNSPECIFIED = 0;
+    AGENT_STATE_BOOTING = 1;              // MicroVM is starting
+    AGENT_STATE_READY = 2;                // Guest runtime handshaked and ready to run playbooks
+    AGENT_STATE_RUNNING = 3;              // Active playbook/reasoning execution
+    AGENT_STATE_PAUSED = 4;               // Suspended for HITL approval
+    AGENT_STATE_FAILED = 5;               // Terminated with error
+    AGENT_STATE_COMPLETED = 6;            // Gracefully terminated upon successful job completion
+  }
+  AgentState state = 2;
+
+  repeated ResourceRef resolved_skills = 3; // Pinned skills successfully verified and mounted
+  string active_step_id = 4;              // ID of the active step in the running playbook
+
+  TokenUsage total_usage_accumulated = 5;  // Total tokens consumed in this session so far
+  Cost total_cost_accumulated = 6;         // Total financial cost incurred so far
+
+  repeated StatusCondition conditions = 7; // Granular system health/admission conditions
+  string failure_reason = 8;              // Explicit error details if state is AGENT_STATE_FAILED
+  google.protobuf.Timestamp last_updated_at = 9; // Last status update timestamp
+}

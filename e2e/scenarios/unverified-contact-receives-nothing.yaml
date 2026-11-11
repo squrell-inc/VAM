@@ -1,0 +1,45 @@
+id: unverified-contact-receives-nothing
+title: Only a verified Slack contact receives messages, and an unlinked one stops receiving them
+tags: [notifications, members]
+needs: process
+description: Bob adds a Slack contact and never confirms the code; the owner links and verifies theirs. Both park an approval. The owner gets one message; nothing is sent to Bob's account, though his contact is still listed. After the owner unlinks, the owner's next approval sends nothing.
+given:
+  - org-admin
+  - { piece: org-member, as: bob }
+  - agent-with-guarded-tool
+  - slack-bot-token
+  - slack-app-token
+  - notify-broker
+when:
+  - node-notify: { slack: { botToken: slack-bot-token, appToken: slack-app-token }, appUrl: "https://vam.example.test" }
+  - link-contact: { channel: slack, account: "T1/U2", as: bob, verify: false }
+  - link-contact: { channel: slack, account: "T1/U1", verify: true }
+  - chat: "e2e-step:one Write the first note"
+  - expect: { approval: pending, tool: write_file }
+  - expect: { channel-messages: { to: "T1/U1", kind: approval.pending, count: 1, within: 20s } }
+  - approve: { via: app }
+  - expect: { run: succeeded }
+  - chat: { text: "e2e-step:one Write the first note", as: bob }
+  - expect: { approval: pending, tool: write_file }
+  - expect: { channel-messages: { to: "T1/U1", kind: approval.pending, count: 1, within: 20s } }
+  - expect: { channel-messages: { to: "T1/U2", absent: true } }
+  - unlink-contact: { channel: slack }
+  - chat: "e2e-step:two Write the second note"
+  - expect: { approval: pending, tool: write_file }
+then:
+  - expect: { notifications: { kind: approval.pending, run: latest, count: 1, state: open } }
+  - expect: { channel-messages: { to: "T1/U1", kind: approval.pending, count: 1 } }
+  - expect: { channel-messages: { to: "T1/U2", absent: true } }
+guards:
+  - vam:brokers/vam-notify/src/**
+  - vam:crates/vam-orchestrator/src/notifications.rs
+mock:
+  - when: { step: one, afterTool: write_file }
+    reply: { text: first written }
+  - when: { step: one }
+    reply: { toolCall: { name: write_file, args: { path: first.txt, content: e2e } } }
+  - when: { step: two, afterTool: write_file }
+    reply: { text: second written }
+  - when: { step: two }
+    reply: { toolCall: { name: write_file, args: { path: second.txt, content: e2e } } }
+status: active

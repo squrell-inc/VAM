@@ -1,0 +1,25 @@
+{
+  "spec": {
+    "agentRef": {
+      "resourceId": {
+        "urn": "urn:vam:agent:local.vam.dev/vam/linear-mcp-assistant"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0,
+        "patch": 0
+      }
+    },
+    "idempotencyKey": "",
+    "inputs": {
+      "model": "openai/gpt-4o-mini",
+      "prompt": "Call load_skill with skill mcp-linear. Then call linear__get_issue for issue id ENG-1 and report the title and status. Do not grep or paste SKILLS.md or manifest.json."
+    },
+    "maxDuration": "1800s",
+    "maxFinancialBudget": {
+      "currency": "USD",
+      "microAmount": "500000"
+    },
+    "workspaceRefUri": "volume://linear-mcp-1"
+  }
+}

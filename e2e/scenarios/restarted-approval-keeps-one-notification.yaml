@@ -1,0 +1,51 @@
+id: restarted-approval-keeps-one-notification
+title: A parked approval keeps its one notification across a restart, and a repeated call after a denial gets its own
+tags: [approval, notifications]
+needs: process
+description: A run parks on a guarded call and vamd restarts. The list still holds exactly one open record for it, pointing at the same approval. The user denies it and the record closes as acted. A follow-up in the same thread repeats the identical call and parks again; that run has its own single open record. Two records in all, and the closed one is never reopened.
+given:
+  - org-admin
+  - agent-with-guarded-tool
+when:
+  - chat: "e2e-step:ask Write the note"
+  - expect: { approval: pending, tool: write_file }
+  - expect: { notifications: { kind: approval.pending, run: latest, count: 1, state: open, fields: { count: 1 } } }
+  - restart-vamd: {}
+  - expect: { approval: pending, tool: write_file }
+  - expect:
+      notifications:
+        kind: approval.pending
+        run: latest
+        count: 1
+        state: open
+        approval: latest
+        fields:
+          count: 1
+          resolvedAt: { absent: true }
+  - deny: latest
+  - expect: { run: succeeded }
+  - expect: { notifications: { kind: approval.pending, run: latest, count: 1, fields: { resolvedReason: acted } } }
+  - chat: { text: "e2e-step:again Write the note again", thread: continue }
+  - expect: { approval: pending, tool: write_file }
+then:
+  - expect:
+      notifications:
+        kind: approval.pending
+        run: latest
+        count: 1
+        state: open
+        approval: latest
+        fields:
+          count: 1
+          resolvedAt: { absent: true }
+  - expect: { notifications: { kind: approval.pending, state: open, count: 1 } }
+  - expect: { notifications: { kind: approval.pending, count: 2 } }
+guards:
+  - vam:crates/vam-orchestrator/src/workflow.rs
+  - vam:crates/vam-orchestrator/src/hitl.rs
+mock:
+  - when: { step: ask }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+  - when: { step: again }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+status: active

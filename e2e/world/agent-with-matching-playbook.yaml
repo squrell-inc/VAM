@@ -1,0 +1,15 @@
+piece: agent-with-matching-playbook
+kind: agent
+release: true
+requires: [playbook-draft-pull-request]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent with minimal instructions and one attached playbook
+    description: Agent with minimal instructions and one attached playbook
+    role: Assistant
+    systemInstructions: Help the user.
+    defaultPlaybookRef:
+      resourceId: { urn: "urn:vam:playbook:local.vam.dev/e2e/draft-pull-request-matching" }
+    permissions:
+      tools: { default: allow }

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.sock
+data/
+secrets.local.json
+*.secrets.json

@@ -1,0 +1,47 @@
+id: triggered-run-resumes-like-a-chat-run
+title: A run a trigger started resumes after vamd restarts, as the same run with the same source
+tags: [triggers]
+needs: process
+description: The user approves a trigger and the broker fires it. The run it starts writes a.txt and runs a slow command; vamd restarts during the command. The same run picks up from its last finished step and finishes, still a triggered run, with no second fired run.
+given:
+  - org-admin
+  - agent-with-trigger-tool
+  - trigger-test-broker
+when:
+  - chat: "e2e-step:arm Arm the trigger"
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { run: succeeded }
+  - fire-trigger: { key: fire-1, label: slow }
+  - expect: { event: tool.invoked, tool: run }
+  - restart-vamd: {}
+then:
+  - expect: { run: succeeded }
+  - expect: { event: run.resumed, fields: { data.reason: vamd_restarted } }
+  - expect: { file: { path: a.txt, present: true } }
+  - expect: { file: { path: partial.txt, equals: half } }
+  - expect: { runs: { count: 2, latest: { source.kind: trigger } } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/queue.rs
+  - vam:crates/vam-orchestrator/src/session_end.rs
+  - vam:crates/vam-orchestrator/src/reconcile.rs
+mock:
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:slow Write a.txt, then run the slow command mock-script:triggered-run-resumes-like-a-chat-run"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+  - when: { step: slow, toolName: run }
+    reply: { text: "Done." }
+  - when: { step: slow, toolName: write_file }
+    reply: { toolCall: { name: run, args: { command: "printf half > partial.txt; sleep 4" } } }
+  - when: { step: slow, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: a.txt, content: first } } }
+status: active

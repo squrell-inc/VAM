@@ -1,0 +1,75 @@
+id: community-connector-appears-unverified-and-connects
+title: A connector from an added marketplace appears Unverified, is enabled by the admin, and a member connects it
+description: >
+  An admin adds a marketplace whose listing ships a connector file (a remote MCP server with discovery).
+  Before installing, the listing shows what the connector can reach. A member cannot install it; the admin
+  does. The connector then appears beside the built-in ones, marked Unverified, with the marketplace, tag and
+  commit it came from, and it is not enabled: the member is told to ask the admin and cannot connect it.
+  The admin enables it, the member connects through the same flow as Linear, a read tool runs and the
+  connector's vetted tools are the only ones offered. Three other listings are refused with a reason: a
+  connector that takes a Squrell id, one that names a profile the node does not know, and one that asks for a
+  client secret. When the marketplace later tags a release whose connector asks for more, the update waits for
+  the admin: the connector is back to not enabled, enabling it again leaves the member to reconnect, and only
+  then do its tools run again.
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - mock-linear-server
+  - agent-plain
+  - marketplace-community-connectors
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-admin, fields: { installed: null, summary.connectors.0.publisher: Community Tools Ltd, summary.connectors.0.mcpHost: mcp.bugwatch.example, summary.connectors.0.scopes.1: write } } }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-member, refused: true }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-admin }
+  - expect: { connectors: { id: bugwatch, as: org-member, fields: { state: askAdmin, source: marketplace, trust: unverified, publisher: Community Tools Ltd, origin.listing: bugwatch-connector, origin.ref: bugwatch-connector-v1.0.0, node.enabled: false } } }
+  - connector-connect: { id: bugwatch, url: "https://mcp.bugwatch.example/mcp", piece: mock-linear-server, as: org-member, refused: true }
+  - connector-node: { id: bugwatch, enabled: true, as: org-member, refused: true }
+  - connector-node: { id: bugwatch, enabled: true, as: org-admin }
+  - expect: { connectors: { id: bugwatch, as: org-member, fields: { state: connect, trust: unverified, node.enabled: true, mcp.url: "https://mcp.bugwatch.example/mcp", provider.profile: discover } } }
+  - connector-connect: { id: bugwatch, url: "https://mcp.bugwatch.example/mcp", piece: mock-linear-server, as: org-member }
+  - expect: { connectors: { id: bugwatch, as: org-member, fields: { state: connected } } }
+  - chat: { text: "e2e-step:read Read my issues", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-linear-server, path: /mcp, has: [authorization, tool=list_issues] } }
+  - chat: { text: "e2e-step:vendor Export the workspace", as: org-member }
+  - expect: { run: failed }
+  - expect: { event: mock.unmatched, fields: { reason: tool_not_offered } }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: reserved-connector-id, as: org-admin, refused: true, contains: linear }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: unknown-profile-connector, as: org-admin, refused: true, contains: profile }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: connector-with-a-secret, as: org-admin, refused: true, contains: secret }
+  - git-tag: { piece: marketplace-community-connectors, tag: bugwatch-connector-v1.1.0, overlay: marketplace-community-connectors-update }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-admin, fields: { installed.ref: bugwatch-connector-v1.0.0, updateAvailable: true, summary.connectors.0.scopes.2: admin } } }
+  - marketplace-update: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-admin }
+  - expect: { connectors: { id: bugwatch, as: org-member, fields: { state: askAdmin, node.enabled: false, origin.ref: bugwatch-connector-v1.1.0 } } }
+  - chat: { text: "e2e-step:read Read my issues again", as: org-member }
+  - expect: { run: failed }
+  - expect: { event: mock.unmatched, fields: { reason: tool_not_offered } }
+  - connector-node: { id: bugwatch, enabled: true, as: org-admin }
+  - expect: { connectors: { id: bugwatch, as: org-member, fields: { state: needsReconnect, trust: unverified } } }
+  - connector-connect: { id: bugwatch, url: "https://mcp.bugwatch.example/mcp", piece: mock-linear-server, as: org-member }
+  - chat: { text: "e2e-step:read Read my issues once more", as: org-member }
+then:
+  - expect: { run: succeeded }
+  - expect: { connectors: { id: bugwatch, as: org-member, fields: { state: connected, provider.scopes.2: admin } } }
+  - expect: { connectors: { id: linear, as: org-member, fields: { state: askAdmin, source: builtin, trust: squrell }, absent: [origin] } }
+guards:
+  - vam:crates/vam-orchestrator/src/marketplace/import.rs
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+  - vam:crates/vam-spec/src/connector.rs
+  - vam:crates/vam-spec/src/package.rs
+mock:
+  - when: { step: read, toolName: bugwatch__list_issues }
+    reply: { text: Read. }
+  - when: { step: read, stepStart: true }
+    reply: { toolCall: { name: bugwatch__list_issues, args: {} } }
+  - when: { step: vendor, toolName: bugwatch__export_workspace }
+    reply: { text: Exported. }
+  - when: { step: vendor, stepStart: true }
+    reply: { toolCall: { name: bugwatch__export_workspace, args: {} } }
+status: active

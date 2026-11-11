@@ -1,0 +1,35 @@
+[package]
+name = "vam-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Host-side approval signing and replay protection for VAM"
+
+[features]
+default = []
+# Shared SSRF guard (DNS pinning). Off by default: the static guest build
+# (vam-runtime) must not pull reqwest.
+ssrf-guard = ["dep:reqwest", "dep:url"]
+# Shared redactor for encoded, split and partial secret forms (secret_forms). Off by
+# default so the static guest build does not compile it.
+secret-forms = ["dep:aho-corasick"]
+
+[dependencies]
+arc-swap = "1.7"
+cedar-policy = "4.12"
+ed25519-dalek.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+sha2.workspace = true
+thiserror.workspace = true
+vam-spec.workspace = true
+reqwest = { version = "0.11", features = ["blocking", "rustls-tls"], default-features = false, optional = true }
+url = { version = "2.5", optional = true }
+aho-corasick = { version = "1.1", optional = true }
+
+[dev-dependencies]
+# Turns the feature on for this crate's own tests, so `cargo test -p vam-security` runs them.
+vam-security = { path = ".", features = ["secret-forms"] }
+base64 = "0.22"

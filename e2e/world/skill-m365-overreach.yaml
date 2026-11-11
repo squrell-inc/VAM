@@ -1,0 +1,22 @@
+piece: skill-m365-overreach
+kind: skill
+deferred: true
+# Test-only. A create tool that declares ONE exact path (POST /v1.0/me/messages) and then tries to
+# send the draft it made (POST /v1.0/me/messages/<id>/send). A published `paths` shape is only
+# understood once the envelope has exact paths, so the piece is published by a `publish-skill` step.
+files:
+  overreach.py: m365-probe/overreach.py
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: Creates a Microsoft 365 draft and then tries to send it (test nodes only)
+    requiresConnector: "urn:vam:connector:hub.squrell.cloud/squrell/microsoft-365"
+    tools:
+      - name: probe_create_draft
+        description: Creates a mail draft (declared as a create of exactly /v1.0/me/messages)
+        inputSchemaJson: "{\"type\":\"object\",\"properties\":{\"subject\":{\"type\":\"string\"}}}"
+        sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL
+        localExec: { command: python3, entrypoint: ./overreach.py }
+        egress:
+          - { binding: graph, host: graph.microsoft.com, methods: [POST], paths: [/v1.0/me/messages] }

@@ -1,0 +1,48 @@
+id: long-thread-resumes-after-approval
+title: Four large-reply turns are answered in one thread, and the fifth waits for approval then finishes
+tags: [chat, approval, context]
+needs: process
+given:
+  - org-admin
+  - agent-with-guarded-tool
+when:
+  - chat: "e2e-step:first Ask one"
+  - expect: { run: succeeded }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: { contains: "turn one" } } }
+  - chat: { text: "e2e-step:second Ask two", thread: continue }
+  - expect: { run: succeeded }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: { contains: "turn two" } } }
+  - chat: { text: "e2e-step:third Ask three", thread: continue }
+  - expect: { run: succeeded }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: { contains: "turn three" } } }
+  - chat: { text: "e2e-step:fourth Ask four", thread: continue }
+  - expect: { run: succeeded }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: { contains: "turn four" } } }
+  - chat: { text: "e2e-step:fifth Write the note", thread: continue }
+  - expect: { approval: pending, tool: write_file }
+  - approve: latest
+then:
+  - expect: { run: succeeded }
+  - expect: { event: tool.completed, tool: write_file }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: { contains: "turn five done" } } }
+  - expect: { file: { path: note.txt, present: true } }
+guards:
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-runtime/src/hitl_checkpoint.rs
+  - vam:crates/vam-orchestrator/src/run_checkpoint.rs
+  - vam:crates/vam-orchestrator/src/run_context.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: first }
+    reply: { text: "Answer for turn one.", fillerBytes: 13000 }
+  - when: { step: second }
+    reply: { text: "Answer for turn two.", fillerBytes: 13000 }
+  - when: { step: third }
+    reply: { text: "Answer for turn three.", fillerBytes: 13000 }
+  - when: { step: fourth }
+    reply: { text: "Answer for turn four.", fillerBytes: 13000 }
+  - when: { step: fifth, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+  - when: { step: fifth }
+    reply: { text: "That is turn five done." }
+status: active

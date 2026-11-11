@@ -1,0 +1,29 @@
+id: long-task-posts-progress
+title: A long task posts a progress message before it ends
+tags: [chat]
+needs: process
+description: With no instructions about progress, the agent posts a message while a slow command runs. The message is readable through the run's events before the task ends.
+model:
+  task: u4-progress
+  version: 0.2.0
+  k: 5
+given:
+  - org-admin
+  - agent-with-shell
+when:
+  - chat: { text: "e2e-step:work Do the two checks", wait: false, harness: { human: { jig: true } } }
+  - expect: { event: outbox.message, fields: { data.text: "Starting: 1 of 2" } }
+  - expect: { run: running }
+then:
+  - expect: { run: succeeded }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: work, toolName: post_message }
+    reply: { toolCall: { name: run, args: { command: "sleep 6" } } }
+  - when: { step: work, toolName: run }
+    reply: { text: done }
+  - when: { step: work, stepStart: true }
+    reply: { toolCall: { name: post_message, args: { text: "Starting: 1 of 2" } } }
+status: active

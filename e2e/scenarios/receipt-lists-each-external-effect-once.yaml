@@ -1,0 +1,44 @@
+id: receipt-lists-each-external-effect-once
+title: A receipt lists each outside effect once, with its class, state and key digest, and counts reads without listing them
+tags: [chat]
+needs: process
+description: The task creates a ticket, looks it up, and writes a file in its own workspace. The receipt's effects section is built from the host's effect journal. It lists the create as one line (class, state, attempts, a digest of the key and of the arguments), counts the lookup as a read without listing it, and does not list the file write, which is a turn commit and never left the machine. It says how many sends beyond the first and how many outcomes stayed unknown, and what the journal cannot see. The receipt still verifies.
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: "e2e-step:make Create the Q4 plan ticket, look it up, and save a note"
+then:
+  - expect: { run: succeeded }
+  - expect:
+      receipt:
+        fields:
+          receipt.effects.journaled: true
+          receipt.effects.statement: { absent: true }
+          receipt.effects.scope: { present: true }
+          receipt.effects.duplicates: 0
+          receipt.effects.unknown: 0
+          receipt.effects.counts.reads: 1
+          receipt.effects.lines.0.tool: echo_create_ticket
+          receipt.effects.lines.0.class: non_idempotent
+          receipt.effects.lines.0.state: confirmed
+          receipt.effects.lines.0.attempts: 1
+          receipt.effects.lines.0.keyDigest: { present: true }
+          receipt.effects.lines.0.argsDigest: { present: true }
+          receipt.effects.lines.1: { absent: true }
+  - verify-receipt: {}
+guards:
+  - vam:crates/vam-orchestrator/src/receipt.rs
+  - vam:crates/vam-orchestrator/src/effect_store.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: make, toolName: write_file }
+    reply: { text: "Done" }
+  - when: { step: make, toolName: echo_find_ticket }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: e2e } } }
+  - when: { step: make, toolName: echo_create_ticket }
+    reply: { toolCall: { name: echo_find_ticket, args: { title: Q4 plan } } }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan } } }
+status: active

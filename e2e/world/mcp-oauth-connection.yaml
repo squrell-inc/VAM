@@ -1,0 +1,18 @@
+piece: mcp-oauth-connection
+kind: mcp-connection
+# An org OAuth connection to an MCP server that does not exist (a reserved `.example` host, so a
+# lookup fails if anything ever tries). It is registered through the public API with random access,
+# refresh and client-secret values, which the runner keeps in memory and never prints. The
+# connection is removed when the scenario ends, so its host and credentials do not reach a later
+# scenario's session. The id is fixed because a mock script spells the guest's `vamsec_` guess.
+body:
+  connectionId: e2e-mcp
+  url: https://mcp.e2e-mcp.example/mcp
+  authMode: oauth
+  oauth:
+    resource: https://mcp.e2e-mcp.example/mcp
+    authorizationServer: https://auth.e2e-mcp.example
+    tokenEndpoint: https://auth.e2e-mcp.example/oauth/token
+    clientId: e2e-client
+    registrationMethod: dcr
+    scopes: [mcp:tools]

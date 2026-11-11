@@ -1,0 +1,51 @@
+id: schedule-set-to-skip-does-not-wait-for-a-busy-workspace
+title: A schedule set to skip starts nothing when its workspace is busy, and records the skipped fire
+tags: [schedule, triggers]
+needs: process
+description: The agent makes a once-schedule with onBusy SKIP on the chat's workspace. A slow task holds the workspace at the time. The fire starts nothing and queues nothing, and schedule_get shows a fire with outcome skipped_busy.
+given:
+  - org-admin
+  - agent-with-schedule-tools
+  - schedule-broker
+when:
+  - chat: "e2e-step:create Write a note in eight seconds, skip if busy"
+  - expect: { approval: pending, tool: schedule_create }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "sch_" } }
+  - chat: { text: "e2e-step:slow Check slowly", thread: continue, wait: false }
+  - expect: { event: tool.invoked, tool: run }
+  - expect: { run: succeeded }
+  - expect: { scheduled-runs: { count: 0, within: 3s } }
+  - chat: { text: "e2e-step:get Show the schedule", thread: continue }
+  - expect: { run: succeeded }
+then:
+  - expect: { thread: { role: tool, contains: "skipped_busy" } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+mock:
+  - when: { step: create, stepStart: true }
+    reply:
+      toolCall:
+        name: schedule_create
+        args:
+          title: Nightly note
+          when: { once: { in: PT8S } }
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:schedule-set-to-skip-does-not-wait-for-a-busy-workspace"
+            workspace: { mode: SAME }
+            thread: { mode: NEW, name: nightly-note }
+            onBusy: SKIP
+  - when: { step: create }
+    reply: { text: Scheduled. }
+  - when: { step: slow, toolName: run }
+    reply: { text: done }
+  - when: { step: slow, stepStart: true }
+    reply: { toolCall: { name: run, args: { command: "sleep 14" } } }
+  - when: { step: get, stepStart: true }
+    reply: { toolCall: { name: schedule_get, args: { scheduleId: "{{last:sch_}}" } } }
+  - when: { step: get }
+    reply: { text: Shown. }
+status: active

@@ -1,0 +1,121 @@
+{
+  "description": "Finds stale issues in the current sprint, prompts for manager approval, and transitions them back to the backlog with a notification comment.",
+  "activation": {
+    "when": "Use when the user wants to clean up stale issues in the current sprint and move them back to the backlog."
+  },
+  "displayName": "Sprint Backlog Cleanup",
+  "inputSchema": {
+    "properties": {
+      "cutoff_days": {
+        "description": "Number of inactive days required to flag an issue as stale",
+        "type": "integer"
+      },
+      "project_key": {
+        "description": "The key of the Jira project to target",
+        "type": "string"
+      },
+      "sprint_name": {
+        "description": "The name of the sprint to clean up",
+        "type": "string"
+      }
+    },
+    "required": [
+      "project_key",
+      "sprint_name",
+      "cutoff_days"
+    ],
+    "type": "object"
+  },
+  "metadata": {
+    "createdBy": {
+      "urn": "urn:vam:user:local.vam.dev/vam/admin"
+    },
+    "revision": 2
+  },
+  "outputSchema": {
+    "properties": {
+      "report_file_path": {
+        "type": "string"
+      },
+      "transitioned_count": {
+        "type": "integer"
+      }
+    },
+    "type": "object"
+  },
+  "resourceId": {
+    "urn": "urn:vam:playbook:local.vam.dev/vam/jira-sprint-backlog-cleanup"
+  },
+  "steps": [
+    {
+      "id": "query-stale-issues",
+      "description": "Find issues in the specified project and sprint that have not been updated within the cutoff window.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "instruction": "Search for all issues in project '{{inputs.project_key}}' and sprint '{{inputs.sprint_name}}' that are not 'Done' and have not been updated for more than {{inputs.cutoff_days}} days. Use the jira_search_issues tool. Put the matching issues in the step output under issues.",
+      "evidence": {
+        "tool": "jira_search_issues",
+        "result": "success"
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "issues": {
+            "type": "array",
+            "description": "Stale issues found in the sprint"
+          }
+        },
+        "required": ["issues"]
+      }
+    },
+    {
+      "id": "request-approver-review",
+      "description": "Pause for human review before moving stale issues to the backlog.",
+      "kind": "STEP_KIND_GATE",
+      "after": ["query-stale-issues"],
+      "question": "Approve moving these stale issues (no updates in {{inputs.cutoff_days}} days) back to the backlog?",
+      "choicesFrom": "steps.query-stale-issues.output.issues",
+      "timeout": "2592000s",
+      "options": [
+        {
+          "label": "approved",
+          "description": "Proceed with transitions for the selected issues"
+        },
+        {
+          "label": "rejected",
+          "description": "Stop cleanly without transitioning issues",
+          "terminal": "OUTCOME_TERMINAL_SUCCEEDED"
+        }
+      ]
+    },
+    {
+      "id": "transition-stale-issues",
+      "description": "Transition approved issues back to the 'To Do' column and post a descriptive comment on each.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "after": ["request-approver-review:approved"],
+      "instruction": "For each issue selected in {{steps.request-approver-review.output.selected}}, run the jira_transition_issue tool to move it to 'To Do' status, and run the jira_add_comment tool to add a comment indicating that this issue has been moved due to inactivity of {{inputs.cutoff_days}} days."
+    },
+    {
+      "id": "generate-report",
+      "description": "Generate a final markdown summary of transitioned tickets and save it in the workspace.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "after": ["transition-stale-issues"],
+      "instruction": "Write a summary report of the cleanup execution (which issues were transitioned and when) and save it as 'sprint_cleanup_report.md' in the workspace. Once done, declare completion to end the execution loop."
+    }
+  ],
+  "guards": [
+    {
+      "tools": ["jira_transition_issue"],
+      "sideEffects": ["SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL"],
+      "allowedWhen": ["request-approver-review:approved"],
+      "argsWithin": [
+        {
+          "argument": "issue_key",
+          "within": "steps.request-approver-review.output.selected[*].key"
+        }
+      ]
+    }
+  ]
+}

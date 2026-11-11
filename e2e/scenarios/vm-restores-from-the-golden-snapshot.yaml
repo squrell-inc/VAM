@@ -1,0 +1,23 @@
+id: vm-restores-from-the-golden-snapshot
+title: With snapshot restore on, new sessions boot from the golden snapshot and reply
+tags: [chat]
+needs: firecracker
+given:
+  - org-admin
+  - agent-plain
+when:
+  - chat: "e2e-step:first Hello"
+  - expect: { event: session.booted, fields: { data.bootPath: restore } }
+  - chat: "e2e-step:second Hello again"
+then:
+  - expect: { event: session.booted, fields: { data.bootPath: restore } }
+  - expect: { run: succeeded }
+guards:
+  - vam:crates/vam-orchestrator/src/golden.rs
+  - vam:crates/vam-orchestrator/src/manager.rs
+mock:
+  - when: { step: first }
+    reply: { text: first reply }
+  - when: { step: second }
+    reply: { text: second reply }
+status: active

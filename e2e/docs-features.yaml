@@ -1,0 +1,800 @@
+# The feature register: every shipped feature, the page that teaches it (`dev`), the page that
+# explains it (`arch`), and what proves it. Checked by `vam-e2e check` (rule `docs-feature`).
+#   proves:       active scenario ids, or tests: a file under a crate's `tests/` or `path::fn` where
+#                 `fn` has a #[test] or #[tokio::test] attribute (a bare `src/` file is not a proof)
+#   unproven:     why no test proves it (a reason, never a proof; a row has `proves` or `unproven`)
+#   pending_page: true while a `dev` or `arch` page is not written yet (its wave removes the flag)
+# Pages are slugs under docs/src/content/docs. A listed page that has left docs-baseline.txt must
+# be `shipped` and name at least one of the row`s proofs in its own `proves`.
+features:
+  - id: start-a-node-state-db-listen-address
+    area: "Install and node"
+    surface: "config --db-path / VAMD_DB_PATH, --listen / VAMD_LISTEN"
+    dev: [getting-started/installation]
+    arch: [orchestrator/overview]
+    proves:
+      - plain-chat-gets-a-reply
+  - id: vm-node-refuses-to-start-without-its
+    area: "Install and node"
+    surface: "config VAMD_FIRECRACKER_BIN, VAM_ROOTFS_PATH, VAM_KERNEL_PATH, VAMD_JAILER_BIN"
+    dev: [getting-started/macos-lima, getting-started/quickstart]
+    arch: [orchestrator/overview, core/overview]
+    proves:
+      - crates/vam-orchestrator/src/daemon.rs::vm_node_names_every_missing_variable
+  - id: tls-on-by-default-operator-cert-self
+    area: "Install and node"
+    surface: "config VAMD_TLS_CERT, VAMD_TLS_KEY, VAMD_TLS_SANS, --insecure-dev; CLI vam config set-ca, VAM_CA_FILE"
+    dev: [getting-started/quickstart, getting-started/installation]
+    arch: [orchestrator/overview, orchestrator/api]
+    proves:
+      - crates/vam-orchestrator/tests/tls_refusals.rs
+      - vamd-refuses-plain-http-by-default
+  - id: health-and-node-status-isolation-line
+    area: "Install and node"
+    surface: "CLI vam health, vam node status; API GET /v1/health, GET /v1/node"
+    dev: [getting-started/cli]
+    arch: [orchestrator/api]
+    proves:
+      - node-reports-the-isolation-it-runs
+  - id: vam-node-init-installs-a-node
+    area: "Install and node"
+    surface: "CLI vam node init, --check, --no-systemd, --base, --root; vamd --init, --preflight"
+    dev: [getting-started/installation]
+    arch: []
+    proves:
+      - node-init-check-names-what-is-missing
+      - node-init-run-twice-changes-nothing-and-shows-the-key-once
+  - id: standard-base-image-python-git-bun
+    area: "Install and node"
+    surface: "base image vam/base:2 (Python 3.13 libraries, git, curl, jq, Bun); scripts/build-rootfs.sh --minimal fallback; API GET /v1/node base"
+    dev: [getting-started/installation]
+    arch: []
+    proves:
+      - skill-uses-python-pandas-and-git-on-the-standard-base
+      - node-reports-the-standard-base-it-boots
+  - id: skill-requires-runtime-refused-at-install
+    area: "Install and node"
+    surface: "skill manifest requiresRuntime (>=X[.Y[.Z]], =X, *)"
+    dev: [getting-started/installation, authoring/skill-manifest]
+    arch: []
+    proves:
+      - skill-needing-a-runtime-the-base-lacks-is-refused-at-install
+  - id: golden-snapshot-bake-and-restore
+    area: "Install and node"
+    surface: "config VAM_SNAPSHOT_RESTORE, VAM_RESEED_TIMEOUT_SECS, VAM_BAKE_READY_TIMEOUT_SECS, VAM_SNAPSHOT_ROOT"
+    dev: [getting-started/installation]
+    arch: [architecture/cold-start]
+    proves:
+      - vm-restores-from-the-golden-snapshot
+  - id: idle-sessions-end
+    area: "Install and node"
+    surface: "config VAMD_SESSION_IDLE_TTL_SECS"
+    dev: []
+    arch: [orchestrator/overview]
+    proves:
+      - crates/vam-orchestrator/src/ttl.rs::bare_session_is_idle_only_after_the_ttl
+      - crates/vam-orchestrator/src/ttl.rs::sweep_ends_idle_sessions_once_and_survives_a_restart
+      - crates/vam-orchestrator/src/daemon.rs::session_idle_ttl_default_off_and_invalid
+    pending_page: true
+  - id: example-seeds
+    area: "Install and node"
+    surface: "config VAMD_EXAMPLES_DIR (alias VAM_EXAMPLES_DIR)"
+    dev: []
+    arch: [orchestrator/overview]
+    unproven: "no test covers seeding from VAMD_EXAMPLES_DIR"
+    pending_page: true
+  - id: runs-and-threads-survive-a-restart
+    area: "Install and node"
+    surface: "behaviour"
+    dev: []
+    arch: [orchestrator/overview]
+    proves:
+      - follow-up-continues-after-vamd-restart
+      - work-survives-vamd-restart-mid-task
+    pending_page: true
+  - id: session-operations
+    area: "Install and node"
+    surface: "CLI vam session create/ls/get/pause/resume/terminate/snapshot/restore; API /v1/sessions…"
+    dev: [getting-started/cli]
+    arch: [orchestrator/session]
+    proves:
+      - crates/vam-orchestrator/tests/api_tests.rs
+  - id: mac-and-windows-hosts
+    area: "Install and node"
+    surface: "scripts start-vamd-lima.sh, build-rootfs-lima.sh, fetch-guest-kernel-lima.sh"
+    dev: [getting-started/macos-lima, getting-started/windows-wsl]
+    arch: []
+    unproven: "the Lima and WSL scripts are run by hand; no test runs them"
+    pending_page: true
+  - id: process-mode-a-test-build-that-isolates
+    area: "Install and node"
+    surface: "build feature process-guest, VAMD_PROCESS_GUEST_BIN"
+    dev: []
+    arch: [architecture/overview]
+    proves:
+      - crates/vam-orchestrator/tests/process_mode_bin.rs
+  - id: bootstrap-key-and-first-admin
+    area: "Auth and users"
+    surface: "config VAMD_BOOTSTRAP_API_KEY, VAMD_BOOTSTRAP_ADMIN, VAMD_BOOTSTRAP_ADMIN_PASSWORD, --bootstrap-admin, --reset-password"
+    dev: [getting-started/users-and-roles]
+    arch: [orchestrator/user-isolation]
+    proves:
+      - crates/vam-orchestrator/tests/login_tests.rs
+  - id: login-refresh-logout-who-am-i
+    area: "Auth and users"
+    surface: "CLI vam login, vam logout; API /v1/login, /v1/login/refresh, /v1/logout, /v1/me"
+    dev: [getting-started/cli]
+    arch: [orchestrator/user-isolation]
+    proves:
+      - crates/vam-orchestrator/tests/login_tests.rs
+      - crates/vam-orchestrator/tests/me_tests.rs
+  - id: users-and-roles-deactivate-password-reset-publish
+    area: "Auth and users"
+    surface: "CLI vam users create; API /v1/users…, /v1/catalog/reassign-owner"
+    dev: [getting-started/users-and-roles]
+    arch: [orchestrator/user-isolation]
+    proves:
+      - member-chats-with-a-released-agent
+  - id: api-keys-own-and-per-user
+    area: "Auth and users"
+    surface: "CLI vam keys create/list/revoke; API /v1/keys, /v1/users/:id/keys"
+    dev: [getting-started/cli]
+    arch: [orchestrator/user-isolation]
+    proves:
+      - crates/vam-orchestrator/tests/api_tests.rs
+  - id: one-user-cannot-see-another-s-runs
+    area: "Auth and users"
+    surface: "API behaviour"
+    dev: []
+    arch: [orchestrator/user-isolation]
+    proves:
+      - crates/vam-orchestrator/tests/isolation_coverage_map_tests.rs
+    pending_page: true
+  - id: api-rate-limits-on-by-default
+    area: "Auth and users"
+    surface: "config VAMD_RATE_LIMIT (off), VAMD_RATE_LIMIT_RPS/_BURST/_CREATE_*/_IP_*; 429 with Retry-After"
+    dev: []
+    arch: []
+    proves:
+      - api-rate-limits-a-flood
+    pending_page: true
+  - id: list-paging
+    area: "Auth and users"
+    surface: "API pageSize, pageToken, pagination.nextPageToken; CLI --all"
+    dev: [getting-started/cli]
+    arch: [orchestrator/api]
+    proves:
+      - crates/vam-orchestrator/src/paging_store_tests.rs::sessions_page_newest_first_and_a_new_session_does_not_shift_the_next_page
+      - crates/vam-orchestrator/src/paging_store_tests.rs::runs_page_newest_first_by_rowid_cursor
+  - id: scripting-contract-exit-codes-no-prompts
+    area: "Auth and users"
+    surface: "CLI global flags"
+    dev: [getting-started/cli]
+    arch: []
+    proves:
+      - crates/vam-cli/tests/cli_tests.rs
+    pending_page: true
+  - id: agent-spec-put-get-list-draft-release
+    area: "Agents and specs"
+    surface: "CLI vam agent put/get/ls/release/versions/suggest-version; API /v1/agents…, …/release-suggestion"
+    dev: [authoring/agent-spec, authoring/model]
+    arch: [orchestrator/catalog]
+    proves:
+      - crates/vam-orchestrator/tests/api_tests.rs
+      - released-agent-approvals-are-once-only
+  - id: urn-origin-and-reserved-domains
+    area: "Agents and specs"
+    surface: "config VAMD_REGISTRY_DOMAIN, VAMD_MARKETPLACE_DOMAIN"
+    dev: [authoring/model]
+    arch: [orchestrator/catalog]
+    proves:
+      - crates/vam-orchestrator/tests/api_tests.rs
+  - id: agent-check
+    area: "Agents and specs"
+    surface: "CLI vam agent check; API POST /v1/agent-checks"
+    dev: [getting-started/cli]
+    arch: []
+    proves:
+      - crates/vam-cli/tests/agent_check_cli.rs
+      - crates/vam-orchestrator/tests/agent_check_tests.rs
+    pending_page: true
+  - id: permissions-as-data-tool-and-internet-rules
+    area: "Agents and specs"
+    surface: "CLI vam agent permissions get/set/web/presets, vam agent migrate, vam policy explain; API /v1/agents/{urn}/permissions…, /v1/permission-presets"
+    dev: [authoring/agent-spec]
+    arch: [security/permissions]
+    proves:
+      - always-allow-and-always-deny-are-remembered
+      - crates/vam-orchestrator/tests/permissions_api_tests.rs
+  - id: cedar-policies-legacy
+    area: "Agents and specs"
+    surface: "CLI vam policy put/get/ls/release/versions; spec field"
+    dev: [security/cedar-and-hitl]
+    arch: [security/permissions]
+    proves:
+      - crates/vam-orchestrator/tests/legacy_permissions_tests.rs
+      - crates/vam-security/tests/pdp_tests.rs
+  - id: allowed-models-operator-list
+    area: "Agents and specs"
+    surface: "API /v1/node/allowed-models"
+    dev: []
+    arch: [runtime/inference]
+    proves:
+      - crates/vam-orchestrator/tests/allowed_models_tests.rs
+    pending_page: true
+  - id: a-workspace-pins-its-agent-version
+    area: "Agents and specs"
+    surface: "behaviour"
+    dev: []
+    arch: [orchestrator/session]
+    proves:
+      - crates/vam-orchestrator/tests/workspace_pin_tests.rs
+    pending_page: true
+  - id: run-spec-and-name-urn-or-file
+    area: "Agents and specs"
+    surface: "CLI vam run, -p, --file, --workspace; API POST /v1/runs"
+    dev: [authoring/run-spec, getting-started/cli]
+    arch: []
+    proves:
+      - follow-up-uses-earlier-tool-results
+      - plain-chat-gets-a-reply
+  - id: dry-run
+    area: "Agents and specs"
+    surface: "CLI vam run --dry-run"
+    dev: [getting-started/cli]
+    arch: []
+    proves:
+      - crates/vam-cli/tests/cli_tests.rs
+    pending_page: true
+  - id: harness-switches-and-profiles-loop-detection-todo
+    area: "Agents and specs"
+    surface: "run input inputs.harness"
+    dev: []
+    arch: [runtime/agent]
+    proves:
+      - harness-switches-print-on-the-receipt
+      - repeated-identical-call-is-caught-and-observed
+      - todo-is-recited-each-turn-when-enabled
+    pending_page: true
+  - id: context-compaction
+    area: "Agents and specs"
+    surface: "agent context policy"
+    dev: []
+    arch: [runtime/agent]
+    proves:
+      - compaction-keeps-an-early-correction
+      - follow-up-after-compaction
+    pending_page: true
+  - id: instruction-layers-template
+    area: "Agents and specs"
+    surface: "package files"
+    dev: [authoring/agent-package]
+    arch: [runtime/agent]
+    unproven: "no test covers the instruction layer files or the protected write path"
+  - id: skill-package-executor
+    area: "Skills"
+    surface: "directory layout"
+    dev: [authoring/skill-manifest]
+    arch: []
+    proves:
+      - host-tool-output-fits-frame
+  - id: publish-release-and-version-a-skill
+    area: "Skills"
+    surface: "CLI vam skill publish/put/get/ls/release/versions/suggest-version; API /v1/skills/packages…"
+    dev: [authoring/publish-skill]
+    arch: [orchestrator/catalog]
+    proves:
+      - crates/vam-orchestrator/tests/api_tests.rs
+  - id: load-skill-and-index
+    area: "Skills"
+    surface: "built-in tool"
+    dev: [authoring/skill-manifest]
+    arch: [runtime/agent]
+    proves:
+      - crates/vam-runtime/src/skill_index.rs::generate_is_sorted_unique_and_escaped
+  - id: required-secrets-and-declared-capabilities
+    area: "Skills"
+    surface: "manifest fields"
+    dev: [authoring/skill-manifest]
+    arch: [hosted/overview]
+    proves:
+      - vault-secret-is-not-in-the-guest
+  - id: built-in-tools
+    area: "Tools"
+    surface: "agent tools"
+    dev: []
+    arch: [runtime/tools]
+    proves:
+      - thread-history-lists-tool-results
+      - tool-call-first-try-saves-a-draft
+    pending_page: true
+  - id: typed-error-for-bad-tool-arguments
+    area: "Tools"
+    surface: "behaviour"
+    dev: []
+    arch: [runtime/tools]
+    proves:
+      - invalid-tool-arguments-return-a-typed-error
+
+  - id: custom-in-vm-tools-stdin-stdout-json
+    area: "Tools"
+    surface: "skill executor"
+    dev: [tools/writing-tools, tools/tool-runtimes]
+    arch: [runtime/tools]
+    unproven: "no test runs a custom tool executor; only the example skills use it"
+  - id: tool-process-confinement-setuid-1000-env-scrub
+    area: "Tools"
+    surface: "behaviour"
+    dev: [tools/writing-tools]
+    arch: [runtime/tools]
+    unproven: "no test checks the uid, environment or Landlock rules of a running tool"
+  - id: host-tool-output-bound-60-kib-truncation
+    area: "Tools"
+    surface: "behaviour"
+    dev: []
+    arch: [runtime/tools]
+    proves:
+      - host-tool-output-fits-frame
+    pending_page: true
+  - id: mcp-connections-remote-servers-oauth-tokens-refresh
+    area: "Tools"
+    surface: "CLI vam mcp connect/update/list/disconnect/refresh; API /v1/mcp/connections…"
+    dev: []
+    arch: [runtime/tools]
+    proves:
+      - crates/vam-orchestrator/tests/mcp_connections_tests.rs
+    pending_page: true
+  - id: playbook-spec-put-release-local-and
+    area: "Playbooks"
+    surface: "CLI vam playbook put/get/ls/release/versions/init/explain"
+    dev: [authoring/playbook-spec, authoring/playbook-tutorial]
+    arch: []
+    proves:
+      - crates/vam-cli/tests/playbook_put_cli.rs
+      - crates/vam-orchestrator/tests/playbook_examples_tests.rs
+  - id: activation-start-by-itself-or-ask-first
+    area: "Playbooks"
+    surface: "spec when, activation mode"
+    dev: [authoring/playbook-spec]
+    arch: [runtime/workflow]
+    proves:
+      - greeting-starts-no-playbook
+      - injected-text-cannot-start-a-playbook
+      - matching-request-starts-the-playbook
+  - id: playbook-run-with-inputs
+    area: "Playbooks"
+    surface: "CLI, API POST /v1/runs"
+    dev: [authoring/playbook-tutorial]
+    arch: []
+    proves:
+      - playbook-run-starts-with-inputs
+  - id: gates-and-guards
+    area: "Playbooks"
+    surface: "spec steps"
+    dev: [authoring/playbook-spec]
+    arch: [runtime/workflow]
+    proves:
+      - gate-decided-finishes-the-run
+      - gate-offers-its-options-and-stop-ends-the-run
+      - receipt-shows-denial-before-approval
+      - vm-run-waits-at-a-gate-and-finishes
+  - id: playbook-tests-scripted-observations-pass-k
+    area: "Playbooks"
+    surface: "CLI vam playbook test --repeat; API POST /v1/playbook-tests"
+    dev: [authoring/playbook-tutorial]
+    arch: []
+    proves:
+      - crates/vam-cli/tests/playbook_test_cli.rs
+    pending_page: true
+  - id: tool-approval-list-inspect-approve-reject-amend
+    area: "Approvals"
+    surface: "CLI vam approve ls/get/decide; API /v1/approvals…"
+    dev: [security/hitl-lifecycle]
+    arch: [runtime/workflow]
+    proves:
+      - approval-suspends-and-resumes
+  - id: always-allow-always-deny
+    area: "Approvals"
+    surface: "CLI vam approve decide --always allow\\|deny"
+    dev: []
+    arch: [security/permissions]
+    proves:
+      - always-allow-and-always-deny-are-remembered
+  - id: a-released-agent-s-approvals-are-once
+    area: "Approvals"
+    surface: "behaviour"
+    dev: []
+    arch: [security/permissions]
+    proves:
+      - released-agent-approvals-are-once-only
+  - id: parked-approvals-survive-a-restart-long-threads
+    area: "Approvals"
+    surface: "behaviour"
+    dev: []
+    arch: [runtime/workflow]
+    proves:
+      - long-thread-resumes-after-approval
+      - parked-approval-survives-a-restart
+    pending_page: true
+  - id: approval-timeout
+    area: "Approvals"
+    surface: "config VAMD_TOOL_HITL_TIMEOUT_SECS, --tool-hitl-timeout-secs"
+    dev: []
+    arch: [runtime/workflow]
+    proves:
+      - crates/vam-orchestrator/src/daemon.rs::tool_hitl_timeout_parser_uses_one_hour_default
+
+  - id: vault-set-list-get-delete-kinds-org
+    area: "Secrets"
+    surface: "CLI vam secrets set/list/get/delete --scope; API /v1/secrets…, /v1/org/secrets…"
+    dev: [security/secret-management]
+    arch: [security/secrets-proxy]
+    proves:
+      - crates/vam-orchestrator/tests/api_tests.rs
+  - id: vault-master-key
+    area: "Secrets"
+    surface: "config VAMD_SECRETS_MASTER_KEY, else a 0600 key file beside the DB (/var/lib/vam/secrets.key)"
+    dev: [security/secret-management]
+    arch: [security/secrets-proxy]
+    unproven: "no test reads VAMD_SECRETS_MASTER_KEY or the key file beside the database"
+  - id: placeholders-substituted-at-the-host-proxy-the
+    area: "Secrets"
+    surface: "vamsec_… placeholders"
+    dev: [integrations/egress-proxy-deepdive]
+    arch: [security/secrets-proxy]
+    proves:
+      - vault-secret-is-not-in-the-guest
+  - id: encoded-forms-of-a-secret-redacted-from
+    area: "Secrets"
+    surface: "behaviour"
+    dev: []
+    arch: [security/secrets-proxy]
+    proves:
+      - secret-never-reaches-guest-encoded
+  - id: import-secrets-from-the-environment-at-start
+    area: "Secrets"
+    surface: "config VAMD_IMPORT_ENV_SECRETS"
+    dev: [security/secret-management]
+    arch: [orchestrator/user-isolation]
+    proves:
+      - crates/vam-orchestrator/src/secrets.rs::import_env_secrets_are_org_scope_and_ignore_user_rows
+  - id: guest-proxy-binds-loopback-only
+    area: "Egress"
+    surface: "behaviour"
+    dev: []
+    arch: [network/overview]
+    proves:
+      - guest-proxy-never-binds-wildcard
+  - id: the-guest-has-no-route-the-host
+    area: "Egress"
+    surface: "behaviour"
+    dev: []
+    arch: [network/overview]
+    proves:
+      - guest-has-no-route-off-the-vm
+  - id: per-agent-internet-rules-no-setting-resolves
+    area: "Egress"
+    surface: "spec permissions.internet"
+    dev: [authoring/agent-spec]
+    arch: [security/permissions, network/overview]
+    proves:
+      - crates/vam-security/src/permissions.rs::default_deny_internet_allows_only_listed_hosts
+      - crates/vam-security/src/permissions.rs::host_specificity_table
+  - id: ip-floor-private-loopback-and-metadata-addresses
+    area: "Egress"
+    surface: "behaviour"
+    dev: []
+    arch: [network/overview]
+    proves:
+      - crates/vam-security/src/ssrf_guard.rs::test_is_restricted_ip
+      - crates/vam-security/src/ssrf_guard.rs::policy_pin_keeps_every_address_and_fails_closed_on_any_restricted_one
+  - id: https-terminated-with-a-per-session-ca
+    area: "Egress"
+    surface: "API GET /v1/sessions/:id/egress-ca"
+    dev: [integrations/egress-proxy-deepdive]
+    arch: [security/secrets-proxy]
+    proves:
+      - crates/vam-network/src/proxy/mitm_tests.rs::connect_then_tls_get_returns_the_upstream_body
+      - crates/vam-network/src/proxy/mitm_tests.rs::prepare_substitutes_authorization_and_finish_scrubs_the_echo
+  - id: passthrough-hosts-and-response-cap
+    area: "Egress"
+    surface: "config VAMD_EGRESS_PASSTHROUGH_HOSTS, VAMD_EGRESS_MAX_BYTES"
+    dev: []
+    arch: [network/overview]
+    proves:
+      - crates/vam-orchestrator/src/daemon.rs::passthrough_hosts_default_empty_and_normalize
+      - crates/vam-orchestrator/src/daemon.rs::egress_max_bytes_defaults_to_one_gib_and_zero_disables
+  - id: signed-receipt-per-run-host-facts-apart
+    area: "Receipts and evidence"
+    surface: "CLI vam receipt show; API GET /v1/runs/{id}/receipt"
+    dev: [authoring/playbook-tutorial]
+    arch: [security/run-receipt]
+    proves:
+      - receipt-names-the-isolation-the-run-had
+      - receipt-names-who-decided-and-from-where
+      - receipt-separates-host-facts-from-model-text
+      - receipt-shows-denial-before-approval
+  - id: verify-a-receipt-offline
+    area: "Receipts and evidence"
+    surface: "CLI vam receipt verify"
+    dev: []
+    arch: [security/run-receipt]
+    proves:
+      - crates/vam-cli/tests/receipt_cli.rs
+      - receipt-verifies-offline-and-fails-on-tamper
+      - old-receipt-still-verifies
+  - id: node-signing-keys
+    area: "Receipts and evidence"
+    surface: "CLI vam node keys"
+    dev: []
+    arch: [security/run-receipt]
+    proves:
+      - crates/vam-orchestrator/tests/node_signing_keys_tests.rs
+  - id: evidence-pack
+    area: "Receipts and evidence"
+    surface: "CLI vam evidence export/verify/receipt; API /v1/runs/{id}/evidence"
+    dev: [getting-started/cli]
+    arch: [telemetry/overview]
+    proves:
+      - crates/vam-orchestrator/tests/evidence_pack_test.rs
+  - id: workspaces-and-threads-multi-turn
+    area: "Workspaces and storage"
+    surface: "CLI vam thread ls/show, vam run --workspace; API /v1/workspaces/:id/threads…"
+    dev: [tutorials/bun-assistant]
+    arch: [storage/turn-commits]
+    proves:
+      - crates/vam-orchestrator/tests/thread_api_tests.rs
+      - thread-history-lists-tool-results
+  - id: workspace-files-list-read-upload
+    area: "Workspaces and storage"
+    surface: "CLI vam workspace ls/cat/put; API /v1/workspaces/:id/files"
+    dev: [getting-started/cli]
+    arch: [orchestrator/workspace-files, orchestrator/workspace-files-upload]
+    proves:
+      - crates/vam-orchestrator/tests/workspace_files_tests.rs
+  - id: turn-commits-files-match-the-conversation-after
+    area: "Workspaces and storage"
+    surface: "behaviour"
+    dev: []
+    arch: [storage/turn-commits]
+    proves:
+      - follow-up-continues-after-stop
+      - workspace-matches-conversation-after-vm-stop
+  - id: each-agent-s-workspace-is-separate
+    area: "Workspaces and storage"
+    surface: "behaviour"
+    dev: []
+    arch: [storage/overview]
+    proves:
+      - agent-workspaces-are-isolated
+  - id: thread-log-quota-and-gc
+    area: "Workspaces and storage"
+    surface: "behaviour"
+    dev: []
+    arch: [storage/overview]
+    proves:
+      - crates/vam-storage/src/log_quota.rs::usage_is_measured_once_then_counted
+      - crates/vam-storage/src/gc.rs::gc_drops_chunk_when_no_manifest_references_remain
+    pending_page: true
+  - id: host-brokered-providers-openai-compatible-incl-openrouter
+    area: "Inference"
+    surface: "secret kind inference; run inputs model, model_provider"
+    dev: [getting-started/quickstart]
+    arch: [runtime/inference]
+    proves:
+      - crates/vam-inference/src/provider.rs::test_openai_sse_parsing
+      - crates/vam-inference/src/provider.rs::test_anthropic_sse_parsing
+      - crates/vam-inference/src/provider.rs::vercel_gateway_auto_sets_provider_options
+  - id: prompt-caching-usage-and-cost-on-the
+    area: "Inference"
+    surface: "run events"
+    dev: []
+    arch: [runtime/inference, telemetry/overview]
+    proves:
+      - crates/vam-e2e/tests/usage_recorded.rs
+  - id: mock-model-tests
+    area: "Inference"
+    surface: "config VAMD_E2E_MOCK_SCRIPTS"
+    dev: []
+    arch: [architecture/testing]
+    proves:
+      - plain-chat-gets-a-reply
+  - id: benchmark-runner
+    area: "Inference"
+    surface: "vam-e2e run --bench"
+    dev: []
+    arch: [runtime/benchmark-results]
+    proves:
+      - bench-trial-starts-from-a-clean-thread
+      - model-task-runs-k-trials-on-the-mock
+    pending_page: true
+  - id: run-events-trajectory-compare
+    area: "Telemetry"
+    surface: "CLI vam run events/trajectory/compare; API /v1/runs/{id}/events, /trajectory"
+    dev: [getting-started/cli]
+    arch: [telemetry/event-catalog]
+    proves:
+      - crates/vam-orchestrator/tests/trajectory_replay_test.rs
+      - crates/vam-orchestrator/tests/trajectory_timeline_test.rs
+  - id: otlp-export
+    area: "Telemetry"
+    surface: "config VAMD_OTLP_ENABLED, _ENDPOINT, _TLS_*, _SUCCESS_SAMPLE_RATE"
+    dev: []
+    arch: [telemetry/overview]
+    proves:
+      - crates/vam-orchestrator/tests/standards_egress_test.rs
+  - id: cloudevents-and-openlineage-webhooks
+    area: "Telemetry"
+    surface: "config VAMD_CLOUDEVENTS_URL, VAMD_OPENLINEAGE_URL"
+    dev: []
+    arch: [telemetry/overview]
+    proves:
+      - crates/vam-orchestrator/tests/standards_egress_test.rs
+  - id: grpc-telemetry-stream-loopback-no-tls
+    area: "Telemetry"
+    surface: "config VAMD_TELEMETRY_LISTEN"
+    dev: [getting-started/macos-lima]
+    arch: [telemetry/overview]
+    proves:
+      - crates/vam-orchestrator/tests/telemetry_stream_test.rs
+  - id: audit-spool-retention-tenant
+    area: "Telemetry"
+    surface: "config VAMD_SPOOL_DIR, VAMD_SPOOL_MAX_*, VAMD_TENANT_ID"
+    dev: []
+    arch: [telemetry/overview]
+    proves:
+      - crates/vam-orchestrator/tests/audit_fail_closed_test.rs
+  - id: timing-lines
+    area: "Telemetry"
+    surface: "config VAM_TIMING, VAM_TIMING_STDERR_JSON"
+    dev: []
+    arch: [telemetry/overview]
+    unproven: "no test covers the VAM_TIMING output"
+  - id: register-a-hosted-broker-hsp-over-uds
+    area: "Hosted brokers"
+    surface: "API PUT /v1/hosted/brokers; proto hosted_services.proto"
+    dev: []
+    arch: [hosted/overview]
+    proves:
+      - crates/vam-orchestrator/tests/hsp_uds.rs
+      - crates/vam-orchestrator/tests/hsp_invoke.rs
+      - crates/vam-orchestrator/tests/hsp_hooks.rs
+      - crates/vam-orchestrator/tests/hsp_manifest.rs
+      - crates/vam-orchestrator/tests/hsp_trust.rs
+  - id: web-search-and-fetch-search-provider-guarded
+    area: "Hosted brokers"
+    surface: "tools web_search, web_fetch; scripts/run-web-broker.sh"
+    dev: []
+    arch: [hosted/web]
+    proves:
+      - brokers/vam-web/tests/env_isolation.rs
+      - crates/vam-orchestrator/tests/hsp_web.rs
+      - crates/vam-orchestrator/tests/hsp_web_sources.rs
+      - brokers/vam-web/src/fetch/network/tests.rs::dns_rebinding_between_hops_is_caught
+      - brokers/vam-web/src/fetch/network/tests.rs::robots_disallow_blocks_the_path_and_is_cached
+  - id: typescript-broker-examples-echo-files
+    area: "Hosted brokers"
+    surface: "examples/hsp-echo-ts, examples/hsp-files-ts"
+    dev: []
+    arch: [hosted/overview]
+    unproven: "the examples have READMEs only; no test runs them"
+  - id: broker-and-web-text-fenced-as-untrusted
+    area: "Hosted brokers"
+    surface: "behaviour"
+    dev: []
+    arch: [security/permissions]
+    proves:
+      - crates/vam-security/src/vendor_text.rs::closing_marker_cannot_escape
+      - crates/vam-security/src/vendor_text.rs::fenced_body_reads_back_a_fence_without_the_nonce
+  - id: a-firecracker-microvm-per-session-control-over
+    area: "Isolation"
+    surface: "behaviour"
+    dev: [getting-started/introduction]
+    arch: [architecture/isolation]
+    proves:
+      - vm-boots-and-registers-over-vsock
+  - id: jailer-on-by-default-chroot-uid-65400
+    area: "Isolation"
+    surface: "config --no-jailer / VAMD_USE_JAILER, VAMD_JAILER_UID/_GID, VAMD_JAILER_CGROUP_VERSION"
+    dev: []
+    arch: [architecture/isolation, core/overview]
+    proves:
+      - crates/vam-core/tests/jailed.rs
+      - jailer-confines-the-vmm-process
+  - id: node-and-receipt-report-the-isolation-they
+    area: "Isolation"
+    surface: "—"
+    dev: []
+    arch: [security/run-receipt, architecture/isolation]
+    proves:
+      - node-reports-the-isolation-it-runs
+      - receipt-names-the-isolation-the-run-had
+  - id: control-channel-survives-oversize-and-hostile-frames
+    area: "Isolation"
+    surface: "behaviour"
+    dev: []
+    arch: [architecture/isolation]
+    proves:
+      - crates/vam-orchestrator/tests/adversarial_vsock_tests.rs
+      - host-tool-output-fits-frame
+  - id: no-panics-in-the-daemon-s-request
+    area: "Isolation"
+    surface: "behaviour"
+    dev: []
+    arch: [orchestrator/errors]
+    unproven: "enforced by a lint attribute (deny unwrap_used, expect_used) on the library, not by a test"
+    pending_page: true
+  - id: steer-and-queue-a-message-to-a-running-task
+    area: "Agents and specs"
+    surface: "CLI vam run send [--queue]; API POST /v1/runs/{id}/messages"
+    dev: []
+    arch: [runtime/inbox-outbox]
+    proves:
+      - steer-changes-the-running-task
+      - correction-sent-mid-task-is-followed
+      - crates/vam-cli/tests/run_inbox_cli.rs
+      - crates/vam-spec/tests/inbox_contracts.rs
+  - id: stop-a-running-task
+    area: "Agents and specs"
+    surface: "CLI vam run stop; API POST /v1/runs/{id}/stop"
+    dev: []
+    arch: [runtime/inbox-outbox]
+    proves:
+      - stop-denies-a-pending-approval
+      - follow-up-continues-after-stop
+  - id: jig-closed-ui-catalog-and-ir
+    area: "Agents and specs"
+    surface: "tools post_message, show; vam_spec::jig"
+    dev: []
+    arch: [runtime/jig]
+    unproven: "the catalog, IR checker and form generator are tested only in crates/vam-spec/src/jig/tests.rs, a src file; the scenarios drive the data and result checks only, not the IR"
+  - id: model-catalog-and-open-model-harness-profiles
+    area: "Inference"
+    surface: "run input inputs.harness.profile (base, open-strong, open-small); bench --profile"
+    dev: []
+    arch: [runtime/benchmark-results]
+    unproven: "a scenario proves a named profile and its digest on the receipt, but no test under a tests/ directory covers the catalog entries or the open-model adapter"
+  - id: connection-vault-kind-is-host-only
+    area: "Secrets"
+    surface: "vault kind connection (API kind 3, read-only); PUT /v1/mcp/connections credentials"
+    dev: [security/secret-management]
+    arch: [runtime/tools]
+    proves:
+      - guest-cannot-use-an-mcp-token-placeholder
+      - broker-cannot-be-given-an-mcp-credential
+      - skill-cannot-send-a-secret-to-an-unpinned-host
+      - crates/vam-orchestrator/tests/mcp_credentials_stay_host_side.rs
+  - id: connection-token-hosts-are-secret-bound
+    area: "Egress"
+    surface: "behaviour (a host a connector binding is pinned to counts as holding a secret for the 8 MiB rule)"
+    dev: []
+    arch: [orchestrator/api]
+    proves:
+      - crates/vam-network/src/broker.rs::a_connection_bound_destination_is_secret_bound_with_or_without_a_placeholder
+  - id: notifications-vam-notify-slack-contacts
+    area: "Notifications"
+    surface: "vam.notify, Slack channel and linked contacts, quiet hours, decisions from Slack"
+    dev: []
+    arch: []
+    proves:
+      - notifications-are-never-shown-to-another-user
+      - unverified-contact-receives-nothing
+      - quiet-hours-hold-slack-until-morning
+      - decision-in-the-app-updates-the-slack-message
+      - slack-decision-needs-the-handle-and-the-linked-account
+      - restarted-approval-keeps-one-notification
+      - skipped-schedule-is-told-once-a-day
+    pending_page: true
+  - id: connectors-microsoft-365-and-linear
+    area: "Connectors"
+    surface: "connectors admin enable, member connect, Microsoft 365 and Linear skills, tool cards"
+    dev: []
+    arch: []
+    proves:
+      - connectors-reach-members-only-after-an-org-admin-enables-them
+      - microsoft-365-waits-for-the-admin-consent
+      - microsoft-365-connection-stays-in-the-consented-tenant
+      - skill-reads-microsoft-graph-as-the-member-without-holding-a-token
+      - tool-declared-as-a-read-cannot-send-mail
+      - revoked-microsoft-connection-parks-the-call-and-tells-the-member
+    pending_page: true

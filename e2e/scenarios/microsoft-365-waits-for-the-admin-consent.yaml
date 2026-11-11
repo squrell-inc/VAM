@@ -1,0 +1,30 @@
+id: microsoft-365-waits-for-the-admin-consent
+title: Microsoft 365 waits for the admin consent, and a consent names a tenant
+description: >
+  Enabled without a consent, the member's tile waits for admin approval. A consent whose tenant
+  is not a GUID (or is "organizations") is refused. With a consent for tenant T the member sees
+  "connect", and the listing shows the entra profile, the node's client id, tenant T and
+  offline_access in the scopes, and no resource.
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-member
+  - org-administrator
+when:
+  - expect: { connectors: { id: microsoft-365, as: org-member, fields: { state: askAdmin } } }
+  - connector-node: { id: microsoft-365, enabled: true, as: org-administrator }
+  - expect: { connectors: { id: microsoft-365, as: org-member, fields: { state: waitingForConsent } } }
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: organizations }, as: org-administrator, refused: true }
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: not-a-guid }, as: org-administrator, refused: true }
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-administrator }
+then:
+  - expect:
+      connectors:
+        id: microsoft-365
+        as: org-member
+        fields: { state: connect, provider.profile: entra, node.consent.tenantId: 11111111-1111-4111-8111-111111111111 }
+        absent: [provider.resource]
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+status: active

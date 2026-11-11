@@ -1,0 +1,17 @@
+piece: trigger-test-broker
+kind: broker
+# A test broker process on a short socket path, registered with the node under one fixed id (a
+# second broker exporting the same tool would collide in the catalog; each scenario registers
+# its own process under the same id). The manifest lists the one tool the broker serves, the grant
+# tool, and declares it may ask vamd to start runs.
+body:
+  manifest:
+    brokerId: trigger-test-broker
+    trustTier: TRUST_TIER_FIRST_PARTY
+    runRequestPermission:
+      grantTools: [echo_arm_trigger]
+      loopGuardedTools: [echo_arm_trigger]
+      surface: echo
+    tools:
+      - { toolName: echo_arm_trigger, sideEffect: SIDE_EFFECT_CLASS_UNSPECIFIED }
+  unixPath: "{{socket}}"

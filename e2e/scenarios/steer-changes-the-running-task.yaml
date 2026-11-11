@@ -1,0 +1,31 @@
+id: steer-changes-the-running-task
+title: A message sent while the task runs changes what it does next
+tags: [chat]
+needs: process
+description: The task starts a slow command. A message sent during it is taken in at the next turn boundary as a user message, and the files the task writes afterwards follow it.
+given:
+  - org-admin
+  - agent-with-shell
+when:
+  - chat: { text: "e2e-step:first Draft the title, checking first", wait: false }
+  - expect: { event: tool.invoked, tool: run }
+  - send: { text: "Use the title Final instead" }
+then:
+  - expect: { run: succeeded }
+  - expect: { file: { path: title.txt, equals: Final } }
+  - expect: { thread: { role: user, contains: "Use the title Final instead" } }
+  - expect: { event: inbox.delivered }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/thread_recorder.rs
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: first, lastRole: user, contains: "Use the title Final" }
+    reply: { toolCall: { name: write_file, args: { path: title.txt, content: Final } } }
+  - when: { step: first, toolName: run }
+    reply: { toolCall: { name: write_file, args: { path: title.txt, content: Draft } } }
+  - when: { step: first, toolName: write_file }
+    reply: { text: done }
+  - when: { step: first, stepStart: true }
+    reply: { toolCall: { name: run, args: { command: "sleep 8; echo checked" } } }
+status: active

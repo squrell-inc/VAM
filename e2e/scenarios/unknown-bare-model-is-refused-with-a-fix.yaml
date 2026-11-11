@@ -1,0 +1,22 @@
+id: unknown-bare-model-is-refused-with-a-fix
+title: A bare model id the catalog does not know is refused at once, with how to fix it
+tags: [chat]
+needs: process
+description: >-
+  Without a slash and without a catalog entry the host has no provider to choose. The answer
+  names the model and says how to name it, instead of a failure inside the guest later.
+given:
+  - org-admin
+  - agent-plain
+when:
+  - set-node: { allowedModels: ["mock-model", "madeup-model"], defaultModel: mock-model }
+  - chat: { text: "e2e-step:hi Say hi", model: "madeup-model", refused: true }
+then:
+  - expect: { refused: true, contains: "madeup-model" }
+  - expect: { refused: true, contains: "provider/model" }
+guards:
+  - vam:crates/vam-orchestrator/src/allowed_models.rs
+mock:
+  - when: { step: hi }
+    reply: { text: hi }
+status: active

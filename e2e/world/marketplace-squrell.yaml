@@ -1,0 +1,8 @@
+piece: marketplace-squrell
+kind: git-marketplace
+# The Squrell marketplace the node lists from the start. The runner copies the fixture directory,
+# commits and tags it, and serves it as a bare repo; the process-only seam maps `url` to that repo.
+fixture: marketplace-squrell
+url: https://github.com/squrell-inc/vam-marketplace
+preconfigured: true
+tags: [microsoft-365-v1.0.0]

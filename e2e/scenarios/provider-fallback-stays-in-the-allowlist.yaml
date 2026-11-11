@@ -1,0 +1,28 @@
+id: provider-fallback-stays-in-the-allowlist
+title: When the run's model keeps failing, the task continues on another model the operator allows
+tags: [chat]
+needs: process
+description: The operator allows two models and the run starts on the first with fallback switched on. When that model fails after its retries the task continues on the other allowed model, and never on one that is not on the list.
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - set-node: { allowedModels: ["mock-model", "openai/gpt-4o"], defaultModel: mock-model }
+  - chat: { text: "e2e-step:work Write the file", model: none, harness: { reliability: { fallback: true } } }
+then:
+  - expect: { run: succeeded }
+  - expect: { event: model.fallback, fields: { data.from: mock-model, data.to: openai/gpt-4o } }
+  - expect: { file: { path: out.txt, equals: done } }
+guards:
+  - vam:crates/vam-inference/src/provider.rs
+  - vam:crates/vam-orchestrator/src/allowed_models.rs
+mock:
+  # The first model fails every attempt; the second answers. The run is not pinned to a model, so
+  # the node default (the first) is what it starts on and fallback may move it.
+  - when: { model: mock-model }
+    reply: { fail: { status: 503 } }
+  - when: { model: openai/gpt-4o, step: work, toolName: write_file }
+    reply: { text: "Done." }
+  - when: { model: openai/gpt-4o, step: work, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: out.txt, content: done } } }
+status: active

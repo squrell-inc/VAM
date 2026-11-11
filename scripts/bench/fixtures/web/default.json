@@ -1,0 +1,7 @@
+{
+  "results": [
+    {"title": "Rust 1.99 released", "url": "https://blog.example.org/rust-1-99", "snippet": "The Rust team announces version 1.99 with faster builds.", "published": "2026-10-14"},
+    {"title": "What is new in Rust 1.99", "url": "https://news.example.net/rust-1-99-changes", "snippet": "A walkthrough of the changes in Rust 1.99.", "published": "2026-10-15"},
+    {"title": "Rust forum discussion", "url": "https://forum.example.com/t/rust-1-99", "snippet": "Users discuss the release."}
+  ]
+}

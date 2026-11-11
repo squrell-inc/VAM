@@ -1,0 +1,32 @@
+piece: schedule-broker
+kind: broker
+# The schedule broker (`vam-schedule-broker`, named by $VAM_E2E_SCHEDULE_BROKER) on a short socket
+# path, registered under its fixed id with the manifest the design gives. vamd opens the broker's
+# trigger gateway only after the registration, so the runner starts the process again with
+# `--gateway-socket <path>` once vamd reports it (`restartWithGateway`). Cleanup removes the
+# registration, so the tools do not reach later scenarios.
+bin: VAM_E2E_SCHEDULE_BROKER
+args: ["--socket", "{{socket}}", "--state-dir", "{{dir}}/state"]
+restartWithGateway: true
+body:
+  manifest:
+    brokerId: vam.schedule
+    trustTier: TRUST_TIER_FIRST_PARTY
+    secretBindings: []
+    egressDomains: []
+    identityRequirement: { userId: true, agent: true }
+    runRequestPermission:
+      grantTools: [schedule_create, schedule_update]
+      loopGuardedTools: [schedule_create, schedule_update, schedule_run_now]
+      surface: schedule
+      maxRequestsPerMinute: 60
+      maxRequestsPerDay: 5000
+      maxActiveGrantsPerUser: 50
+    tools:
+      - { toolName: schedule_create, sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL }
+      - { toolName: schedule_list, sideEffect: SIDE_EFFECT_CLASS_READ_ONLY }
+      - { toolName: schedule_get, sideEffect: SIDE_EFFECT_CLASS_READ_ONLY }
+      - { toolName: schedule_update, sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL }
+      - { toolName: schedule_delete, sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL }
+      - { toolName: schedule_run_now, sideEffect: SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL }
+  unixPath: "{{socket}}"

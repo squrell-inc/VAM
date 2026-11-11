@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "google/protobuf/struct.proto";
+
+message FileExistsCheck {
+  string path = 1;                        // Target absolute path inside the VM
+  int64 min_size_bytes = 2;               // If set, file size must be at least this value
+}
+
+message SchemaCheck {
+  string path = 1;                        // Target file path inside VM
+  string schema_json = 2;                 // JSON Schema (draft-07) to validate against
+}
+
+message ToolSequenceCheck {
+  repeated string expected_tools = 1;     // List of tool names that must have been invoked in order
+  bool strict_order = 2;                  // If true, no intermediate tool invocations are allowed
+}
+
+message LlmJudgeCheck {
+  string rubric = 1;                      // Evaluation criteria
+  string model_name = 2;                  // Model preference for the judge
+  float pass_threshold = 3;               // Threshold score (typically between 0.0 and 1.0)
+  ResourceRef evaluator_ref = 4;          // Pinned evaluator implementation and rubric revision.
+  string prompt_template_digest = 5;      // Digest of the rendered judge prompt template.
+  float temperature = 6;                  // Explicit judge sampling setting.
+}
+
+message AssertionRule {
+  ResourceId assertion_id = 1;            // E.g. "urn:vam:assertion:hub.vam.dev/acme/pkg-json-valid"
+  string name = 2;
+  
+  oneof check {
+    FileExistsCheck file_exists = 3;
+    SchemaCheck schema_valid = 4;
+    ToolSequenceCheck tool_sequence = 5;
+    LlmJudgeCheck llm_judge = 6;
+  }
+}
+
+message EvaluationResult {
+  ResourceId assertion_id = 1;
+  bool passed = 2;                        // True if criteria were satisfied
+  float confidence_score = 3;             // Score (0.0 to 1.0) indicating evaluation confidence
+  string reasoning = 4;                   // Explanation of evaluation outcome
+  google.protobuf.Struct details = 5;     // Diagnostic key-values from the check execution
+  repeated ArtifactRef evidence_artifacts = 6;
+  ResourceRef evaluator_ref = 7;          // Pinned evaluator that produced this result.
+  bool authoritative = 8;                 // False for guest-collected observations.
+}
+
+message TrajectoryResult {
+  ResourceId run_id = 1;
+  repeated EvaluationResult results = 2;
+  
+  // Aggregated Scores
+  float trajectory_quality_score = 3;     // Comprehensive quality metrics
+  bool overall_pass = 4;                  // True if all critical assertions passed
+}
+
+message StepEvaluationPolicy {
+  repeated AssertionRule assertions = 1;
+  
+  // If true, failing assertions marks the parent step as FAILED
+  // If false, assertions are warning-only (useful for tracking metrics)
+  bool halt_on_failure = 2;
+}

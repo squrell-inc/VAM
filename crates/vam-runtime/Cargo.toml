@@ -1,0 +1,49 @@
+[package]
+name = "vam-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Bounded leased task executor for VAM guests"
+
+[[bin]]
+name = "vam-runtime"
+path = "src/bin/vam-runtime.rs"
+
+[features]
+# TEST-ONLY. Builds the guest as a plain host process (no PID 1, no mounts, no
+# reboot, no real vsock). It runs agent code without a sandbox. Never enable it
+# for the rootfs/release-guest build; it fails to compile for musl.
+process-guest = ["vam-vsock/process-guest"]
+
+[dependencies]
+bytes = "1.5"
+ed25519-dalek.workspace = true
+libc = "0.2"
+once_cell = "1.18"
+prost = "0.12"
+prost-types = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+sha2.workspace = true
+tempfile = "3"
+thiserror.workspace = true
+tokio = { version = "1.34", features = ["net", "time", "io-util", "rt", "macros", "rt-multi-thread", "signal", "process"] }
+tracing = "0.1"
+vam-security.workspace = true
+vam-spec.workspace = true
+vam-vsock = { path = "../vam-vsock", default-features = false, features = ["guest"] }
+regex = "1.10"
+walkdir = "2"
+glob = "0.3"
+
+[dev-dependencies]
+prost-types = "0.12"
+# Tests run the guest side over the Unix-socket transport (test builds only).
+vam-vsock = { path = "../vam-vsock", features = ["guest", "host", "uds-transport"] }
+vam-inference = { path = "../vam-inference" }
+
+
+
+

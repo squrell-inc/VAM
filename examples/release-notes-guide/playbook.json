@@ -1,0 +1,12 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:playbook:local.vam.dev/vam/release-notes-guide"
+  },
+  "displayName": "Release notes style guide",
+  "description": "House style for release notes. Adds guidance only; nothing is tracked.",
+  "activation": {
+    "when": "Use when the user asks for release notes or a changelog entry.",
+    "mode": "ACTIVATION_MODE_AUTO"
+  },
+  "guidance": "Write release notes in this style.\n- Start with one sentence saying what changed for the user.\n- Group changes under Added, Changed and Fixed.\n- One line per change, in the past tense, with the ticket id in brackets.\n- Do not mention internal refactors.\n- Ask the user for the version number if it is not in the request; do not guess it."
+}

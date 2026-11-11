@@ -1,0 +1,55 @@
+id: send-interrupted-mid-call-is-not-sent-twice
+title: A send interrupted in the middle of the call is not sent twice
+description: >
+  Graph holds the sendMail answer after it has the request. The guest is killed during the hold and the run
+  resumes on a new guest. Graph saw exactly one sendMail: the resumed call is not sent again. Graph's answer
+  was recorded before the guest came back, so the resumed call is replayed from the journal (and when an
+  answer is lost instead, the call asks the member again); the run says it was replayed, the model is told the
+  send was already done, and the receipt shows the one approved send and no second decision.
+tags: [connectors, approval]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - marketplace-squrell
+  - mock-microsoft-login
+  - mock-microsoft-graph
+when:
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin }
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-admin }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }
+  - mock-provider: { piece: mock-microsoft-graph, hold: true }
+  - chat: { text: "e2e-step:send Send the reply to Ana", agent: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", as: org-member, wait: false }
+  - expect: { approval: pending, tool: mail_send }
+  - approve: { as: org-member }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/sendMail, method: POST, count: 1 } }
+  - kill-guest: {}
+  - mock-provider: { piece: mock-microsoft-graph, hold: false }
+then:
+  - expect: { event: run.resumed, fields: { data.reason: guest_crashed } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/sendMail, method: POST, count: 1, has: [bearer=current] } }
+  - expect: { event: effect.replayed, fields: { data.tool: mail_send } }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "not sent again" } }
+  - expect:
+      receipt:
+        fields:
+          receipt.toolCalls.counts.asked: 1
+          receipt.toolCalls.lines.0.tool: mail_send
+          receipt.toolCalls.lines.0.resolution: approved-once
+          receipt.toolCalls.lines.1: { absent: true }
+guards:
+  - vam:crates/vam-orchestrator/src/effect_path.rs
+  - vam:crates/vam-orchestrator/src/connection_egress.rs
+  - vam:crates/vam-orchestrator/src/resume.rs
+mock:
+  - when: { step: send, lastRole: user, contains: "Human approval was granted" }
+    reply: { text: Sent. }
+  - when: { step: send, toolName: mail_send }
+    reply: { text: Sent. }
+  - when: { step: send, toolName: load_skill }
+    reply: { toolCall: { name: mail_send, args: { to: ana@e2e.example, subject: Planning, body: "Thursday works." } } }
+  - when: { step: send, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: m365-mail } } }
+status: active

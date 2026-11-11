@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://vam.dev/spec/jig/ir.schema.json",
+  "title": "Jig IR v1",
+  "description": "Shape of a jig IR. The host checker (vam-spec jig::check_ir) also checks it against catalog.json: unknown primitives and props, prop types, bindings to missing paths, reserved Query/Mutation.",
+  "type": "object",
+  "required": ["version", "catalog", "jig", "root", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "catalog": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*/[0-9]+$" },
+    "jig": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$" },
+    "root": { "type": "string" },
+    "nodes": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/node" }
+    },
+    "state": {
+      "type": "object",
+      "description": "State variables and their default values.",
+      "additionalProperties": { "$ref": "#/definitions/literal" }
+    },
+    "inputSchema": { "type": "object", "description": "JSON Schema (draft-07 subset) of the data bound in." },
+    "resultSchema": { "type": "object", "description": "JSON Schema (draft-07 subset) of the submit result." }
+  },
+  "definitions": {
+    "literal": {
+      "type": ["string", "number", "boolean", "array", "object", "null"]
+    },
+    "binding": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "$data": { "type": "string", "pattern": "^/" },
+        "$state": { "type": "string" },
+        "$item": { "type": "string", "pattern": "^/", "description": "A field of the current element of the enclosing List's array." }
+      },
+      "additionalProperties": false
+    },
+    "action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["event"],
+          "properties": {
+            "event": { "const": "submit" },
+            "with": { "type": "array", "items": { "type": "string" } },
+            "set": { "type": "object" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["event", "state", "value"],
+          "properties": {
+            "event": { "const": "set" },
+            "state": { "type": "string" },
+            "value": { "$ref": "#/definitions/literal" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "node": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string" },
+        "props": { "type": "object" },
+        "children": { "type": "array", "items": { "type": "string" } },
+        "visible": {
+          "$ref": "#/definitions/binding",
+          "description": "Shown only when the bound value is non-empty (true, non-zero, non-empty string or array)."
+        },
+        "hidden": {
+          "$ref": "#/definitions/binding",
+          "description": "Shown only when the bound value is empty (the opposite of visible)."
+        }
+      }
+    }
+  }
+}

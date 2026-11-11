@@ -1,0 +1,30 @@
+id: follow-up-uses-earlier-tool-results
+title: A follow-up message sees what the first task read and wrote, not only its text
+tags: [chat, context]
+needs: process
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: "e2e-step:first Save the note"
+  - chat: { text: "e2e-step:next What does the note say?", thread: continue }
+then:
+  - expect: { run: succeeded }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: "The note says kiwi-42." } }
+guards:
+  - vam:crates/vam-storage/src/thread_log.rs
+  - vam:crates/vam-orchestrator/src/thread_recorder.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: next, anyContains: "kiwi-42" }
+    reply: { text: "The note says kiwi-42." }
+  - when: { step: next }
+    reply: { text: "I do not know." }
+  - when: { step: first, toolName: read_file }
+    reply: { text: Saved. }
+  - when: { step: first, toolName: write_file }
+    reply: { toolCall: { name: read_file, args: { path: note.txt } } }
+  - when: { step: first, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: kiwi-42 } } }
+status: active

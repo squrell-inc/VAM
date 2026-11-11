@@ -1,0 +1,41 @@
+[package]
+name = "vam-vsock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Vsock framing and IPC control plane for VAM"
+
+[features]
+default = ["host", "guest"]
+host = ["dep:vam-security", "dep:rand", "dep:ed25519-dalek"]
+guest = []
+# Unix-socket emulation of Firecracker's hybrid vsock (`GuestTransport::Uds`).
+# Test-only: no release or rootfs build may enable it. The only enablers are
+# `process-guest` and the dev-dependencies below.
+uds-transport = []
+process-guest = ["uds-transport"]
+
+[dependencies]
+thiserror = { workspace = true }
+vam-spec = { path = "../vam-spec" }
+vam-security = { path = "../vam-security", optional = true }
+tokio = { version = "1.34", features = ["net", "time", "io-util", "rt", "macros", "rt-multi-thread"] }
+prost = "0.12"
+prost-types = "0.12"
+bytes = "1.10"
+log = "0.4"
+rand = { version = "0.8", optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.5.0"
+
+
+
+[dev-dependencies]
+# Tests drive the guest side over `Uds`; dev-dependency features apply to test
+# builds only, so `cargo build` never sees `uds-transport`.
+vam-vsock = { path = ".", features = ["uds-transport"] }
+tempfile = "3"

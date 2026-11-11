@@ -1,0 +1,33 @@
+id: compaction-keeps-an-early-correction
+title: After compaction the agent still applies a correction from an early turn, even when the summary left it out
+tags: [chat, context]
+needs: process
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: "e2e-step:first Correction: always name the output file bravo.txt. Save the note"
+  - chat: { text: "e2e-step:next Now write the report", thread: continue }
+then:
+  - expect: { event: context.compacted }
+  - expect: { event: inference.completed, fields: { data.outcomePreview: "Applied bravo.txt." } }
+  - expect: { file: { path: bravo.txt, equals: report } }
+guards:
+  - vam:crates/vam-storage/src/thread_log.rs
+  - vam:crates/vam-orchestrator/src/thread_recorder.rs
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-runtime/src/compaction.rs
+mock:
+  - when: { contains: "[context compaction]" }
+    reply: { text: "Summary: the note was saved." }
+  - when: { step: next, toolName: write_file }
+    reply: { text: "Applied bravo.txt." }
+  - when: { step: next, anyContains: "bravo.txt" }
+    reply: { toolCall: { name: write_file, args: { path: bravo.txt, content: report } } }
+  - when: { step: next }
+    reply: { text: "I used the wrong file name." }
+  - when: { step: first, toolName: write_file }
+    reply: { text: Saved., fillerBytes: 200000 }
+  - when: { step: first, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: kiwi-42 } } }
+status: active

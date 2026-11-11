@@ -1,0 +1,26 @@
+id: repeated-identical-call-is-caught-and-observed
+title: With loop detection on, a model repeating one identical call is told so and the run fails naming the loop
+tags: [chat]
+needs: process
+description: The run turns loop detection on through its harness switches. The mock repeats one identical read_file call; the thread carries the loop observation and the run fails with an error that names the loop, instead of running to the iteration cap.
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: "e2e-step:seed Save the note"
+  - expect: { file: { path: note.txt, present: true } }
+  - chat: { text: "e2e-step:spin Read the note", harness: { loop: { detect: true } } }
+then:
+  - expect: { thread: { role: user, contains: "repeated the same call" } }
+  - expect: { run: failed }
+  - expect: { event: run.completed, fields: { error: { contains: loop } } }
+guards:
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: seed, afterTool: write_file }
+    reply: { text: saved }
+  - when: { step: seed }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: fern } } }
+  - when: { step: spin }
+    reply: { toolCall: { name: read_file, args: { path: note.txt } } }
+status: active

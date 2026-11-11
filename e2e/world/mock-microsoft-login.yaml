@@ -1,0 +1,5 @@
+piece: mock-microsoft-login
+kind: mock-provider
+# A runner-hosted loopback token endpoint (`/{tenant}/oauth2/v2.0/token`). It logs form field
+# names, never token values, and can be revoked with a `mock-provider` step.
+provider: microsoft-login

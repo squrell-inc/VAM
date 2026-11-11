@@ -1,0 +1,35 @@
+id: send-asks-with-the-skills-card-and-an-edit-runs-as-amended
+title: Sending mail asks with the skill's card, and an edited field runs as amended
+description: >
+  The send waits for approval. The pending approval carries the skill's card with the draft's fields. An edit
+  of a field the card does not offer is refused and the approval stays pending. An edit of the subject is
+  accepted, the send runs with the edited subject and not the draft, and the receipt says it was amended.
+tags: [connectors, approval]
+needs: process
+given:
+  - org-admin
+  - agent-with-mail-calendar-cards
+when:
+  - publish-skill: { piece: skill-mail-calendar-cards }
+  - chat: { text: "e2e-step:send Send the mail", wait: false }
+  - expect: { run: paused }
+  - expect: { approval: pending, tool: mail_send, fields: { card.data.subject: Draft subject, card.data.to: ana@e2e.example } }
+  - approve: { amend: { cc: someone@e2e.example }, refused: true }
+  - approve: { amend: { subject: Amended subject } }
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: Amended subject } }
+  - expect: { receipt: { fields: { receipt.toolCalls.lines.0.resolution: approved-amended } } }
+guards:
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/hitl.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-spec/src/jig.rs
+mock:
+  - when: { afterTool: mail_send }
+    reply: { text: Sent. }
+  - when: { step: send, toolName: load_skill }
+    reply: { toolCall: { name: mail_send, args: { to: ana@e2e.example, subject: Draft subject, body: Hello Ana } } }
+  - when: { step: send, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-mail-calendar-cards-send-asks-with-the-skills-card-and-an-edit-runs-as-amended } } }
+status: active

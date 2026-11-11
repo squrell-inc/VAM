@@ -1,0 +1,210 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/any.proto";
+
+// Unique, stable logical identity. The URN remains a string because it is the
+// canonical serialized key, not a provider-specific retrieval address.
+message ResourceId {
+  string urn = 1;                         // urn:vam:<kind>:<registry>/<namespace>/<name>
+}
+
+// Human-friendly coordinates resolved by a registry adapter. Providers do not
+// need to adopt this schema internally; adapters map native names into it.
+message RegistryCoordinates {
+  string registry = 1;                    // DNS name, e.g. "hub.vam.dev" or "ghcr.io"
+  string namespace = 2;                   // Organization/user path, e.g. "acme" or "acme/platform"
+  string name = 3;                        // Resource slug, e.g. "oracle-developer"
+}
+
+// Provider-specific retrieval information, intentionally separate from
+// ResourceId so migrations, mirrors, and ownership transfers do not change
+// logical identity.
+message ResourceLocator {
+  string provider = 1;                    // Adapter/provider kind, e.g. "oci", "git", "https"
+  string uri = 2;                         // Native provider address
+  RegistryCoordinates coordinates = 3;   // Optional normalized marketplace coordinates
+}
+
+// Semantic Version (SemVer 2.0.0)
+message Version {
+  int32 major = 1;                        // Must be >= 0
+  int32 minor = 2;                        // Must be >= 0
+  int32 patch = 3;                        // Must be >= 0
+  string prerelease = 4;                  // E.g. "alpha.1", optional
+  string build = 5;                       // E.g. "build.123", optional
+}
+
+// Semantic Version Range
+message CompatibilityRange {
+  string min_version_inclusive = 1;       // E.g., ">=1.0.0"
+  string max_version_exclusive = 2;       // E.g., "<2.0.0"
+}
+
+// Cryptographic Verification Digest
+message Digest {
+  enum Algorithm {
+    ALGORITHM_UNSPECIFIED = 0;
+    ALGORITHM_SHA256 = 1;
+    ALGORITHM_SHA512 = 2;
+  }
+  Algorithm algorithm = 1;                // Required algorithm selection
+  string hex_hash = 2;                    // Lowercase hex hash representation (regex: ^[a-f0-9]+$)
+}
+
+// Resource reference. Agents (`RunSpec.agent_ref`) are always pinned.
+// Skill, playbook, and policy refs may omit version (and digest) on input;
+// the host resolves to the latest published (released) version and records
+// the pin on the run (`RunSpec.resolved_refs`).
+message ResourceRef {
+  ResourceId resource_id = 1;             // Required stable identity URN
+  Version version = 2;                    // Exact semantic version; omit to float to latest released
+  Digest digest = 3;                      // Cryptographic verification digest; required once pinned
+  repeated ResourceLocator locators = 4;  // Ordered mirrors/native retrieval addresses
+}
+
+// Immutable output, checkpoint, continuation, or evaluation evidence object.
+// The digest is mandatory at every trust boundary; uri is an opaque retrieval
+// hint rather than an authority to access the object.
+message ArtifactRef {
+  ResourceId artifact_id = 1;
+  Digest digest = 2;
+  string media_type = 3;
+  int64 size_bytes = 4;
+  string uri = 5;
+}
+
+// Opaque identity for a control-plane file attachment.
+// URN: urn:vam:file:<registry>/<namespace>/<name>
+message FileRef {
+  ResourceId file_id = 1;
+  Digest digest = 2;
+  string media_type = 3;
+  int64 size_bytes = 4;
+  ResourceMetadata metadata = 5;
+}
+
+// Pointer to a knowledge corpus entry (chunk, document, or collection).
+// URN: urn:vam:knowledge:<registry>/<namespace>/<name>
+message KnowledgeRef {
+  ResourceId knowledge_id = 1;
+  Digest digest = 2;
+  string collection = 3;
+  ResourceMetadata metadata = 4;
+}
+
+// Key-Value Metadata Label
+message Label {
+  string key = 1;
+  string value = 2;
+}
+
+// Declarative tags, annotations, and revision tracking
+message ResourceMetadata {
+  int64 revision = 1;                      // Monotonically increasing revision sequence
+  google.protobuf.Timestamp created_at = 2;
+  google.protobuf.Timestamp updated_at = 3;
+  ResourceId created_by = 4;               // User or system identity
+  string parent_revision_hash = 5;         // SHA-256 parent hash for revision tracing
+  repeated Label labels = 6;               // For indexing / routing
+  repeated Label annotations = 7;          // Non-indexed metadata
+}
+
+// Financial Valuation
+message Cost {
+  string currency = 1;                    // Uppercase 3-letter ISO 4217 currency code
+  int64 micro_amount = 2;                 // Non-negative value multiplied by 1,000,000 (e.g., $1.50 = 1500000)
+}
+
+// Model Token Usage
+message TokenUsage {
+  int32 prompt_tokens = 1;                // Must be >= 0
+  int32 completion_tokens = 2;            // Must be >= 0
+  int32 cached_tokens = 3;                // Must be >= 0
+  int32 total_tokens = 4;                 // Must be >= 0
+  int32 cache_creation_tokens = 5;        // Must be >= 0; prompt tokens written to the provider cache (cached_tokens = read)
+  // True when the provider reported no cache usage at all (field absent), so
+  // cached_tokens = 0 means "unknown", not "none". Cost is then the full input price.
+  bool cached_tokens_unknown = 6;
+  // Part of cache_creation_tokens written with the long TTL (1 hour), priced separately.
+  int32 cache_creation_long_tokens = 7;
+}
+
+// Pagination Requests and Responses
+message PaginationRequest {
+  int32 page_size = 1;                    // 1..1000; zero requests the server default of 50
+  string page_token = 2;                  // Opaque token from the preceding response
+}
+
+message PaginationResponse {
+  string next_page_token = 1;             // Supply this in next request; empty if no more pages
+}
+
+// Canonical error codes use the standard gRPC numeric values so transports can
+// map errors without a lossy translation layer.
+enum VamErrorCode {
+  VAM_ERROR_CODE_UNSPECIFIED = 0;
+  CANCELLED = 1;
+  UNKNOWN = 2;
+  INVALID_ARGUMENT = 3;
+  DEADLINE_EXCEEDED = 4;
+  NOT_FOUND = 5;
+  ALREADY_EXISTS = 6;
+  PERMISSION_DENIED = 7;
+  RESOURCE_EXHAUSTED = 8;
+  FAILED_PRECONDITION = 9;
+  ABORTED = 10;
+  OUT_OF_RANGE = 11;
+  UNIMPLEMENTED = 12;
+  INTERNAL = 13;
+  UNAVAILABLE = 14;
+  DATA_LOSS = 15;
+  UNAUTHENTICATED = 16;
+}
+
+// Standard Error Envelope
+message ErrorStatus {
+  VamErrorCode code = 1;                  // High-level categorical error code
+  string message = 2;                     // Human-readable error description
+  bool retryable = 3;                     // Hint to caller whether retrying can resolve it
+  repeated google.protobuf.Any details = 4;// Arbitrary structured payloads (e.g., ValidationViolation)
+}
+
+// Signature metadata for canonical protobuf bytes. Signing algorithms are
+// explicit so verification never depends on out-of-band defaults.
+message Signature {
+  enum Algorithm {
+    SIGNATURE_ALGORITHM_UNSPECIFIED = 0;
+    SIGNATURE_ALGORITHM_ED25519 = 1;
+    SIGNATURE_ALGORITHM_ECDSA_P256_SHA256 = 2;
+  }
+  Algorithm algorithm = 1;
+  string key_id = 2;                      // Stable verifier-resolvable key identifier
+  bytes value = 3;                        // Signature bytes; never private-key material
+}
+
+// Versioned, domain-separated signature input. `claims` contains deterministic
+// protobuf serialization of a dedicated unsigned claims message.
+message SignedEnvelope {
+  string domain = 1;                      // E.g. "vam.v1.hitl-token"
+  Version envelope_version = 2;
+  bytes claims = 3;
+  Signature signature = 4;
+}
+
+// Structured Validation Details
+message ValidationViolation {
+  string field_path = 1;                  // JSONPath-like path of the violating parameter
+  string description = 2;                 // Plain English description of why it failed validation
+  string constraint = 3;                  // The specific rule violated
+}
+
+message BadRequest {
+  repeated ValidationViolation field_violations = 1;
+}

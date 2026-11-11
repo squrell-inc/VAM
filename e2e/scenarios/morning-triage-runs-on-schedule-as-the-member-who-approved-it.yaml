@@ -1,0 +1,63 @@
+id: morning-triage-runs-on-schedule-as-the-member-who-approved-it
+title: The morning triage runs on its schedule as the member who approved it, and sends nothing
+description: >
+  The installed Executive assistant is asked to run the morning triage every weekday; creating the schedule asks
+  and the member approves once. At its time (ten seconds ahead in the test) a run starts by itself with the
+  morning-triage playbook, reads Graph as the member with the current token, shows the mail card and sends
+  nothing. The receipt names the surface schedule and the grant.
+tags: [connectors, schedule, triggers]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - marketplace-squrell
+  - mock-microsoft-login
+  - mock-microsoft-graph
+  - schedule-broker
+when:
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin }
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-admin }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }
+  - chat: { text: "e2e-step:plan Run my morning triage every weekday", agent: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", as: org-member }
+  - expect: { approval: pending, tool: schedule_create }
+  - approve: { as: org-member }
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: schedule_create, count: 1 } }
+  - wait-scheduled-run: { within: 40s, label: triage }
+then:
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages, method: GET, count: 1, has: [bearer=current] } }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/sendMail, count: 0 } }
+  - expect: { receipt: { fields: { receipt.requestSurface: schedule, receipt.requestTrigger.brokerId: vam.schedule, receipt.requestTrigger.grantId: { contains: "rg_" } } } }
+guards:
+  - vam:crates/vam-orchestrator/src/grants.rs
+  - vam:crates/vam-orchestrator/src/connection_egress.rs
+  - vam:crates/vam-orchestrator/src/brokers.rs
+mock:
+  - when: { afterTool: schedule_create }
+    reply: { text: Scheduled. }
+  - when: { step: plan, stepStart: true }
+    reply:
+      toolCall:
+        name: schedule_create
+        args:
+          title: Morning triage
+          # A weekday morning cannot be waited for: the scenario schedules it ten seconds ahead.
+          when: { once: { in: PT10S } }
+          run:
+            message: "e2e-step:triage Run the morning triage mock-script:morning-triage-runs-on-schedule-as-the-member-who-approved-it"
+            workspace: { mode: SAME }
+            thread: { mode: NEW, name: morning-triage }
+            playbookRef: { resourceId: { urn: "urn:vam:playbook:hub.squrell.cloud/squrell/morning-triage" } }
+            inputs: { lookbackHours: 24 }
+            onBusy: QUEUE
+  - when: { step: triage, toolName: step_complete }
+    reply: { text: Triage done. }
+  - when: { step: triage, toolName: mail_search }
+    reply: { toolCall: { name: step_complete, args: { step_id: triage, outcome: done } } }
+  - when: { step: triage, toolName: load_skill }
+    reply: { toolCall: { name: mail_search, args: { sinceHours: 24 } } }
+  - when: { step: triage, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: m365-mail } } }
+status: active

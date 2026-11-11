@@ -1,0 +1,34 @@
+id: newer-tag-shows-update-available-until-the-admin-updates
+title: A newer tag shows "update available" until the admin updates, and a moved tag is refused
+description: >
+  After an install at the first tag the marketplace tags a newer release and its index names it. A refresh
+  shows an update is available and changes nothing in the catalog. The admin updates and the new release is
+  the one that is installed; the old one stays resolvable for agents pinned to it. When the installed tag is
+  later re-pointed at a different commit, a refresh and an install are refused, not followed.
+tags: [connectors, members]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - marketplace-squrell
+when:
+  - expect: { marketplaces: { marketplace: marketplace-squrell, as: org-admin, fields: { trust: squrell } } }
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin, fields: { installed.ref: microsoft-365-v1.0.0, updateAvailable: false } } }
+  - git-tag: { piece: marketplace-squrell, tag: microsoft-365-v1.1.0, overlay: marketplace-squrell-update }
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin, fields: { installed.ref: microsoft-365-v1.0.0, updateAvailable: true, ref: microsoft-365-v1.1.0 } } }
+  - expect: { catalog: { kind: playbook, urnPrefix: "urn:vam:playbook:hub.squrell.cloud/squrell/", as: org-admin, count: 1, fields: { origin.ref: microsoft-365-v1.0.0 } } }
+  - marketplace-update: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin }
+then:
+  - expect: { listings: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin, fields: { installed.ref: microsoft-365-v1.1.0, updateAvailable: false } } }
+  - expect: { catalog: { kind: playbook, urnPrefix: "urn:vam:playbook:hub.squrell.cloud/squrell/", as: org-admin, count: 1, fields: { origin.ref: microsoft-365-v1.1.0 } } }
+  - git-tag: { piece: marketplace-squrell, tag: microsoft-365-v1.1.0, move: true, overlay: marketplace-squrell-moved-tag }
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: org-admin, refused: true, contains: moved }
+  - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin, refused: true, contains: moved }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog_tier.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/skill_package_resolve.rs
+status: active

@@ -1,0 +1,47 @@
+id: release-shows-the-diff-against-the-previous-version
+title: Before and after a release, the outcomes diff compares the version with the one before it
+tags: [chat, release]
+needs: process
+description: The released version has one successful run. The owner edits the draft and runs it once. Asked before releasing, the diff compares the draft's run with 1.0.0's. After the draft is released as 1.1.0, the diff of 1.1.0 names 1.0.0 as its base, and 1.1.0 has no runs yet, so it has no pass^k to compare.
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: { text: "e2e-step:make Create the Q4 plan ticket", draft: false }
+  - edit-agent-draft: { piece: agent-with-effect-tools, set: { description: second edition } }
+  - chat: { text: "e2e-step:make Create the Q4 plan ticket", draft: true, thread: new }
+  - expect:
+      release-diff:
+        piece: agent-with-effect-tools
+        version: draft
+        fields:
+          base.version: 1.0.0
+          base.runs: 1
+          base.successes: 1
+          candidate.version: draft
+          candidate.runs: 1
+          candidate.successes: 1
+          candidate.effects.duplicates: 0
+  - release-agent: { piece: agent-with-effect-tools, version: 1.1.0 }
+then:
+  - expect:
+      release-diff:
+        piece: agent-with-effect-tools
+        version: 1.1.0
+        fields:
+          base.version: 1.0.0
+          base.runs: 1
+          candidate.version: 1.1.0
+          candidate.runs: 0
+          candidate.passK.value: { absent: true }
+guards:
+  - vam:crates/vam-orchestrator/src/receipt.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: make, toolName: echo_create_ticket }
+    reply: { text: "Created T-1" }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan } } }
+status: active

@@ -1,0 +1,40 @@
+id: receipt-separates-host-facts-from-model-text
+title: A receipt keeps host facts in the signed tier and the model's words in a labelled appendix
+tags: [playbook]
+needs: process
+description: Pins, model, isolation and steps are host facts. What the model wrote is only in the appendix, labelled, and the host tier carries its digest.
+given:
+  - org-admin
+  - agent-plain
+  - playbook-one-step
+when:
+  - start-playbook: { playbook: playbook-one-step, label: run, inputs: { topic: ferns } }
+then:
+  - expect: { run: succeeded }
+  - expect:
+      receipt:
+        fields:
+          receipt.pins.agent.version: { present: true }
+          receipt.pins.agent.digest: { present: true }
+          receipt.pins.playbook.version: { present: true }
+          receipt.pins.playbook.digest: { present: true }
+          receipt.model.0.name: mock-model
+          receipt.isolation.summary: "process guest (no isolation)"
+          receipt.workspace.headBefore: { present: true }
+          receipt.procedure.steps.0.id: summarise
+          receipt.procedure.steps.0.outcome: done
+          receipt.procedure.steps.0.summary: { absent: true }
+          receipt.modelAppendixDigest: { present: true }
+          modelAppendix.label: "written by the model, not verified by the host"
+          modelAppendix.finalReply: { contains: summarised }
+guards:
+  - vam:crates/vam-orchestrator/src/workflow.rs
+  - vam:crates/vam-orchestrator/src/isolation.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/receipt.rs
+mock:
+  - when: { step: run, afterTool: step_complete }
+    reply: { text: summarised ferns }
+  - when: { step: run }
+    reply: { toolCall: { name: step_complete, args: { step_id: summarise, outcome: done } } }
+status: active

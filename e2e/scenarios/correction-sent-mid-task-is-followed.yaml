@@ -1,0 +1,33 @@
+id: correction-sent-mid-task-is-followed
+title: A correction sent while the task runs is followed by the files written after it
+tags: [chat]
+needs: process
+description: The task starts a slow command. A correction sent during it is read at the next step, and the file the task writes afterwards follows it.
+model:
+  task: u3-mid-run-correction
+  version: 0.2.0
+  k: 5
+given:
+  - org-admin
+  - agent-with-shell
+when:
+  - chat: { text: "e2e-step:first Write title.txt with the word Draft, checking first", wait: false }
+  - expect: { event: tool.invoked, tool: run }
+  - send: { text: "Use the word Final instead" }
+then:
+  - expect: { run: succeeded }
+  - expect: { file: { path: title.txt, equals: Final } }
+  - expect: { event: inbox.delivered }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: first, lastRole: user, contains: "Use the word Final" }
+    reply: { toolCall: { name: write_file, args: { path: title.txt, content: Final } } }
+  - when: { step: first, toolName: run }
+    reply: { toolCall: { name: write_file, args: { path: title.txt, content: Draft } } }
+  - when: { step: first, toolName: write_file }
+    reply: { text: done }
+  - when: { step: first, stepStart: true }
+    reply: { toolCall: { name: run, args: { command: "sleep 8; echo checked" } } }
+status: active

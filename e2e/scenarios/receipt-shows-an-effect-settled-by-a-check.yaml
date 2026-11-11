@@ -1,0 +1,39 @@
+id: receipt-shows-an-effect-settled-by-a-check
+title: A create that was left unknown and then found by a declared read shows on the receipt as reconciled, naming the check
+tags: [chat]
+needs: process
+description: The task creates a ticket and the broker holds the call open. vamd restarts during the hold, so the outcome is unknown. The tool declares a read that finds a ticket by title; the read finds it. The receipt shows the create as reconciled by a check, counts no unknown and no duplicate, and the broker's ledger holds one create and one find.
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: { text: "e2e-step:make Create the Q4 plan ticket", wait: false }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - restart-vamd: {}
+then:
+  - expect: { run: succeeded }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_find_ticket, count: 1 } }
+  - expect:
+      receipt:
+        fields:
+          receipt.effects.journaled: true
+          receipt.effects.lines.0.tool: echo_create_ticket
+          receipt.effects.lines.0.state: reconciled
+          receipt.effects.lines.0.checkedBy: verify
+          receipt.effects.lines.0.attempts: 1
+          receipt.effects.unknown: 0
+          receipt.effects.duplicates: 0
+          receipt.effects.counts.reconciled: 1
+guards:
+  - vam:crates/vam-orchestrator/src/receipt.rs
+  - vam:crates/vam-orchestrator/src/effect_store.rs
+  - vam:crates/vam-orchestrator/src/reconcile.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: make, toolName: echo_create_ticket }
+    reply: { text: "Created T-1" }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan, holdMs: 6000 } } }
+status: active

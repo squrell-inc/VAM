@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+// Outcomes per agent version: what an agent version's stored, signed run receipts add up to.
+//
+// Documentation of the JSON `GET /v1/agents/{urn}/outcomes` writes. The route builds the JSON
+// explicitly (never through prost, so `false` and zero survive) and it is unsigned, so floats
+// are allowed here (they are not in a receipt). The answer holds counts and ratios only: no
+// run id and no user id. Computed on each read from the receipts as stored; a receipt is
+// never rebuilt or re-signed.
+//
+// `GET /v1/agents/{urn}/outcomes` lists the versions that have receipts.
+// `GET /v1/agents/{urn}/outcomes?version=X.Y.Z|draft&k=N` returns one aggregate. Same auth as
+// `versions`: a catalog reader sees released versions; the draft only its owner or a
+// `users:admin` caller (anyone else gets a 404 for `draft`).
+//
+// `GET /v1/agents/{urn}/outcomes/diff?version=V[&k=N]` returns `{base, candidate, changes}`:
+// `candidate` is V's aggregate (`draft` = runs at the current draft digest), `base` the highest
+// release below V (the latest release for `draft`; absent for a first release), and `changes`
+// has `{base, candidate, delta}` for success_rate, pass_k value, cost_per_success_micro_usd,
+// tokens_per_success and approvals_per_run (each absent when either side lacks it), and
+// `duplicates` for whichever sides have it. Additive: nothing above changes.
+
+message AgentOutcomesList {
+  // The caller's `draft` first (when its current content has runs), then releases newest first.
+  repeated AgentOutcomesVersion versions = 1;
+}
+
+message AgentOutcomesVersion {
+  // "X.Y.Z" or "draft".
+  string version = 1;
+  // "released" or "draft".
+  string channel = 2;
+  // Counted runs (succeeded + failed + timed out).
+  int64 runs = 3;
+  int64 successes = 4;
+}
+
+// A run belongs to the group its receipt pins (`receipt.pins.agent`): a released version by its
+// label, the draft by the digest of the draft it ran (a draft keeps changing, so only the
+// digest names its content). `draft` is the caller's current draft content.
+message AgentOutcomes {
+  string version = 1;
+  // SUCCEEDED + FAILED + TIMED_OUT. Success is SUCCEEDED.
+  int64 runs = 2;
+  int64 successes = 3;
+  int64 failed = 4;
+  int64 timed_out = 5;
+  // Listed, not counted against the agent: a person stopped it, no one answered, refused at
+  // admission.
+  int64 cancelled = 6;
+  int64 expired = 7;
+  int64 rejected = 8;
+  // successes / runs; absent when there are no runs.
+  double success_rate = 9;
+  AgentOutcomesPassK pass_k = 10;
+  // Tokens (prompt + completion) of the counted runs divided by successes; absent with no
+  // success. `turns_per_success` likewise, from the receipts that record turns.
+  double tokens_per_success = 11;
+  double turns_per_success = 12;
+  // Priced on read from the receipts' per-model tokens at the model maker's list price in the
+  // compiled-in catalog (a gateway is transport); integer micro-USD per success. Absent, with
+  // `cost_missing` naming the models, when any model has no price (the mock).
+  int64 cost_per_success_micro_usd = 13;
+  string price_source = 14;
+  string catalog_version = 15;
+  repeated string cost_missing = 16;
+  // Decided approvals per counted run.
+  double approvals_per_run = 17;
+  AgentOutcomesEffects effects = 18;
+}
+
+message AgentOutcomesPassK {
+  int64 k = 1;
+  // The unbiased estimator C(successes, k) / C(runs, k): the chance that k runs drawn from this
+  // version's runs all succeeded. Absent, with `note`, when runs < k. Default k is 5.
+  double value = 2;
+  string note = 3;
+}
+
+// Summed over journaled receipts only (a receipt from before the effect journal says it is not
+// journaled and is counted in `unjournaled_runs`, never as zero effects). The sums are absent
+// (never 0) when no receipt is journaled. Counted over every receipt of the version, including
+// cancelled runs: a duplicate in a stopped run is still a duplicate.
+message AgentOutcomesEffects {
+  int64 journaled_runs = 1;
+  int64 unjournaled_runs = 2;
+  // Effects known to have happened: confirmed plus reconciled by a check.
+  int64 confirmed = 3;
+  int64 unknown = 4;
+  int64 duplicates = 5;
+  int64 identical_repeats = 6;
+}

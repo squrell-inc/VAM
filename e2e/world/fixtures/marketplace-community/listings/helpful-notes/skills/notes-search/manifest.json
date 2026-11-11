@@ -1,0 +1,36 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:skill:market.community.example/community/notes-search"
+  },
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "description": "Searches a notes service",
+  "requiresConnector": "urn:vam:connector:market.community.example/community/notes",
+  "tools": [
+    {
+      "name": "notes_search",
+      "description": "Searches notes",
+      "inputSchemaJson": "{\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}}}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "bun",
+        "entrypoint": "./notes_search.ts"
+      },
+      "egress": [
+        {
+          "binding": "notes",
+          "host": "notes.example.test",
+          "methods": [
+            "GET"
+          ],
+          "pathPrefixes": [
+            "/"
+          ]
+        }
+      ]
+    }
+  ]
+}

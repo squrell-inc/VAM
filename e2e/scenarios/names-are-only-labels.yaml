@@ -1,0 +1,28 @@
+id: names-are-only-labels
+title: Two threads can carry one label, a label keeps its spaces, and only the ids tell threads apart
+tags: [chat, workspace]
+needs: process
+description: A thread name is a label the person chose. Two threads given the same label get different ids, a label with spaces is kept as written, and the thread list and the Space list show the id next to the label.
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: { text: "e2e-step:one Remember apples", thread: { name: "my notes" } }
+  - chat: { text: "e2e-step:two Remember pears", thread: { name: "my notes" } }
+then:
+  - expect:
+      threads:
+        count: 2
+        all: { name: "my notes", threadId: { present: true } }
+        distinct: [threadId]
+  - expect: { spaces: { fields: { spaceId: { present: true }, name: { present: true } } } }
+  - expect: { thread: { role: user, contains: "pears" } }
+guards:
+  - vam:crates/vam-orchestrator/src/spaces.rs
+  - vam:crates/vam-orchestrator/src/run_context.rs
+mock:
+  - when: { step: one, stepStart: true }
+    reply: { text: Noted apples. }
+  - when: { step: two, stepStart: true }
+    reply: { text: Noted pears. }
+status: active

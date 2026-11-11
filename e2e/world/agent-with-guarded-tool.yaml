@@ -1,0 +1,16 @@
+piece: agent-with-guarded-tool
+kind: agent
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent whose write_file waits for approval
+    description: Agent whose write_file waits for approval
+    role: Tester
+    systemInstructions: Write files when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:write_file", decision: ask }

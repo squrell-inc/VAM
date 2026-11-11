@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "google/protobuf/duration.proto";
+
+// Selection of context eviction / summary algorithms
+enum CompactionPolicy {
+  COMPACTION_POLICY_UNSPECIFIED = 0;
+  COMPACTION_POLICY_TRUNCATE_FIFO = 1;    // Hard drop of oldest turns, starting with old tool output
+  COMPACTION_POLICY_SUMMARIZE_MIDDLE = 2; // Collapse old middle turns into a system-role summary
+  COMPACTION_POLICY_FAIL_CLOSED = 3;      // Abort execution once threshold is crossed
+}
+
+// Condition criteria for loop endings
+enum TerminationPolicy {
+  TERMINATION_POLICY_UNSPECIFIED = 0;
+  TERMINATION_POLICY_EXPLICIT_CLAIM = 1;  // Agent must explicitly call a completion/success tool
+  TERMINATION_POLICY_OUTPUT_SATISFIED = 2;// Loop exits once output matches validation schema
+}
+
+enum NetworkMode {
+  NETWORK_MODE_UNSPECIFIED = 0;
+  NETWORK_MODE_ISOLATED = 1;
+  NETWORK_MODE_BROKERED = 2;
+  NETWORK_MODE_RESTRICTED_EGRESS = 3;
+}
+
+enum AuditLedgerMode {
+  AUDIT_LEDGER_MODE_UNSPECIFIED = 0;
+  AUDIT_LEDGER_MODE_DISABLED = 1;
+  AUDIT_LEDGER_MODE_APPEND_ONLY = 2;
+  AUDIT_LEDGER_MODE_HASH_CHAINED = 3;
+}
+
+// Portable model constraints solved by the host at admission time
+message ModelRequirements {
+  int32 min_context_tokens = 1;           // Minimum context window (e.g. 128000)
+  bool requires_tool_calling = 2;         // Model must natively support tool calling (JSON / Function calling)
+  bool requires_structured_output = 3;    // Model must natively support JSON Schema output constraining
+  repeated string required_modalities = 4; // E.g., ["text", "vision"]
+  Cost max_cost_per_million_tokens = 5;   // Maximum acceptable financial rate constraint
+}
+
+// Optional ordered preferences resolved by the host on a best-effort basis
+message ModelPreference {
+  string provider = 1;                    // E.g., "anthropic", "openai"
+  string model_name = 2;                  // E.g., "claude-3-5-sonnet-latest", "gpt-4o"
+  float temperature = 3;                  // Default 0.7
+  float top_p = 4;                        // Default 1.0
+  int32 max_completion_tokens = 5;        // Hard ceiling on output tokens per inference call
+}
+
+// In-VM sliding context compiling rules
+message ContextPolicy {
+  int32 max_token_count = 1;              // Token count that triggers the compaction engine
+  int32 max_history_turns = 2;            // Maximum User/Assistant turns to retain in short-term context
+  CompactionPolicy compaction = 3;        // Selection of eviction / summary algorithms
+}
+
+// In-VM reasoning limits for ReAct cycles. vamd resolves these once at create_run.
+message ReasoningPolicy {
+  int32 max_iterations = 1;               // Turns per task (default 50, hard cap 200, set by vamd)
+  google.protobuf.Duration step_timeout = 2; // Per ReAct round (default 5m)
+  TerminationPolicy termination = 3;      // Condition criteria for loop endings
+}
+
+// Reference to host-enforced SPIRE and AWS Cedar capability permissions
+message CapabilityPolicyRef {
+  ResourceRef policy_ref = 1;
+  string security_profile_name = 2;       // E.g., "restricted-egress-developer"
+}
+
+// Reference to host-enforced human review rules
+message HitlPolicyRef {
+  ResourceRef policy_ref = 1;
+  repeated string monitored_tools = 2;    // Tools subject to HITL intercepts (e.g. ["db_drop_table"])
+}
+
+// Reference to host-enforced telemetry, auditing, and redaction levels
+message TelemetryPolicyRef {
+  ResourceRef policy_ref = 1;
+  bool pii_redaction_enabled = 2;         // Injects regex filters into logging streams on host
+  AuditLedgerMode audit_ledger_mode = 3;
+}
+
+// Desired VM sandbox resource constraints checked during admission
+message ResourceRequirements {
+  int32 vcpu_count = 1;                   // E.g. 1, 2, or 4
+  int32 memory_mib = 2;                   // E.g. 1024, 2048, or 4096
+  int32 storage_gib = 3;                  // Drive9 FUSE cache size limit
+  NetworkMode network_mode = 4;
+}
+
+// Reference to independent workflow completion check policies
+message CompletionPolicyRef {
+  ResourceRef policy_ref = 1;
+  repeated ResourceRef evaluator_refs = 2;// Pinned references to evaluation modules / assertion checks
+}

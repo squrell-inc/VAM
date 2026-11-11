@@ -1,0 +1,3 @@
+piece: org-admin
+kind: org
+role: Owner   # the bootstrap key's signed-in profile

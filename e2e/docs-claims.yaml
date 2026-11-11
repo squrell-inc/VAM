@@ -1,0 +1,17 @@
+# Words that make a docs page an isolation claim (case-insensitive regexes, matched against the
+# prose of a `shipped` page: frontmatter, code fences and HTML comments are left out).
+# A shipped page that matches must name at least one active scenario or test in `proves`.
+# There is no opt-out key: a page that says "jail" names a proof or is `planned` or `stale`.
+patterns:
+  - 'isolat'
+  - 'jail'
+  - 'sandbox'
+  - 'exfiltrat'
+  - 'zero.trust'
+  - 'seccomp'
+  - 'kernel.level'
+  - 'ebpf'
+  - 'tamper'
+  - 'escape'
+  - 'never (reach|leave|enter|see)s?'
+  - "(cannot|can't|never) (reach|read|see|access|bypass|escape)"

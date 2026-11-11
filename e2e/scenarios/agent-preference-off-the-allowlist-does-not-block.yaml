@@ -1,0 +1,19 @@
+id: agent-preference-off-the-allowlist-does-not-block
+title: An agent whose preferred model is not allowed still runs, and the run says which model it used
+tags: [chat]
+needs: process
+description: A preference is a hint. The run goes ahead on an allowed model and records that the preference was not used.
+given:
+  - org-admin
+  - agent-prefers-an-unlisted-model
+when:
+  - chat: { text: "e2e-step:hi Say hi", model: none }
+then:
+  - expect: { run: succeeded }
+  - expect: { event: model.resolved, fields: { model: mock-model, note: "preference not allowed, used mock-model" } }
+guards:
+  - vam:crates/vam-orchestrator/src/allowed_models.rs
+mock:
+  - when: { step: hi }
+    reply: { text: hi }
+status: active

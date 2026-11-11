@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "google/protobuf/timestamp.proto";
+import "vam/v1/common.proto";
+import "vam/v1/model_policy.proto";
+
+message AllowedPortRange {
+  uint32 from_port = 1;
+  uint32 to_port = 2;
+  string protocol = 3;               // "tcp", "udp", or "any"
+}
+
+message NetworkPolicy {
+  NetworkMode mode = 1;
+  uint64 max_egress_bps = 2;
+  uint64 max_ingress_bps = 3;
+  uint64 max_packet_rate_pps = 4;
+  repeated string allowed_domains = 5;
+  repeated string allowed_cidr_destinations = 6;
+  repeated AllowedPortRange allowed_ports = 7;
+}
+
+message NetworkPolicySnapshot {
+  string session_id = 1;
+  uint64 policy_generation = 2;
+  uint64 compiled_at_timestamp = 3;
+  NetworkPolicy policy = 4;
+  repeated string resolved_allowed_ips = 5;
+}
+
+message NetworkLeaseRecord {
+  string session_id = 1;
+  string tap_device_name = 2;
+  string guest_mac_address = 3;
+  string guest_ipv4_address = 4;
+  string guest_ipv6_prefix = 5;
+  uint64 lease_created_at = 6;
+  uint64 lease_expires_at = 7;
+}
+
+message LeaseAllocated {
+  NetworkLeaseRecord lease = 1;
+}
+
+message PolicyEnforced {
+  NetworkPolicySnapshot snapshot = 1;
+}
+
+message TrafficThrottled {
+  string interface_name = 1;
+  uint64 bytes_throttled = 2;
+  string direction = 3; // "egress" or "ingress"
+}
+
+message ConnectionBlocked {
+  string destination_ip = 1;
+  uint32 destination_port = 2;
+  string protocol = 3;
+  string blocked_by_rule = 4; // "dns_unauthorized", "nftables_deny"
+}
+
+message LeaseReleased {
+  string session_id = 1;
+  string tap_device_name = 2;
+}
+
+message NetworkEvent {
+  string event_id = 1;
+  string session_id = 2;
+  uint64 timestamp = 3;
+  oneof payload {
+    LeaseAllocated lease_allocated = 4;
+    PolicyEnforced policy_enforced = 5;
+    TrafficThrottled traffic_throttled = 6;
+    ConnectionBlocked connection_blocked = 7;
+    LeaseReleased lease_released = 8;
+  }
+}
+
+// Structured Brokered Egress request/response definitions
+message EgressRequest {
+  string method = 1;
+  string url = 2;
+  map<string, string> headers = 3;
+  bytes body = 4;
+}
+
+message EgressResponse {
+  uint32 status_code = 1;
+  map<string, string> headers = 2;
+  bytes body = 3;
+  ErrorStatus error = 4;
+}
+
+enum InjectionSiteType {
+  INJECTION_SITE_UNSPECIFIED = 0;
+  INJECTION_SITE_HEADER = 1;
+  INJECTION_SITE_BEARER_TOKEN = 2;
+  INJECTION_SITE_QUERY_PARAM = 3;
+  INJECTION_SITE_BODY_JSON_POINTER = 4;
+}
+
+message InjectionSite {
+  InjectionSiteType type = 1;
+  string key = 2; // header name, query param name, or JSON pointer
+}
+
+message SecretBinding {
+  string binding_id = 1;
+  string placeholder = 2;
+  string secret_ref = 3;
+  repeated string allowed_destinations = 4;
+  InjectionSite inject_at = 5;
+}

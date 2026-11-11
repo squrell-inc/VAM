@@ -1,0 +1,34 @@
+id: node-init-check-names-what-is-missing
+title: Checking a bare host lists everything the node needs, each with its fix, and changes nothing
+description: >
+  `vam node init --check` on a host with none of the node's requirements exits non-zero and prints
+  one line per check: `missing <check>` or `wrong <check>`, then the detail, then `fix: <what to
+  do>`. The checks are `kvm`, `cgroup-v2`, `firecracker`, `jailer`, `kernel` and `base-image`.
+  The tree is byte-for-byte what it was before. The command needs no host and no key.
+
+  The `--root DIR` flag is a test seam that the check and the install must implement: every
+  host path the command reads or writes (`/dev/kvm`, the cgroup mount, the asset directory, the
+  state directory, the systemd unit directory, `/etc/vam`) is looked up under DIR, and the
+  command never touches the real root, the real `/dev` or needs real root privileges. The
+  fixture tree is a bare host: a `dev` directory with no `kvm`, and a cgroup mount without
+  `cgroup.controllers`.
+tags: [release]
+needs: process
+given: []
+when:
+  - cli:
+      args: [node, init, --check, --root, "{{root}}", --vamd, "{{vamd}}"]
+      root: { from: node-init/bare }
+      exit: fail
+      unchanged: true
+      contains:
+        - "missing kvm"
+        - "missing cgroup-v2"
+        - "missing firecracker"
+        - "missing jailer"
+        - "missing kernel"
+        - "missing base-image"
+        - "fix:"
+guards:
+  - vam:crates/vam-cli/src/main.rs
+status: active

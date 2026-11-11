@@ -1,0 +1,23 @@
+id: connector-id-cannot-be-taken-by-a-hand-added-server
+title: A connector id cannot be taken by a hand-added MCP server
+description: >
+  Fixed connector ids stay meaningful on every node. A member's OAuth connection with the id
+  linear and another URL is refused. With the connector's own URL while linear is not enabled it
+  is refused too ("ask your admin"). Both answer 2xx today: an OAuth connect without tokens skips
+  tools/list.
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-member
+  - mock-linear-server
+when:
+  - connector-connect: { id: linear, url: "https://mcp.e2e-hand-added.example/mcp", as: org-member, refused: true }
+  - connector-connect: { id: linear, url: "https://mcp.linear.app/mcp", as: org-member, refused: true }
+then:
+  - expect: { connectors: { id: linear, as: org-member, fields: { state: askAdmin } } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+  - vam:crates/vam-orchestrator/src/mcp_registry.rs
+  - vam:crates/vam-orchestrator/src/api/mcp_connections.rs
+status: active

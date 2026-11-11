@@ -1,0 +1,57 @@
+id: linear-reads-run-without-asking-and-writes-ask
+title: Linear reads run without asking, writes ask, and a disabled connector offers no tools
+description: >
+  The administrator enables Linear and the member connects as the app would (fixed id linear,
+  tokens). A read tool runs with no approval and the mock saw the bearer. A write tool parks on
+  an approval. The vendor's unvetted tool is not offered. Disabled, a new chat's call to a read
+  tool is refused as an unknown tool; enabled again, it runs without reconnecting. No token is in
+  the thread, the events or the receipt. A tool the product does not offer cannot be called by the
+  mock model, so that refusal is observed as a failed run with `tool_not_offered`, not as a tool message.
+tags: [connectors, approval, egress]
+needs: process
+given:
+  - org-member
+  - org-administrator
+  - mock-linear-server
+  - agent-plain
+when:
+  - connector-node: { id: linear, enabled: true, as: org-administrator }
+  - connector-connect: { id: linear, piece: mock-linear-server, as: org-member }
+  - chat: { text: "e2e-step:read Read my issues", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-linear-server, path: /mcp, has: [authorization, tool=list_issues] } }
+  - chat: { text: "e2e-step:write Save an issue", as: org-member }
+  - expect: { approval: pending, tool: linear__save_issue }
+  - deny: { as: org-member }
+  - chat: { text: "e2e-step:vendor Export the workspace", as: org-member }
+  - expect: { run: failed }
+  - expect: { event: mock.unmatched, fields: { reason: tool_not_offered } }
+  - connector-node: { id: linear, enabled: false, as: org-administrator }
+  - chat: { text: "e2e-step:read Read my issues again", as: org-member }
+  - expect: { run: failed }
+  - expect: { event: mock.unmatched, fields: { reason: tool_not_offered } }
+  - connector-node: { id: linear, enabled: true, as: org-administrator }
+  - chat: { text: "e2e-step:read Read my issues once more", as: org-member }
+then:
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-linear-server, path: /mcp, lacks: [authorization-wrong, tool=export_workspace] } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+  - vam:crates/vam-orchestrator/src/mcp_registry.rs
+  - vam:crates/vam-orchestrator/src/api/mcp_connections.rs
+  - vam:crates/vam-orchestrator/src/secrets.rs
+mock:
+  - when: { step: read, toolName: linear__list_issues }
+    reply: { text: Read. }
+  - when: { step: read, stepStart: true }
+    reply: { toolCall: { name: linear__list_issues, args: {} } }
+  - when: { step: write, toolName: linear__save_issue }
+    reply: { text: Saved. }
+  - when: { step: write, stepStart: true }
+    reply: { toolCall: { name: linear__save_issue, args: { title: e2e } } }
+  - when: { step: vendor, toolName: linear__export_workspace }
+    reply: { text: Exported. }
+  - when: { step: vendor, stepStart: true }
+    reply: { toolCall: { name: linear__export_workspace, args: {} } }
+status: active

@@ -1,0 +1,41 @@
+name: DCO
+
+# Checks that every commit in a pull request carries a Signed-off-by line (see CONTRIBUTING.md).
+# It reads git history only: no secrets, no write permissions, and it never runs PR code.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    # Public repository only; the private predecessor does not require sign-off.
+    if: github.repository == 'squrell-inc/VAM'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Every commit is signed off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            author_email="$(git log -1 --format=%ae "$c")"
+            if ! git log -1 --format=%B "$c" | grep -i '^Signed-off-by: ' | grep -qiF "<$author_email>"; then
+              echo "::error::commit $c ($(git log -1 --format=%s "$c")) has no Signed-off-by line matching its author <$author_email>"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Fix: git rebase --signoff $BASE and force-push. See CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "All commits are signed off."

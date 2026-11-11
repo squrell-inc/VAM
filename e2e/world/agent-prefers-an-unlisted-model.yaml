@@ -1,0 +1,14 @@
+piece: agent-prefers-an-unlisted-model
+kind: agent
+release: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent that prefers a model the operator did not list
+    description: Plain chat agent whose only preferred model is not on the node's allowlist
+    role: Tester
+    systemInstructions: Answer briefly. Finish with task_complete.
+    allowAnyPlaybook: true
+    preferredModels:
+      - provider: openai
+        modelName: openai/gpt-4o-not-on-the-list

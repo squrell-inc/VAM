@@ -1,0 +1,102 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:playbook:local.vam.dev/vam/support-refund"
+  },
+  "displayName": "Support refund",
+  "description": "Refund an order when it is eligible; the agent confirms the amount first.",
+  "activation": {
+    "when": "Use when a customer asks for a refund on an order.",
+    "examples": [
+      "Refund order 1042"
+    ]
+  },
+  "inputSchema": {
+    "type": "object",
+    "required": [
+      "order_id"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "order_id": {
+        "type": "string"
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "fetch-order",
+      "description": "Look up the order.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_BOUND",
+      "instruction": "Look up order {{inputs.order_id}}.",
+      "binding": {
+        "toolName": "get_order",
+        "arguments": {
+          "order_id": "{{inputs.order_id}}"
+        }
+      }
+    },
+    {
+      "id": "assess-eligibility",
+      "description": "Decide whether the order can be refunded.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_AGENTIC",
+      "after": [
+        "fetch-order"
+      ],
+      "instruction": "Using the order details ({{steps.fetch-order.output.status}}, delivered {{steps.fetch-order.output.delivered_on}}), record eligible or not_eligible. Orders are refundable within 30 days of delivery.",
+      "outcomes": [
+        {
+          "label": "eligible"
+        },
+        {
+          "label": "not_eligible",
+          "terminal": "OUTCOME_TERMINAL_SUCCEEDED"
+        }
+      ]
+    },
+    {
+      "id": "refund-amount",
+      "description": "Confirm the refund amount.",
+      "kind": "STEP_KIND_GATE",
+      "after": [
+        "assess-eligibility:eligible"
+      ],
+      "question": "Refund order {{inputs.order_id}}?",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "number",
+            "title": "Amount",
+            "default": "{{steps.fetch-order.output.total}}"
+          }
+        }
+      }
+    },
+    {
+      "id": "issue-refund",
+      "description": "Issue the refund.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_BOUND",
+      "after": [
+        "refund-amount"
+      ],
+      "instruction": "Issue the refund.",
+      "binding": {
+        "toolName": "issue_refund",
+        "arguments": {
+          "order_id": "{{inputs.order_id}}",
+          "amount": "{{steps.refund-amount.output.amount}}"
+        }
+      },
+      "evidence": {
+        "tool": "issue_refund",
+        "result": "success"
+      }
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+id: space-and-thread-can-be-renamed-in-place
+title: A Space and a thread can be created and renamed, and their ids, history and files stay put
+tags: [chat, workspace]
+needs: process
+description: A person creates a Space for an agent, chats in it, then renames the Space and the thread. A rename changes only the label; the ids are the same, the earlier messages are still there, and a follow-up sent with the ids lands in the same thread. The Space list and the thread list show the new labels.
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - create-space: { label: "Holiday plans" }
+  - chat: { text: "e2e-step:one Remember apples", thread: { name: "first idea" } }
+  - rename-space: { label: "Trip to Lisbon" }
+  - rename-thread: { label: "Day one" }
+  - chat: { text: "e2e-step:two Remember pears", thread: { id: latest } }
+then:
+  - expect: { spaces: { fields: { spaceId: { present: true }, name: "Trip to Lisbon" } } }
+  - expect: { threads: { count: 1, all: { threadId: { present: true }, name: "Day one" } } }
+  - expect: { thread: { role: user, contains: "apples" } }
+  - expect: { thread: { role: user, contains: "pears" } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/spaces.rs
+  - vam:crates/vam-orchestrator/src/spaces.rs
+mock:
+  - when: { step: one, stepStart: true }
+    reply: { text: Noted apples. }
+  - when: { step: two, stepStart: true }
+    reply: { text: Noted pears. }
+status: active

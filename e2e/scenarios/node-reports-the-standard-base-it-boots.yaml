@@ -1,0 +1,31 @@
+id: node-reports-the-standard-base-it-boots
+title: The node names the base image it boots, verified, with the runtimes it holds, and a chat boots on it
+description: >
+  `GET /v1/node` reports the base by name, whether its manifest matches the image the node
+  boots, and the runtimes in it (at least Python and git). A chat then boots a microVM on that
+  base and finishes. Needs a microVM: only there is there an image whose digest the node can
+  check against its manifest.
+tags: [release]
+needs: firecracker
+given:
+  - org-admin
+  - agent-plain
+when:
+  - expect:
+      node:
+        fields:
+          status.base.name: vam/base:2
+          status.base.verified: true
+          status.base.runtimes.name=python.version: { present: true }
+          status.base.runtimes.name=git.version: { present: true }
+then:
+  - chat: "e2e-step:hello Say hello"
+  - expect: { run: succeeded }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/daemon.rs
+  - vam:scripts/build-rootfs.sh
+mock:
+  - when: { step: hello }
+    reply: { text: Hello. }
+status: active

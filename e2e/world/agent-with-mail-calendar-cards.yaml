@@ -1,0 +1,22 @@
+piece: agent-with-mail-calendar-cards
+kind: agent
+release: true
+deferred: true
+requires: [skill-mail-calendar-cards]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent offered the mail and calendar card skill
+    description: Agent that lists mail, sends mail, finds times and books them
+    role: Tester
+    systemInstructions: Use the mail and calendar tools when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    skillRefs:
+      - resourceId: { urn: "{{urn:skill-mail-calendar-cards}}" }
+        version: { major: 1, minor: 0, patch: 0 }
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:load_skill", decision: allow }
+          - { target: "skill:{{name:skill-mail-calendar-cards}}/*", decision: allow }

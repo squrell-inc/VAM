@@ -1,0 +1,22 @@
+{
+  "spec": {
+    "agentRef": {
+      "resourceId": {
+        "urn": "urn:vam:agent:local.vam.dev/vam/sqlite-assistant"
+      }
+    },
+    "inputs": {
+      "max_iterations": 8,
+      "model": "openai/gpt-4o-mini",
+      "system_instructions": "You are a specialized code analyst. Initialize your SQLite DB, insert facts about the project architecture, run a SQL query to verify the count of recorded facts, and write a structured report to 'ANALYSIS.md' using write_file."
+    },
+    "maxDuration": "300s",
+    "maxFinancialBudget": {
+      "currency": "USD",
+      "microAmount": "500000"
+    },
+    "runId": {
+      "urn": "urn:vam:run:sqlite-analysis-001"
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "actions": [
+    {
+      "tool": {
+        "name": "read_pull_request",
+        "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+        "result": "success",
+        "arguments": {}
+      }
+    },
+    {
+      "stepComplete": {
+        "stepId": "review-change",
+        "outcome": "done",
+        "agentSummary": "Adds retry handling to the upload client."
+      }
+    },
+    {
+      "tool": {
+        "name": "post_review_comment",
+        "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL",
+        "result": "success",
+        "arguments": {}
+      }
+    },
+    {
+      "gate": {
+        "stepId": "approve",
+        "decision": "SUBMITTED",
+        "response": {"option": "approved"}
+      }
+    },
+    {
+      "tool": {
+        "name": "post_review_comment",
+        "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL",
+        "result": "success",
+        "arguments": {}
+      }
+    },
+    {
+      "stepComplete": {
+        "stepId": "post-review",
+        "outcome": "done"
+      }
+    }
+  ],
+  "expect": {
+    "steps": [
+      {"id": "review-change", "state": "completed", "outcome": "done"},
+      {"id": "approve", "state": "completed", "outcome": "approved"},
+      {"id": "post-review", "state": "completed", "outcome": "done"}
+    ],
+    "deniedTools": ["post_review_comment"],
+    "finish": "complete"
+  }
+}

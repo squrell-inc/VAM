@@ -1,0 +1,72 @@
+{
+  "id": "bench-oracle-pr",
+  "rules": [
+    {
+      "when": {
+        "contains": "Available now: create-pr"
+      },
+      "reply": {
+        "toolCall": {
+          "name": "run_step",
+          "args": {
+            "step_id": "create-pr"
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "contains": "Available now: find-suppliers"
+      },
+      "reply": {
+        "toolCall": {
+          "name": "run_step",
+          "args": {
+            "step_id": "find-suppliers"
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "lastRole": "tool",
+        "toolName": "run_step"
+      },
+      "reply": {
+        "text": "Done with that step. Waiting for your answer on the open form, or finished if there is none."
+      }
+    },
+    {
+      "when": {
+        "lastRole": "user",
+        "contains": "[Playbook status:"
+      },
+      "reply": {
+        "text": "Waiting for your answer on the open form."
+      }
+    },
+    {
+      "when": {
+        "lastRole": "tool",
+        "toolName": "start_playbook"
+      },
+      "reply": {
+        "text": "Started. Waiting for your answers on the form."
+      }
+    },
+    {
+      "when": {
+        "step": "start",
+        "stepStart": true
+      },
+      "reply": {
+        "toolCall": {
+          "name": "start_playbook",
+          "args": {
+            "urn": "urn:vam:playbook:local.vam.dev/vam/bench-oracle-pr"
+          }
+        }
+      }
+    }
+  ]
+}

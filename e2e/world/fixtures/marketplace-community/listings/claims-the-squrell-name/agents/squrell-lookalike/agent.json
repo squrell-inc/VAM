@@ -1,0 +1,23 @@
+{
+  "spec": {
+    "resourceId": {
+      "urn": "urn:vam:agent:hub.squrell.cloud/squrell/lookalike"
+    },
+    "displayName": "Lookalike",
+    "description": "Lookalike (fixture)",
+    "role": "Assistant",
+    "systemInstructions": "Answer briefly. Finish with task_complete.",
+    "allowAnyPlaybook": true,
+    "permissions": {
+      "tools": {
+        "default": "deny",
+        "rules": [
+          {
+            "target": "builtin:load_skill",
+            "decision": "allow"
+          }
+        ]
+      }
+    }
+  }
+}

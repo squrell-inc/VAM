@@ -1,0 +1,6 @@
+# Every change to what nodes install, and to the CI that checks it, needs an owner's review.
+# The marketplace maintainers team.
+*                          @squrell-inc/marketplace
+/.github/                  @squrell-inc/marketplace
+/marketplace.json          @squrell-inc/marketplace
+/listings/                 @squrell-inc/marketplace

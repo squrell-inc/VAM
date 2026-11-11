@@ -1,0 +1,47 @@
+id: missed-fire-runs-once-after-the-broker-restarts
+title: A fire missed while the broker is down runs exactly once when the broker is back inside the grace window
+tags: [schedule, triggers]
+needs: process
+description: The agent makes a once-schedule eight seconds ahead and the user approves it. The broker is stopped over the fire time and nothing starts while it is down. When it is started again with the same state, one run starts, and no second one.
+given:
+  - org-admin
+  - agent-with-schedule-tools
+  - schedule-broker
+when:
+  - chat: "e2e-step:create Write a note in eight seconds"
+  - expect: { approval: pending, tool: schedule_create }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "sch_" } }
+  - stop-broker: {}
+  - expect: { scheduled-runs: { count: 0, within: 11s } }
+  - start-broker: {}
+  - wait-scheduled-run: { within: 30s, label: fired }
+then:
+  - expect: { run: succeeded }
+  - expect: { file: { path: fired.txt, present: true } }
+  - expect: { scheduled-runs: { count: 1, within: 8s } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+mock:
+  - when: { step: create, stepStart: true }
+    reply:
+      toolCall:
+        name: schedule_create
+        args:
+          title: Nightly note
+          when: { once: { in: PT8S } }
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:missed-fire-runs-once-after-the-broker-restarts"
+            workspace: { mode: SAME }
+            thread: { mode: NEW, name: nightly-note }
+            onBusy: QUEUE
+  - when: { step: create }
+    reply: { text: Scheduled. }
+  - when: { step: fired, toolName: write_file }
+    reply: { text: done }
+  - when: { step: fired, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: fired.txt, content: fired } } }
+status: active

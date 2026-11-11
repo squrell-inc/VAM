@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+message ApprovalRequestClaims {
+  ResourceId request_id = 1;              // Unique request ID (e.g., "urn:vam:hitl:req-123")
+  ResourceId run_id = 2;                  // Contextual workflow run ID
+  string step_id = 3;                     // Associated DAG step node ID
+  
+  string target_tool_name = 4;            // Intercepted tool name (empty if explicit playbook step)
+  google.protobuf.Struct requested_args = 5;// Raw arguments to be approved
+  
+  repeated string required_roles = 6;     // Roles permitted to authorize (e.g., ["finance-admin"])
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp expires_at = 8;
+  ResourceId tenant_id = 9;
+  ResourceId attempt_id = 10;
+  ArtifactRef workspace_checkpoint = 11;
+  Digest requested_args_digest = 12;
+  int64 policy_revision = 13;
+  int64 continuation_generation = 14;
+
+  // Host-rendered reviewer copy (P0 HITL).
+  string approval_message = 15;
+  // JSON Schema draft-07 of values decide may change; empty object rejects amend.
+  google.protobuf.Struct amendable_schema = 16;
+
+  // `tool_call` is a suspended tool (today). `gate` is a playbook gate step;
+  // `step_id` is that step. Unspecified on older rows means `tool_call`.
+  ApprovalKind kind = 17;
+
+  // Permission target this prompt can save (for example `skill:jira/create_issue`).
+  // Design Part IV §IV.7. Empty until the host fills it.
+  string target = 18;
+  // True when Always allow / Always deny can take effect.
+  bool always_offered = 19;
+  // Why Always is withheld. Empty when `always_offered` is true.
+  string locked_reason = 20;
+  // The skill's ask card for this call: jig name, checked IR, bound data.
+  ApprovalCard card = 21;
+}
+
+message ApprovalCard {
+  string jig = 1;                         // "<skill>.<jig>"
+  google.protobuf.Struct ir = 2;
+  google.protobuf.Struct data = 3;
+}
+
+// How `DecideApprovalRequest` saves a decision into the owner's draft
+// (design Part IV §IV.7). Unspecified means once: allow or deny this time only.
+enum Remember {
+  REMEMBER_UNSPECIFIED = 0;
+  REMEMBER_ALWAYS_ALLOW = 1;
+  REMEMBER_ALWAYS_DENY = 2;
+}
+
+// What a pending approval is waiting on.
+enum ApprovalKind {
+  APPROVAL_KIND_UNSPECIFIED = 0;
+  APPROVAL_KIND_TOOL_CALL = 1;
+  APPROVAL_KIND_GATE = 2;
+  APPROVAL_KIND_QUESTION = 3;             // ask_user: the agent asks the owner a question
+}
+
+// Representation of a pending HITL authorization request
+message ApprovalRequest {
+  ApprovalRequestClaims claims = 1;
+  SignedEnvelope authorization = 2;       // Domain: "vam.v1.approval-request"
+}
+
+message HitlTokenClaims {
+  ResourceId token_id = 1;                // Unique cryptographic nonce
+  ResourceId request_id = 2;              // Target approval request URN
+  ResourceId reviewer_id = 3;             // Exact principal authorized to use this token
+  repeated string authorized_roles = 4;   // Host-verified role snapshot
+  ResourceId tenant_id = 5;
+  string audience = 6;                    // Required verifier/service audience
+  google.protobuf.Timestamp issued_at = 7;
+  google.protobuf.Timestamp expires_at = 8;
+  ResourceId run_id = 9;
+  string step_id = 10;
+  ResourceId attempt_id = 11;
+  ArtifactRef workspace_checkpoint = 12;
+  Digest approved_args_digest = 13;
+  int64 policy_revision = 14;
+  int64 continuation_generation = 15;
+}
+
+// Cryptographic token issued to reviewers to authorize decision-making
+message HitlToken {
+  HitlTokenClaims claims = 1;
+  SignedEnvelope authorization = 2;       // Domain: "vam.v1.hitl-token"
+}
+
+message ApprovalDecisionClaims {
+  ResourceId request_id = 1;              // Target approval request URN
+  HitlToken token = 2;                    // Reviewer token proving lease authority
+  
+  enum HitlDecision {
+    HITL_DECISION_UNSPECIFIED = 0;
+    HITL_DECISION_APPROVED = 1;           // Execute action as requested
+    HITL_DECISION_REJECTED = 2;           // Abort execution and trigger fallbacks
+    HITL_DECISION_AMENDED = 3;            // Execute action with modified arguments
+    HITL_DECISION_SUBMITTED = 4;          // Gate response. Does not execute a tool.
+  }
+  HitlDecision decision = 3;
+  
+  string rejection_reason = 4;            // Required if HITL_DECISION_REJECTED on a tool call
+  google.protobuf.Struct amended_args = 5; // Required if HITL_DECISION_AMENDED
+  // Required if HITL_DECISION_SUBMITTED. Validated against the gate response schema.
+  google.protobuf.Struct response = 9;
+  
+  ResourceId reviewer_id = 6;             // Authorized human operator identity
+  google.protobuf.Timestamp reviewed_at = 7;
+  Digest amended_args_digest = 8;
+}
+
+// User-submitted decision payload
+message ApprovalDecision {
+  ApprovalDecisionClaims claims = 1;
+  SignedEnvelope authorization = 2;       // Domain: "vam.v1.approval-decision"
+}
+
+// Observed status of the HITL interaction
+message ApprovalStatus {
+  ResourceId request_id = 1;
+  enum ApprovalState {
+    APPROVAL_STATE_UNSPECIFIED = 0;
+    APPROVAL_STATE_PENDING = 1;           // Awaiting human review
+    APPROVAL_STATE_APPROVED = 2;          // Approved and dispatched as-is
+    APPROVAL_STATE_AMENDED = 3;           // Approved with modified arguments
+    APPROVAL_STATE_REJECTED = 4;          // Explicitly rejected by reviewer
+    APPROVAL_STATE_EXPIRED = 5;           // Expired without user submission
+    APPROVAL_STATE_CANCELLED = 6;         // Cancelled (e.g., parent Run aborted)
+    APPROVAL_STATE_SUBMITTED = 7;         // Gate response recorded
+  }
+  ApprovalState state = 2;
+  ApprovalDecision decision = 3;          // Submitted decision block
+  google.protobuf.Timestamp decided_at = 4;
+  int64 decision_revision = 5;
+}

@@ -1,0 +1,36 @@
+{
+  "name": "vam.question",
+  "doc": "The agent asks the owner a question. With choices the answer must be one of them (jig decision 14); without, it is free text.",
+  "inputSchema": {
+    "type": "object",
+    "required": ["question"],
+    "additionalProperties": false,
+    "properties": {
+      "question": { "type": "string", "minLength": 1, "maxLength": 2000 },
+      "choices": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }
+    }
+  },
+  "resultSchema": {
+    "type": "object",
+    "required": ["answer"],
+    "additionalProperties": false,
+    "properties": {
+      "answer": { "type": "string", "maxLength": 4000 }
+    }
+  },
+  "resultRules": ["answer must equal one of data.choices when data.choices is present"],
+  "ir": {
+    "version": 1,
+    "catalog": "vam/1",
+    "jig": "vam.question",
+    "root": "root",
+    "state": { "answer": "" },
+    "nodes": {
+      "root": { "type": "Stack", "props": { "gap": "medium" }, "children": ["q", "pick", "free", "send"] },
+      "q": { "type": "Text", "props": { "text": { "$data": "/question" }, "emphasis": "strong" } },
+      "pick": { "type": "Select", "props": { "label": "Answer", "value": { "$state": "answer" }, "options": { "$data": "/choices" } }, "visible": { "$data": "/choices" } },
+      "free": { "type": "TextArea", "props": { "label": "Answer", "value": { "$state": "answer" } }, "hidden": { "$data": "/choices" } },
+      "send": { "type": "Button", "props": { "label": "Send", "action": { "event": "submit", "with": ["answer"] } } }
+    }
+  }
+}

@@ -1,0 +1,1198 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "vam/v1/agentic_spec.proto";
+import "vam/v1/workflow.proto";
+import "vam/v1/skills.proto";
+import "vam/v1/hitl.proto";
+import "vam/v1/hosted_services.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// ---------------------------------------------------------------------------
+// API key management
+// ---------------------------------------------------------------------------
+
+message ApiKeyRecord {
+  ResourceId key_id = 1;
+  string name = 2;
+  string principal = 3;
+  repeated string scopes = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp last_used_at = 6;
+  google.protobuf.Timestamp revoked_at = 7;
+  // Bound control-plane user (`users.user_id`). Bootstrap key is `operator`.
+  string user_id = 8;
+  // Credential fields (E5). Empty holder reads as "http".
+  string holder = 9;               // "http" | "broker:<id>"
+  string target_kind = 10;
+  string target_id = 11;
+  string target_label = 12;
+  string message_preview = 13;
+  string issued_via = 14;
+  string tool_name = 15;
+  google.protobuf.Timestamp expires_at = 16;
+}
+
+message CreateApiKeyRequest {
+  string name = 1;
+  string principal = 2;
+  repeated string scopes = 3;
+  string idempotency_key = 4;
+  // Optional owner to bind. Empty = calling principal. Tenants never receive
+  // `keys:admin` or `brokers:admin`.
+  string user_id = 5;
+}
+
+message CreateApiKeyResponse {
+  ApiKeyRecord key = 1;
+  string secret = 2; // Plaintext shown once at creation; never stored.
+}
+
+message ListApiKeysRequest {
+  PaginationRequest pagination = 1;
+  string holder = 2;               // "" = http keys only; "broker" = grants; "all" = both
+}
+
+message ListApiKeysResponse {
+  repeated ApiKeyRecord keys = 1;
+  PaginationResponse pagination = 2;
+}
+
+message RevokeApiKeyRequest {
+  ResourceId key_id = 1;
+  string idempotency_key = 2;
+}
+
+message RevokeApiKeyResponse {
+  ApiKeyRecord key = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Node status
+// ---------------------------------------------------------------------------
+
+message NodeStatus {
+  string node_id = 1;
+  string listen_addr = 2;
+  bool draining = 3;
+  bool ready = 4;
+  int32 active_sessions = 5;
+  int32 max_sessions = 6;
+  int32 total_vcpus_allocated = 7;
+  int32 max_vcpus = 8;
+  int64 total_memory_mib_allocated = 9;
+  int64 max_memory_mib = 10;
+  google.protobuf.Timestamp updated_at = 11;
+  // How session guests run: "vm" (Firecracker microVMs, every normal node) or
+  // "process" (host processes, no isolation; E9 test nodes only).
+  string guest_mode = 12;
+  // The isolation this node runs, built from its running config.
+  NodeIsolation isolation = 13;
+  // The keys that sign this node's run receipts: the current one, then retired
+  // ones kept so old receipts stay verifiable. Public keys only.
+  repeated NodeSigningKey signing_keys = 14;
+  // The base image this node boots and the runtimes it holds. Absent on an older node.
+  NodeBase base = 15;
+}
+
+// The standard base image a node boots, from its `<image>.base.json`.
+message NodeBase {
+  string name = 1;       // E.g. "vam/base:2"
+  string version = 2;
+  string digest = 3;     // "sha256:<64 hex>" of the rootfs image
+  // True when a VM node's rootfs sha256 matches `digest`. A process node reports
+  // the manifest it was given, unverified.
+  bool verified = 4;
+  repeated NodeRuntime runtimes = 5;  // Empty when a VM node's manifest is missing or unverified
+}
+
+message NodeRuntime {
+  string name = 1;
+  string version = 2;
+}
+
+// A public key of this node. `key_id` is "ed25519:<first 16 hex of
+// sha256(public key)>"; `public_key` is lowercase hex.
+message NodeSigningKey {
+  string key_id = 1;
+  string public_key = 2;
+  // "current" (signs new receipts) or "retired" (verifies old ones).
+  string state = 3;
+}
+
+// What isolates session guests on this node. `summary` is the one-line form the
+// receipt and `vam node` print.
+message NodeIsolation {
+  // "firecracker" (microVMs) or "process" (host processes, test nodes only).
+  string vmm = 1;
+  // True when the Firecracker process runs under the jailer.
+  bool jailer = 2;
+  // True when the node API is served over TLS.
+  bool api_tls = 3;
+  // "firecracker microVM, jailer on", "firecracker microVM, jailer off" or
+  // "process guest (no isolation)".
+  string summary = 4;
+  // The API rate limits this node enforces: "on (30/s burst 100, runs 2/s burst 20)"
+  // or "off" (VAMD_RATE_LIMIT=off). Not part of `summary`.
+  string rate_limits = 5;
+}
+
+message GetNodeStatusRequest {}
+
+message GetNodeStatusResponse {
+  NodeStatus status = 1;
+}
+
+// Operator-published model ids this node may use on CreateRun (`inputs.model`).
+// Empty list means unrestricted (operator has not published yet).
+message GetOperatorAllowedModelsRequest {}
+
+message GetOperatorAllowedModelsResponse {
+  repeated string models = 1;
+  // The operator's default model; absent when none is set.
+  optional string default_model = 2;
+  // The model a run gets when neither the caller nor the agent names an allowed one:
+  // the default, else the first listed model, else the catalog default.
+  string effective_default_model = 3;
+  // Where a slash model id the catalog does not know is sent: `vercel` or `openrouter`.
+  // `vercel` when the operator has not set one.
+  string default_gateway = 4;
+}
+
+message PutOperatorAllowedModelsRequest {
+  repeated string models = 1;
+  // Absent leaves the stored default as is; an empty string clears it. Must be on a
+  // non-empty list.
+  optional string default_model = 2;
+  // Absent leaves the stored gateway as is. `vercel` or `openrouter`.
+  optional string default_gateway = 3;
+}
+
+message PutOperatorAllowedModelsResponse {
+  repeated string models = 1;
+  optional string default_model = 2;
+  string default_gateway = 3;
+}
+
+message HealthResponse {
+  enum ServingStatus {
+    SERVING_STATUS_UNSPECIFIED = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------
+
+message PutAgentRequest {
+  AgentSpec spec = 1;
+  string idempotency_key = 2;
+}
+
+message PutAgentResponse {
+  AgentSpec spec = 1;
+}
+
+message GetAgentRequest {
+  string urn = 1;
+}
+
+// Where a catalog row a marketplace installed came from (CN-4.5, `design/connectors.md` §9.1).
+// Absent on every row that was not installed from a marketplace.
+message CatalogOrigin {
+  // Id of the trusted marketplace on this node (`squrell` for the preconfigured one).
+  string marketplace = 1;
+  // The listing that installed the row.
+  string listing = 2;
+  // The tag the listing was installed at.
+  string ref = 3;
+  // The commit that tag named when it was installed (40-hex SHA-1).
+  string commit = 4;
+  // SHA-256 hex of what was installed: the package digest of a skill, the digest of the stored
+  // spec for an agent or playbook.
+  string package_digest = 5;
+}
+
+message GetAgentResponse {
+  AgentSpec spec = 1;
+  // Host stamp. Not part of the guest AgentSpec; populated on list/get.
+  string owner_user_id = 2;
+  SkillChannel channel = 3;
+  // `user` (tenant-published), `platform` (`examples.local` stamped as platform; not boot-seeded)
+  // or `marketplace` (installed from a trusted marketplace; read-only).
+  string catalog_tier = 4;
+  // The same value as `catalog_tier`.
+  string tier = 5;
+  // True when a marketplace installed the row: nobody changes it but the import (M2).
+  bool read_only = 6;
+  CatalogOrigin origin = 7;
+}
+
+message ListAgentsRequest {
+  PaginationRequest pagination = 1;
+}
+
+message ListAgentsResponse {
+  repeated AgentSpec specs = 1;
+  PaginationResponse pagination = 2;
+  // Same rows as `specs`, with owner / channel / catalog tier for isolation UI.
+  repeated AgentRecord records = 3;
+}
+
+message PolicyRecord {
+  ResourceId resource_id = 1;
+  string cedar = 2;
+  string digest = 3; // SHA-256 hex of cedar bytes
+  ResourceMetadata metadata = 4;
+  // `user` (caller-published) or `platform` (`examples.local` stamped as platform; not boot-seeded).
+  string catalog_tier = 5;
+  // Released rows carry their semver with an empty `prerelease`. The owner's draft
+  // has no version (locked decision 2): it carries its stored slot with
+  // `prerelease: "draft"`. Clients treat any `*-draft` version as "the draft".
+  Version version = 6;
+  SkillChannel channel = 7;
+}
+
+message PutPolicyRequest {
+  string urn = 1;
+  string cedar = 2;
+  string idempotency_key = 3;
+}
+
+message PutPolicyResponse {
+  PolicyRecord record = 1;
+}
+
+message GetPolicyRequest {
+  string urn = 1;
+}
+
+message GetPolicyResponse {
+  PolicyRecord record = 1;
+}
+
+message ListPoliciesRequest {
+  PaginationRequest pagination = 1;
+}
+
+message ListPoliciesResponse {
+  repeated PolicyRecord records = 1;
+  PaginationResponse pagination = 2;
+}
+
+message PutPlaybookRequest {
+  PlaybookSpec spec = 1;
+  string idempotency_key = 2;
+}
+
+message ListPlaybooksRequest {
+  PaginationRequest pagination = 1;
+}
+
+message ListPlaybooksResponse {
+  repeated PlaybookSpec specs = 1;
+  PaginationResponse pagination = 2;
+  // One record per row in `specs`, same order, with the host stamps the app
+  // list needs: owner, channel, tier and version. Clients read the latest
+  // release and the owner-draft flag from these.
+  repeated PlaybookRecord records = 3;
+}
+
+message PlaybookRecord {
+  PlaybookSpec spec = 1;
+  string owner_user_id = 2;
+  SkillChannel channel = 3;
+  // `user` (tenant-published), `platform` or `marketplace` (installed; read-only).
+  string catalog_tier = 4;
+  // Released rows carry their semver with an empty `prerelease`. The owner's draft
+  // carries its stored slot with `prerelease: "draft"`.
+  Version version = 5;
+  // The same value as `catalog_tier`.
+  string tier = 6;
+  // True when a marketplace installed the row (M2).
+  bool read_only = 7;
+  CatalogOrigin origin = 8;
+}
+
+// `POST /v1/agent-checks`. Informational: it never blocks put, run or release.
+message AgentCheckRequest {
+  // The agent to check. A draft or floating ref resolves like `GET /v1/agents/{urn}`;
+  // a versioned ref checks that exact version.
+  ResourceRef agent_ref = 1;
+}
+
+message AgentCheckResponse {
+  // The agent as checked: URN and the version it resolved to (`-draft` for the owner's draft).
+  ResourceRef agent_ref = 1;
+  // The agent may run any playbook. Allowed playbooks are not enumerated.
+  bool allow_any_playbook = 2;
+  // The default playbook first, then each allowed playbook, each once.
+  repeated AgentCheckPlaybook playbooks = 3;
+  // Every skill the agent attaches or a playbook requires, each once.
+  repeated AgentCheckSkill skills = 4;
+  // Advisory findings, for example a termination policy that cannot take effect.
+  repeated string warnings = 5;
+}
+
+message AgentCheckPlaybook {
+  string urn = 1;
+  // `default` or `allowed`.
+  string role = 2;
+  // Resolved version. Unset when the ref did not resolve.
+  Version version = 3;
+  repeated AgentCheckRequiredSkill required_skills = 4;
+  // `PlaybookSpec.requires.capabilities`.
+  repeated string required_capabilities = 5;
+  // Set when the playbook ref did not resolve. The other fields are then empty.
+  string error = 6;
+}
+
+message AgentCheckRequiredSkill {
+  string urn = 1;
+  Version version = 2;
+  // True when the agent's `skill_refs` (or overlay additions) already name this skill.
+  bool attached = 3;
+  string error = 4;
+}
+
+message AgentCheckSkill {
+  string urn = 1;
+  Version version = 2;
+  // `SkillManifest.capabilities` of the resolved version.
+  repeated string capabilities = 3;
+  // True when the agent attaches this skill itself.
+  bool attached = 4;
+  // Playbook URNs that require this skill.
+  repeated string required_by = 5;
+  string error = 6;
+}
+
+message PutPlaybookResponse {
+  PlaybookSpec spec = 1;
+}
+
+message GetPlaybookRequest {
+  string urn = 1;
+}
+
+message GetPlaybookResponse {
+  PlaybookSpec spec = 1;
+}
+
+message PutSkillRequest {
+  SkillManifest spec = 1;
+  string idempotency_key = 2;
+}
+
+message PutSkillResponse {
+  SkillManifest spec = 1;
+}
+
+message GetSkillRequest {
+  string urn = 1;
+}
+
+message GetSkillResponse {
+  SkillManifest spec = 1;
+}
+
+enum SkillChannel {
+  UNSPECIFIED = 0;
+  DRAFT = 1;
+  RELEASED = 2;
+}
+
+// Host listing row for an agent catalog URN (V2 list + V3 owner on JSON).
+message AgentRecord {
+  AgentSpec spec = 1;
+  string owner_user_id = 2;
+  SkillChannel channel = 3;
+  // `user` (tenant-published), `platform` (`examples.local` stamped as platform; not boot-seeded)
+  // or `marketplace` (installed from a trusted marketplace; read-only).
+  string catalog_tier = 4;
+  // Released rows carry their semver with an empty `prerelease`. The owner's draft
+  // has no version (locked decision 2): it carries its stored slot with
+  // `prerelease: "draft"`. Clients treat any `*-draft` version as "the draft".
+  Version version = 5;
+  // The same value as `catalog_tier`.
+  string tier = 6;
+  // True when a marketplace installed the row (M2).
+  bool read_only = 7;
+  CatalogOrigin origin = 8;
+}
+
+message SkillPackageRecord {
+  ResourceId resource_id = 1;
+  Version version = 2;
+  SkillChannel channel = 3;
+  string digest = 4;
+  string blob_relpath = 5;
+  int64 size_bytes = 6;
+  SkillManifest spec = 7;
+  ResourceMetadata metadata = 8;
+  string owner_user_id = 9;
+  // `user` (tenant-published), `platform` (`examples.local` stamped as platform; not boot-seeded)
+  // or `marketplace` (installed from a trusted marketplace; read-only).
+  string catalog_tier = 10;
+  // The same value as `catalog_tier`.
+  string tier = 11;
+  // True when a marketplace installed the row (M2).
+  bool read_only = 12;
+  CatalogOrigin origin = 13;
+}
+
+message PublishSkillPackageRequest {
+  SkillManifest spec = 1;
+  Version version = 2;
+  SkillChannel channel = 3;
+  string digest = 4;
+  string blob_relpath = 5;
+  int64 size_bytes = 6;
+  string idempotency_key = 7;
+}
+
+message PublishSkillPackageResponse {
+  SkillPackageRecord package = 1;
+}
+
+message ReleaseSkillPackageRequest {
+  string urn = 1;
+  Version version = 2;
+  string idempotency_key = 3;
+  // Optional release note, at most 500 characters after trimming.
+  string note = 4;
+}
+
+message ReleaseSkillPackageResponse {
+  SkillPackageRecord package = 1;
+}
+
+message ReleaseCatalogRequest {
+  Version version = 1;
+  string idempotency_key = 2;
+  // Optional release note, at most 500 characters after trimming.
+  string note = 3;
+}
+
+// One entry in an artifact's version history. Released entries carry their
+// semver and `released_at`. The caller's own draft comes first, with
+// `prerelease: "draft"`, `channel: DRAFT` and `updated_at`, and no note.
+message CatalogVersionEntry {
+  Version version = 1;
+  SkillChannel channel = 2;
+  string digest = 3;
+  // Empty for rows released before release notes were recorded.
+  string released_by = 4;
+  google.protobuf.Timestamp released_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+  string note = 7;
+}
+
+message ListCatalogVersionsResponse {
+  // Newest release first. The caller's draft, when visible, is first of all.
+  repeated CatalogVersionEntry versions = 1;
+}
+
+// How far the draft moved from the latest release. INITIAL means no release yet.
+// NONE means the draft digest equals the latest release.
+enum ReleaseBump {
+  RELEASE_BUMP_UNSPECIFIED = 0;
+  INITIAL = 1;
+  NONE = 2;
+  PATCH = 3;
+  MINOR = 4;
+  MAJOR = 5;
+}
+
+// How the effective decision for one permission target moved between the
+// latest release and the draft. JSON uses loosened, tightened, added, and
+// removed (vam-spec encoding). `added` and `removed` are advanced policy
+// refs, and the legacy Cedar-to-rules entry (`target` `permissions`).
+enum PermissionChangeKind {
+  PERMISSION_CHANGE_KIND_UNSPECIFIED = 0;
+  PERMISSION_CHANGE_KIND_LOOSENED = 1;
+  PERMISSION_CHANGE_KIND_TIGHTENED = 2;
+  PERMISSION_CHANGE_KIND_ADDED = 3;
+  PERMISSION_CHANGE_KIND_REMOVED = 4;
+}
+
+// One permission target that differs between the latest release and the draft.
+// Design §IV.8. `sentence` is what the release dialog and CLI print.
+message PermissionChange {
+  string target = 1;
+  // Effective decision before. Empty when an advanced ref was added.
+  string before = 2;
+  // Effective decision after. Empty when an advanced ref was removed.
+  string after = 3;
+  PermissionChangeKind change = 4;
+  string sentence = 5;
+}
+
+// A dependency a release cannot freeze because it has no released pin.
+// `kind` names the release endpoint: skill_package, skill, playbook, policy, agent.
+// `reason` is no_release, pinned_to_draft, or version_not_released.
+// JSON names are camelCase (`callerCanRelease`), like `permissionChanges`.
+message UnreleasedDependency {
+  string kind = 1;
+  string urn = 2;
+  string reason = 3;
+  bool caller_can_release = 4;
+}
+
+// GET .../release-suggestion. Compares the caller's draft with the latest release.
+message ReleaseSuggestion {
+  Version latest = 1;                     // Latest released version. Absent before the first release.
+  Version suggested = 2;                  // The next version.
+  ReleaseBump bump = 3;
+  repeated string reasons = 4;            // Short human-readable strings, one per matched rule.
+  bool unchanged = 5;                     // Draft digest equals the latest release.
+  // Agent permission diffs. Empty for other kinds and when permissions did not change.
+  repeated PermissionChange permission_changes = 6;
+  // Draft-only dependencies, in an order where releasing each in turn succeeds.
+  // Empty when every dependency already has a release the freeze can pin.
+  repeated UnreleasedDependency unreleased_dependencies = 7;
+}
+
+message ReleaseAgentResponse {
+  AgentSpec spec = 1;
+}
+
+message ReleasePlaybookResponse {
+  PlaybookSpec spec = 1;
+}
+
+message ReleaseSkillResponse {
+  SkillManifest spec = 1;
+}
+
+message ReleasePolicyResponse {
+  PolicyRecord record = 1;
+}
+
+// Org-admin user management (Phase 8). Password is write-only on create.
+message UserAccount {
+  string user_id = 1;
+  string username = 2;
+  string role = 3;
+  bool has_password = 4;
+  int64 created_at = 5;
+  int64 deactivated_at = 6;
+  bool deactivated = 7;
+}
+
+message CreateUserRequest {
+  string username = 1;
+  string password = 2;
+  string role = 3;
+  string user_id = 4;
+}
+
+message CreateUserResponse {
+  UserAccount user = 1;
+}
+
+message ListUsersRequest {}
+
+message ListUsersResponse {
+  repeated UserAccount users = 1;
+}
+
+message DeactivateUserRequest {
+  string user_id = 1;
+}
+
+message DeactivateUserResponse {
+  UserAccount user = 1;
+}
+
+// Org-admin password reset (Phase 10). Password is write-only. Path carries
+// user_id. No email. Does not create a missing user.
+message ResetUserPasswordRequest {
+  string password = 1;
+}
+
+message ResetUserPasswordResponse {
+  UserAccount user = 1;
+}
+
+// Identity read for any authenticated caller (password session or API key).
+// Not `users:admin`. Scopes are the bearer's live scopes, not the role default.
+message GetMeRequest {}
+
+message GetMeResponse {
+  string user_id = 1;
+  string username = 2;
+  string role = 3;
+  repeated string scopes = 4;
+  // This node's registry domain (the org's URN domain). `local.vam.dev` when unconfigured.
+  string registry_domain = 5;
+  // The caller's default URN namespace: the username lowercased, else `default`.
+  string default_namespace = 6;
+  // Squrell marketplace domain. Empty (omitted in JSON) when none is set.
+  string marketplace_domain = 7;
+}
+
+// Org-admin mint/list/revoke API keys for a given user (Phase 8). Distinct
+// from operator `CreateApiKey` (`keys:admin`). Path carries `user_id`.
+message AdminMintUserApiKeyRequest {
+  string name = 1;
+  string principal = 2;
+  repeated string scopes = 3;
+}
+
+message ListUserApiKeysRequest {
+  string user_id = 1;
+}
+
+message AdminRevokeUserApiKeyRequest {
+  string user_id = 1;
+  ResourceId key_id = 2;
+  string idempotency_key = 3;
+}
+
+// Org-admin grant/revoke of `publish:grant` (Phase 7).
+message GrantPublishRightRequest {
+  string user_id = 1;
+}
+
+message GrantPublishRightResponse {
+  string user_id = 1;
+  string role = 2;
+  bool granted = 3;
+}
+
+message RevokePublishRightRequest {
+  string user_id = 1;
+}
+
+message RevokePublishRightResponse {
+  string user_id = 1;
+  string role = 2;
+  bool granted = 3;
+}
+
+// Org-admin catalog ownership reassignment (Phase 7). Published channels stay.
+message ReassignCatalogOwnerRequest {
+  string kind = 1;
+  string urn = 2;
+  string owner_user_id = 3;
+}
+
+message ReassignCatalogOwnerResponse {
+  string kind = 1;
+  string urn = 2;
+  string previous_owner_user_id = 3;
+  string owner_user_id = 4;
+  int32 rows_updated = 5;
+}
+
+message GetSkillPackageRequest {
+  string urn = 1;
+  Version version = 2;
+}
+
+message GetSkillPackageResponse {
+  SkillPackageRecord package = 1;
+}
+
+message ListSkillPackagesRequest {
+  PaginationRequest pagination = 1;
+}
+
+message ListSkillPackagesResponse {
+  repeated SkillPackageRecord packages = 1;
+  PaginationResponse pagination = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
+
+message SessionStatus {
+  ResourceId session_id = 1;
+  string idempotency_key = 2;
+  enum SessionState {
+    SESSION_STATE_UNSPECIFIED = 0;
+    SESSION_STATE_CREATING = 1;
+    SESSION_STATE_BOOTING = 2;
+    SESSION_STATE_RUNNING = 3;
+    SESSION_STATE_PAUSED = 4;
+    SESSION_STATE_TERMINATING = 5;
+    SESSION_STATE_TERMINATED = 6;
+    SESSION_STATE_FAILED = 7;
+  }
+  SessionState observed_state = 3;
+  SessionState desired_state = 4;
+  string vm_id = 5;
+  string workspace_id = 6;
+  string storage_profile_id = 7;
+  int32 guest_cid = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  string agent_urn = 11;  // latest run that owns this session, if any
+}
+
+message CreateSessionRequest {
+  // Must be unset/empty. The server always mints session_id (`sess-<unguessable>`).
+  // A non-empty value is rejected with HTTP 400 / INVALID_ARGUMENT.
+  // Kept on the wire for compatibility; do not send from clients.
+  ResourceId session_id = 1;
+  string idempotency_key = 2;
+  // Must be empty. The server always mints vm_id (`vm-<session_id>`).
+  // A non-empty value is rejected with HTTP 400 / INVALID_ARGUMENT.
+  string vm_id = 3;
+  string workspace_id = 4;
+  string storage_profile_id = 5;
+}
+
+message CreateSessionResponse {
+  SessionStatus session = 1;
+}
+
+message GetSessionRequest {
+  ResourceId session_id = 1;
+}
+
+message GetSessionResponse {
+  SessionStatus session = 1;
+}
+
+message ListSessionsRequest {
+  PaginationRequest pagination = 1;
+}
+
+message ListSessionsResponse {
+  repeated SessionStatus sessions = 1;
+  PaginationResponse pagination = 2;
+}
+
+message PauseSessionRequest {
+  ResourceId session_id = 1;
+  string idempotency_key = 2;
+}
+
+message PauseSessionResponse {
+  SessionStatus session = 1;
+}
+
+message ResumeSessionRequest {
+  ResourceId session_id = 1;
+  string idempotency_key = 2;
+}
+
+message ResumeSessionResponse {
+  SessionStatus session = 1;
+}
+
+message TerminateSessionRequest {
+  ResourceId session_id = 1;
+  string idempotency_key = 2;
+}
+
+message TerminateSessionResponse {
+  SessionStatus session = 1;
+}
+
+message CreateSnapshotRequest {
+  ResourceId session_id = 1;
+  ResourceId snapshot_id = 2;
+  enum SnapshotKind {
+    SNAPSHOT_KIND_UNSPECIFIED = 0;
+    SNAPSHOT_KIND_COLD = 1;
+    SNAPSHOT_KIND_WARM = 2;
+  }
+  SnapshotKind kind = 3;
+  string idempotency_key = 4;
+}
+
+message CreateSnapshotResponse {
+  ResourceId snapshot_id = 1;
+  ResourceId session_id = 2;
+  string drive9_manifest_hash = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message RestoreSessionRequest {
+  ResourceId snapshot_id = 1;
+  ResourceId new_session_id = 2;
+  string idempotency_key = 3;
+}
+
+message RestoreSessionResponse {
+  SessionStatus session = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Runs
+// ---------------------------------------------------------------------------
+
+message CreateRunRequest {
+  RunSpec spec = 1;
+  AgentSpec inline_agent = 2;   // Optional inline agent for curl-friendly dev flows.
+  PlaybookSpec inline_playbook = 3;
+  string idempotency_key = 4;
+}
+
+message CreateRunResponse {
+  RunStatus status = 1;
+  InboxReceipt inbox = 2;                 // Set when the message went to a live task's inbox.
+}
+
+message GetRunRequest {
+  ResourceId run_id = 1;
+}
+
+message GetRunResponse {
+  RunStatus status = 1;
+}
+
+message ListRunsRequest {
+  PaginationRequest pagination = 1;
+}
+
+message ListRunsResponse {
+  repeated RunStatus statuses = 1;
+  PaginationResponse pagination = 2;
+}
+
+message CancelRunRequest {
+  ResourceId run_id = 1;
+  string idempotency_key = 2;
+}
+
+message CancelRunResponse {
+  RunStatus status = 1;
+}
+
+// POST /v1/runs/{id}/messages
+message SendRunMessageRequest {
+  ResourceId run_id = 1;
+  string text = 2;
+  RunSpec.InboxMode mode = 3;
+  string idempotency_key = 4;
+}
+
+message SendRunMessageResponse {
+  RunStatus status = 1;
+  InboxReceipt inbox = 2;
+}
+
+// POST /v1/runs/{id}/stop
+message StopRunRequest {
+  ResourceId run_id = 1;
+  string idempotency_key = 2;
+}
+
+// A message that never reached the task because the run was stopped.
+message DiscardedMessage {
+  int64 seq = 1;
+  RunSpec.InboxMode mode = 2;
+  ResourceId run_id = 3;
+  // The user's own text, returned once to the run's owner so the client can put it back
+  // in the composer. The host clears it from its store when it discards the message.
+  string text = 4;
+}
+
+message StopRunResponse {
+  RunStatus status = 1;
+  repeated DiscardedMessage discarded = 2;
+}
+
+message RunEvent {
+  int64 sequence = 1;
+  string event_type = 2;
+  string payload = 3;
+  google.protobuf.Timestamp emitted_at = 4;
+}
+
+message ListRunEventsRequest {
+  ResourceId run_id = 1;
+  int64 after_sequence = 2;
+}
+
+message ListRunEventsResponse {
+  repeated RunEvent events = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Approvals (HITL)
+// ---------------------------------------------------------------------------
+
+message ListApprovalsRequest {
+  PaginationRequest pagination = 1;
+}
+
+message ListApprovalsResponse {
+  repeated ApprovalRequest approvals = 1;
+  PaginationResponse pagination = 2;
+}
+
+message DecideApprovalRequest {
+  ResourceId request_id = 1;
+  ApprovalDecisionClaims.HitlDecision decision = 2;
+  string rejection_reason = 3;
+  string idempotency_key = 4;
+  google.protobuf.Struct amended_args = 5;
+  int64 expected_decision_revision = 6;
+  // Gate response. Required when decision is HITL_DECISION_SUBMITTED.
+  google.protobuf.Struct response = 7;
+  // Unspecified means once. AX-5.5 writes an agent rule when this is always_*.
+  // Defined in hitl.proto. JSON name is the proto value (`REMEMBER_ALWAYS_ALLOW`).
+  Remember remember = 8;
+}
+
+message DecideApprovalResponse {
+  ApprovalStatus status = 1;
+}
+
+message GetApprovalRequest {
+  ResourceId request_id = 1;
+}
+
+message GetApprovalResponse {
+  ApprovalRequest approval = 1;
+  ApprovalStatus status = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Host secrets vault (encrypted at rest; values never returned on GET/LIST)
+// ---------------------------------------------------------------------------
+
+message HostSecretMetadata {
+  string binding_id = 1;
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_INFERENCE = 1;
+    KIND_EGRESS = 2;
+    // MCP connection credentials. Listed, never writable through the secrets API,
+    // and never a guest egress binding.
+    KIND_CONNECTION = 3;
+  }
+  Kind kind = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp updated_at = 4;
+  google.protobuf.Timestamp last_used_at = 5;
+  string fingerprint = 6; // First 8 hex chars of SHA-256(value); metadata only.
+  repeated string allowed_destinations = 7; // Egress secrets only.
+  // Vault partition. Org is shared; user is per owner_user_id. No user→org fallback.
+  enum Scope {
+    SCOPE_UNSPECIFIED = 0;
+    SCOPE_ORG = 1;
+    SCOPE_USER = 2;
+  }
+  Scope scope = 8;
+  // Empty for org-scope. User-scope is the owning users.user_id.
+  string owner_user_id = 9;
+}
+
+message PutHostSecretRequest {
+  string binding_id = 1;
+  string value = 2;
+  HostSecretMetadata.Kind kind = 3;
+  repeated string allowed_destinations = 4;
+  string idempotency_key = 5;
+  // Unspecified follows the caller's role default (org for operator/org_admin, user otherwise).
+  HostSecretMetadata.Scope scope = 6;
+}
+
+message PutHostSecretResponse {
+  HostSecretMetadata secret = 1;
+}
+
+message ListHostSecretsResponse {
+  repeated HostSecretMetadata secrets = 1;
+}
+
+message DeleteHostSecretResponse {
+  HostSecretMetadata secret = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Secret requirement surfacing: discovery + admission + call-time.
+// Discovery resolves declared requirements against the caller's vault without
+// revealing whether another user configured a user-scope secret. Org existence
+// may be reported (shared on purpose). Admission fails fast listing which
+// bindings are missing and at which scope. Tool call stays fail-closed with a
+// typed missing-binding error. Invoke-path `resolved_secrets` is unchanged.
+// ---------------------------------------------------------------------------
+
+message SecretRequirementStatus {
+  string binding_id = 1;
+  // Requested scope from SecretRequirement (UNSPECIFIED is reported as EITHER).
+  SecretRequirement.Scope scope = 2;
+  bool required = 3;
+  bool configured = 4;
+  // Where the requirement is satisfied when configured: org or user.
+  // Unspecified when missing.
+  HostSecretMetadata.Scope satisfied_scope = 5;
+}
+
+message ResolveSecretRequirementsRequest {
+  repeated SecretRequirement requirements = 1;
+}
+
+message ResolveSecretRequirementsResponse {
+  repeated SecretRequirementStatus statuses = 1;
+  // Subset of statuses where required && !configured (fail-fast surfacing).
+  repeated SecretRequirementStatus missing = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Hosted brokers (HSP operator attach)
+// ---------------------------------------------------------------------------
+
+// Approve a capability manifest and dial Register + ListTools over a Unix path.
+message PutHostedBrokerRequest {
+  CapabilityManifest manifest = 1;
+  string unix_path = 2;
+  string idempotency_key = 3;
+  optional int64 peer_uid = 4;     // unset = no SO_PEERCRED check on the gateway socket; any set value (0 = root) is enforced
+}
+
+message PutHostedBrokerResponse {
+  HostedBrokerRecord broker = 1;
+}
+
+message GetHostedBrokerRequest {
+  string broker_id = 1;
+}
+
+message GetHostedBrokerResponse {
+  HostedBrokerRecord broker = 1;
+}
+
+message ListHostedBrokersRequest {
+  PaginationRequest pagination = 1;
+}
+
+message ListHostedBrokersResponse {
+  repeated HostedBrokerRecord brokers = 1;
+  PaginationResponse pagination = 2;
+}
+
+// Operator-visible snapshot of an approved (and optionally registered) broker.
+message HostedBrokerRecord {
+  CapabilityManifest manifest = 1;
+  string unix_path = 2;
+  bool enabled = 3;
+  repeated ToolSpec tools = 4;
+  string gateway_socket = 5;       // set when the manifest declares run_request_permission
+}
+
+// ---------------------------------------------------------------------------
+// Spaces and threads (opaque ids; vam-apps-spaces.md amendment section 4)
+// ---------------------------------------------------------------------------
+
+message Space {
+  string space_id = 1;             // sp_...
+  string name = 2;
+  string workspace_id = 3;
+  string agent_urn = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp last_active_at = 6;
+  string created_by_grant_id = 7;
+}
+
+message Thread {
+  string thread_id = 1;            // th_...
+  string space_id = 2;
+  string name = 3;
+  google.protobuf.Timestamp created_at = 4;
+  string created_by_grant_id = 5;
+}
+
+message ListSpacesRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+  string agent_urn = 3;
+}
+
+message ListSpacesResponse {
+  repeated Space spaces = 1;
+  string next_page_token = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Vamd service (documented RPCs; this slice serves HTTP/JSON, not tonic gRPC)
+// ---------------------------------------------------------------------------
+
+service Vamd {
+  rpc Health(HealthResponse) returns (HealthResponse);
+
+  rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse);
+  rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse);
+  rpc RevokeApiKey(RevokeApiKeyRequest) returns (RevokeApiKeyResponse);
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc DeactivateUser(DeactivateUserRequest) returns (DeactivateUserResponse);
+  rpc ResetUserPassword(ResetUserPasswordRequest) returns (ResetUserPasswordResponse);
+  rpc AdminMintUserApiKey(AdminMintUserApiKeyRequest) returns (CreateApiKeyResponse);
+  rpc ListUserApiKeys(ListUserApiKeysRequest) returns (ListApiKeysResponse);
+  rpc AdminRevokeUserApiKey(AdminRevokeUserApiKeyRequest) returns (RevokeApiKeyResponse);
+  rpc GrantPublishRight(GrantPublishRightRequest) returns (GrantPublishRightResponse);
+  rpc RevokePublishRight(RevokePublishRightRequest) returns (RevokePublishRightResponse);
+  rpc ReassignCatalogOwner(ReassignCatalogOwnerRequest) returns (ReassignCatalogOwnerResponse);
+
+  rpc GetNodeStatus(GetNodeStatusRequest) returns (GetNodeStatusResponse);
+  rpc GetOperatorAllowedModels(GetOperatorAllowedModelsRequest) returns (GetOperatorAllowedModelsResponse);
+  rpc PutOperatorAllowedModels(PutOperatorAllowedModelsRequest) returns (PutOperatorAllowedModelsResponse);
+  rpc GetMe(GetMeRequest) returns (GetMeResponse);
+
+  rpc PutAgent(PutAgentRequest) returns (PutAgentResponse);
+  rpc ReleaseAgent(ReleaseCatalogRequest) returns (ReleaseAgentResponse);
+  rpc GetAgent(GetAgentRequest) returns (GetAgentResponse);
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  rpc PutPolicy(PutPolicyRequest) returns (PutPolicyResponse);
+  rpc ReleasePolicy(ReleaseCatalogRequest) returns (ReleasePolicyResponse);
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+  rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
+  rpc PutPlaybook(PutPlaybookRequest) returns (PutPlaybookResponse);
+  rpc ReleasePlaybook(ReleaseCatalogRequest) returns (ReleasePlaybookResponse);
+  rpc GetPlaybook(GetPlaybookRequest) returns (GetPlaybookResponse);
+  rpc PutSkill(PutSkillRequest) returns (PutSkillResponse);
+  rpc ReleaseSkill(ReleaseCatalogRequest) returns (ReleaseSkillResponse);
+  rpc GetSkill(GetSkillRequest) returns (GetSkillResponse);
+  rpc PublishSkillPackage(PublishSkillPackageRequest) returns (PublishSkillPackageResponse);
+  rpc ReleaseSkillPackage(ReleaseSkillPackageRequest) returns (ReleaseSkillPackageResponse);
+  rpc GetSkillPackage(GetSkillPackageRequest) returns (GetSkillPackageResponse);
+  rpc ListSkillPackages(ListSkillPackagesRequest) returns (ListSkillPackagesResponse);
+
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc PauseSession(PauseSessionRequest) returns (PauseSessionResponse);
+  rpc ResumeSession(ResumeSessionRequest) returns (ResumeSessionResponse);
+  rpc TerminateSession(TerminateSessionRequest) returns (TerminateSessionResponse);
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  rpc RestoreSession(RestoreSessionRequest) returns (RestoreSessionResponse);
+
+  rpc CreateRun(CreateRunRequest) returns (CreateRunResponse);
+  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
+  rpc ListRunEvents(ListRunEventsRequest) returns (ListRunEventsResponse);
+
+  rpc ListApprovals(ListApprovalsRequest) returns (ListApprovalsResponse);
+  rpc GetApproval(GetApprovalRequest) returns (GetApprovalResponse);
+  rpc DecideApproval(DecideApprovalRequest) returns (DecideApprovalResponse);
+
+  rpc PutHostSecret(PutHostSecretRequest) returns (PutHostSecretResponse);
+  rpc ListHostSecrets(ListHostSecretsResponse) returns (ListHostSecretsResponse);
+  rpc GetHostSecret(HostSecretMetadata) returns (HostSecretMetadata);
+  rpc DeleteHostSecret(HostSecretMetadata) returns (DeleteHostSecretResponse);
+  rpc ResolveSecretRequirements(ResolveSecretRequirementsRequest) returns (ResolveSecretRequirementsResponse);
+
+  rpc PutHostedBroker(PutHostedBrokerRequest) returns (PutHostedBrokerResponse);
+  rpc GetHostedBroker(GetHostedBrokerRequest) returns (GetHostedBrokerResponse);
+  rpc ListHostedBrokers(ListHostedBrokersRequest) returns (ListHostedBrokersResponse);
+}

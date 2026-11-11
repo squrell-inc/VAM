@@ -1,0 +1,34 @@
+id: queued-message-runs-after-the-task
+title: A queued message never reaches the running task and runs as the next task on the thread
+tags: [chat]
+needs: process
+description: The task runs a slow command. A message sent in queue mode is held back; it starts its own task when the first one ends.
+given:
+  - org-admin
+  - agent-with-shell
+when:
+  - chat: { text: "e2e-step:first Write a.txt after a slow check", wait: false }
+  - expect: { event: tool.invoked, tool: run }
+  - send: { text: "e2e-step:queued Then write b.txt", mode: queue }
+then:
+  - expect: { run: succeeded }
+  - expect: { file: { path: a.txt, present: true } }
+  - expect: { file: { path: b.txt, present: true } }
+  - expect: { file: { path: wrong.txt, absent: true } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/manager.rs
+mock:
+  - when: { step: first, anyContains: "Then write b.txt" }
+    reply: { toolCall: { name: write_file, args: { path: wrong.txt, content: x } } }
+  - when: { step: first, toolName: run }
+    reply: { toolCall: { name: write_file, args: { path: a.txt, content: a } } }
+  - when: { step: first, toolName: write_file }
+    reply: { text: done }
+  - when: { step: first, stepStart: true }
+    reply: { toolCall: { name: run, args: { command: "sleep 6" } } }
+  - when: { step: queued, toolName: write_file }
+    reply: { text: done }
+  - when: { step: queued, stepStart: true }
+    reply: { toolCall: { name: write_file, args: { path: b.txt, content: b } } }
+status: active

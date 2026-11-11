@@ -1,0 +1,39 @@
+id: receipt-counts-effects-after-a-crash
+title: After the guest dies mid-create and the task resumes, the receipt counts the create once, with no duplicates and no unknown
+tags: [chat]
+needs: process
+description: The task creates a ticket and the broker holds the call open. The guest is killed during the hold and the task resumes on a new guest, which replays the recorded answer. The broker's own ledger counts one create, and the receipt's effects section agrees with it from the host's journal - the ledger is the independent count, the receipt is the declared one.
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: { text: "e2e-step:make Create the Q4 plan ticket", wait: false }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - kill-guest: {}
+then:
+  - expect: { run: succeeded }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_ticket, count: 1 } }
+  - expect:
+      receipt:
+        fields:
+          receipt.effects.journaled: true
+          receipt.effects.duplicates: 0
+          receipt.effects.unknown: 0
+          receipt.effects.counts.identicalRepeats: 0
+          receipt.effects.lines.0.tool: echo_create_ticket
+          receipt.effects.lines.0.state: confirmed
+          receipt.effects.lines.0.attempts: 1
+          receipt.effects.lines.1: { absent: true }
+  - verify-receipt: {}
+guards:
+  - vam:crates/vam-orchestrator/src/receipt.rs
+  - vam:crates/vam-orchestrator/src/effect_store.rs
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: make, toolName: echo_create_ticket }
+    reply: { text: "Created T-1" }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: echo_create_ticket, args: { title: Q4 plan, holdMs: 4000 } } }
+status: active

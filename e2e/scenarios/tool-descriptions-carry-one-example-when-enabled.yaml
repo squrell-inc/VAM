@@ -1,0 +1,23 @@
+id: tool-descriptions-carry-one-example-when-enabled
+title: A tool's description carries one worked example only when the run turns examples on
+tags: [chat]
+needs: process
+description: Two chats offer read_file. With defaults its description has no example; with tools.examples on it has one.
+given:
+  - org-admin
+  - agent-with-builtins
+when:
+  - chat: "e2e-step:ask Is there an example?"
+  - expect: { thread: { role: assistant, contains: "no example" } }
+  - chat: { text: "e2e-step:ask Is there an example?", harness: { tools: { examples: true } } }
+then:
+  - expect: { thread: { role: assistant, contains: "has example" } }
+guards:
+  - vam:crates/vam-runtime/src/primitives.rs
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: ask, toolDescribed: { tool: read_file, contains: "Example:" } }
+    reply: { text: has example }
+  - when: { step: ask }
+    reply: { text: no example }
+status: active

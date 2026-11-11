@@ -1,0 +1,34 @@
+id: gate-left-open-shows-until-it-times-out
+title: A gate nobody decides is listed while it waits, then closes as timed out with nobody having acted
+tags: [gate, playbook, notifications]
+needs: process
+description: A playbook opens a gate that stops the run after three seconds. The gate is listed as an unread action record; the node's sweeper later closes both the gate and the record as timed out, with no acting surface. The sweeper runs once a minute, so the wait is 90 seconds.
+given:
+  - org-admin
+  - agent-plain
+  - playbook-with-timed-gate
+when:
+  - start-playbook: { playbook: playbook-with-timed-gate, label: run }
+  - expect: { gate: pending, step: confirm }
+  - expect: { notifications: { kind: gate.opened, run: latest, count: 1, state: open, unread: true, approval: latest } }
+then:
+  - expect:
+      notifications:
+        kind: gate.opened
+        run: latest
+        count: 1
+        within: 90s
+        fields:
+          resolvedReason: timed_out
+          actedSurface: { absent: true }
+  - expect: { notification-summary: { action: 0 } }
+guards:
+  - vam:crates/vam-orchestrator/src/workflow.rs
+mock:
+  - when: { step: run, lastRole: user, contains: "Missing required steps: finish" }
+    reply: { toolCall: { name: step_complete, args: { step_id: finish, outcome: done } } }
+  - when: { step: run, afterTool: step_complete }
+    reply: { text: step done }
+  - when: { step: run }
+    reply: { toolCall: { name: step_complete, args: { step_id: prepare, outcome: done } } }
+status: active

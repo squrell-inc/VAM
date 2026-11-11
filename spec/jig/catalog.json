@@ -1,0 +1,138 @@
+{
+  "catalog": "vam/1",
+  "version": 1,
+  "doc": "The closed primitive catalog of jig IR v1. Agents never add to it. A prop is a literal or a binding {\"$data\": \"/path\"} (the jig's input data, a JSON pointer) or {\"$state\": \"name\"} (a state variable). A prop with bind=state only takes {\"$state\": name}: it is where the person's typing lands. Prop types: string (any scalar shows as text), number, integer, boolean, stringList, options (array of strings or {value,label}), action, enum (values), list (a {\"$data\"} binding to an array; only List takes it), token:<name> (closed style token). Inside the one child subtree of a List, {\"$item\": \"/ptr\"} reads a field of the current element, resolved against the array's items schema; $item is an error outside a List and a List inside a List is an error. A List paints at most 100 items and then 'and N more'; it is display only (no selection).",
+  "tokens": {
+    "gap": ["none", "small", "medium", "large"],
+    "tone": ["neutral", "info", "success", "warning", "danger"]
+  },
+  "actions": {
+    "submit": {
+      "doc": "Ends an ask. 'set' assigns literals to state first; 'with' names the state variables that form the result object.",
+      "fields": ["event", "with", "set"]
+    },
+    "set": {
+      "doc": "Assigns a literal to a state variable. Runs in the renderer.",
+      "fields": ["event", "state", "value"]
+    }
+  },
+  "reserved": ["Query", "Mutation", "query", "mutation"],
+  "primitives": {
+    "Stack": {
+      "doc": "Lays out children in order.",
+      "children": true,
+      "props": [
+        { "name": "direction", "type": "enum", "values": ["vertical", "horizontal"] },
+        { "name": "gap", "type": "token:gap" }
+      ]
+    },
+    "Text": {
+      "doc": "A line or paragraph of text. Never interpreted as markup.",
+      "props": [
+        { "name": "text", "type": "string", "required": true },
+        { "name": "tone", "type": "token:tone" },
+        { "name": "emphasis", "type": "enum", "values": ["normal", "strong"] }
+      ]
+    },
+    "List": {
+      "doc": "Repeats its one child for each element of an array. Display only, no selection. Shows 'empty' when there are no elements. Paints at most 100 elements, then 'and N more'. Does not nest.",
+      "children": true,
+      "props": [
+        { "name": "items", "type": "list", "required": true },
+        { "name": "empty", "type": "string" }
+      ]
+    },
+    "Badge": {
+      "doc": "A short status label.",
+      "props": [
+        { "name": "text", "type": "string", "required": true },
+        { "name": "tone", "type": "token:tone" }
+      ]
+    },
+    "KeyValue": {
+      "doc": "A label with its value.",
+      "props": [
+        { "name": "label", "type": "string", "required": true },
+        { "name": "value", "type": "string", "required": true }
+      ]
+    },
+    "ProgressBar": {
+      "doc": "done of total.",
+      "props": [
+        { "name": "value", "type": "number", "required": true },
+        { "name": "max", "type": "number", "required": true },
+        { "name": "label", "type": "string" }
+      ]
+    },
+    "Input": {
+      "doc": "One line of text.",
+      "props": [
+        { "name": "label", "type": "string", "required": true },
+        { "name": "value", "type": "string", "required": true, "bind": "state" },
+        { "name": "placeholder", "type": "string" }
+      ]
+    },
+    "TextArea": {
+      "doc": "Several lines of text.",
+      "props": [
+        { "name": "label", "type": "string", "required": true },
+        { "name": "value", "type": "string", "required": true, "bind": "state" },
+        { "name": "placeholder", "type": "string" }
+      ]
+    },
+    "NumberInput": {
+      "doc": "A number.",
+      "props": [
+        { "name": "label", "type": "string", "required": true },
+        { "name": "value", "type": "number", "required": true, "bind": "state" },
+        { "name": "min", "type": "number" },
+        { "name": "max", "type": "number" }
+      ]
+    },
+    "Toggle": {
+      "doc": "On or off.",
+      "props": [
+        { "name": "label", "type": "string", "required": true },
+        { "name": "value", "type": "boolean", "required": true, "bind": "state" }
+      ]
+    },
+    "Select": {
+      "doc": "One of the offered options.",
+      "props": [
+        { "name": "label", "type": "string", "required": true },
+        { "name": "value", "type": "string", "required": true, "bind": "state" },
+        { "name": "options", "type": "options", "required": true }
+      ]
+    },
+    "MultiSelect": {
+      "doc": "Any subset of the offered options.",
+      "props": [
+        { "name": "label", "type": "string", "required": true },
+        { "name": "value", "type": "stringList", "required": true, "bind": "state" },
+        { "name": "options", "type": "options", "required": true }
+      ]
+    },
+    "DateInput": {
+      "doc": "A calendar date, YYYY-MM-DD.",
+      "props": [
+        { "name": "label", "type": "string", "required": true },
+        { "name": "value", "type": "string", "required": true, "bind": "state" }
+      ]
+    },
+    "FileInput": {
+      "doc": "A workspace file path.",
+      "props": [
+        { "name": "label", "type": "string", "required": true },
+        { "name": "value", "type": "string", "required": true, "bind": "state" }
+      ]
+    },
+    "Button": {
+      "doc": "Runs an action when pressed.",
+      "props": [
+        { "name": "label", "type": "string", "required": true },
+        { "name": "action", "type": "action", "required": true },
+        { "name": "tone", "type": "token:tone" }
+      ]
+    }
+  }
+}

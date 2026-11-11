@@ -1,0 +1,43 @@
+id: receipt-counts-an-unknown-effect-it-could-not-check
+title: An outside effect whose outcome stayed unknown is counted on the receipt, never hidden, and the denied retry shows as not sent
+tags: [chat, approval]
+needs: process
+description: The task creates a note and the broker holds the call open. vamd restarts during the hold. The note tool declares no read, so nothing can check it and the outcome stays unknown. The model's blind retry asks the person, who says no. The receipt counts one unknown, lists the note create as unknown with no check named, lists the denied retry as failed with no attempts, and counts no duplicate.
+given:
+  - org-admin
+  - agent-with-effect-tools
+  - effects-test-broker
+when:
+  - chat: { text: "e2e-step:make Create the Q4 plan note", wait: false }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_note, count: 1 } }
+  - restart-vamd: {}
+  - expect: { approval: pending, tool: echo_create_note, fields: { approvalMessage: { contains: "may already have taken effect" } } }
+  - deny: latest
+then:
+  - expect: { run: succeeded }
+  - expect: { ledger: { piece: effects-test-broker, tool: echo_create_note, count: 1 } }
+  - expect:
+      receipt:
+        fields:
+          receipt.effects.journaled: true
+          receipt.effects.unknown: 1
+          receipt.effects.lines.0.tool: echo_create_note
+          receipt.effects.lines.0.state: unknown
+          receipt.effects.lines.0.checkedBy: { absent: true }
+          receipt.effects.lines.1.tool: echo_create_note
+          receipt.effects.lines.1.state: failed
+          receipt.effects.lines.1.attempts: 0
+          receipt.effects.duplicates: 0
+guards:
+  - vam:crates/vam-orchestrator/src/receipt.rs
+  - vam:crates/vam-orchestrator/src/effect_store.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/reconcile.rs
+mock:
+  - when: { step: make, toolName: echo_create_note, contains: "Outcome unknown" }
+    reply: { toolCall: { name: echo_create_note, args: { title: Q4 plan, holdMs: 6000 } } }
+  - when: { step: make, afterTool: echo_create_note }
+    reply: { text: "Left it" }
+  - when: { step: make, stepStart: true }
+    reply: { toolCall: { name: echo_create_note, args: { title: Q4 plan, holdMs: 6000 } } }
+status: active

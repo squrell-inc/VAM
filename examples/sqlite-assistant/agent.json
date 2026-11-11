@@ -1,0 +1,87 @@
+{
+  "allowAnyPlaybook": true,
+  "allowedPlaybookRefs": [],
+  "capabilityPolicy": {
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/sqlite-memory-only"
+      }
+    },
+    "securityProfileName": "assistant-profile"
+  },
+  "contextPolicy": {
+    "compaction": "COMPACTION_POLICY_SUMMARIZE_MIDDLE",
+    "maxHistoryTurns": 30,
+    "maxTokenCount": 96000
+  },
+  "description": "An autonomous agent that indexes codebases, stores structured memory in an embedded SQLite database, queries facts, and synthesizes technical reports.",
+  "displayName": "SQLite Memory & Code Analyst Agent",
+  "hitlPolicy": {
+    "monitoredTools": [],
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/high-risk-assistant-actions"
+      }
+    }
+  },
+  "metadata": {
+    "createdBy": {
+      "urn": "urn:vam:user:local.vam.dev/vam/admin"
+    },
+    "labels": [
+      {
+        "key": "environment",
+        "value": "development"
+      }
+    ],
+    "revision": 1
+  },
+  "modelRequirements": {
+    "minContextTokens": 128000,
+    "requiredModalities": [
+      "text"
+    ],
+    "requiresStructuredOutput": true,
+    "requiresToolCalling": true
+  },
+  "preferredModels": [
+    {
+      "maxCompletionTokens": 4096,
+      "modelName": "openai/gpt-4o-mini",
+      "provider": "openrouter",
+      "temperature": 0.1
+    }
+  ],
+  "reasoningPolicy": {
+    "maxIterations": 10,
+    "stepTimeout": "300s",
+    "termination": "TERMINATION_POLICY_EXPLICIT_CLAIM"
+  },
+  "resourceId": {
+    "urn": "urn:vam:agent:local.vam.dev/vam/sqlite-assistant"
+  },
+  "resourceRequirements": {
+    "memoryMib": 2048,
+    "networkMode": "NETWORK_MODE_RESTRICTED_EGRESS",
+    "storageGib": 10,
+    "vcpuCount": 2
+  },
+  "role": "You are a professional Code Analyst with embedded SQLite memory capabilities.",
+  "skillRefs": [
+    {
+      "resourceId": {
+        "urn": "urn:vam:skill:local.vam.dev/vam/db-tools"
+      }
+    }
+  ],
+  "systemInstructions": "You are an autonomous engineering analyst operating inside a secure VAM microVM. Call load_skill with catalog id db-tools before using database tools (init_db, insert_fact, insert_code_note, query_db). Use runtime primitives for workspace files and reports. Fulfill the user's objective autonomously using your available capabilities.",
+  "telemetryPolicy": {
+    "auditLedgerMode": "AUDIT_LEDGER_MODE_HASH_CHAINED",
+    "piiRedactionEnabled": true,
+    "policyRef": {
+      "resourceId": {
+        "urn": "urn:vam:policy:local.vam.dev/vam/standard-telemetry-compliance"
+      }
+    }
+  }
+}

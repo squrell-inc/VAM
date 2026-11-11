@@ -1,0 +1,34 @@
+id: harness-switches-print-on-the-receipt
+title: A run's receipt names its harness profile, version, digest and any overrides
+tags: [chat]
+needs: process
+description: A run with default switches prints profile base, its version and digest, and no overrides. A run with an override prints the same profile and the override.
+given:
+  - org-admin
+  - agent-plain
+when:
+  - chat: "e2e-step:plain Say hi"
+  - expect:
+      receipt:
+        fields:
+          receipt.harness.profile: base
+          receipt.harness.version: { present: true }
+          receipt.harness.digest: { present: true }
+          receipt.harness.overrides: { absent: true }
+  - chat: { text: "e2e-step:tuned Say hi", harness: { loop: { detect: true } } }
+then:
+  - expect:
+      receipt:
+        fields:
+          receipt.harness.profile: base
+          receipt.harness.version: { present: true }
+          receipt.harness.digest: { present: true }
+          receipt.harness.overrides.loop.detect: true
+guards:
+  - vam:crates/vam-orchestrator/src/receipt.rs
+mock:
+  - when: { step: plain }
+    reply: { text: hi }
+  - when: { step: tuned }
+    reply: { text: hi }
+status: active

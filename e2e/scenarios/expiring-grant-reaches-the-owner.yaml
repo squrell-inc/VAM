@@ -1,0 +1,40 @@
+id: expiring-grant-reaches-the-owner
+title: A grant about to expire is told to its owner once
+tags: [notifications, triggers]
+needs: process
+description: A trigger grant that will expire inside the warning lead gives its owner one expiring warning with the renew action, however many times the sweep runs. The record is in the list; no channel is needed.
+given:
+  - org-admin
+  - agent-with-trigger-tool
+  - trigger-test-broker
+when:
+  - chat: "e2e-step:arm Arm the trigger"
+  - expect: { approval: pending, tool: echo_arm_trigger }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: echo_arm_trigger, count: 1 } }
+  # The sweep runs every minute; two sweeps still leave one record.
+  - expect:
+      notifications:
+        kind: grant.expiring
+        count: 1
+        within: 150s
+        fields: { severity: warn }
+then:
+  - expect: { notifications: { kind: grant.expiring, count: 1 } }
+guards:
+  - vam:crates/vam-orchestrator/src/ttl.rs
+  - vam:crates/vam-orchestrator/src/notifications.rs
+mock:
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:expiring-grant-reaches-the-owner"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+status: active

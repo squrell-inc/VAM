@@ -1,0 +1,28 @@
+{
+  "name": "Squrell",
+  "publisherDomain": "hub.squrell.cloud",
+  "listings": [
+    {
+      "id": "microsoft-365",
+      "displayName": "Microsoft 365",
+      "description": "Read and send mail and book meetings as the member, through their own Microsoft 365 connection.",
+      "connector": "urn:vam:connector:hub.squrell.cloud/squrell/microsoft-365",
+      "artifacts": [
+        {
+          "kind": "skill",
+          "path": "listings/microsoft-365/skills/m365-mail"
+        },
+        {
+          "kind": "playbook",
+          "path": "listings/microsoft-365/playbooks/morning-triage"
+        },
+        {
+          "kind": "agent",
+          "path": "listings/microsoft-365/agents/executive-assistant"
+        }
+      ],
+      "ref": "microsoft-365-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    }
+  ]
+}

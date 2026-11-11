@@ -1,0 +1,14 @@
+piece: agent-with-effect-tools-and-playbooks
+kind: agent
+release: true
+requires: [effects-test-broker]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Agent that can run a playbook and create tickets
+    description: Agent offered the effects test broker's tools, ask_user and the playbook step tools
+    role: Tester
+    systemInstructions: Follow the playbook. Use the tools when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    permissions:
+      tools: { default: allow }

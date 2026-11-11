@@ -1,0 +1,21 @@
+{
+  "spec": {
+    "agentRef": {
+      "resourceId": {
+        "urn": "urn:vam:agent:local.vam.dev/vam/invoice-assistant"
+      },
+      "version": {
+        "major": 1,
+        "minor": 0,
+        "patch": 0
+      }
+    },
+    "idempotencyKey": "",
+    "inputs": {
+      "invoice_url": "https://files.example.com/invoices/2026-0147.pdf"
+    },
+    "maxDuration": "1800s",
+    "threadRef": "thread-invoice-2026-0147",
+    "workspaceRefUri": "volume://invoice-2026-0147"
+  }
+}

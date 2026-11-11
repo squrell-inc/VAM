@@ -1,0 +1,51 @@
+id: another-users-schedules-are-invisible
+title: A member sees none of the admin's schedules, and asking for one by id answers not found
+tags: [schedule, triggers]
+needs: process
+description: The admin makes a schedule an hour ahead. A member of the org, using the same agent, asks for the admin's schedule by its id and is told it is not found, then lists schedules and sees none.
+given:
+  - org-admin
+  - { piece: org-member, as: member }
+  - agent-with-schedule-tools
+  - schedule-broker
+when:
+  - chat: "e2e-step:create Write a note in an hour"
+  - expect: { approval: pending, tool: schedule_create }
+  - approve: latest
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "sch_" } }
+  - chat: { text: "e2e-step:mget Show schedule {{schedule-id}}", as: member }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "NOT_FOUND" } }
+  - chat: { text: "e2e-step:mlist List my schedules", as: member }
+  - expect: { run: succeeded }
+then:
+  - expect: { thread: { role: tool, contains: '"schedules":[]' } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+mock:
+  - when: { step: create, stepStart: true }
+    reply:
+      toolCall:
+        name: schedule_create
+        args:
+          title: Admin note
+          when: { once: { in: PT1H } }
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:another-users-schedules-are-invisible"
+            workspace: { mode: SAME }
+            thread: { mode: NEW, name: admin-note }
+            onBusy: QUEUE
+  - when: { step: create }
+    reply: { text: Scheduled. }
+  - when: { step: mget, stepStart: true }
+    reply: { toolCall: { name: schedule_get, args: { scheduleId: "{{last:sch_}}" } } }
+  - when: { step: mget }
+    reply: { text: Not found. }
+  - when: { step: mlist, stepStart: true }
+    reply: { toolCall: { name: schedule_list, args: {} } }
+  - when: { step: mlist }
+    reply: { text: Nothing is scheduled. }
+status: active

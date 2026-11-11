@@ -1,0 +1,24 @@
+# Pins for the standard base image (vam/base:2). Sourced by scripts/build-rootfs.sh and
+# scripts/e2e/firecracker-assets.sh, read by scripts/base/resolve-pins.sh. Plain KEY=VALUE.
+#
+# A value that starts with UNRESOLVED fails the build fast. Fill it with
+# `scripts/base/resolve-pins.sh --write` on a host that reaches the registry and the
+# release host; review the diff; commit.
+
+# Manifest-list (index) digest of debian:trixie-slim (image created 2026-11-04T21:23:39Z),
+# confirmed against the registry by `scripts/base/resolve-pins.sh --check`.
+DEBIAN_TAG=trixie-slim
+DEBIAN_DIGEST=sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+
+# snapshot.debian.org timestamp the apt sources are pinned to (YYYYMMDDTHHMMSSZ). Chosen just
+# after the base image's creation so the package set matches it. snapshot.debian.org was not
+# reachable from the writing session; the first lane build proves the timestamp resolves.
+SNAPSHOT_TIMESTAMP=20261105T000000Z
+
+# Bun: glibc baseline build (bun-linux-x64-baseline.zip), pinned by version and sha256.
+BUN_VERSION=bun-v1.4.4
+BUN_SHA256=e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76
+
+# What the manifest calls this base. Bump BASE_REVISION when the recipe changes.
+BASE_NAME=vam/base:2
+BASE_REVISION=1

@@ -1,0 +1,47 @@
+# The pinned benchmark task sets (benchmark decision 3). A scenario's `model.version` names one
+# and its `model.task` must be listed in it; `vam-e2e check` and `run --bench` refuse anything
+# else. A new task or a changed pass rule is a new version; published results name the version.
+sets:
+  # The versioned set the published baseline runs against.
+  - version: 0.1.0
+    tasks:
+      - first-try-tool-use
+      - playbook-match
+      - playbook-no-match
+      - playbook-injected
+  # 0.1.0 plus the two Agent Runtime Phase 3 tasks (mid-run correction, progress).
+  - version: 0.2.0
+    tasks:
+      - first-try-tool-use
+      - playbook-match
+      - playbook-no-match
+      - playbook-injected
+      - u3-mid-run-correction
+      - u4-progress
+  # 0.2.0 plus the Agent Runtime Phase 4 task (a task killed mid-effect finishes once).
+  - version: 0.3.0
+    tasks:
+      - first-try-tool-use
+      - playbook-match
+      - playbook-no-match
+      - playbook-injected
+      - u3-mid-run-correction
+      - u4-progress
+      - u5-kill-mid-task
+  # 0.3.0 plus the machine task (a skill reads a table with Python and clones a repository with git).
+  - version: 0.4.0
+    tasks:
+      - first-try-tool-use
+      - playbook-match
+      - playbook-no-match
+      - playbook-injected
+      - u3-mid-run-correction
+      - u4-progress
+      - u5-kill-mid-task
+      - toolchain
+  # Proves the runner lane on the mock. Not a benchmark, not publishable.
+  - version: 0.0.0-lane
+    tasks:
+      - mock-chat-reply
+      - fresh-trial-isolation
+      - thinking-tool-call

@@ -1,0 +1,32 @@
+{
+  "manifest": {
+    "brokerId": "vam.web",
+    "trustTier": "TRUST_TIER_FIRST_PARTY",
+    "secretBindings": [
+      {
+        "logicalName": "brave-api-key",
+        "vaultKey": "web/brave-api-key",
+        "required": true
+      }
+    ],
+    "egressDomains": ["api.search.brave.com"],
+    "tools": [
+      {
+        "toolName": "web_search",
+        "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+        "requiredSecrets": ["brave-api-key"],
+        "destinationPolicy": "TOOL_DESTINATION_ALLOWLIST"
+      },
+      {
+        "toolName": "web_fetch",
+        "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+        "requiredSecrets": [],
+        "destinationPolicy": "TOOL_DESTINATION_PUBLIC_WEB"
+      }
+    ],
+    "labels": {
+      "vam.capability": "web"
+    }
+  },
+  "unixPath": "/tmp/vam-web.sock"
+}

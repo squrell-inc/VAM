@@ -1,0 +1,19 @@
+{
+  "spec": {
+    "agentRef": {
+      "resourceId": {
+        "urn": "urn:vam:agent:local.vam.dev/vam/hsp-files-ts"
+      }
+    },
+    "idempotencyKey": "",
+    "inputs": {
+      "max_iterations": 5,
+      "model": "openai/gpt-4o-mini",
+      "system_instructions": "You have access to files.put, files.list, and files.get tools from the files-ts broker. Load the hosted-files-ts skill first (call load_skill with catalog id hosted-files-ts), then upload the 1x1 PNG test image (base64: iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==) as 'test-pixel.png', then list all uploaded files, then retrieve it by placeholder and confirm size_bytes > 0."
+    },
+    "runId": {
+      "urn": "urn:vam:run:local.vam.dev/vam/files-agent-test-002"
+    },
+    "workspaceRefUri": "volume://files-agent-test"
+  }
+}

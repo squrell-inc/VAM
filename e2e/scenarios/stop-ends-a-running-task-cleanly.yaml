@@ -1,0 +1,35 @@
+id: stop-ends-a-running-task-cleanly
+title: Stop ends a running task as stopped by the user, rolls files back, and a follow-up continues
+tags: [chat, workspace]
+needs: process
+description: Loop detection is on and has already warned the model. Stop through the API still ends the run as stopped by the user (not as a loop), files roll back to the last finished step, and a follow-up on the thread continues from there.
+given:
+  - org-admin
+  - agent-with-shell
+when:
+  - chat: { text: "e2e-step:first Save the note, then run the slow command", wait: false, harness: { loop: { detect: true } } }
+  - expect: { event: tool.invoked, tool: run, fields: { args_preview: { contains: "sleep 30" } } }
+  - stop: {}
+  - expect: { run: failed }
+  - expect: { event: run.completed, fields: { error: { contains: "stopped by user" } } }
+  - chat: { text: "e2e-step:next What does the note say?", thread: continue }
+then:
+  - expect: { event: inference.completed, fields: { data.outcomePreview: "The note says kiwi-42." } }
+  - expect: { file: { path: note.txt, equals: kiwi-42 } }
+  - expect: { file: { path: partial.txt, absent: true } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/manager.rs
+  - vam:crates/vam-runtime/src/agent.rs
+mock:
+  - when: { step: next, anyContains: "Wrote 7 bytes" }
+    reply: { text: "The note says kiwi-42." }
+  - when: { step: next }
+    reply: { text: "I do not know." }
+  - when: { step: first, toolName: write_file }
+    reply: { toolCall: { name: run, args: { command: "echo half > partial.txt; sleep 30" } } }
+  - when: { step: first, lastRole: user, contains: "repeated the same call" }
+    reply: { toolCall: { name: write_file, args: { path: note.txt, content: kiwi-42 } } }
+  - when: { step: first }
+    reply: { toolCall: { name: run, args: { command: "true" } } }
+status: active

@@ -1,0 +1,183 @@
+syntax = "proto3";
+
+package vam.v1;
+
+option go_package = "github.com/squrell-inc/vam/spec/v1;vamv1";
+option java_multiple_files = true;
+option java_package = "com.vam.spec.v1";
+
+import "vam/v1/common.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+
+// Classification of tool side-effects for human authorization (HITL) and safety gates
+enum SideEffectClass {
+  SIDE_EFFECT_CLASS_UNSPECIFIED = 0;
+  SIDE_EFFECT_CLASS_READ_ONLY = 1;        // Purely observational, safe (e.g., read_file)
+  SIDE_EFFECT_CLASS_MUTABLE_LOCAL = 2;    // Mutates files/DB inside VM workspace, moderately safe
+  SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL = 3; // Calls external APIs with side effects (e.g., transfer_funds)
+}
+
+// How a repeated call of a tool behaves, for the effect journal. A declared class wins over the one
+// inferred from side_effect; a vendor hint never counts.
+enum EffectClass {
+  EFFECT_CLASS_UNSPECIFIED = 0;
+  EFFECT_CLASS_READ = 1;                  // Observational: a repeat is harmless.
+  EFFECT_CLASS_IDEMPOTENT = 2;            // A repeat with the same key has the same effect as one call.
+  EFFECT_CLASS_NON_IDEMPOTENT = 3;        // A repeat does the effect again.
+}
+
+// When a verify read's answer shows the effect happened.
+message EffectFound {
+  string path = 1;                        // Dotted path into the verify tool's JSON answer.
+  oneof match {
+    // Found when the value at path is present and not empty: not null, false, 0, "", [] or {}.
+    bool non_empty = 2;
+    // Found when the JSON value at path, as text, equals this (may use "{{args.x}}").
+    string equals = 3;
+  }
+}
+
+// A read the host may run to learn whether a call whose answer was lost took effect.
+message EffectVerify {
+  string tool = 1;                        // A READ_ONLY tool of the same skill, broker or connection.
+  google.protobuf.Struct args_template = 2; // String values may be "{{args.<name>}}" from the call.
+  EffectFound found = 3;
+}
+
+message EffectSpec {
+  EffectClass class = 1;
+  EffectVerify verify = 2;
+}
+
+// Local subprocess execution runner
+message LocalExecSpec {
+  string command = 1;                     // Interpreter or binary (e.g., "bun", "python3")
+  string entrypoint = 2;                  // Path relative to the skill directory (e.g., "./execute.js")
+  repeated string default_args = 3;
+  map<string, string> env_vars = 4;
+}
+
+// Model Context Protocol (MCP) server spec
+message McpServerSpec {
+  string command = 1;                     // E.g. "npx" or "uvx"
+  repeated string args = 2;               // E.g. ["-y", "@modelcontextprotocol/server-postgres"]
+  map<string, string> env_vars = 3;
+}
+
+// Runtime-owned builtin primitive (implemented in vam-runtime, not a skill script)
+message BuiltinExecSpec {
+  string version = 1;                     // Builtin ABI version (e.g. "v1")
+}
+
+// Host-side adapter execution (credentials and sockets stay on the host)
+message HostExecSpec {
+  string adapter_id = 1;                  // Registered host adapter, e.g. "echo"
+  map<string, string> config = 2;         // Non-secret adapter config only
+}
+
+// Immutable tool description passed to the LLM for function calling
+message ToolSpec {
+  string name = 1;                        // Unique name (e.g., "oracle_sql_execute")
+  string description = 2;                 // Human description used by LLM to understand utility
+  string input_schema_json = 3;           // JSON Schema (draft-07) detailing accepted arguments
+  
+  oneof execution_provider {
+    LocalExecSpec local_exec = 4;         // Subprocess runner (Node/Bun/Python) inside VM
+    McpServerSpec mcp_server = 5;         // Model Context Protocol (MCP) server launched inside VM
+    BuiltinExecSpec builtin = 10;         // In-process runtime primitive (read_file, run, etc.)
+    HostExecSpec host_exec = 11;          // Host adapter after PEP authorization (Port 52)
+  }
+  
+  repeated SecretRequirement required_secrets = 6; // Names only; values are never serialized
+  SideEffectClass side_effect = 7;        // Classification of side effects for policy evaluation
+  string output_schema_json = 8;          // Optional JSON Schema (draft-07) detailing structured tool output
+  google.protobuf.Duration timeout = 9;   // Execution timeout limit for this tool (defaults to 30s)
+  // Source rule of ask for this tool only (design Part IV §IV.5). JSON `approvalRequired`.
+  bool approval_required = 12;
+  // Effect class and optional verify read (journal and resume). Absent: inferred from side_effect.
+  EffectSpec effect = 13;
+  // Hosts this tool may reach through the member's connection (design/connectors.md 4.1).
+  // Declared here; vamd enforces it. Needs a local_exec provider and requires_connector.
+  repeated ToolEgress egress = 14;
+  // Cards for this tool's result (show) and its approval (ask). Names of jig files in the package.
+  ToolUi ui = 15;
+}
+
+// Names of the skill's cards for one tool. Empty means no card.
+message ToolUi {
+  string show = 1;                        // Card shown on a successful result; needs output_schema_json
+  string ask = 2;                         // Card shown when the call asks for approval
+}
+
+// One host, with methods and paths, a tool may reach through a connector binding. A request is
+// admitted when its path equals one of `paths` or lies at or beneath one of `path_prefixes`.
+message ToolEgress {
+  string binding = 1;                     // Binding name on the connector, e.g. "graph"
+  string host = 2;                        // Exact lowercase DNS name
+  repeated string methods = 3;            // GET HEAD POST PUT PATCH DELETE
+  repeated string path_prefixes = 4;      // Each starts with "/" ("/" for the whole host); admits the prefix and everything beneath it
+  // Exact paths (each starts with "/", no trailing "/"): the request path must equal one of these
+  // after the usual decoding, so "/v1.0/me/events" does not admit "/v1.0/me/events/x/forward".
+  // Declare a write (POST, PUT, PATCH, DELETE) this way. At least one of path_prefixes or paths.
+  repeated string paths = 5;
+}
+
+message SecretRequirement {
+  string name = 1;                        // Logical secret name requested from the host broker
+  bool required = 2;                      // Admission fails when required and unavailable
+  // Vault partition the requirement can be satisfied from. Unspecified
+  // defaults to EITHER for backwards compatibility (org or caller user row).
+  // There is no implicit user→org fallback for USER scope.
+  enum Scope {
+    SCOPE_UNSPECIFIED = 0;
+    SCOPE_ORG = 1;
+    SCOPE_USER = 2;
+    SCOPE_EITHER = 3;
+  }
+  Scope scope = 3;
+}
+
+message ToolResult {
+  google.protobuf.Struct output = 1;
+  ErrorStatus error = 2;                  // Exactly one of output or error must be populated
+}
+
+// Representation of a registered skill in the database
+message SkillManifest {
+  ResourceId resource_id = 1;             // E.g. "urn:vam:skill:hub.vam.dev/acme/oracle-sql"
+  Version version = 2;                    // Pinned semantic version
+  string description = 3;                 // Short summary for LLM discovery
+  string system_extension = 4;            // Instruction extension appended to Agent baseline
+  repeated ToolSpec tools = 5;            // Standard tool specifications registered under this skill
+  
+  CompatibilityRange runtime_compatibility = 6; // Required vam-runtime version bounds
+  ResourceMetadata metadata = 7;          // Creation, provenance, and labels
+  repeated ResourceLocator locators = 8;  // Ordered native artifact locations/mirrors
+
+  // Structured capability requests. Each entry is `tool:`, `egress:`, `secret:`,
+  // or `fs:` plus a non-empty remainder (for example `tool:jira.search`,
+  // `fs:workspace:write`). Human-readable and diffable. Not checked against
+  // `policy` until DX-62.
+  repeated string capabilities = 9;
+
+  // Deprecated: design/agent-experience.md Part IV. Skills ship no Cedar.
+  // Ignored. A skill marks its own tools `approval_required` instead.
+  // Unvalidated until that deprecation is enforced. Do not load this from an
+  // untrusted source.
+  string policy = 10;
+
+  // Procedures shipped with this skill. Each entry is a path relative to the
+  // directory that contains manifest.json (for example
+  // "./playbooks/sprint-cleanup.json"). A procedure, not a scheduler, and not
+  // a per-step advisory or enforced flag.
+  repeated string playbooks = 11;
+
+  // Connector URN whose connection this skill's egress uses. JSON `requiresConnector`.
+  string requires_connector = 12;
+
+  // Runtimes this skill needs from the node's base image: name to requirement
+  // (`*` or empty, `>=X[.Y[.Z]]`, `=X[.Y[.Z]]`). JSON `requiresRuntime`. Checked at
+  // install and release against the base the node reports; absent means none.
+  map<string, string> requires_runtime = 13;
+}

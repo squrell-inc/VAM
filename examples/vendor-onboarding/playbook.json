@@ -1,0 +1,103 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:playbook:local.vam.dev/vam/vendor-onboarding"
+  },
+  "displayName": "Vendor onboarding",
+  "description": "Onboard a new vendor: categories, contract date and a W-9, then create the vendor record.",
+  "activation": {
+    "when": "Use when the user wants to onboard or register a new vendor."
+  },
+  "inputSchema": {
+    "type": "object",
+    "required": [
+      "vendor_name"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "vendor_name": {
+        "type": "string"
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "details",
+      "description": "Collect categories, contract start date and the W-9.",
+      "kind": "STEP_KIND_GATE",
+      "question": "Details for {{inputs.vendor_name}}",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "categories",
+          "contract_start",
+          "w9"
+        ],
+        "properties": {
+          "categories": {
+            "type": "array",
+            "title": "Categories",
+            "items": {
+              "enum": [
+                "hardware",
+                "software",
+                "services",
+                "logistics"
+              ]
+            }
+          },
+          "contract_start": {
+            "type": "string",
+            "format": "date",
+            "title": "Contract start"
+          },
+          "w9": {
+            "type": "string",
+            "format": "vam-workspace-file",
+            "title": "W-9"
+          }
+        }
+      }
+    },
+    {
+      "id": "confirm",
+      "description": "Confirm before creating the vendor.",
+      "kind": "STEP_KIND_GATE",
+      "after": [
+        "details"
+      ],
+      "question": "Create vendor {{inputs.vendor_name}} ({{steps.details.output.categories}}) starting {{steps.details.output.contract_start}}?",
+      "options": [
+        {
+          "label": "approve"
+        },
+        {
+          "label": "cancel",
+          "terminal": "OUTCOME_TERMINAL_SUCCEEDED"
+        }
+      ]
+    },
+    {
+      "id": "create-vendor",
+      "description": "Create the vendor record.",
+      "kind": "STEP_KIND_TASK",
+      "mode": "STEP_MODE_BOUND",
+      "after": [
+        "confirm:approve"
+      ],
+      "instruction": "Create the vendor record.",
+      "binding": {
+        "toolName": "create_vendor",
+        "arguments": {
+          "name": "{{inputs.vendor_name}}",
+          "categories": "{{steps.details.output.categories}}",
+          "contract_start": "{{steps.details.output.contract_start}}",
+          "w9": "{{steps.details.output.w9}}"
+        }
+      },
+      "evidence": {
+        "tool": "create_vendor",
+        "result": "success"
+      }
+    }
+  ]
+}
