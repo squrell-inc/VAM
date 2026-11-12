@@ -108,6 +108,36 @@ vam users create --username ops-bot --role publisher --password-from-env NEW_USE
 
 `--role` is `member`, `publisher`, or `org_admin`. `operator` is not offered here. The command sends an `Idempotency-Key` and prints the created account as JSON (`user`, which has no password). A username that already exists is refused.
 
+### Change your password (`vam passwd`)
+
+Change your own password. It needs a password session, so run `vam login` first. An API key (`VAM_API_KEY`, `--token`) is refused with the node's message.
+
+```bash
+# Interactive: three hidden prompts, nothing is echoed
+vam passwd
+
+# Scripts: name the variables that hold the passwords. A password is never an argument.
+vam passwd --current-password-from-env OLD_PW --new-password-from-env NEW_PW
+```
+
+The prompts read `Current password: `, `New password: ` and `Repeat new password: `. If the two new passwords differ, the command stops with exit `2` and sends nothing. With no terminal on stdin, or with `--json`, it will not prompt: it exits `2` and names `--current-password-from-env <VAR>`. A variable that is unset or empty is an error that names the variable.
+
+On success the node signs out every session of your user, so the CLI removes the stored session from `config.toml` (a stored API key stays) and prints:
+
+```text
+password changed; every session was signed out. Run vam login.
+```
+
+With `--json` it prints `{"passwordChanged":true,"reloginRequired":true}`. Each call sends a fresh `Idempotency-Key`. Refusals print the node's message and exit `3` for a wrong current password or an API key, `6` for a password the node rejects, and `1` with the wait in the text after five wrong tries:
+
+```text
+Error: Wrong: current password is incorrect.
+Expected: your current password (five wrong tries, then a wait).
+Fix: vam passwd.
+```
+
+The rules, the limit and the error table are on [Host API](/orchestrator/api/#change-your-own-password). Who may change which password is on [Users and roles](/getting-started/users-and-roles/#who-can-change-a-password).
+
 On a single-user node, the implicit owner is seeded user **`local`** (`member` role) — same SQLite schema and owner filters as multi-user; only one human owner is expected. The bootstrap **`operator`** key is for daemon administration (`keys:admin`, `brokers:admin`), not a second isolation path.
 
 ---

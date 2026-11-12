@@ -120,6 +120,85 @@ paths:
         "401":
           description: Missing, invalid, deactivated, or revoked bearer.
 
+  /v1/me/password:
+    post:
+      summary: Change your own password
+      description: |
+        The signed-in user sets a new password for themselves. Any role may call it,
+        the operator included. It needs a **password session** (`vam login`); an API
+        key is refused with 403. The body carries the current password and the new one.
+        Both are write-only: they are never logged or returned, and the password is
+        stored as argon2id only.
+
+        **Every session is signed out, this one included. API keys stay.** The answer
+        sets `reloginRequired` to true; sign in again with the new password.
+
+        **Five wrong current passwords per user, then a wait.** The limit is per user
+        and always on (it does not depend on `VAMD_RATE_LIMIT`). One more try comes back
+        every 60 seconds; the 429 says how long to wait. A correct password, a refused
+        new password and a missing key do not count against it.
+
+        The new password must differ from the current one and follow the same rules as
+        any password (not empty, at most 1024 bytes). A reset by an admin
+        (`POST /v1/users/{id}/password`) does not need the current password.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeMyPasswordRequest"
+      responses:
+        "200":
+          description: Password replaced. Every session of the user was revoked. API keys unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChangeMyPasswordResponse"
+        "400":
+          description: |
+            `currentPassword is required`; `new password must differ from the current
+            password`; a password rule (`password must be non-empty`, `password exceeds
+            1024 bytes`); or no `Idempotency-Key` header.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing, invalid, expired, deactivated or revoked bearer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: |
+            Two causes, told apart by `message`. `changing a password needs a password
+            session (vam login); API keys cannot change a password`: the caller used an
+            API key. `current password is incorrect`: the current password did not match;
+            this counts against the attempt limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: |
+            Too many wrong current passwords. `message` reads `too many wrong password
+            attempts; retry after Ns`. `code` is `RESOURCE_EXHAUSTED`.
+          headers:
+            Retry-After:
+              description: Seconds to wait.
+              schema:
+                type: integer
+            X-VAM-Rate-Limited-Reason:
+              schema:
+                type: string
+                enum: [password-attempt-rate]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /v1/node:
     get:
       summary: Get node status
@@ -4123,6 +4202,33 @@ components:
       properties:
         user:
           $ref: "#/components/schemas/UserAccount"
+
+    ChangeMyPasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+          format: password
+          description: The password the caller signed in with. Write-only. Never logged or returned.
+        newPassword:
+          type: string
+          format: password
+          description: New password. Must differ from the current one. Write-only. Never logged or returned.
+
+    ChangeMyPasswordResponse:
+      type: object
+      properties:
+        user:
+          $ref: "#/components/schemas/UserAccount"
+        reloginRequired:
+          type: boolean
+          description: Always true. Every session of the user, this one included, was revoked.
+        passwordUpdatedAt:
+          type: string
+          format: int64
+          description: When the password changed, Unix seconds, as a JSON string (proto3 int64).
+          example: "1760000000"
 
     AdminMintUserApiKeyRequest:
       type: object

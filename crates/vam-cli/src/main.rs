@@ -44,6 +44,8 @@ enum Commands {
     },
     /// Revoke the stored session token and remove it from local config.
     Logout,
+    /// Change your own password. Signs out every session; run `vam login` after.
+    Passwd(cmd::passwd::PasswdArgs),
     /// Manage control-plane users (org admin).
     Users {
         #[command(subcommand)]
@@ -189,6 +191,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             password_from_env,
         } => cmd::login::run_login(cli.host, username, password_from_env).await,
         Commands::Logout => cmd::login::run_logout(cli.host).await,
+        Commands::Passwd(args) => cmd::passwd::run(cli.host, cli.token, args).await,
         Commands::Users { command } => cmd::users::run(cli.host, cli.token, command).await,
         Commands::Health => cmd::health::run(cli.host, cli.token).await,
         Commands::Node { command } => cmd::node::run(cli.host, cli.token, command).await,
@@ -264,6 +267,30 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn passwd_parses_the_env_flags() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "vam",
+            "passwd",
+            "--current-password-from-env",
+            "OLD",
+            "--new-password-from-env",
+            "NEW",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Passwd(a) => {
+                assert_eq!(a.current_password_from_env.as_deref(), Some("OLD"));
+                assert_eq!(a.new_password_from_env.as_deref(), Some("NEW"));
+            }
+            _ => panic!("expected passwd"),
+        }
+        // No flag takes the password itself.
+        assert!(Cli::try_parse_from(["vam", "passwd", "--password", "x"]).is_err());
+        assert!(Cli::try_parse_from(["vam", "passwd"]).is_ok());
     }
 
     #[test]
