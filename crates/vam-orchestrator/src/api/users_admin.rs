@@ -28,7 +28,7 @@ pub fn reset_user_password_route() -> axum::routing::MethodRouter<AppState> {
     post(reset_user_password)
 }
 
-fn user_account(user: UserRecord) -> UserAccount {
+pub(crate) fn user_account(user: UserRecord) -> UserAccount {
     UserAccount {
         user_id: user.user_id,
         username: user.username,

@@ -8,6 +8,9 @@
 //!   keys never shares it. Once an address is out of tokens, a request with no valid key is
 //!   refused before it reaches auth.
 //!
+//! [`PasswordAttemptLimiter`] is a third, separate control: wrong current passwords on
+//! `POST /v1/me/password`, per user, always on (also with limits off).
+//!
 //! `/v1/health`, `/openapi.yaml` and `/docs` are never limited. `X-Forwarded-For` is ignored: the
 //! peer address is the only identity the daemon can trust. State is per node and resets on restart.
 
@@ -30,6 +33,12 @@ pub const REASON_HEADER: &str = "X-VAM-Rate-Limited-Reason";
 pub const REASON_KEY: &str = "key-rate";
 pub const REASON_KEY_CREATE: &str = "key-create-rate";
 pub const REASON_IP_AUTH: &str = "ip-auth-rate";
+pub const REASON_PASSWORD_ATTEMPT: &str = "password-attempt-rate";
+
+/// Wrong `currentPassword` tries one user may make in a burst on `POST /v1/me/password`.
+pub const PASSWORD_ATTEMPT_BURST: u32 = 5;
+/// Seconds for one wrong-attempt token to come back.
+pub const PASSWORD_ATTEMPT_REFILL_SECS: u64 = 60;
 
 /// Most per-IP buckets kept. Past it, untracked addresses share one overflow bucket.
 pub const MAX_IP_BUCKETS: usize = 50_000;
@@ -158,6 +167,67 @@ fn ip_key(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// Per-user limit on wrong `currentPassword` tries (`POST /v1/me/password`).
+///
+/// Authentication control, not flood control: it ignores `RateLimitConfig.enabled`
+/// (`VAMD_RATE_LIMIT=off` does not switch it off). Burst 5, one token back per 60 s, per
+/// `user_id`, in memory and per node.
+///
+/// A token is reserved with [`Self::try_take`] (atomic under the mutex) *before* the password
+/// is verified, so concurrent guesses cannot all pass a check while argon2 runs. A wrong
+/// password keeps the token spent; every other outcome gives it back with [`Self::refund`].
+pub struct PasswordAttemptLimiter {
+    buckets: Mutex<HashMap<String, Bucket>>,
+}
+
+impl Default for PasswordAttemptLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PasswordAttemptLimiter {
+    const RPS: f64 = 1.0 / PASSWORD_ATTEMPT_REFILL_SECS as f64;
+    const BURST: f64 = PASSWORD_ATTEMPT_BURST as f64;
+
+    pub fn new() -> Self {
+        Self {
+            buckets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Reserves one token for `user_id`, or refuses with the wait until one is back.
+    /// Check and take are one step under the lock.
+    pub fn try_take(&self, user_id: &str, now: Instant) -> Result<(), Refusal> {
+        let mut m = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() >= KEY_SWEEP_AT && !m.contains_key(user_id) {
+            m.retain(|_, b| !b.is_full(now, Self::RPS, Self::BURST));
+        }
+        m.entry(user_id.to_string())
+            .or_insert_with(|| Bucket::full(Self::BURST, now))
+            .take(now, Self::RPS, Self::BURST)
+            .map_err(|wait| Refusal {
+                reason: REASON_PASSWORD_ATTEMPT,
+                retry_after_secs: secs(wait),
+            })
+    }
+
+    /// Gives back a token reserved by [`Self::try_take`] for an attempt that was not a wrong
+    /// password. Capped at the burst; a no-op for a user with no bucket (already full).
+    pub fn refund(&self, user_id: &str, now: Instant) {
+        let mut m = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(b) = m.get_mut(user_id) {
+            b.refill(now, Self::RPS, Self::BURST);
+            b.tokens = (b.tokens + 1.0).min(Self::BURST);
+        }
+    }
+
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.buckets.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
 struct IpState {
     map: HashMap<IpAddr, Bucket>,
     overflow: Bucket,
@@ -170,6 +240,7 @@ pub struct RateLimiter {
     creates: Mutex<HashMap<String, Bucket>>,
     ips: Mutex<IpState>,
     ip_cap: usize,
+    password_attempts: Arc<PasswordAttemptLimiter>,
 }
 
 impl RateLimiter {
@@ -192,7 +263,13 @@ impl RateLimiter {
                 overflow: Bucket::full(cfg.ip_burst as f64, Instant::now()),
             }),
             ip_cap,
+            password_attempts: Arc::new(PasswordAttemptLimiter::new()),
         }
+    }
+
+    /// The per-user wrong-password limiter of this router. Always on.
+    pub fn password_attempts(&self) -> Arc<PasswordAttemptLimiter> {
+        self.password_attempts.clone()
     }
 
     /// The limiter `router()` uses: the installed config (the defaults when none).
@@ -328,10 +405,21 @@ fn is_create(method: &Method, path: &str) -> bool {
 #[derive(Clone, Copy)]
 struct Authenticated;
 
-fn refuse(r: &Refusal) -> Response {
+pub(crate) fn refuse(r: &Refusal) -> Response {
+    let message = if r.reason == REASON_PASSWORD_ATTEMPT {
+        format!(
+            "too many wrong password attempts; retry after {}s",
+            r.retry_after_secs
+        )
+    } else {
+        format!(
+            "rate limit exceeded ({}); retry after {}s",
+            r.reason, r.retry_after_secs
+        )
+    };
     let body = serde_json::json!({
         "code": "RESOURCE_EXHAUSTED",
-        "message": format!("rate limit exceeded ({}); retry after {}s", r.reason, r.retry_after_secs),
+        "message": message,
         "retryable": true,
     });
     let mut resp = (StatusCode::TOO_MANY_REQUESTS, axum::Json(body)).into_response();
@@ -347,7 +435,7 @@ fn refuse(r: &Refusal) -> Response {
 /// Inner layer, after auth: the per-key buckets.
 pub async fn key_layer(
     State(limiter): State<Arc<RateLimiter>>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next<Body>,
 ) -> Response {
     let Some(auth) = req.extensions().get::<AuthContext>() else {
@@ -355,6 +443,8 @@ pub async fn key_layer(
     };
     let create = is_create(req.method(), req.uri().path());
     let key_id = auth.key.record.key_id.clone();
+    // Handlers that guard a secret (the password change) reach their always-on limiter here.
+    req.extensions_mut().insert(limiter.password_attempts());
     let mut resp = match limiter.check_key(&key_id, create, Instant::now()) {
         Ok(()) => next.run(req).await,
         Err(r) => refuse(&r),
@@ -514,6 +604,151 @@ mod tests {
         assert!(l
             .ip_exhausted(ip, t0 + Duration::from_millis(600))
             .is_none());
+    }
+
+    #[test]
+    fn password_attempts_burst_then_refusal_with_retry_after() {
+        let l = PasswordAttemptLimiter::new();
+        let t0 = Instant::now();
+        for _ in 0..PASSWORD_ATTEMPT_BURST {
+            l.try_take("alice", t0).expect("a token is left");
+        }
+        let r = l.try_take("alice", t0).expect_err("empty after the burst");
+        assert_eq!(r.reason, REASON_PASSWORD_ATTEMPT);
+        assert!(r.retry_after_secs >= 1);
+        assert!(r.retry_after_secs <= PASSWORD_ATTEMPT_REFILL_SECS);
+        // A refusal takes nothing: same wait the next time.
+        let again = l.try_take("alice", t0).expect_err("still empty");
+        assert_eq!(again.retry_after_secs, r.retry_after_secs);
+    }
+
+    #[test]
+    fn password_attempts_race_is_closed_exactly_burst_succeed() {
+        // No refunds: however many callers reserve at once, exactly the burst gets through.
+        let l = PasswordAttemptLimiter::new();
+        let t0 = Instant::now();
+        let ok = (0..20).filter(|_| l.try_take("alice", t0).is_ok()).count();
+        assert_eq!(ok, PASSWORD_ATTEMPT_BURST as usize);
+    }
+
+    #[test]
+    fn password_attempts_race_is_closed_across_threads() {
+        let l = Arc::new(PasswordAttemptLimiter::new());
+        let t0 = Instant::now();
+        let handles: Vec<_> = (0..32)
+            .map(|_| {
+                let l = l.clone();
+                std::thread::spawn(move || l.try_take("alice", t0).is_ok())
+            })
+            .collect();
+        let ok = handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or(false))
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(ok, PASSWORD_ATTEMPT_BURST as usize);
+    }
+
+    #[test]
+    fn password_attempts_refund_gives_a_token_back_up_to_the_burst() {
+        let l = PasswordAttemptLimiter::new();
+        let t0 = Instant::now();
+        for _ in 0..PASSWORD_ATTEMPT_BURST {
+            l.try_take("alice", t0).expect("take");
+        }
+        assert!(l.try_take("alice", t0).is_err());
+        l.refund("alice", t0);
+        l.try_take("alice", t0).expect("refunded token is usable");
+        assert!(l.try_take("alice", t0).is_err());
+        // Refunding never goes past the burst, and an unknown user is a no-op.
+        for _ in 0..20 {
+            l.refund("alice", t0);
+        }
+        let ok = (0..20).filter(|_| l.try_take("alice", t0).is_ok()).count();
+        assert_eq!(ok, PASSWORD_ATTEMPT_BURST as usize);
+        l.refund("nobody", t0);
+        assert_eq!(l.tracked(), 1);
+    }
+
+    #[test]
+    fn password_attempts_take_then_refund_leaves_the_burst_intact() {
+        // Non-wrong outcomes (success, invalid input reaching the store) must cost nothing.
+        let l = PasswordAttemptLimiter::new();
+        let t0 = Instant::now();
+        for _ in 0..50 {
+            l.try_take("alice", t0).expect("take");
+            l.refund("alice", t0);
+        }
+        let ok = (0..20).filter(|_| l.try_take("alice", t0).is_ok()).count();
+        assert_eq!(ok, PASSWORD_ATTEMPT_BURST as usize);
+    }
+
+    #[test]
+    fn password_attempts_refill_one_per_minute() {
+        let l = PasswordAttemptLimiter::new();
+        let t0 = Instant::now();
+        for _ in 0..PASSWORD_ATTEMPT_BURST {
+            l.try_take("alice", t0).expect("take");
+        }
+        assert!(l.try_take("alice", t0 + Duration::from_secs(59)).is_err());
+        let t1 = t0 + Duration::from_secs(61);
+        l.try_take("alice", t1).expect("one token is back");
+        // Exactly one token came back.
+        assert!(l.try_take("alice", t1).is_err());
+        // Never more than the burst, however long the wait.
+        let later = t0 + Duration::from_secs(3600);
+        let ok = (0..20)
+            .filter(|_| l.try_take("alice", later).is_ok())
+            .count();
+        assert_eq!(ok, PASSWORD_ATTEMPT_BURST as usize);
+    }
+
+    #[test]
+    fn password_attempts_users_are_independent() {
+        let l = PasswordAttemptLimiter::new();
+        let t0 = Instant::now();
+        for _ in 0..PASSWORD_ATTEMPT_BURST {
+            l.try_take("alice", t0).expect("take");
+        }
+        assert!(l.try_take("alice", t0).is_err());
+        l.try_take("bob", t0).expect("bob has his own bucket");
+    }
+
+    #[test]
+    fn password_attempts_ignore_the_enabled_switch() {
+        let l = RateLimiter::new(
+            RateLimitConfig {
+                enabled: false,
+                ..cfg()
+            },
+            None,
+        );
+        let p = l.password_attempts();
+        let t0 = Instant::now();
+        let ok = (0..20).filter(|_| p.try_take("alice", t0).is_ok()).count();
+        assert_eq!(ok, PASSWORD_ATTEMPT_BURST as usize);
+    }
+
+    #[test]
+    fn password_attempts_map_is_swept_of_idle_buckets() {
+        let l = PasswordAttemptLimiter::new();
+        let t0 = Instant::now();
+        // Each idle user took one token; "locked" used its whole burst.
+        for _ in 0..PASSWORD_ATTEMPT_BURST {
+            l.try_take("locked", t0).expect("take");
+        }
+        for i in 0..KEY_SWEEP_AT - 1 {
+            l.try_take(&format!("u{i}"), t0).expect("take");
+        }
+        assert_eq!(l.tracked(), KEY_SWEEP_AT);
+        // 90 s on, the idle users are back to a full bucket, "locked" is not.
+        let later = t0 + Duration::from_secs(90);
+        l.try_take("new-user", later).expect("take");
+        assert_eq!(
+            l.tracked(),
+            2,
+            "only the locked user and the new one remain"
+        );
     }
 
     #[test]
