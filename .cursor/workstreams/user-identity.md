@@ -80,7 +80,7 @@ CLI; all sessions signed out, API keys kept; wrong attempts limited.
 **Exit:** the phase 1 scenarios are `active` and green; `scripts/ci/local.sh --full`
 green on `feat/user-identity`; OpenAPI and docs describe the route and who can do what.
 
-- [ ] Scenarios and harness steps land pending, red for the right reason (W0)
+- [x] Scenarios and harness steps land pending, red for the right reason (W0, #2)
 - [ ] Server: route, store method, attempt limiter, proto (W1)
 - [ ] CLI `vam passwd`, OpenAPI, docs (W2)
 
@@ -103,7 +103,7 @@ operator is the bootstrap key and has no password.
 
 **Items** (each names the pending scenarios it turns green)
 
-- [ ] `UI-1.1` — Harness: `org` pieces keep their generated password; steps `login`,
+- [x] `UI-1.1` — Harness: `org` pieces keep their generated password; steps `login`,
   `change-password`, `identity-request` (design §3.6) in `crates/vam-e2e`
   (`scenario.rs` parse, `check.rs` lint, engine), README step docs; the six scenarios
   as `pending`. Accept: `cargo run -p vam-e2e -- check` passes; each scenario fails at
@@ -129,9 +129,9 @@ operator is the bootstrap key and has no password.
 
 | Wave | Items | Turns green | Repo | Model | Budget | Depends on | Actions | Status | PR |
 |---|---|---|---|---|---|---|---|---|---|
-| 0 docs | design + tracker | — | vam | orchestrator | 30 min | — | none | [ ] | |
-| 0 | `UI-1.1` | — (pending, red for the right reason) | vam | Sonnet 5.5 medium (harness code in `vam-e2e`, not only YAML) | 60 min | 0 docs | none | [ ] | |
-| 1 | `UI-1.2` | all six | vam | Sonnet 5.5 high (auth, sessions, rate limit: security boundary) | 90 min | 0 | none | [ ] | |
+| 0 docs | design + tracker | — | vam | orchestrator | 30 min | — | none | [x] | #1 |
+| 0 | `UI-1.1` | — (pending, red for the right reason) | vam | Sonnet 5.5 medium (harness code in `vam-e2e`, not only YAML) | 60 min | 0 docs | none | [x] | #2 |
+| 1 | `UI-1.2` | all six | vam | Sonnet 5.5 high (auth, sessions, rate limit: security boundary) | 90 min | 0 | none | [~] | |
 | 2 | `UI-1.3` | — (keeps six green) | vam | Sonnet 5.5 medium (CLI + OpenAPI + docs, two crates) | 75 min | 1 | none | [ ] | |
 
 **Open questions** (each with a default)
@@ -187,3 +187,4 @@ in design §4.2 is closed row by row.
 | Date | Phase | What landed (end with the scoreboard: scenarios green, red, fix cycles, wall time) |
 |---|---|---|
 | 2026-11-12 | 1 | Tracker opened; design `design/user-identity.md`; Phase 1 plan (owner brief) |
+| 2026-11-12 | 1 | W0 docs (#1) and W0 scenarios (#2) merged: harness steps `login`, `change-password`, `identity-request`; six scenarios pending, all red for the right reason (404 at the first change-password). Scoreboard: 0 green, 6 red (right reason), 0 fix cycles, about 75 min. Session note: the session runs as root, so `LOCAL_CI_OUT` must sit in a 0755 directory under a short path (a long path overflows the 107-byte socket limit; a 0700 `mktemp -d` dir breaks the 10 Microsoft 365 smoke scenarios: probe.py permission denied). Never two builds at once on the shared target. |
