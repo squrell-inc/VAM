@@ -681,6 +681,38 @@ fn check_scenario(
                     ));
                 }
             }
+            Step::Login(x) => refer_org(errors, p, &pos, &org_aliases, Some(&x.as_)),
+            Step::ChangePassword(x) => {
+                refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
+                if x.as_.is_none() && x.via != crate::engine::identity::ChangeVia::Key {
+                    errors.push(CheckError::new(
+                        p,
+                        "change-password",
+                        format!("{pos}: `change-password` without `as` needs `via: key` (the bootstrap key has no session)"),
+                    ));
+                }
+                if !(100..600).contains(&x.status) {
+                    errors.push(CheckError::new(
+                        p,
+                        "change-password",
+                        format!("{pos}: `status` must be an HTTP status"),
+                    ));
+                }
+            }
+            Step::IdentityRequest(x) => {
+                refer_org(errors, p, &pos, &org_aliases, Some(&x.as_));
+                if !x.path.starts_with('/')
+                    || !["get", "post", "put", "patch", "delete"]
+                        .contains(&x.method.to_lowercase().as_str())
+                    || !(100..600).contains(&x.status)
+                {
+                    errors.push(CheckError::new(
+                        p,
+                        "identity-request",
+                        format!("{pos}: `identity-request` needs a method, a path starting with `/` and an HTTP status"),
+                    ));
+                }
+            }
             Step::CatalogWrite(x) => {
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
                 if !matches!(x.kind.as_str(), "agent" | "playbook" | "skill") {

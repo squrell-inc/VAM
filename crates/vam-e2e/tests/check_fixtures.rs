@@ -570,3 +570,49 @@ fn a_skill_piece_names_only_pieces_it_requires() {
     );
     f.expect_error("piece-body", "must contain `{{name}}`");
 }
+
+const IDENTITY: &str = "id: chat-replies
+title: A password change
+tags: [members]
+needs: process
+given: [org-admin, { piece: org-member, as: person }]
+when:
+  - login: { as: person }
+  - change-password: { as: person, status: 200, contains: reloginRequired }
+then:
+  - login: { as: person, password: previous, refused: true }
+  - identity-request: { as: person, credential: previous-session, path: /v1/me, status: 401 }
+status: active
+";
+
+#[test]
+fn identity_steps_catalog_is_clean() {
+    let f = flood_fx(IDENTITY);
+    assert!(f.errors().is_empty(), "{:#?}", f.errors());
+}
+
+#[test]
+fn identity_steps_need_org_aliases_and_sane_arguments() {
+    let f = flood_fx(&IDENTITY.replace("login: { as: person }", "login: { as: nobody }"));
+    f.expect_error("step-alias", "`as: nobody` is not an org piece");
+    let f = flood_fx(&IDENTITY.replace(
+        "change-password: { as: person,",
+        "change-password: { as: nobody,",
+    ));
+    f.expect_error("step-alias", "`as: nobody` is not an org piece");
+    let f = flood_fx(&IDENTITY.replace(
+        "change-password: { as: person, status: 200",
+        "change-password: { status: 200",
+    ));
+    f.expect_error("change-password", "needs `via: key`");
+    let f = flood_fx(&IDENTITY.replace("status: 200,", "status: 20,"));
+    f.expect_error("change-password", "HTTP status");
+    let f = flood_fx(&IDENTITY.replace("path: /v1/me", "path: v1/me"));
+    f.expect_error("identity-request", "path starting with `/`");
+    let f = flood_fx(&IDENTITY.replace("credential: previous-session", "credential: cookie"));
+    assert!(
+        f.errors().iter().any(|e| e.contains("cookie")),
+        "{:#?}",
+        f.errors()
+    );
+}
