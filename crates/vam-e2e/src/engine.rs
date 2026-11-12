@@ -193,6 +193,8 @@ struct Ctx {
     threads: u32,
     /// Keys of the identities that `org` pieces created, by piece alias.
     identities: HashMap<String, Secret>,
+    /// Username, user id, passwords and sessions of those identities (`identity.rs`).
+    accounts: HashMap<String, identity::Account>,
     /// Values of `secret` pieces, by alias. Never printed.
     secrets: HashMap<String, Secret>,
     /// Ids of the org MCP connections that `mcp-connection` pieces made; removed at cleanup.
@@ -243,6 +245,8 @@ pub mod cli;
 pub mod connectors;
 #[path = "effects.rs"]
 pub mod effects;
+#[path = "identity.rs"]
+pub mod identity;
 #[path = "marketplace.rs"]
 pub mod marketplace;
 #[path = "notifications.rs"]
@@ -668,11 +672,12 @@ impl Engine {
             }
         };
         let username = identity_name(name, alias, &self.eff_tag().0);
+        let password = secret_hex(24);
         let r = self
             .api
             .post(
                 "/v1/users",
-                &json!({ "username": username, "password": secret_hex(24), "role": wire }),
+                &json!({ "username": username, "password": password, "role": wire }),
             )
             .map_err(conn)?;
         if !r.ok() {
@@ -710,6 +715,17 @@ impl Engine {
         self.ctx
             .identities
             .insert(alias.to_string(), Secret(secret));
+        self.ctx.accounts.insert(
+            alias.to_string(),
+            identity::Account {
+                username,
+                user_id,
+                current: Secret(password),
+                previous: None,
+                session: None,
+                previous_session: None,
+            },
+        );
         Ok(())
     }
 
@@ -2226,6 +2242,9 @@ impl Engine {
             Step::MarketplaceInstall(x) => self.marketplace_act("install", x),
             Step::MarketplaceUpdate(x) => self.marketplace_act("update", x),
             Step::CatalogWrite(x) => self.catalog_write(x),
+            Step::Login(x) => self.login(x),
+            Step::ChangePassword(x) => self.change_password(x),
+            Step::IdentityRequest(x) => self.identity_request(x),
         }
     }
 }

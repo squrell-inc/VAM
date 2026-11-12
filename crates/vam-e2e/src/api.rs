@@ -155,6 +155,34 @@ impl Api {
         Ok(Reply { status, body })
     }
 
+    /// One request with a caller-chosen credential. `bearer: None` sends no `Authorization`
+    /// header at all (the login route); `idempotency` adds a fresh `Idempotency-Key` header.
+    pub fn call(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        bearer: Option<&str>,
+        idempotency: bool,
+    ) -> Result<Reply, ConnError> {
+        let mut rb = self
+            .client()?
+            .request(method, format!("{}{path}", self.base));
+        if let Some(b) = bearer {
+            rb = rb.header("Authorization", format!("Bearer {b}"));
+        }
+        if idempotency {
+            rb = rb.header("Idempotency-Key", self.idem());
+        }
+        if let Some(b) = body {
+            rb = rb.json(b);
+        }
+        let resp = rb.send().map_err(|e| ConnError(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let body = resp.text().map_err(|e| ConnError(e.to_string()))?;
+        Ok(Reply { status, body })
+    }
+
     pub fn get(&self, path: &str) -> Result<Reply, ConnError> {
         self.send(reqwest::Method::GET, path, None, None)
     }
