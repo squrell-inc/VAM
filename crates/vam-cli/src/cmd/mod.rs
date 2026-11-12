@@ -17,6 +17,7 @@ mod node_init;
 mod node_install;
 pub mod notifications;
 mod outcomes;
+pub mod passwd;
 pub mod permissions;
 pub mod playbook_local;
 pub mod receipt;

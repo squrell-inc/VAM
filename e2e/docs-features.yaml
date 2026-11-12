@@ -135,6 +135,18 @@ features:
     arch: [orchestrator/user-isolation]
     proves:
       - member-chats-with-a-released-agent
+  - id: change-your-own-password
+    area: "Auth and users"
+    surface: "CLI vam passwd; API POST /v1/me/password"
+    dev: [getting-started/cli, getting-started/users-and-roles]
+    arch: [orchestrator/api]
+    proves:
+      - member-changes-own-password-and-signs-in-with-the-new-one
+      - password-change-signs-out-every-session-and-keeps-api-keys
+      - wrong-current-password-is-refused-and-attempts-are-limited
+      - api-key-cannot-change-a-password
+      - new-password-equal-to-current-is-refused
+      - password-change-needs-an-idempotency-key
   - id: api-keys-own-and-per-user
     area: "Auth and users"
     surface: "CLI vam keys create/list/revoke; API /v1/keys, /v1/users/:id/keys"

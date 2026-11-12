@@ -32,6 +32,28 @@ fn openapi_parses_as_yaml_with_the_inbox_contract() {
 }
 
 #[test]
+fn openapi_has_the_self_service_password_change() {
+    let doc = load();
+    let post = &doc["paths"]["/v1/me/password"]["post"];
+    assert!(post.is_mapping(), "missing POST /v1/me/password");
+    for code in ["200", "400", "401", "403", "429"] {
+        assert!(
+            post["responses"][code].is_mapping(),
+            "missing response {code}"
+        );
+    }
+    assert!(post["responses"]["429"]["headers"]["Retry-After"].is_mapping());
+    assert!(post["responses"]["429"]["headers"]["X-VAM-Rate-Limited-Reason"].is_mapping());
+    let schemas = &doc["components"]["schemas"];
+    for s in ["ChangeMyPasswordRequest", "ChangeMyPasswordResponse"] {
+        assert!(schemas[s].is_mapping(), "missing schema {s}");
+    }
+    let updated = &schemas["ChangeMyPasswordResponse"]["properties"]["passwordUpdatedAt"];
+    assert_eq!(updated["type"].as_str(), Some("string"));
+    assert_eq!(updated["format"].as_str(), Some("int64"));
+}
+
+#[test]
 fn every_local_ref_resolves() {
     fn walk(v: &serde_yaml::Value, doc: &serde_yaml::Value, bad: &mut Vec<String>) {
         match v {

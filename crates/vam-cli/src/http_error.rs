@@ -71,6 +71,11 @@ fn parse_body(body: &str) -> ApiBody {
 
 fn hint(method: &str, path: &str, status: u16, body: &ApiBody) -> (String, String) {
     let msg = body.message.to_ascii_lowercase();
+    if path == "/v1/me/password" {
+        if let Some(h) = password_change_hint(status, &msg) {
+            return h;
+        }
+    }
     if status == 401 || msg.contains("bearer token") || msg.contains("unauthenticated") {
         return (
             "a live session token or API key".into(),
@@ -219,6 +224,35 @@ fn hint(method: &str, path: &str, status: u16, body: &ApiBody) -> (String, Strin
     )
 }
 
+/// Hints for `POST /v1/me/password`. A wrong current password is a 403 and must not read as
+/// "log in again"; an API key is a 403 too, and that one does need a password session.
+fn password_change_hint(status: u16, msg: &str) -> Option<(String, String)> {
+    let login = "vam login --username <NAME> --password-from-env <VAR>";
+    match status {
+        401 => Some((
+            "a live password session".into(),
+            format!("{login}, then vam passwd"),
+        )),
+        403 if msg.contains("current password is incorrect") => Some((
+            "your current password (five wrong tries, then a wait)".into(),
+            "vam passwd".into(),
+        )),
+        403 if msg.contains("api key") => Some((
+            "a password session, not an API key".into(),
+            format!("unset VAM_API_KEY and --token, run {login}, then vam passwd"),
+        )),
+        429 => Some((
+            "the wait named in the message to pass".into(),
+            "vam passwd, after the wait".into(),
+        )),
+        400 => Some((
+            "a current password, and a new one that is not empty, is at most 1024 bytes and differs from the current one".into(),
+            "vam passwd".into(),
+        )),
+        _ => None,
+    }
+}
+
 /// `vam <kind> release <urn> --version <X.Y.Z>` for each dependency a release
 /// refusal lists. Offender lines read `  <kind> '<urn>' ...`; the header line and
 /// kinds with no release command (evaluators) are skipped.
@@ -288,6 +322,7 @@ fn command_for(method: &str, path: &str) -> String {
         }
         ("POST", "login", _, _) => "vam login --username <NAME> --password-from-env <VAR>".into(),
         ("POST", "logout", _, _) => "vam logout".into(),
+        ("POST", "me", Some("password"), _) => "vam passwd".into(),
         ("PUT", "workspaces", Some(_), Some("files")) => {
             "vam workspace put <PATH> <LOCAL-FILE> -w <WORKSPACE>".into()
         }
@@ -424,6 +459,49 @@ mod tests {
         );
         assert!(!text.contains("HTTP"), "{text}");
         assert_eq!(output::classify(&err).1, Some(409));
+    }
+
+    #[test]
+    fn password_change_wrong_password_does_not_say_log_in_again() {
+        let raw = body("PermissionDenied", "current password is incorrect", false);
+        let text = failure("POST", "/v1/me/password", 403, &raw).to_string();
+        assert!(
+            text.contains("Wrong: current password is incorrect."),
+            "{text}"
+        );
+        assert!(text.contains("Fix: vam passwd."), "{text}");
+        assert!(!text.contains("vam login"), "{text}");
+    }
+
+    #[test]
+    fn password_change_with_an_api_key_asks_for_a_password_session() {
+        let raw = body(
+            "PermissionDenied",
+            "changing a password needs a password session (vam login); API keys cannot change a password",
+            false,
+        );
+        let text = failure("POST", "/v1/me/password", 403, &raw).to_string();
+        assert!(
+            text.contains("a password session, not an API key"),
+            "{text}"
+        );
+        assert!(text.contains("vam login"), "{text}");
+    }
+
+    #[test]
+    fn password_change_rate_limit_keeps_the_wait_and_401_asks_for_a_session() {
+        let raw = body(
+            "RESOURCE_EXHAUSTED",
+            "too many wrong password attempts; retry after 42s",
+            true,
+        );
+        let text = failure("POST", "/v1/me/password", 429, &raw).to_string();
+        assert!(text.contains("retry after 42s"), "{text}");
+        assert!(text.contains("vam passwd, after the wait"), "{text}");
+        let raw = body("Unauthenticated", "invalid bearer token", false);
+        let text = failure("POST", "/v1/me/password", 401, &raw).to_string();
+        assert!(text.contains("a live password session"), "{text}");
+        assert!(text.contains("then vam passwd"), "{text}");
     }
 
     #[test]
