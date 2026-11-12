@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: user-identity
-current_phase: 1
+current_phase: 1 closed in base 2026-11-12; 2 not drafted
 base_branch: feat/user-identity
 design_docs:
   - design/user-identity.md
@@ -76,13 +76,13 @@ Full sections: [archive/user-identity.md](archive/user-identity.md).
 **Goal:** any user with a password session changes their own password over HTTP and the
 CLI; all sessions signed out, API keys kept; wrong attempts limited.  
 **Depends on:** none  
-**Plan:** approved 2026-11-12 (owner brief; design `design/user-identity.md` §3)  
+**Plan:** approved 2026-11-12 (owner brief; design `design/user-identity.md` §3); **closed in base 2026-11-12** (#1, #2, #8, #9; six scenarios active and green; no release PR into `main` without the owner's word)  
 **Exit:** the phase 1 scenarios are `active` and green; `scripts/ci/local.sh --full`
 green on `feat/user-identity`; OpenAPI and docs describe the route and who can do what.
 
 - [x] Scenarios and harness steps land pending, red for the right reason (W0, #2)
 - [x] Server: route, store method, attempt limiter, proto (W1, #8)
-- [ ] CLI `vam passwd`, OpenAPI, docs (W2)
+- [x] CLI `vam passwd`, OpenAPI, docs (W2, #9)
 
 **Scenario delta**
 
@@ -116,7 +116,7 @@ operator is the bootstrap key and has no password.
   `api_tests.rs` (401, API key 403, master key 403, wrong 403 + unchanged, 429 after 5,
   same 400, empty 400, missing key 400, success revokes all sessions incl. caller, key
   still works, operator changes own password); store unit tests. Turns green: all six.
-- [ ] `UI-1.3` — `vam passwd` (no-echo prompts via `rpassword`, repeat check,
+- [x] `UI-1.3` — `vam passwd` (no-echo prompts via `rpassword`, repeat check,
   `--current-password-from-env`, `--new-password-from-env`, Idempotency-Key, clears the
   stored session on 200, JSON output); CLI tests for arg parsing and the cleared session.
   `docs/api/openapi.yaml` path + schemas + `openapi_yaml.rs` assertion. Docs:
@@ -132,7 +132,7 @@ operator is the bootstrap key and has no password.
 | 0 docs | design + tracker | — | vam | orchestrator | 30 min | — | none | [x] | #1 |
 | 0 | `UI-1.1` | — (pending, red for the right reason) | vam | Sonnet 5.5 medium (harness code in `vam-e2e`, not only YAML) | 60 min | 0 docs | none | [x] | #2 |
 | 1 | `UI-1.2` | all six | vam | Sonnet 5.5 high (auth, sessions, rate limit: security boundary) | 90 min | 0 | none | [x] | #8 |
-| 2 | `UI-1.3` | — (keeps six green) | vam | Sonnet 5.5 medium (CLI + OpenAPI + docs, two crates) | 75 min | 1 | none | [~] | |
+| 2 | `UI-1.3` | — (keeps six green) | vam | Sonnet 5.5 medium (CLI + OpenAPI + docs, two crates) | 75 min | 1 | none | [x] | #9 |
 
 **Open questions** (each with a default)
 
@@ -189,3 +189,4 @@ in design §4.2 is closed row by row.
 | 2026-11-12 | 1 | Tracker opened; design `design/user-identity.md`; Phase 1 plan (owner brief) |
 | 2026-11-12 | 1 | W0 docs (#1) and W0 scenarios (#2) merged: harness steps `login`, `change-password`, `identity-request`; six scenarios pending, all red for the right reason (404 at the first change-password). Scoreboard: 0 green, 6 red (right reason), 0 fix cycles, about 75 min. Session note: the session runs as root, so `LOCAL_CI_OUT` must sit in a 0755 directory under a short path (a long path overflows the 107-byte socket limit; a 0700 `mktemp -d` dir breaks the 10 Microsoft 365 smoke scenarios: probe.py permission denied). Never two builds at once on the shared target. |
 | 2026-11-12 | 1 | W1 server merged (#8): `POST /v1/me/password`, store `change_own_password`, per-user attempt limiter (reserve before verify, refund unless wrong; review found and fixed a check-then-charge race, concurrent API test proves 5 of 16), 14 API tests incl. operator. Orchestrator `--full` at head: all steps ok, 4458 tests, smoke 140/140. Scoreboard: 6 green, 0 red, 1 fix cycle (review), about 100 min. |
+| 2026-11-12 | 1 | W2 merged (#9): `vam passwd` (hidden prompts, env flags, clears the stored session after 200), OpenAPI `/v1/me/password` + shape test, docs (users-and-roles who-can-change table, host API, CLI), feature row. `cli.md` stays in the docs baseline (shipping it needs proofs for 13 unrelated rows). Orchestrator `--full` at head: all steps ok, 4470 tests, smoke 140/140; `vam-e2e check` ok. **Phase 1 closed in base**: 6/6 scenarios active and green, 1 fix cycle in the phase, about 4.5 h wall. Open for the owner: merge `main` (4147270) into the base; Phase 2 decisions relayed by another session (`usr_` ids; migration refuses case-insensitive clashes) await confirmation. |
