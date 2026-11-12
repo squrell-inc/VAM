@@ -114,7 +114,7 @@ approved by the owner 2026-10-29, with the five §7 defaults).
 
 ## Phases
 
-### Done phases (archived)
+### Done phases
 
 Full sections: not kept; see the progress log and git history.
 

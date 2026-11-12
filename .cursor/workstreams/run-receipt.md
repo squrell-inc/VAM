@@ -62,7 +62,7 @@ Do not re-litigate without editing this list. Copied from
 
 ## Phases
 
-### Done phases (archived)
+### Done phases
 
 Full sections: not kept; see the progress log and git history.
 

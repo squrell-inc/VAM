@@ -242,9 +242,10 @@ owner hands it over. Nobody waits on it.
 
 1. Update the tracker: tick the phase's checkboxes, mark the phase done with its
    date, add the progress row, fix `current_phase` and the row in `README.md`.
-   Then **archive it**: move the phase section and its progress-log rows to
-   `.cursor/workstreams/archive/<slug>.md` (append), and leave one row in the
-   tracker's "Done phases (archived)" table. The tracker keeps Goal, Locked
+   Then **delete it when done**: remove the phase section and its progress-log
+   rows (git history keeps them), and leave one row in the tracker's "Done
+   phases" table. When every phase is done, delete the tracker and its README
+   row. The tracker keeps Goal, Locked
    decisions, the open phases, Explicitly later and the open phases' log, so a
    session reads only what is current.
 2. This runs when the team reports a pass, which may be during a later phase.

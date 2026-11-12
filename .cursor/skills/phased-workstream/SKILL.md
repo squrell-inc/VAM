@@ -116,8 +116,9 @@ After each merge: tick the items, set the wave `[x]` with its PR, add a
 red, fix cycles, wall time. A wave whose scoreboard does not move is flagged to
 the owner. At the phase close: mark the phase done, set
 `current_phase` to the next undone phase (or `done`), update the README row, and
-move the phase section and its log rows to `.cursor/workstreams/archive/<slug>.md`,
-leaving one row in the tracker's "Done phases (archived)" table.
+delete the phase section and its log rows (git history keeps them), leaving one
+row in the tracker's "Done phases" table. A tracker whose work is all done is
+deleted, and its README row with it.
 If blocked, mark `[~]`, log the blocker, do not skip ahead.
 
 ## Rules
