@@ -7,9 +7,9 @@ current_phase: 2
 base_branch: feat/work-outside-chat
 wave_branches: e5-2/wave-N   # Phase 2 closed in base 2026-11-01
 design_docs:
-  - design/hsp-triggers.md            # Amendment 2026-10-29 §1–§8; "Phases (E5 getting-started slice)"
+  - docs/src/content/docs/hosted/triggered-runs.md
   - design/vam-apps-spaces.md         # Amendment 2026-10-29 §1–§6
-  - design/schedule-broker.md         # Phase 2
+  - docs/src/content/docs/hosted/schedule.md         # Phase 2
   - docs/src/content/docs/hosted/
 ```
 
@@ -42,7 +42,7 @@ rows 6a and 6b).
 ## Locked decisions
 
 Do not re-litigate without editing this list. Copied from
-`design/hsp-triggers.md` "Decision summary (locked)" as amended by the
+`docs/src/content/docs/hosted/triggered-runs.md` as amended by the
 2026-10-15 amendment and by §2 of the 2026-10-29 amendment (P1 and P2
 approved by the owner 2026-10-29, with the five §7 defaults).
 
@@ -99,7 +99,7 @@ approved by the owner 2026-10-29, with the five §7 defaults).
 11. **Field numbers.** `CapabilityManifest.run_request_permission = 10`;
     `InvokeRequest.run_grant = 9`.
 12. **Broker development.** Phase 1 ships a Rust test broker; Phase 2 ships
-    `vam.schedule` (`design/schedule-broker.md`) in `brokers/` (E10 decision 22).
+    `vam.schedule` (`docs/src/content/docs/hosted/schedule.md`) in `brokers/` (E10 decision 22).
 13. **Grant expiry (§7 default 2).** Always set: default 90 days, cap 365; a
     one-off schedule's grant at most fire time + 24 h; no silent renewal;
     `grant.expiring` 7 days ahead.
@@ -302,10 +302,10 @@ findings.
 
 #### Items
 
-Item ids follow the design (`hsp-triggers.md` § "E5 Phase 1"); WO-1.3 and
+Item ids follow the design (the `work-outside-chat` tracker (E5 Phase 1)); WO-1.3 and
 WO-1.6 are split so each wave fits one session, and WO-1.8 (docs) is added.
 
-- [ ] **WO-1.1 Contract.** Protos of `hsp-triggers.md` amendment §3 in
+- [ ] **WO-1.1 Contract.** Protos of `docs/src/content/docs/hosted/triggered-runs.md` in
   `hosted_services.proto` (`RunRequestPermission`, `RunGrant`,
   `GrantTarget`, `RunGrantRequest`, `PlaceChoice`, enums,
   `CallerContext.space_id/thread_id/run_source` 8–10,
@@ -325,7 +325,7 @@ WO-1.6 are split so each wave fits one session, and WO-1.8 (docs) is added.
   `hsp_registry.rs`. Accept: protos compile, field numbers as locked
   (decision 11), a manifest with `runRequestPermission` round-trips through
   `PUT /v1/hosted/brokers`, the schedule broker's `run` JSON
-  (`schedule-broker.md` "`schedule_create` arguments", with `"SAME"`,
+  (`docs/src/content/docs/hosted/schedule.md` "`schedule_create` arguments", with `"SAME"`,
   `"NEW"`, `"QUEUE"`, `null`s) decodes to `RunGrantRequest`, unknown keys
   refused. Tests: `cargo test -p vam-spec`, `cargo test -p vam-orchestrator
   hsp_registry`, `cargo check --workspace`. Turns green: none (scaffold).
@@ -711,8 +711,8 @@ Q2) waits for the owner's word.
 Q1 (relative `once {in}`) and Q4 (delay the `once` revoke on QUEUED) at their
 defaults, and **yes to wave 6 (WO-2.8, Q2)**: a `vamd` behaviour change, no
 new surface. All other open questions at their defaults.  
-**Design:** `design/schedule-broker.md`; items and scenarios
-`design/hsp-triggers.md` § "E5 Phase 2".  
+**Design:** `docs/src/content/docs/hosted/schedule.md`; items and scenarios
+the `work-outside-chat` tracker (E5 Phase 2).  
 **Exit:** the seven Phase 2 scenarios `active` and green in process mode;
 every existing scenario green unchanged (smoke, once as a non-root user before
 the release PR); `cargo test -p vam-schedule`, `cargo check --workspace`,
@@ -875,7 +875,7 @@ with E12 Phase 2.
 
 #### Items
 
-Item ids follow the design (`hsp-triggers.md` § "E5 Phase 2"); WO-2.3 is
+Item ids follow the design (the `work-outside-chat` tracker (E5 Phase 2)); WO-2.3 is
 split so each wave fits one session, and WO-2.8 is proposed (owner's word).
 
 - [x] **WO-2.1 Crate and process.** Wave 0: the stub above (workspace member,
@@ -1068,7 +1068,7 @@ Firecracker lane.
    takes only an absolute `at`; scripted mock args load at vamd start and
    cannot hold "now + 5 s". **Add `when: {once: {in: "PT5S"}}` (ISO-8601
    duration, counted from when the schedule is saved, after approval) to the
-   tool schema and amend `schedule-broker.md` "The tools"**: a design
+   tool schema and amend `docs/src/content/docs/hosted/schedule.md` "The tools"**: a design
    amendment to the broker's schema only, also good for "in two hours" asks
    (models are poor at absolute times). Alternative: a mock placeholder
    `{{now+15s}}` rendered when the model replies (no product change; flaky if
@@ -1226,14 +1226,14 @@ Report: "Phase 2 pass", or the step number with a screenshot or the error text.
   phase). The primary agent does not need them: its result path is
   **report back**, a host-written queued message `vamd` puts in the
   asking thread when a run it started for another agent ends
-  (`design/primary-agent.md` §5), built in the `primary-agent` lane.
+  (the primary-agent proposal (backlog in `.cursor/workstreams/README.md`) §5), built in the `primary-agent` lane.
   `DeliverEvent` will reuse that inbox entry.
 - Delegation by the primary agent is **not** option B: it uses a per-call
   grant minted on an approved `delegate_run` call, so locked decisions 5
   and 9 hold unchanged. It reads decision 6 as "any run a person did not
-  start" (`design/primary-agent.md` §9, P-A, approved by the owner
+  start" (the primary-agent proposal (backlog in `.cursor/workstreams/README.md`) §9, P-A, approved by the owner
   2026-11-01).
-- Notifications and `vam.notify` (`design/notifications.md`, `notifications`
+- Notifications and `vam.notify` (`docs/src/content/docs/orchestrator/notifications.md`, `notifications`
   tracker; slice 2 reuses this lane's gateway socket and credential checks and
   serves `HostedNotificationGateway` on it).
 - Apps, shared Spaces, retention, rename UI, ending name lookups.

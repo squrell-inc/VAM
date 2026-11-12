@@ -148,7 +148,7 @@ proposals for the `harness` struct.
 | File memory and notes | `PLAN.md`, `notes/`; Harness-1 and StateM show gains from externalised bookkeeping | prompt guidance only | W | `context.file_memory` |
 | Todo recitation | Re-read the todo at every turn | `todo_write` exists, no recitation | W | `context.recite_todo` |
 | Cache-aware layout | Stable prefix, append-only, breakpoints | present (host cache plan) | B | fixed |
-| Reminders | The three `SYSTEM.md` bullets (`improving-the-vam.md`) | present | B | `context.reminders` |
+| Reminders | The three `SYSTEM.md` bullets (`docs/src/content/docs/authoring/skill-manifest.md`) | present | B | `context.reminders` |
 
 ### L5 Control loop
 

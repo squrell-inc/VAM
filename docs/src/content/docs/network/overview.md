@@ -94,9 +94,6 @@ The first answer then would be an nftables set that a DNS proxy fills.
   are built for that direct mode.
 * `SessionDnsProxy` (`dns.rs`) has no caller in `vam-orchestrator`.
 
-The earlier pages for modes, TAP, NAT, DNS filtering and traffic control describe this unused
-design. They now live in `design/docs-archive/network/` and are design intent, not behaviour.
-
 ## Not built yet
 
 * Direct-route network modes, NAT rules and traffic shaping.

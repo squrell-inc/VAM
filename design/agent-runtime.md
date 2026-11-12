@@ -5,11 +5,11 @@ the placement in §VII.2, and the rule changes, with security kept first.
 Tracker: `.cursor/workstreams/agent-runtime.md`. Part IX (how the guest
 runtime, `vamd` and HSP combine, and waits and triggers) and the E5 move
 confirmed 2026-10-15. Trigger wire details live in
-[`hsp-triggers.md`](hsp-triggers.md), amended the same day.
+[`hosted/triggered-runs.md`](../docs/src/content/docs/hosted/triggered-runs.md), amended the same day.
 Proposes epic **E10 Agent runtime** (problems P12, P13), a hotfix for
 workspace identity, and where E10 sits in the epic order. Builds on
 [`agent-experience.md`](agent-experience.md) (P1–P11, E1–E8) and extends
-the park-and-resume model in [`playbooks.md`](playbooks.md).
+the park-and-resume model in [`runtime/workflow.md`](../docs/src/content/docs/runtime/workflow.md).
 
 Every finding below comes from reading `main`. None has been
 measured on a live run yet. The first issue of Phase 0 measures them
@@ -218,7 +218,7 @@ They are deferred, not dropped (§IV.4):
 
 ### II.4 What already exists to build on
 
-- **Park and resume** (`playbooks.md`): a conversation checkpoint
+- **Park and resume** (`docs/src/content/docs/runtime/workflow.md`): a conversation checkpoint
   (`HitlContinuation`: messages, loaded skills, counters, pending call)
   uploaded and digest-verified on the host; resume on a fresh VM with a
   higher lifecycle generation; secret placeholders stable per run; spend
@@ -287,7 +287,7 @@ job, not because it is attached.
 | Activation field | `PlaybookSpec.activation`: `when` (one or two sentences: "Use when the user wants to draft or open a pull request"), optional `examples` (sample requests), and `mode`: `ask` (default) or `auto`. Shown on the playbook page and in the marketplace. | A23 |
 | `start_playbook` tool | The agent sees the playbooks attached to it (default and allowed), with their `when` text, ranked like tools (§IV.1). It calls `start_playbook(urn, inputs)` when a request matches. The host checks: attached to this agent, inputs valid against `input_schema`, Cedar allows `start_playbook`. Then it binds step state to the **current task** and adds the procedure to the prompt; guided execution runs as today. | A20, A21, A22 |
 | Ask before starting | In `ask` mode the chat shows a card: "Start *Draft a PR*?" with the input form prefilled from the request. Confirm, edit, or decline. `auto` is for read-only or low-risk playbooks. A playbook with a mutable step is always `ask` when the request came from untrusted content (web, MCP, event payload). | U9 safety |
-| Explicit start | A playbook picker in the composer (and `/playbook-name`), the CLI `--playbook`, and triggers (a run grant that captures a `playbook_ref`, `hsp-triggers.md` open question 4) still start one directly, with no matching. | A21 |
+| Explicit start | A playbook picker in the composer (and `/playbook-name`), the CLI `--playbook`, and triggers (a run grant that captures a `playbook_ref`, `docs/src/content/docs/hosted/triggered-runs.md` open question 4) still start one directly, with no matching. | A21 |
 | Default playbook, redefined | `default_playbook_ref` means "this agent's main job": it ranks first, is the target for API and trigger runs that name none, and is highlighted in the composer. It no longer starts on its own in chat. | A20 |
 | One journey at a time | A task runs at most one playbook. A different matching request mid-journey asks: finish, pause, or abandon the current one (journaled). After it finishes, the thread returns to plain chat. A journey continues across follow-ups, which needs Phase 2's thread context (today a follow-up is a plain run unless the playbook is parked at a gate). | — |
 
@@ -733,7 +733,7 @@ the hook contract that already exists, and lets an org swap the backend
 `vamd` stores **no standing schedules**. It holds **deadlines for waits
 that belong to a task**, as it already does for approvals, gate timeouts,
 keep-warm and active duration (four sweepers in `manager.rs` and
-`api/mod.rs`). This keeps `hsp-triggers.md`'s rule ("brokers decide when")
+`api/mod.rs`). This keeps `docs/src/content/docs/hosted/triggered-runs.md`'s rule ("brokers decide when")
 for standing work.
 
 **Example: wait for a PR to merge, then continue**
@@ -776,7 +776,7 @@ deadline passes first → the wait's on_timeout: resume with "timed out",
   per user; deduplication by event ID; per-broker rate limits (existing
   gateway checklist).
 - **A trigger for a thread with a running or parked task** goes to its
-  inbox (steer or queue), not `BUSY`. This answers `hsp-triggers.md` open
+  inbox (steer or queue), not `BUSY`. This answers `docs/src/content/docs/hosted/triggered-runs.md` open
   question 3.
 - **Self-hosted installs behind a firewall** can't receive webhooks; the
   broker polls instead. That is the broker's concern, not `vamd`'s.
@@ -811,10 +811,10 @@ list before building:
 5. MCP descriptions capped and OAuth errors blanked as security measures
    (A3, A4). Becomes: fencing and redaction.
 6. A failed workspace commit discards the session's work (A18).
-7. `hsp-triggers.md`: "`vamd` has no ticker and no schedule table" becomes
+7. `docs/src/content/docs/hosted/triggered-runs.md`: "`vamd` has no ticker and no schedule table" becomes
    "`vamd` stores no standing schedules and holds deadlines only for waits
    that belong to a task" (§IX.4). A trigger for a busy thread goes to
-   the inbox instead of `BUSY`. Amended in `hsp-triggers.md` on 2026-10-15.
+   the inbox instead of `BUSY`. Amended in `docs/src/content/docs/hosted/triggered-runs.md` on 2026-10-15.
 
 ## Still to drill into, by phase
 

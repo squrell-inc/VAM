@@ -150,6 +150,7 @@ export default defineConfig({
 									{ label: 'Sessions and runs', slug: 'orchestrator/session' },
 									{ label: 'Catalog', slug: 'orchestrator/catalog' },
 									{ label: 'Users, keys and ownership', slug: 'orchestrator/user-isolation' },
+									{ label: 'Notifications', slug: 'orchestrator/notifications' },
 								],
 							},
 							{
@@ -157,6 +158,9 @@ export default defineConfig({
 								items: [
 									{ label: 'Overview', slug: 'hosted/overview' },
 									{ label: 'Web Broker', slug: 'hosted/web' },
+									{ label: 'Broker-Triggered Runs', slug: 'hosted/triggered-runs' },
+									{ label: 'Schedule Broker', slug: 'hosted/schedule' },
+									{ label: 'Notify Broker', slug: 'hosted/notify' },
 								],
 							},
 							{

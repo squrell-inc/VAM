@@ -506,7 +506,7 @@ Report: "Phase 1 pass", or the step number with the error text.
 **Exit:** Scenario: a gate decided from the notify surface shows that surface in the receipt.
 
 - [ ] App receipt view (built-in jig once E10 Phase 3 lands)
-- [ ] Slack short form and gate decisions from Slack: built in the `notifications` tracker, slice 2 (NT-2.x); this phase's exit is met by `gate-decided-from-slack-names-slack-on-the-receipt` (owner, 2026-11-02; `design/notifications.md`)
+- [ ] Slack short form and gate decisions from Slack: built in the `notifications` tracker, slice 2 (NT-2.x); this phase's exit is met by `gate-decided-from-slack-names-slack-on-the-receipt` (owner, 2026-11-02; `docs/src/content/docs/orchestrator/notifications.md`)
 
 **Coordination point with notifications (2026-11-02).** Phase 2's Slack items
 (Slack short form, gate decisions from Slack with surface `slack`) now live in

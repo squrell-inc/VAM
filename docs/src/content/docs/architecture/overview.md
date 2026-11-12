@@ -107,7 +107,7 @@ release-gate: PASS
 | `scripts/e2e/` | the runner, the release gate, the lane's asset script |
 | `examples/` | worked agents, skills and brokers |
 | `docs/` | this site (Astro Starlight) |
-| `design/` | design notes; `design/docs-archive/` holds retired pages that were design intent, not behaviour |
+| `design/` | design proposals for open or in-progress work |
 | `third_party/` | `ext4-view`, vendored with one patch |
 
 ## Not built

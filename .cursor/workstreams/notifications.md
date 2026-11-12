@@ -7,9 +7,9 @@ current_phase: 2
 base_branch: feat/notifications   # the VAM app: feature/notifications
 lane: E12 (row 7 of the 0.1.0 launch scope)
 design_docs:
-  - design/notifications.md
+  - docs/src/content/docs/orchestrator/notifications.md
   - design/run-receipt.md          # decision 4, §1.1 (decision provenance)
-  - design/primary-agent.md        # §5, §14.2 (consumers of slice 1)
+  - the primary-agent proposal (backlog in `.cursor/workstreams/README.md`)        # §5, §14.2 (consumers of slice 1)
 ```
 
 ## Goal
@@ -36,13 +36,13 @@ active and green and row 7 of the 0.1.0 launch scope is met.
 - Push registrations, email, digests: slice 3.
 - An org-wide approvals inbox (E3), a notification as a steer into a thread,
   any agent acting on a notification.
-- Building the primary agent (`design/primary-agent.md`); slice 1 ships the
+- Building the primary agent (the primary-agent proposal (backlog in `.cursor/workstreams/README.md`)); slice 1 ships the
   `report.arrived` / `delegation.*` kinds and the function it will call.
 
 ## Locked decisions
 
 Do not re-litigate without editing this list. Decisions 1 to 9 copied from
-`design/notifications.md` §8, **approved 2026-11-02** by the owner.
+`docs/src/content/docs/orchestrator/notifications.md`, **approved 2026-11-02** by the owner.
 
 1. **One record, derived.** `vamd` writes a notification at the moment it
    records the underlying fact, in the same transaction where one exists, or
@@ -110,7 +110,7 @@ list in the app and the CLI, and the primary agent can read.
 **Exit:** a run in another thread parks on an approval; the user's list and
 badge show it within one poll; deciding it from the CLI clears it with surface
 `cli`; an agent with `notifications_list` reads it and the approval stays
-pending. Eight scenarios (`design/notifications.md` §6) active and green; the two
+pending. Eight scenarios (`docs/src/content/docs/orchestrator/notifications.md`) active and green; the two
 benchmark lines (P2 pending decisions listed, P7 learned within a minute)
 recorded on the mock.
 
@@ -1317,7 +1317,7 @@ Report: pass, or the step number with a screenshot or the error text.
 **Depends on:** Phase 2; a VAM app mobile or web shell.  
 **Plan:** not drafted
 
-- [ ] NT-3.x per `design/notifications.md` §6 slice 3 and §9.7
+- [ ] NT-3.x per the `notifications` tracker slice 3
 
 ## Explicitly later
 
@@ -1348,7 +1348,7 @@ Report: pass, or the step number with a screenshot or the error text.
 | 2026-11-02 | 1 | **Phase 1 closed in base.** 7/7 process scenarios green; benchmark P2 100% (49/49), P7 100% within 60 s (46/46), median to act 1 s on the mock; team checklist written. Release PRs (vam first, then the VAM app) wait on the owner's word. |
 | 2026-11-02 | 1 W3 | **Wave 3 merged** (merge commit; Sonnet 5.5 low). CLI `vam notifications [--unread] [--kind] [--all] [--json]`, `show <id>`, `read <id>\|--all` (one page plus a "more" hint; decision rows print `vam approve decide <id>`). Tool `notifications_list` through the existing `ExecuteHostTool` (no proto change; `reserved_builtin_tool_names` untouched, no digest moved): READ_ONLY, run owner and source from the leased run, refused when `runs.source` is set, host fields only (no `agentText`), 4 KiB cap, never marks read or shown; guest change is the definition only (`vam-runtime/src/skills.rs`). Mock-fixture fix (orchestrator): two mock rules `afterTool` → `toolName`; `when`/`then` untouched. Fix cycle 1 (orchestrator review): opt-in held only under DENY defaults; now offered and executable only with an explicit `builtin:notifications_list` allow rule whatever the default (session rows, catalog, call path), tested under ALLOW, BY_SIDE_EFFECT, ASK, DENY. Process note: the plan-only agent's worktree was auto-removed, so its build turn first checked out in the main checkout; moved to its own worktree before any edit. Orchestrator re-run: smoke 89 pass, 0 fail, leftovers ok (a first run overlapped the agent's own `--full` and failed the leftovers check only); `--full` only the known root-only `hsp_uds` failure. Scoreboard: 1 green (`agent-reads-what-waits-without-acting`; all 7 process scenarios green), 0 red, 1 fix cycle, about 2.5 h. Disk 22 → 21 GB. |
 | 2026-11-02 | 1 W2 | **Wave 2 merged** (merge commit; Sonnet 5.5 medium). `run.finished` written inside `insert_run_receipt` in the receipt's transaction (gather/build untouched); a 60 s no-keys pass in `issue_missing_receipts` records without a digest, filled when the receipt lands; one record per run. Rule `run_finished_wanted`: trigger (`broker:`), waited (published approval row) or failed; excluded: user stop (`reason: stopped`, incl. owner-stopped trigger runs), `broker:vam.delegate` and `report:` sources (named constants). NT-1.4 `record_report`/`record_delegation_end` (no caller). Accepted extra: the runner marks earlier records read before each scenario (`quiesce_notifications`), since finished runs now leave records in the shared vamd. Orchestrator resolved a tracker-row conflict on the PR branch, then re-ran: smoke 88 pass, 1 red right reason, 0 fail; `--full` only the known root-only `hsp_uds` failure. Scoreboard: 1 green (`background-run-end-notifies-and-chat-turn-does-not`; 6 of 7 process green), 1 red (right reason), 0 fix cycles, about 1.5 h. Disk 22 GB before and after. |
-| 2026-11-02 | — | Tracker opened from `design/notifications.md` (approved 2026-11-02); base `feat/notifications` cut from `main` |
+| 2026-11-02 | — | Tracker opened from `docs/src/content/docs/orchestrator/notifications.md` (approved 2026-11-02); base `feat/notifications` cut from `main` |
 | 2026-11-02 | 1 W1 | **Wave 1 merged** (merge commit; Sonnet 5.5 medium). `notifications.rs` (table, `record()`/`resolve()`/`resolve_for_run()`, kinds as data, prune in the 60 s sweeper, one-time scope migration for keys with `approvals:write`), `api/notifications.rs` (list `pageSize`/`pageToken`, summary with etag/304, get with `agentText` and the approval, read, bulk read, acted with 409 `decide_required`; surface only from `X-Vam-Surface`). Producers in the same transaction: `create_approval` (reached by a parked run through `apply_guest_task_outcome`, `api/mod.rs:4520`), `insert_gate_approval`; resolution in decide (acted + surface + user), expire, stop, gate timeout, skipped gate (`superseded`); reauth parks get no record. Accepted extra: `update_run_state` closes a run's open decision records as `run_ended` on terminal state (same transaction). Fix cycle 1 (owner-approved): runner scopes `count` without `run:` to the scenario's runs; expectFail moved for the two later-wave scenarios (`then.0`, `when.4`, class product; a notification-wait timeout now reads as product); whole-invocation e2e budget 10m → 15m (smoke scenario time 465 s → 525 s). Orchestrator re-run: smoke 87 pass, 2 red right reason, 0 fail; `--full` only the known root-only `hsp_uds` failure. Scoreboard: 5 green (`approval-in-another-thread-reaches-the-list`, `decision-anywhere-clears-the-notification`, `gate-left-open-shows-until-it-times-out`, `restarted-approval-keeps-one-notification`, `notifications-are-never-shown-to-another-user`), 2 red (right reason), 1 fix cycle, about 3 h. Disk 22 GB before and after. |
 | 2026-11-02 | 1 W0 | **Wave 0 merged** (merge commit; Sonnet 5.5 low). Eight scenarios (7 process `pending`, red right reason, class `product`, 404 on `/v1/notifications`: `approval-in-another-thread-reaches-the-list` at `when.4`, the other six at `when.2`; `badge-counts-what-waits-on-you` `needs: ui`, skipped). World pieces `playbook-with-timed-gate`, `agent-reads-notifications`; runner module `crates/vam-e2e/src/notifications.rs` (steps `notifications`, `notification-summary`, `notification-mark` get/read/acted, `via: cli\|app`; probes `bench.notify.pendingListed` 0/7, `shownWithin60s`/`medianToActSecs` unmeasured). Shapes W1 must match (README): list `{records, pagination.nextPageToken}`, `pageSize`/`pageToken`; flat summary `{action, warn, unread}`; 409 body has `decide_required`; camelCase fields. W3 note: the triggered-run refusal is asserted as `tool.failed`. Spec change (owner, B): `restarted-approval-keeps-one-notification`. Orchestrator re-run at the head: `--full` all workspace tests pass except the known root-only `hsp_uds::uds_socket_acl_deny_fails_fast`; `--fast` smoke 82 pass, 7 red right reason; 7 named red right reason; `vam-e2e check` 99/31. Actions fast jobs started, not awaited (merged on local proof). Scoreboard: 0 green, 7 red (right reason), 0 fix cycles, about 1.5 h. Disk 30 → 22 GB. |
 | 2026-11-02 | 1 | **Spec change (owner, option B):** `retried-approval-keeps-one-notification` becomes `restarted-approval-keeps-one-notification`; dedupe stays one record per approval (run-scoped subject), no cross-run grouping or reopen. |

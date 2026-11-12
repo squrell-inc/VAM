@@ -32,11 +32,12 @@ The broker serves `HostedBroker` (`hosted_services.proto:280-287`) with seven ca
 
 A broker that may ask `vamd` to start runs declares `run_request_permission` in its manifest (`hosted_services.proto:98`): the `grant_tools` whose `Invoke` may carry a `RunGrant`, the `loop_guarded_tools` that are refused inside a triggered run, a receipt `surface` and request limits. A limit left at 0 means the node default (for example 50 active grants per user, `vam-spec/src/validation.rs:661`), never unlimited. The operator approves the declaration with the same subset gate as secrets and egress domains.
 
-`vamd` serves `HostedTriggerGateway` (`hosted_services.proto:364`) to such a broker on a socket of its own, with `RequestRunTrigger` and `RevokeRunGrant`. The run starts as the user who approved the grant. `CallerContext` carries `space_id`, `thread_id` and `run_source` (`"broker:<id>"` for a triggered run). Proved by `trigger-starts-a-run-as-the-grant-owner`, `grant-token-is-refused-over-http` and `revoked-grant-starts-nothing`. Design: `design/hsp-triggers.md`.
+`vamd` serves `HostedTriggerGateway` (`hosted_services.proto:364`) to such a broker on a socket of its own, with `RequestRunTrigger` and `RevokeRunGrant`. The run starts as the user who approved the grant. `CallerContext` carries `space_id`, `thread_id` and `run_source` (`"broker:<id>"` for a triggered run). Proved by `trigger-starts-a-run-as-the-grant-owner`, `grant-token-is-refused-over-http` and `revoked-grant-starts-nothing`. See [Broker-Triggered Runs](/hosted/triggered-runs/) for grants, the gateway and what `vamd` checks on a fire.
 
 ## Brokers that exist
 
 * `vam.web` gives agents `web_search` and `web_fetch`. See [Web Broker](/hosted/web/).
+* `vam.schedule` starts runs at a set time or on a repeat. See [Schedule Broker](/hosted/schedule/).
 * Two TypeScript examples show how to write a broker: `examples/hsp-echo-ts` and `examples/hsp-files-ts`. They have a README and no test.
 
 ## Planned
@@ -45,5 +46,3 @@ These are design only. No code runs them.
 
 * First-party `vam.files` and `vam.rag` brokers.
 * A vsock transport for third party brokers.
-
-Earlier design notes on these live in `design/docs-archive/hosted/`.

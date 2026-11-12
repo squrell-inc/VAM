@@ -10,7 +10,7 @@ base: vam feat/e2e-scenarios, the VAM app feat/e2e-scenarios (both cut from main
 orchestrator: cloud session (owner, 2026-10-18), not a local machine
 ```
 
-Replaces the paused journeys harness (`design/e2e-journeys.md`). Nothing from it is resumed; what is reused is named
+Replaces the paused journeys harness (`the earlier journeys harness (removed)`). Nothing from it is resumed; what is reused is named
 in Phase 1.
 
 ## Goal
