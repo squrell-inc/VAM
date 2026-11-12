@@ -81,7 +81,7 @@ packet filter for egress. Reopen the question as its own design if one of three 
 
 * a direct-route network mode for traffic the proxy cannot terminate;
 * the userspace proxy becoming the bottleneck at many VMs per host;
-* a buyer requiring kernel-enforced egress as an attestable control.
+* kernel-enforced egress being required as an attestable control.
 
 The first answer then would be an nftables set that a DNS proxy fills.
 

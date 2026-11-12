@@ -7,7 +7,7 @@ current_phase: 2 (Coverage: approvals, gates and chat; all waves merged; release
 design_docs:
   - design/scenarios.md
 base: vam feat/e2e-scenarios, the VAM app feat/e2e-scenarios (both cut from main 2026-10-18)
-orchestrator: cloud session (owner, 2026-10-18), not the Mac
+orchestrator: cloud session (owner, 2026-10-18), not a local machine
 ```
 
 Replaces the paused journeys harness (`design/e2e-journeys.md`). Nothing from it is resumed; what is reused is named
@@ -19,7 +19,7 @@ Every phase of every epic is planned and proven through **scenarios**: runnable
 given/when/then flows named by behaviour, written first, failing for the right
 reason, then turned green by the build. Most scenarios run on every PR and in
 cloud sessions (process-mode guest, scripted mock); only what needs a real
-microVM runs on the Mac. A session that runs them gets one command, a time
+microVM runs on a KVM host. A session that runs them gets one command, a time
 budget and a `brief.md` per failure, and stops when nothing moves. Done when
 E10 Phase 2 is planned and closed with this flow (Phase 1 exit) and the old
 coverage is rebuilt (later phases).
@@ -783,7 +783,7 @@ owner's word.
 - Scenarios: of the six new, five are `active` and green in CI on `feat/e2e-scenarios`; the catalog is 11 (`--smoke` 10 pass + 1 red right reason, 63 s locally, CI `scenarios (smoke)` green on). `parked-approval-survives-a-restart` is `pending` (`expectFail then.1 product`) on the product bug in the handoff; flip it to `active` with the fix.
 - Spec change (owner, 2026-10-21): a remembered Always deny withholds the tool from the model, so `always-allow-and-always-deny-are-remembered` asserts no prompt and the file intact instead of a DENY event.
 - Taken as intended (owner informed): a run with no version by the agent's owner follows the owner's draft once one exists; the admin key cannot read a member's runs or files.
-- No `needs: firecracker` scenario touched; no Mac run needed.
+- No `needs: firecracker` scenario touched; no local microVM run needed.
 
 **Team checklist** (team instance, app + CLI, about 10 minutes)
 
@@ -820,7 +820,7 @@ extended, never changed.
   CLI agrees with the API, workspace files.
 - **Benchmark fold** (`scripts/bench` into the runner, pass^k with `--real`):
   after E10 Phase 2 closes, because `scripts/bench` is E10's.
-- **UI layer:** 10–15 the VAM app UI scenarios, Linux CI if possible, else the Mac.
+- **UI layer:** 10–15 the VAM app UI scenarios, Linux CI if possible, else a macOS host.
 - **Firecracker lane and selection:** `needs: firecracker` scenarios on Lima
   (egress, isolation, checkpoints), `--changed` from guards, PR guard check.
 

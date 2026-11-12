@@ -131,7 +131,7 @@ Do not re-litigate without editing this list.
 
 ### Done phases (archived)
 
-Full sections and their progress-log rows: [archive/agent-experience.md](archive/agent-experience.md).
+Earlier phase detail is in git history.
 
 | Phase | Name | Done |
 |---|---|---|

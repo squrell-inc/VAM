@@ -8,7 +8,7 @@ E7 and later epics open their own trackers from their planning session.
 A way of planning VAM from the problems teams face when adopting agents,
 rather than from the parts VAM already has. This document does two things:
 
-1. **Part I** lists the market problems VAM exists to solve. Each one names
+1. **Part I** lists the problems VAM exists to solve. Each one names
    who feels it, what VAM already has, and what is missing. Every later epic
    and story must cite the problems it serves. A story that serves none of
    them waits.
@@ -60,7 +60,7 @@ reflect `main`. Each problem has at least one measured line in
 `design/benchmark.md` §1; a phase that serves a problem reports that line
 before and after.
 
-| # | Problem, as a customer would say it | Who feels it |
+| # | Problem, as a user would say it | Who feels it |
 |---|---|---|
 | P1 | "We can't let an agent touch real systems." | Security, platform teams |
 | P2 | "We don't know what our agents did, or who allowed it." | Security, compliance, managers |
@@ -212,8 +212,7 @@ cost and pass^k per agent version, per model, on the agent page, fed by
 receipts), then E8 Phases 2–3, E7 Phase 1, E10 Phases 5–6, E11 Jig
 Phases 1–3, E2, the rest of E7, E3, the rest of E5, the rest of E4, E6.
 
-Why this order (market evaluation, 2026-10-19): the thing VAM can sell that
-no managed runtime offers is a governed run, on the customer's own hardware
+Why this order: the goal is a governed run, on the operator's own hardware
 and model, that comes back with a verifiable receipt. The receipt needs
 host-tracked playbooks (built), triggers and approvals where people work
 (E5), effects that are never repeated (E10 Phase 4), and outcome numbers
@@ -236,7 +235,7 @@ phases that do not wait for an epic boundary:
   Phase 3 (honest docs, clippy gate) before 0.1.0.
 
 **What 0.1.0 ships** and what is cut from it, with the decision rubric
-every proposal uses from now on: `design/launch-0.1.0.md`.
+every proposal uses from now on: `.cursor/workstreams/phase-playbook.md` §11.1.
 
 **Order of 2026-10-15 (superseded):** H0, H1, E1 Phase 7, E10 Phases 0–3,
 E8 Phases 2–3, E7 Phase 1, E10 Phases 4–6, E5's getting-started slice, E11
@@ -278,7 +277,7 @@ sets the order in which they are pulled.
   benchmark proves outcomes with real ones; a phase needs both.
 - **Every proposal is scored before it is planned (added 2026-10-21).**
   Waves, items, backlog rows and new designs carry a one-line decision
-  from the rubric in `launch-0.1.0.md` §3: NOW, SLICE, BACKLOG or CUT,
+  from the rubric in `phase-playbook.md` §11.1: NOW, SLICE, BACKLOG or CUT,
   with the proof and cost scores and the line it moves.
 - **The repo is the source of truth.** Trackers hold the work queue; issue
   IDs are local to each tracker.

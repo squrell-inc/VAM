@@ -14,50 +14,16 @@ thread ids, amendment 2026-10-29). Phases: `design/hsp-triggers.md` §
 **Context.** P7: "real work doesn't happen in a chat window"
 (`design/agent-experience.md` P7). The first trigger a user asks for is a
 clock: "summarise my Jira board every day at 6 PM". The launch demo is a
-scheduled `close-prep` run (`design/launch-0.1.0.md` §1).
+scheduled `close-prep` run (0.1.0 launch scope).
 
-A prototype exists on `origin/feat/scheduler-broker` (tip 647
-commits behind `main`, 14 ahead, criss-cross merge base): a TypeScript broker
-under `examples/vam-scheduler-ts` (`vam.scheduler`, Node, `better-sqlite3`,
-`croner`). Its calendar logic is sound and has 59 tests. Its one
-load-bearing choice is not:
-
-- `schedule_create` declares a required secret `vam_api_credential`
-  (`src/tools.ts:75-76`), which the manifest maps to the vault key
-  `vam.scheduler.credential` (`manifest.json:4-17`). The operator runbook has
-  the operator mint a `runs:write` API key owned by the user and log in **as
-  the user, with their password**, to put that key in the user's vault
-  (`ONBOARDING.md:18-76`).
-- On every create the broker copies that key out of the Invoke and stores it
-  **in plain text**, one per owner, in its own SQLite file
-  (`src/create.ts:316-325`, table `owner_credentials`, `src/schema.ts:43-47`),
-  outside `vamd`'s list and revoke path, forever (deleted only with the
-  owner's last job, `src/write.ts:150`).
-- Because vault resolution falls back to org scope
-  (`crates/vam-orchestrator/src/caller_context.rs:190-193`), it then calls
-  `GET /v1/me` with the key to check it belongs to the caller
-  (`src/create.ts:304-310`, `src/me.ts:44-82`).
-- At fire time it calls `POST /v1/runs` over HTTP with the stored key
-  (`src/tick.ts:57-85, 297-303`). On `main` a run for another thread on a busy
-  workspace is now queued (`crates/vam-orchestrator/src/api/inbox.rs:388-410`),
-  so its "busy" branch (`src/tick.ts:112-142`) is dead.
-- The branch also adds run-delegation bearers to `vamd` (every
-  `create_run` mints a `vam_rd_…` bearer that can mint 7-day API keys) with a
-  non-CSPRNG secret (`run_delegation.rs:37-48`). The broker never uses them.
-
-That is exactly what `design/hsp-triggers.md` forbids ("Brokers holding a
-`runs:write` API key and calling `POST /v1/runs`", "Brokers asserting
-`user_id`").
-
-**Decision (owner, 2026-10-29): redesign, do not rescue.** `vam.schedule` is
-a new Rust crate, `brokers/vam-schedule`, built on run grants and the trigger
-gateway. It ports the prototype's calendar, idempotency derivation, tool
-shapes, ownership rules and tests, and drops its credential path entirely.
+**Decision (owner, 2026-10-29):** `vam.schedule` is a new Rust crate,
+`brokers/vam-schedule`, built on run grants and the trigger gateway. It
+replaces an earlier TypeScript prototype; no user credential is stored.
 
 > The broker decides **when**. `vamd` holds **who, what and where**, bound in
 > a grant the user approved.
 
-## Audience and positioning
+## Audience
 
 People who use an agent and want it to work while they are away: "every
 weekday at 9 send me the overnight PR summary", "at 17:00 on the last day of
@@ -86,8 +52,7 @@ task.
   it in a broker (agent-runtime locked decision 15; decision 16: `vamd`
   stores no standing schedules).
 - The grant is listed, revocable, expiring, refused over HTTP, bound to one
-  broker, one agent, one Space, one thread and one approved request. The
-  prototype's API key was none of these.
+  broker, one agent, one Space, one thread and one approved request.
 - Rust under `brokers/` is the shape `vam.web` already set
   (`brokers/vam-web/Cargo.toml`, `src/serve.rs`), with one build, one test
   runner, one supply chain.
@@ -100,10 +65,10 @@ task.
 - A schedule editor in the app. The app shows grants and lets the user revoke
   (Phase 2 item WO-2.6); editing is through the agent.
 - Schedules owned by a team or a shared App (Apps are cut from 0.1.0,
-  `design/launch-0.1.0.md` §2).
+  the 0.1.0 launch plan).
 - Sub-minute schedules, or cron with seconds or years fields.
-- Anything from the prototype on the `vamd` side (run-delegation bearers,
-  `POST /v1/runs/{id}/keys`, caller-asserted `RunOrigin`).
+- Run-delegation bearers, `POST /v1/runs/{id}/keys` and a caller-asserted
+  `RunOrigin` on the `vamd` side.
 
 ## Decision summary (proposed)
 
@@ -164,10 +129,9 @@ sequenceDiagram
 
 ## The tools
 
-Names use `_` like `web_search` and the prototype (`src/tools.ts:9-16`).
-Schemas reject unknown keys and any identity-shaped key (`user`, `owner`,
-`user_id`, `agent_urn` at top level), as the prototype does
-(`src/create.ts:13-23, 56-65`). Errors are typed (`INVALID_ARGUMENT`,
+Names use `_` like `web_search`. Schemas reject unknown keys and any
+identity-shaped key (`user`, `owner`, `user_id`, `agent_urn` at top level).
+Errors are typed (`INVALID_ARGUMENT`,
 `NOT_FOUND`, `FAILED_PRECONDITION`) so the model can repair a call.
 
 | Tool | Side effect | Default decision | Grant | Loop-guarded | Does |
@@ -212,10 +176,10 @@ schedule ("stop once the board is empty").
 `when` is one of:
 - `{"once": {"at": "2026-11-02T08:00", "timezone": "Europe/Berlin"}}`: a wall
   time in an IANA zone, or an instant with an offset (`…Z`, `…+01:00`),
-  parsed as the prototype does (`src/next_fire.ts:50-93`). Must be in the
+  parsed strictly. Must be in the
   future (a past time is `INVALID_ARGUMENT`, not "fire now").
 - `{"cron": {"expression": "<5 fields>", "timezone": "<IANA>"}}`: five-field
-  cron in the zone (`src/next_fire.ts:95-120`). The broker refuses an
+  cron in the zone. The broker refuses an
   expression whose next two fires are closer than the operator floor
   (`--min-interval`, default 15 minutes).
 
@@ -245,9 +209,8 @@ with a typed reason the agent can repair):
 - At most `max_active_grants_per_user` live grants per owner and broker
   (default 50).
 
-Why `NEW` means one dedicated place, not one per fire: the prototype gave
-every fire of a `newWorkspace` job its own workspace and every fire into a
-reused workspace its own thread (`src/tick.ts:242-254`). That leaves a
+Why `NEW` means one dedicated place, not one per fire: a workspace per fire
+of a new-workspace job, or a thread per fire into a reused workspace, leaves a
 workspace or a thread per day with no cleanup (retention is cut from 0.1.0),
 and loses "yesterday's summary" as context. One Space or thread per schedule
 keeps history where the user expects it; compaction (E10 Phase 2) keeps it
@@ -272,8 +235,8 @@ reading of the args. The grant token is never returned to the agent.
 ## The store
 
 SQLite in the broker's `--state-dir` (file mode 0600, directory 0700), one
-process per store (an exclusive `flock` on `vam-schedule.lock`; the prototype
-double-fires with two processes, `src/tick.ts:1-8`).
+process per store (an exclusive `flock` on `vam-schedule.lock`; two processes
+would double-fire).
 
 ```sql
 CREATE TABLE schedules (
@@ -343,16 +306,15 @@ broker's own gateway socket, by this broker, for one agent, one Space, one
 thread and the one request the user approved; it expires and the user can
 revoke it (`design/hsp-triggers.md` amendment §4). Encrypting it with a key
 kept beside it would add nothing. The file mode and "never logged" rules are
-what is required. The prototype's key, by contrast, opened all of `POST
-/v1/runs` for the user, over HTTP, from anywhere.
+what is required.
 
-**Ownership** (ported from `src/read.ts` and `src/write.ts`):
+**Ownership**:
 - Reads (`list`, `get`): rows where `owner_user_id = caller.user_id` and
   (`creator_agent_urn = caller.agent_urn` or `visibility = 'user'`). Owner
   first: the owner filter is in every query, before any other filter.
   Another owner's id answers `NOT_FOUND`, never `PERMISSION_DENIED`.
-- Writes (`update`, `delete`, `run_now`): owner **and** creating agent
-  (`src/write.ts:12`, `CREATOR_MATCH`). Visibility never grants a write.
+- Writes (`update`, `delete`, `run_now`): owner **and** creating agent.
+  Visibility never grants a write.
 - `CallerContext` is host-stamped; the manifest requires `user_id` and
   `agent` (`IdentityRequirement`, `proto/vam/v1/hosted_services.proto:77-83`),
   so an Invoke without them never reaches the broker
@@ -362,14 +324,14 @@ what is required. The prototype's key, by contrast, opened all of `POST
 
 - **Time is UTC instants.** `next_fire_at` is computed from the local wall
   time in the schedule's IANA zone (`chrono-tz`) and stored as UTC. Cron uses
-  the Rust `croner` crate (the same library family as the prototype); both
+  the Rust `croner` crate; both
   are new workspace dependencies, pinned, licence and release age checked by
   the wave.
-- **DST.** The ported tests pin behaviour across both transitions for a
+- **DST.** The tests pin behaviour across both transitions for a
   02:30 daily schedule in `Europe/Berlin` and `America/New_York`: on the
   spring-forward day it fires once, at the first valid instant after the
   gap; on the fall-back day it fires once, at the first 02:30. If the Rust
-  crate differs from the prototype, the tests decide and this section is
+  crate's behaviour differs, the tests decide and this section is
   amended.
 - **One loop.** It sleeps until the earliest `next_fire_at` (capped at 30 s,
   and woken early by any create, update or delete), selects due rows
@@ -385,8 +347,7 @@ what is required. The prototype's key, by contrast, opened all of `POST
     older missed times are recorded as one `missed` row with
     `missed_count`. Grace: `once` 24 h; cron half the interval, capped at
     1 h.
-  - `catch_up = skip`: record `missed`, advance to the next future time
-    (the prototype's `skipMissedFires`, `src/tick.ts:195-240`).
+  - `catch_up = skip`: record `missed`, advance to the next future time.
   - Never more than one catch-up fire per schedule.
 - **`once`**: after an accepted, queued or duplicate fire, the schedule is
   `completed` and its grant revoked. After a terminal refusal it is
@@ -406,8 +367,7 @@ what is required. The prototype's key, by contrast, opened all of `POST
 | `kind` | `FIRE_KIND_SCHEDULED` or `FIRE_KIND_RUN_NOW` |
 | `not_after` | the next nominal time (cron), or `fire_at` + 24 h (once, run now): a queued fire that has not started by then ends `EXPIRED` |
 
-The key is the prototype's derivation (`sha256(job_id "\n" fire_at)`,
-`src/tick.ts:57-59`) with a namespace and the kind added, so a run-now and a
+The key is `sha256(job_id "\n" fire_at)` with a namespace and the kind added, so a run-now and a
 scheduled fire at the same second never collide. For `run_now`, `fire_at` is
 the Invoke time truncated to the second and the key also hashes the calling
 run id, so a retried tool call dedupes and two deliberate presses do not.
@@ -481,27 +441,6 @@ the grant at its first fire.
 ```
 
 No secrets and no egress: the broker talks only to `vamd`.
-
-## Ported from the prototype, and dropped
-
-| Prototype (`origin/feat/scheduler-broker`) | Here |
-| --- | --- |
-| `src/next_fire.ts` once/cron, IANA zone, ISO wall time | **Ported** to Rust with its tests, plus DST tests |
-| `idempotencyKeyFor(job_id, fire_at)`, `src/tick.ts:57-59` | **Ported**, namespaced, kind added |
-| Tool schemas and argument hygiene, `src/tools.ts`, `src/create.ts:13-65` | **Ported**: same names; `pause`/`resume` folded into `update {enabled}`; `run` object added; `workspace`/`newWorkspace` replaced by `run.workspace` |
-| Owner-first reads, creator-only writes, visibility, `src/read.ts`, `src/write.ts` | **Ported** with their tests |
-| `skipMissedFires`, `src/tick.ts:195-240` | **Ported** as `catch_up = skip`; `latest` is new and the default |
-| 5 s ticker, `src/tick.ts:15, 377-416` | **Replaced** by sleep-until-next-due with a 30 s cap |
-| 59 `node:test` cases | **Ported** where the behaviour survives (create, read, write, next-fire, tick outcomes); the `me` and credential tests are dropped |
-| `owner_credentials` table, `src/schema.ts:43-47`, `src/create.ts:316-325`, `src/tick.ts:297-303`, `src/write.ts:150` | **Dropped**. No user credential in the broker |
-| `requiredSecrets: [vam_api_credential]`, vault key `vam.scheduler.credential`, `manifest.json:4-17` | **Dropped** |
-| `GET /v1/me` identity check, `src/me.ts`, `src/create.ts:304-310` | **Dropped**. Identity is the grant's |
-| `httpRunClient` (`POST /v1/runs`), HTTP status mapping, `src/tick.ts:61-142` | **Dropped**; gateway client and typed outcomes |
-| Per-fire workspace / per-fire thread, `src/tick.ts:242-254` | **Dropped**; one dedicated Space or thread per schedule |
-| `ONBOARDING.md` (operator logs in as the user with their password) | **Dropped** |
-| Run-delegation bearers, `POST /v1/runs/{id}/keys`, `run_delegations` table; non-CSPRNG secret `run_delegation.rs:37-48` | **Dropped**, not merged |
-| Caller-asserted `RunOrigin` (`RunStatus.origin = 19`, collides with `waiting_for = 19`) | **Dropped**; host-stamped `RunStatus.source = 22` instead |
-| `examples/vam-scheduler-ts`, `scripts/lima-hsp-scheduler-ts.sh`, stray `state.db`, root `package.json` | **Not merged.** The branch stays as history; WO-2.7 marks it superseded |
 
 ## Phases
 

@@ -9,12 +9,9 @@ is the fact. Nothing in a tracker is edited by this doc; proposed
 amendments are in the Appendix. Tracker slug proposed: `notifications`,
 item prefix `NT`.
 
-The owner, 2026-11-01: "we have to build a common notification system which
-can produce different types of events and then can be used to notify the
-user on different devices that the user might have, from mobile to desktop
-app or to the web. There should be a dedicated notification system which
-can tell about this, and similarly the other systems can also read from
-this notification module."
+Goal: one common notification system that produces typed events, notifies
+the user on any of their devices (mobile, desktop app, web), and that other
+systems can also read from.
 
 The case that motivated it: an asked run parks on a tool approval while the
 user is talking to the primary agent in another thread, and nobody tells
@@ -57,7 +54,7 @@ where each decision was made.
   approvals and results where people already work (Slack, email)." The
   benchmark line (`design/benchmark.md:95`) counts "tasks started by a
   trigger and decided from a notify surface that complete".
-- **The launch demo** (`design/launch-0.1.0.md` §1): "a gate decided from
+- **The launch demo** (0.1.0 launch scope): "a gate decided from
   Slack a day later". Row 7 of §4 is this module.
 - **The primary agent** (`design/primary-agent.md` §14.2): the primary must
   answer "anything waiting on me?" and the user must learn that an asked run
@@ -579,13 +576,13 @@ collects the day's `info` records.
 | Item | Decide |
 | --- | --- |
 | NT-3.1 Push registration API and table | `Decide: BACKLOG — proof 1 (no 0.1.0 line), cost 1; trigger: a mobile or web shell exists` |
-| NT-3.2 APNs, FCM, Web Push adapters in `vam.notify` | `Decide: CUT for 0.1.0 — proof 1, cost 3; number that changes it: a design partner on mobile` |
+| NT-3.2 APNs, FCM, Web Push adapters in `vam.notify` | `Decide: CUT for 0.1.0 — proof 1, cost 3; number that changes it: a need for mobile push` |
 | NT-3.3 Email adapter (SMTP, link only) | `Decide: BACKLOG — proof 1, cost 2` |
 | NT-3.4 Digests | `Decide: BACKLOG — proof 1, cost 1` |
 
 ## 7. Placement
 
-Row 7 of `design/launch-0.1.0.md` §4 is this module, slices 1 and 2. It is
+Row 7 of the 0.1.0 launch plan is this module, slices 1 and 2. It is
 **blocked by** E5 Phase 1 (row 6a: the gateway socket, credential checks,
 Space and thread ids), which is on `main`. It **unblocks**: primary agent
 Phase 1 (row 16, by slice 1 only); the live demo's Slack gate (with row 6b,
@@ -788,7 +785,7 @@ under users and roles, not part of this module.
 
 > | **2 Surfaces** | The same receipt everywhere; every decision names its surface | App receipt view (built-in jig); the run-finished notification links the receipt, delivered by `vam.notify` (`design/notifications.md` slices 1 and 2); gate decisions from Slack recorded with surface `slack` through the gateway, never from a client header | Phase 1, E5 Phase 1, notifications slice 1 | Scenario: a gate decided from Slack shows surface `slack` in the receipt |
 
-**`design/launch-0.1.0.md` §4 row 7** (not applied), Phase column:
+**the 0.1.0 launch scope** (not applied), Phase column:
 
 > **E12 Phase 2: notifications, one record, many surfaces** (`design/notifications.md`, P-D): slice 1, the record, the list in the app and CLI, the `notifications_list` tool; slice 2, `vam.notify` with Slack as the first channel, deciding from Slack with surface `slack`, preferences; plus the app receipt view. Unblocks: the live demo (with 6b), row 16 (slice 1), B2 parked cost (slice 2).
 

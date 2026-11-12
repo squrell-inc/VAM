@@ -6,7 +6,6 @@ slug: machine-base
 current_phase: 1
 design_docs:
   - design/agent-experience.md   # Part III, §III.1 to §III.5
-  - design/launch-0.1.0.md       # §1 "the install", §4 row 14
   - design/benchmark.md          # §2 the `toolchain` task (P11)
   - docs/src/content/docs/getting-started/installation.md
 ```
@@ -45,7 +44,7 @@ Do not re-litigate without editing this list.
    `vam/node`, `vam/jvm`; Tier 1 is after launch.
 3. **Measure and record the cost** (owner, 2026-11-09): image size, cold boot and
    golden-restore session start, before and after, on the CI microVM lane. Baseline is
-   about 225 ms median (isolation-truth W3b, launch-0.1.0.md §2). A regression beyond
+   about 225 ms median (isolation-truth W3b). A regression beyond
    2x is an escalation to the owner.
 4. **PID 1 is always `vam-runtime`** (design III.1 rule 1). The image can add things,
    never replace init; the build injects it as `/sbin/init` whatever the image says.
@@ -79,7 +78,7 @@ the `toolchain` scenario green on the microVM lane; the cost recorded.
 **Depends on:** none  
 **Plan:** breakdown 2026-11-09; closed in base 2026-11-10 (W0-W5 merged; release PR into `main` open; team checklist out)  
 **Exit:** scenarios active and green; cold-start numbers in this tracker and in
-launch-0.1.0.md §2; team checklist written; one release PR into `main`.
+the 0.1.0 launch plan; team checklist written; one release PR into `main`.
 
 #### Code map (what the breakdown found, 2026-11-09, base)
 
@@ -202,7 +201,7 @@ Measured on the CI microVM lane, all runs on GitHub-hosted ubuntu-latest.
 `rust.yml`'s `workflow_dispatch` (passed to `firecracker-assets.sh` as `VAM_BASE`) and four
 Summary lines (base name, digest, image bytes, used bytes). Wave 5 dispatches the lane twice
 on the same commit, once per base, and copies both Summary tables into this tracker (a
-"Cost" table under this section) and into `design/launch-0.1.0.md` §2 (the snapshot row's
+"Cost" table under this section) and into the 0.1.0 launch plan (the snapshot row's
 "about 225 ms" sentence). Same commit, same runner class, so the only change is the image.
 A regression beyond 2x on cold boot or restore stops the wave and goes to the owner.
 
@@ -452,10 +451,10 @@ runs `scripts/e2e/check-release-gate.sh` locally.
   - **Scope.** Add the toolchain scenario to the lane's mock-bench step. Dispatch the lane
     twice on one commit (`base: minimal`, `base: standard`); copy image size, both
     cold-boot numbers, the restore median with its n, the bake time and the first rootfs
-    hash time into a "Cost" table in this tracker and into `design/launch-0.1.0.md` §2;
+    hash time into a "Cost" table in this tracker and into the 0.1.0 launch plan;
     write the P11 mock result. More than 2x on cold boot or restore: stop and escalate.
   - **Files.** `.github/workflows/rust.yml` (mock-bench step), this tracker,
-    `design/launch-0.1.0.md`.
+    the 0.1.0 launch plan.
   - **Acceptance.** Both runs linked from the progress log; the table filled.
   - **Tests.** The two lane runs.
   - **Turns green:** none new (records).
@@ -475,7 +474,7 @@ the microVM lane included.
 | 2 | MB-1.4, MB-1.5, MB-1.6 | skill-needing-a-runtime-the-base-lacks-is-refused-at-install, node-reports-the-standard-base-it-boots | vam | Sonnet medium: two proto fields across `vam-spec`, `vam-orchestrator` and `vam-cli` | lane (proves the base report on the real image) | 120 min | 1 (manifest format) | `proto/vam/v1/{skills,orchestrator}.proto`, `crates/vam-spec/src/{validation.rs,runtime_requirement.rs}`, `crates/vam-spec/tests/examples_json.rs`, `docs/api/openapi.yaml`, `crates/vam-orchestrator/src/{node_base.rs,golden.rs,daemon.rs,bin/vamd.rs,skill_package_admit.rs,api/mod.rs,api/skill_packages.rs,api/catalog_release.rs}`, `crates/vam-cli/src/cmd/node.rs` | [x] | — |
 | 3 | MB-1.7, MB-1.8 | node-init-check-names-what-is-missing | vam | Sonnet medium: crosses `vam-cli` and `vamd`, and changes how the first key is shown (the orchestrator reads that code before merging) | fast | 120 min | 2 (`--check` reads the base manifest) | `crates/vam-orchestrator/src/{bin/vamd.rs,daemon.rs,api/mod.rs}`, `crates/vam-orchestrator/tests/` (new), `crates/vam-cli/src/{main.rs,cmd/node.rs,cmd/node_init.rs}`, `scripts/assets.pins` (new), `scripts/e2e/firecracker-assets.sh` | [x] | — |
 | 4 | MB-1.9 | node-init-run-twice-changes-nothing-and-shows-the-key-once | vam | Sonnet medium: system install steps and idempotency the plan cannot fully specify | fast | 120 min | 3 | `crates/vam-cli/src/cmd/node_init.rs` and its templates | [x] | no PR (merged) |
-| 5 | MB-1.10, MB-1.11 | — (all five active; numbers recorded) | vam | Sonnet low: docs, tracker and recording | lane (two dispatch runs, one per base; doubles as the release-candidate lane run) | 90 min | 1 to 4 | `docs/src/content/docs/getting-started/{installation,users-and-roles,project-status}.md`, `docs/src/content/docs/authoring/skill-manifest.md`, `e2e/docs-baseline.txt`, `e2e/docs-features.yaml`, `.github/workflows/rust.yml` (mock-bench step), this tracker, `design/launch-0.1.0.md` | [x] | — |
+| 5 | MB-1.10, MB-1.11 | — (all five active; numbers recorded) | vam | Sonnet low: docs, tracker and recording | lane (two dispatch runs, one per base; doubles as the release-candidate lane run) | 90 min | 1 to 4 | `docs/src/content/docs/getting-started/{installation,users-and-roles,project-status}.md`, `docs/src/content/docs/authoring/skill-manifest.md`, `e2e/docs-baseline.txt`, `e2e/docs-features.yaml`, `.github/workflows/rust.yml` (mock-bench step), this tracker, the 0.1.0 launch plan | [x] | — |
 
 Decide lines per wave: W0 `NOW — proof 3, cost 1`; W1 `NOW — proof 3, cost 1`; W2
 `SLICE — proof 3, cost 2 → slice as MB-1.4`; W3 `NOW — proof 3 (security floor and install), cost 1`;
@@ -565,7 +564,7 @@ W4 `NOW — proof 3, cost 1`; W5 `NOW — proof 3, cost 0`.
 
 **Phase close.** All five new scenarios `active` and green (three process ones in CI on
 every PR, two firecracker ones on the lane); every existing lane scenario green on the
-standard base; the Cost table filled here and in `design/launch-0.1.0.md` §2 with no
+standard base; the Cost table filled here and in the 0.1.0 launch plan with no
 regression over 2x (or the owner's word on one); the team checklist run once on a fresh
 host and its minutes logged; one release PR into `main`.
 

@@ -7,7 +7,6 @@ current_phase: 3
 base_branch: feat/run-receipt
 design_docs:
   - design/run-receipt.md
-  - design/launch-0.1.0.md
 ```
 
 ## Goal
