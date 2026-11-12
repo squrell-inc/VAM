@@ -23,7 +23,7 @@ it was requested via that grant. Phase 1 builds the machine side and proves it
 with a Rust test broker; Phase 2 ships the schedule broker `vam.schedule`, so
 "summarise my board every weekday at 18:00" works end to end with a receipt
 that names the schedule. Every Space and thread gets an opaque id beside its
-name. Launch demo: a scheduled `close-prep` run (`design/launch-0.1.0.md` §4
+name. Launch demo: a scheduled `close-prep` run (the 0.1.0 launch plan
 rows 6a and 6b).
 
 ## Out of scope
@@ -527,7 +527,7 @@ hotfix merged to `main` and the base synced first (6 edits `keys.rs`; 7
 mints grant secrets; 8 checks them). Waves 0–5 do not (wave 3 mints `sp_`/
 `th_` ids, which are not secrets, from an OS CSPRNG helper outside
 `keys.rs`, Q6). If the hotfix is late, waves 0–5 run and the phase waits at
-wave 6. Phase close: the Firecracker lane once on the owner's KVM host (the start
+wave 6. Phase close: the Firecracker lane once on a KVM host (the start
 path moved in wave 5).
 
 **Shared surfaces per wave** (take `main` before each wave):
@@ -547,9 +547,9 @@ path moved in wave 5).
 | 10 | Starlight docs | — |
 
 
-#### CI credit rules (owner, 2026-10-29)
+#### CI rules (owner, 2026-10-29)
 
-GitHub Actions minutes are saved; the local run is the gate. This replaces,
+The local run is the gate; GitHub Actions is used sparingly. This replaces,
 for this lane, "a grant, gateway or auth change waits for green CI".
 
 1. **Every wave PR stays a draft for its whole life.** Every job in
@@ -571,8 +571,8 @@ for this lane, "a grant, gateway or auth change waits for green CI".
 5. **Firecracker lane only when required:** a wave that touches the VM path
    (`vam-runtime`, `vam-firecracker`, `vam-vsock`, rootfs, guest protocol), and
    once at phase close because the start path moved. Run it as one
-   `workflow_dispatch` with `lane_only: true` on the base branch (or on the
-   owner's KVM host when the owner prefers; ask first). The UDS test broker never
+   `workflow_dispatch` with `lane_only: true` on the base branch (or on a
+   KVM host when the owner prefers; ask first). The UDS test broker never
    needs it.
 6. **The release PR to `main`** is the one PR that runs full CI (the release
    gate requires it), once, when the owner gives the word.
@@ -717,7 +717,7 @@ new surface. All other open questions at their defaults.
 every existing scenario green unchanged (smoke, once as a non-root user before
 the release PR); `cargo test -p vam-schedule`, `cargo check --workspace`,
 `cargo fmt --all --check`, `cargo clippy -p vam-schedule -- -D warnings`;
-the Benchmark delta rows recorded; one manual run on the owner's KVM host with the
+the Benchmark delta rows recorded; one manual run on a KVM host with the
 broker registered inside Lima (the operator script). No Firecracker lane run
 is needed for the phase (no microVM path moves); the release PR into `main`
 runs full Actions once, as always.
@@ -1160,7 +1160,7 @@ non-root job runs it); `cargo fmt`, `cargo check --workspace`; `cargo clippy -p
 vam-schedule --all-targets --no-deps -- -D warnings` clean (`--no-deps`: `vam-spec`'s
 generated code trips `large_enum_variant` on the base, also for `vam-web`; noted in
 2 W1). `cargo tree -p vam-schedule` has no `vam-orchestrator`. **Not yet:** the manual
-run on the owner's KVM host with the broker inside Lima (owner's call, §10) — default: the
+run on a KVM host with the broker inside Lima (owner's call, §10) — default: the
 team checklist below on the team instance replaces it.
 
 **Scoreboard (phase):** 7 scenarios turned green, 0 red; 0 retired; no `then` changed.
@@ -1247,7 +1247,7 @@ Report: "Phase 2 pass", or the step number with a screenshot or the error text.
 | Date | Phase | What landed (end with the scoreboard: scenarios green, red, fix cycles, wall time) |
 |---|---|---|
 | 2026-10-29 | — | Tracker opened from `main` (E5 design approved: P1, P2, five §7 defaults). Base `feat/work-outside-chat` cut. Phase 1 breakdown agent started. |
-| 2026-10-29 | 1 | Breakdown approved (owner): recommendations 1–3, Q3 default, thread key `(space_id, thread_id)` with scoped lookups (locked decision 10 amended; wave 3 builds it), CI credit rules. Wave 0 started (plan only). |
+| 2026-10-29 | 1 | Breakdown approved (owner): recommendations 1–3, Q3 default, thread key `(space_id, thread_id)` with scoped lookups (locked decision 10 amended; wave 3 builds it), CI rules. Wave 0 started (plan only). |
 | 2026-10-29 | 1 | Base takes `main` (`keys.rs` CSPRNG hotfix merge). The hotfix mints from `rand::rngs::OsRng` (`keys.rs:183-189`), so Q6 is settled: grant and id secrets use `OsRng`, the same generator, with no `keys.rs` change for it. Waves 6–8 unblocked. Wave 0 plan approved with: no-run check on the HTTP-refusal scenario, existing scenarios parse unchanged, pre-ids workspace fixture recorded from today's vamd. |
 | 2026-10-29 | 1 W0 | **Wave 0 merged** (merge commit, kept draft: no CI minutes; Sonnet 5.5 low). Eight scenarios `pending`, red for the right reason: six trigger scenarios at `when.4` (`expect: grant`, 0 listed), `thread-is-reached-by-id-or-by-name` at `when.1` (no `th_…` id), `existing-workspace-keeps-its-id-and-history` at `when.1` (`GET /v1/spaces` 404). Runner steps in `crates/vam-e2e/src/triggers.rs`; world pieces `trigger-test-broker` (new kind `broker`, fixed id), `agent-with-trigger-tool`, `agent-before-ids`, `workspace-from-before-ids` (recorded from a real vamd, new kind `workspace-seed`). Deviations for later waves: scenarios use `echo.ping` until wave 2 adds `echo_arm_trigger` (the broker refuses an unserved tool); `revoke-grant` is `via: api` until wave 6's CLI; broker `fire` prints one JSON line per fire and writes `<dir>/grant-token` (contract in `e2e/README.md`). Orchestrator re-run: fmt ok, `vam-e2e check` 72 scenarios / 27 pieces, `cargo test -p vam-e2e` ok, smoke **56 pass, 0 fail, 8 red (right reason)**. Known: `cargo clippy -p vam-e2e -D warnings` fails on three lints already on the base (`report.rs` too_many_arguments, `Step` large_enum_variant, `engine_selftests.rs` cloned_ref_to_slice_refs), not this wave's. Scoreboard: 0 green, 8 red (right reason), 0 fix cycles, wall ~35 min. |
 | 2026-10-29 | 1 W1 | Wave 1 plan approved (owner) with: rate limits left at 0 = node default 60/min and 1440/day (never unlimited); `run_request_permission` with empty `grant_tools` refused. Building (Sonnet 5.5 medium). Owner question on on-demand broker runs answered with option B (Explicitly later). |

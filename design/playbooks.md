@@ -52,15 +52,6 @@ when the decision arrives, hours or days later.
 state and rejects illegal transitions. The agent may still reorder, but may not
 skip a required step or complete a step whose preconditions are unmet.
 
-## Audience and positioning
-
-Open source, developer-first. The first users are developers who build
-automations for ops and audit teams. Lead with the outcome: *the agent ran in a
-microVM and came back with a receipt* — the steps it took, the evidence the
-host observed, and the approvals given. Guarantees are presented as that
-receipt, not as compliance language. Isolation claims in docs and marketing
-must be backed by a test or a doc page.
-
 ## What we are building
 
 1. **Playbook spec v2.** Steps with outcomes and preconditions, gate steps,
@@ -82,19 +73,12 @@ must be backed by a test or a doc page.
 
 ## Why
 
-- Prior art converges on split control: deterministic code owns the process,
-  the model owns reasoning inside bounded steps (LangGraph, Rasa CALM
-  FlowPolicy, Microsoft Agent Framework, Mastra, Google ADK).
 - Runtime guards at the tool boundary have the strongest evidence for policy
   adherence (AgentSpec, arXiv 2503.18666; IBM policy-to-guard compilation,
   EMNLP Industry 2025). Prompt-only adherence is inconsistent across repeated
   runs (tau-bench, arXiv 2406.12045).
-- Long human waits everywhere else use checkpoint + resume event, not a live
-  process (Temporal signals, LangGraph interrupts, Inngest `waitForEvent`,
-  Step Functions task tokens).
-- The closest products are adaptive, not lockstep: Parlant journeys allow
-  jumps within a state graph; Decagon AOPs pair natural-language procedures
-  with code-backed guardrails.
+- Long human waits are best handled by checkpoint plus a resume event, not a
+  live process.
 - VAM already has the enforcement point: the PEP sees every tool call with
   side-effect class, args digest, iteration and spend
   (`crates/vam-orchestrator/src/security.rs`, `EvaluationContext`). It also

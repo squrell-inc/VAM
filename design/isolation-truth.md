@@ -21,7 +21,7 @@ following on `main`:
 | 5 | Secret redaction is string matching on known secret values; encoded, partial or derived forms pass | `host_tools.rs:203` `redact_secrets` |
 | 6 | Generic host-tool path allows 1 MiB output against a 64 KiB vsock frame | E10 Phase 0 wave 2 note |
 | 7 | Guest egress proxy falls back to `0.0.0.0:3128` when the loopback port is taken | `vam-runtime/src/egress.rs` (`agent-experience.md` §V.5 q4, slated for E8 Phase 2) |
-| 8 | No rate limiting on the API; list endpoints return everything; nothing is cleaned up by TTL | `vam-subjects.md` §2 |
+| 8 | No rate limiting on the API; list endpoints return everything; nothing is cleaned up by TTL | API audit |
 | 9 | `expect("connected")` in the daemon's HSP client can panic `vamd` | `hsp.rs:184-248` |
 | 10 | Hard-coded EC2 defaults | `daemon.rs:143-144`, `manager.rs:191`, `golden.rs:84` |
 | 11 | `cargo clippy -D warnings` fails with about 200 warnings; CI does not run clippy | `.github/workflows/rust.yml` |
@@ -35,10 +35,10 @@ jailer off says so on every receipt.
 
 ## Why
 
-- The buyer VAM can win (sovereign, regulated, governed business process
-  work) opens with a security review. The claims that sell the product
-  (hardware isolation, kernel-level egress filtering, no secrets in the
-  guest) must be true on the default install or not be made.
+- Regulated and governed deployments open with a security review. The
+  claims the product makes (hardware isolation, kernel-level egress
+  filtering, no secrets in the guest) must be true on the default install
+  or not be made.
 - The playbook design already rules: "isolation claims in docs and
   marketing must be backed by a test or a doc page". This track makes
   that rule enforceable.
@@ -97,8 +97,8 @@ touches CI, `vam-core` tests, `daemon.rs` defaults and new scenarios only.
    Reopen as its own design when one of three triggers appears: a
    direct-route network mode for traffic the proxy cannot terminate (E8
    CONNECT passthrough keeps the host in the path, so not that); the
-   userspace proxy becoming the bottleneck at many VMs per host; or a
-   buyer requiring kernel-enforced egress as an attestable control. The
+   userspace proxy becoming the bottleneck at many VMs per host; or
+   kernel-enforced egress being required as an attestable control. The
    first answer then is nftables with an address set the DNS proxy fills;
    eBPF after that, for scale.
 3. TLS: self-signed on first start with the CA printed for the app, or

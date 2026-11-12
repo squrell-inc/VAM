@@ -63,7 +63,7 @@ guest remounts it (`image_fits_golden_disk`, `golden.rs:426`).
 
 | Figure | What it measured | Source |
 |---|---|---|
-| About 225 ms | Session start with golden restore, median of 15, on the CI lane | `design/launch-0.1.0.md:83`, measured 2026-10-24 |
+| About 225 ms | Session start with golden restore, median of 15, on the CI lane | CI microVM lane, measured 2026-10-24 |
 | About 60 to 120 ms | The VM itself becoming ready, same runs | same line |
 
 These are lane figures, on shared CI hardware, and one measurement day. They are not a promise. The

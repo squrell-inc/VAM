@@ -209,8 +209,8 @@ and mutations run as the person (decision 12) → `@Submit` sends the result
 
 A jig package plus the skill, MCP connection or HSP broker behind its
 tools, plus a playbook, is a **micro-app** an org installs and runs on
-its own systems under its own Cedar rules. That is the micro-SaaS shape:
-publishers build once, orgs install and govern.
+its own systems under its own Cedar rules: publishers build once, orgs
+install and govern.
 
 ## 3. Security
 
@@ -283,7 +283,7 @@ the jig renderer:
 | **2 Ask in playbooks** | Gates use rich forms | `PlaybookStep.form_ref`, `bindings`, `@Submit`, result validation (decision 14), deadlines through E10 waits | 1 | Purchase-requisition gate with supplier search passes end to end |
 | **3 Packages** | Jigs are shippable | `urn:vam:jig`, manifest, composed components, publish checks, install consent, release through E1's flow, attach to agents | 2 | A jig package released, attached, used in a gate, upgraded |
 | **4 Agent-written and model-filled** | Agents build and fill jigs | `ui/*.jig` written by the agent and listed by the app (branch Phase 3); the model-fill tool (branch Phase 4) | 3 | The agent writes a counter and an address form; a model fill returns a field object |
-| **5 Registry and marketplace** | Micro-apps | Jig packages in the org registry (E2) and the marketplace (E6), signing | 3, E2, E6 | An org installs a community jig package and runs it |
+| **5 Registry and marketplace** | Installable packages | Jig packages in the org registry (E2) and the marketplace (E6), signing | 3, E2, E6 | An org installs a community jig package and runs it |
 | **6 Surfaces and interop** | Jigs outside the app | Slack and email through `vam.notify`; A2UI adapter; MCP Apps sandbox tier | 2, E5 | A gate jig is answered from Slack |
 | **7 Runtime machine** | Decide trust for `@Set` | Either "the renderer keeps `@Set`" or a guest crate (branch Phase 5) | 1 | A written decision |
 
@@ -301,8 +301,6 @@ Phases 1–3 are E11's getting-started slice.
    Spaces?
 5. Can a Show card's queries keep running after the task ends, or only
    while the task lives?
-6. Pricing and paid packages in the marketplace (micro-SaaS) are not
-   designed. Do they belong in E6?
 
 ## What we are not building
 

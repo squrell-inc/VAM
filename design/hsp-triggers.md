@@ -30,7 +30,7 @@ the broker sends back the `CallerContext` it saw on `Invoke` and `vamd` runs
 
 > Brokers decide when. vamd decides who and whether.
 
-## Audience and positioning
+## Audience
 
 The first consumer is the team's scheduler broker ("summarise my Jira board
 every day at 6 PM"). The contract is neutral so the same path serves event
@@ -515,18 +515,18 @@ messages from people.
   amendment items 2, 4, 5). They reuse Phase 1's credential kind, gateway
   socket and caller auth, and add one RPC. Planned as a later E5 phase after
   E10 Phase 5's `wait_until`. B2's `pr-process` task waits on it
-  (`design/launch-0.1.0.md` §4 row 11).
+  (0.1.0 launch scope).
 - **`vam.notify`** (Slack, email): E12 Phase 2. Deciding a gate from Slack
   is a reverse call too; E12 Phase 2 reuses Phase 1's gateway socket and
   credential checks for it.
 - **Apps, shared Spaces, Space retention, App authority** (`vam-apps-spaces.md`
-  Phases 2, 4–6): cut from 0.1.0 (`launch-0.1.0.md` §2). Phase 1 builds only
+  Phases 2, 4–6): cut from 0.1.0 (0.1.0 launch scope). Phase 1 builds only
   the Credential columns and the Space and thread ids.
 
 **Security note found while verifying.** API key secrets on `main` come from
 `time ^ pid ^ counter` (`keys.rs:175-189`), 64 bits that are guessable
 given the mint time. Grants never use that function. Fixing it for API keys
-is a separate P1 item (security floor, `launch-0.1.0.md` §3), not part of
+is a separate P1 item (security floor, `phase-playbook.md` §11.1), not part of
 this slice.
 
 ## Decision summary (locked)
@@ -773,7 +773,7 @@ Supersedes the TR-0 to TR-3 phase list above for planning; the TR items map
 into these two phases (table at the end). Item ids `WO-<phase>.<n>` ("work
 outside chat"); the tracker slug the orchestrator opens is
 `work-outside-chat`. Each item carries its Decide line
-(`design/launch-0.1.0.md` §3) and the benchmark line it moves
+(`phase-playbook.md` §11.1; and the benchmark line it moves
 (`design/benchmark.md` §1, P7: "tasks started by a trigger and decided from
 a notify surface that complete; parked cost (must be 0)"). The scenarios are
 named by behaviour (`design/scenarios.md` §9); the breakdown agent turns
@@ -872,7 +872,7 @@ construction and is recorded as such. Parked cost: a queued fire holds no VM
 existing scenario green unchanged (users who never touch grants see no
 change, AS implementer constraint); `cargo test -p vam-spec`, `-p
 vam-orchestrator`, `-p vam-cli`, `cargo check --workspace`, `cargo fmt --all
---check`; the Firecracker lane once on the owner's KVM host (the start path moved).
+--check`; the Firecracker lane once on a KVM host (the start path moved).
 
 **Scenarios** (3 to 8; all `needs: process`)
 
@@ -950,7 +950,7 @@ notify surface" half of the line moves with E12 Phase 2.
 **Exit.** All Phase 2 scenarios green and `active` in process mode; Phase 1
 scenarios still green; the scheduled task passes on the mock; `cargo test -p
 vam-schedule`, `cargo check --workspace`, `cargo fmt --all --check`; one
-manual run on the owner's KVM host with the broker registered on Lima.
+manual run on a KVM host with the broker registered on Lima.
 
 **Scenarios** (all `needs: process`; times are seconds ahead, never cron, so
 no clock seam is needed in e2e; cron and DST are unit tests)

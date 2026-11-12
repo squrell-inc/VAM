@@ -341,7 +341,7 @@ Do not re-litigate without editing this list.
 | 4 | Local loop | Testing needs a VM boot | skill authoring |
 | 5 | Layered policy | One agent = one policy today | security persona, marketplace |
 | 6 | Install & customize | No way to adopt and adapt an agent | the stage most users live in |
-| 7 | Playbooks | Highest-value SKU, least served | marketplace demand side |
+| 7 | Playbooks | Least served marketplace artifact | marketplace demand side |
 | 8 | Deployments | No named, rollback-able deployment | production use |
 | 9 | Dependencies | Skills can't bring their own deps | installable skills at scale |
 | 10 | MCP — local servers & OAuth | The hard tail: stdio servers and OAuth vendors | marketplace |
@@ -791,7 +791,7 @@ reasoning: `design/developer-experience.md` §26.
   `guest-cannot-use-an-mcp-token-placeholder` and
   `broker-cannot-be-given-an-mcp-credential`; Rust proof in
   `tests/mcp_credentials_stay_host_side.rs`.
-  Decide: NOW (security floor, proof 3 by `design/launch-0.1.0.md` section 3;
+  Decide: NOW (security floor, proof 3 by `phase-playbook.md` §11.1;
   cost 1).
 
 **Team checklist — DX-139 (MCP credentials stay host-side; microVM check)**
@@ -1094,8 +1094,8 @@ scratch.
   overlay conflicts.
 - [ ] **DX-75** CI check: fail when lockfile capabilities exceed `vam.json`
   grants. A capability expansion cannot merge without a human widening the
-  grant. npm structurally cannot do this; VAM can, because Cedar makes
-  capabilities explicit.
+  grant. A version-only lockfile cannot show this; a capability set can,
+  because Cedar makes capabilities explicit.
 - [ ] **DX-76** `vam eject` and `vam adopt` — move a project between
   UI-managed and Git-managed without losing it. Without both, the UI is a trap
   and serious developers avoid it from day one.
@@ -1166,7 +1166,7 @@ tested.
   tools, assert the step sequence.
 - [ ] **DX-85** Playbook ↔ skill compatibility checking: does the playbook's
   `requires` match the installed skill versions?
-- [ ] **DX-86** Marketplace listing treats playbooks as a first-class SKU with
+- [ ] **DX-86** Marketplace listing treats playbooks as a first-class artifact with
   outcome-based descriptions, not tool lists.
 
 ---
@@ -1411,7 +1411,7 @@ Work that must not be pulled into this tracker.
   doc if it becomes a requirement.
 - Rate limiting and the `App`/`Subject` identity model — tracked separately in
   `design/vam-apps-spaces.md` (supersedes
-  `design/vam-subjects.md`). Its decision C1 proposes that the App *is* the
+  an earlier App/Subject draft). Its decision C1 proposes that the App *is* the
   DX-90 deployment and the home of the DX-17 profile. Both add principals to
   the same Cedar evaluation and must be reconciled before Phase 5 ships.
 

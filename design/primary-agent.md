@@ -139,7 +139,7 @@ released agents (P2). So:
 - Squrell ships an **assistant** agent package with VAM. The operator
   releases it into the node's catalog and sets it as the node default (a
   script in Phase 2; `vam node init` later, with the install slice,
-  `design/launch-0.1.0.md` §4 row 14). Its permissions are the org's to set
+  the 0.1.0 launch plan). Its permissions are the org's to set
   on release: `agents:*: ask` by default; an org may release it with
   `agent:<urn>: allow` for agents it trusts.
 - A user with `catalog:write` may **copy** it into a personal draft in their
@@ -496,7 +496,7 @@ the asked run. API (Phase 2): `GET /v1/me` `primaryAgent`; `PUT
 | WOC 7 (busy → queue, never a steer) | Agrees, and extends to reports. |
 | WOC 10 (ids; a request with no Space id uses the default Space) | Agrees: `DEFAULT` is that rule, resolved at issuance. |
 | Apps-Spaces locked row "Personal Apps … Account default App = primary agent" | **Proposal P-B (owner to confirm).** Its second sentence is superseded: the primary is `users.primary_agent_urn`. When Apps ship, an Account's default App is the personal App of its primary (derived, not stored twice). Recorded as a marked amendment in `vam-apps-spaces.md`. |
-| `launch-0.1.0.md` §2 cut row "Child-VM sub-agents and multi-agent delegation" | **Proposal P-C (owner to confirm).** Split it: in-task delegation (sub-agents, child VMs) stays cut and locked to E10 Phase 5; asking another agent as a separate approved task is this design's own row, also after 0.1.0 (Appendix C). |
+| the 0.1.0 launch plan cut row "Child-VM sub-agents and multi-agent delegation" | **Proposal P-C (owner to confirm).** Split it: in-task delegation (sub-agents, child VMs) stays cut and locked to E10 Phase 5; asking another agent as a separate approved task is this design's own row, also after 0.1.0 (Appendix C). |
 | Run receipt locked decisions 1, 4, 8 (proposed there) | Agree: host tier only, approval provenance kept, immutable receipts (hence the three-link chain). |
 
 ## 10. Locked decisions (proposed)
@@ -524,7 +524,7 @@ the asked run. API (Phase 2): `GET /v1/me` `primaryAgent`; `PUT
 
 ## 11. Scope and placement
 
-**Rubric** (`design/launch-0.1.0.md` §3), the five questions:
+**Rubric** (`phase-playbook.md` §11.1;, the five questions:
 
 1. Serves P13 and P4. No benchmark line fits, so its line comes first
    (Appendix D): "delegated jobs that complete and report back".
@@ -538,7 +538,7 @@ the asked run. API (Phase 2): `GET /v1/me` `primaryAgent`; `PUT
    delegates; no existing API changes meaning.
 
 **Decide:** `SLICE — proof 2 (P13 gets its delegation line first, PA-1.8; no
-0.1.0 launch proof needs it, launch-0.1.0.md:27 "Not required: multi-agent"),
+0.1.0 launch proof needs it, the 0.1.0 launch plan "Not required: multi-agent"),
 cost 3 (two phases, a new broker, a new permission target kind, a new vamd
 delivery path, the VAM app) → slice: Phase 1 (cost 2). Phase 2 after Phase 1
 shows the line. Not in 0.1.0 unless the owner names "ask the assistant and
@@ -548,7 +548,7 @@ it gets another agent to do it" a launch proof.`
 shares files with **E12 Phase 2** (row 7: `gateway.rs`, the receipt builder,
 the requester block) and with **E10 Phase 4** (row 9: `host_tools.rs` and
 the inbox, which the journal keys ride). The conflict rule says two lanes
-never build in one file at once (`design/launch-0.1.0.md` §4). Default: the
+never build in one file at once (0.1.0 launch scope). Default: the
 breakdown and wave 0 (scenarios, red) may run while row 7 builds; build
 waves start after rows 7 and 9 merge (0.1.0 first). If the owner wants it
 sooner: after row 7 and before row 9, which delays E10 Phase 4 by one phase.
@@ -643,7 +643,7 @@ cost while a delegation runs: 0, checked by
 existing scenario green unchanged (an agent without the delegate tool sees
 no change; `triggered-run-cannot-arm-another-trigger` stays green after
 P-A); `route-the-ask` passes on the mock; `scripts/ci/local.sh --full`; the
-Firecracker lane once on the owner's KVM host (the start path and the inbox
+Firecracker lane once on a KVM host (the start path and the inbox
 moved).
 
 **Scenarios** (all `needs: process`)
@@ -703,7 +703,7 @@ recorded as such. `route-the-ask` starts from the user's primary.
   slice: cards, picker, header.`
 
 **Exit.** Phase 2 scenarios green and `active`; Phase 1 scenarios still
-green; the VAM app smoke with the new cards; one manual run on the owner's KVM host.
+green; the VAM app smoke with the new cards; one manual run on a KVM host.
 
 **Scenarios** (vam, `needs: process`; the VAM app checks in its own smoke)
 
@@ -879,7 +879,7 @@ And add after the "On-demand broker runs" bullet (line 1217):
 >   and 9 hold unchanged. It reads decision 6 as "any run a person did not
 >   start" (`design/primary-agent.md` §9, P-A, owner to confirm).
 
-## Appendix C: proposed rows for `design/launch-0.1.0.md`
+## Appendix C: proposed rows for the 0.1.0 launch plan
 
 Not applied. §4, after row 15 (outside 0.1.0 unless the owner moves them):
 

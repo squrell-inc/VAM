@@ -96,8 +96,7 @@ real-tenant wave of Phase 1 and for Phase 4):
   platform, `squrell://oauth` and `http://127.0.0.1`, public client, delegated
   Graph scopes per design §4.1). Record the client id for the built-in
   `microsoft-365` connector.
-- [ ] Microsoft AI Cloud Partner Program account and publisher verification.
-  Longest lead time; without it users cannot consent to a multi-tenant app.
+- [ ] Publisher verification for the Entra app: owner item.
 
 ### Phase 1 — Connectors on the node
 
@@ -487,7 +486,7 @@ seam hooks in `mcp_client.rs` / `mcp_oauth_refresh.rs`,
 7: `spec/connectors/microsoft-365.json`.
 
 **Main update 2026-11-07, checked against this breakdown.**
-Connectors are in 0.1.0 as a second product lane (`launch-0.1.0.md` §4 rows
+Connectors are in 0.1.0 as a second product lane (0.1.0 launch scope rows
 18–21, beside rows 10 E12 Phase 3 and 12 E4 slice); the lane conflict rule
 applies: before each wave, check that no other lane is building in its files
 (likely overlaps: the VAM app `OrgSettingsPage.tsx`, `Sidebar.tsx`, `lib.rs`,
@@ -498,7 +497,7 @@ authorize, token and refresh" (that doc, lines ~117 and ~174): still open,
 see open question 12. The egress envelope is Phase 2; Phase 1 needs no
 change for it beyond keeping the definition open (CN-1.1 already does).
 
-**Phase rubric.** `Decide: SLICE — proof 3 (in 0.1.0 since 2026-11-07: `launch-0.1.0.md` §4 row 18, which rows 19–21 and the real-tenant launch demo need; plus the new P6 line Enable → Connected), cost 2 (one phase: new API, two tables, both repos) → slice: two built-in connectors, connect and status only; token use (Phase 2), cards (Phase 3), hub, events, Teams and Google later`
+**Phase rubric.** `Decide: SLICE — proof 3 (in 0.1.0 since 2026-11-07: the 0.1.0 launch plan, which rows 19–21 and the real-tenant launch demo need; plus the new P6 line Enable → Connected), cost 2 (one phase: new API, two tables, both repos) → slice: two built-in connectors, connect and status only; token use (Phase 2), cards (Phase 3), hub, events, Teams and Google later`
 
 ##### Open questions (each with a default)
 
@@ -974,7 +973,7 @@ approval (docs only).
 Connectors Phase 3 ("Cards from skills": `ToolSpec.ui`, the `List`
 primitive in `vam/1`, jig sources in skill packages checked at publish) runs
 as a parallel lane in another session. Conflict rule
-(`design/launch-0.1.0.md` §4): two lanes never build in the same file at the
+(`phase-playbook.md` §11.2): two lanes never build in the same file at the
 same time; the later lane holds its build waves (breakdown and scenarios may
 proceed). Before each wave the orchestrator checks the Phase 3 tracker rows
 and open PRs for the files below.
@@ -1146,7 +1145,7 @@ Report: "Phase 2 pass", or the step number with a screenshot or the error text.
 **Goal:** tool results render as cards; send and book ask with a richer card.
 **Depends on:** none (may run as a parallel lane with Phase 2)
 **Plan:** drafted 2026-11-08 by the phase-breakdown agent; awaiting owner approval.
-**Lane:** runs beside Phase 2 (`launch-0.1.0.md` §4 row 20). Phase 3 is the later lane: wave 0 and the waves that touch no shared file run now; wave 3 (the only one in `skills.proto` / `validation.rs`) and everything after it wait for Phase 2's wave in those files to merge into `feat/connectors` (block "Lane overlap" below).
+**Lane:** runs beside Phase 2 (0.1.0 launch scope). Phase 3 is the later lane: wave 0 and the waves that touch no shared file run now; wave 3 (the only one in `skills.proto` / `validation.rs`) and everything after it wait for Phase 2's wave in those files to merge into `feat/connectors` (block "Lane overlap" below).
 **Exit:** the four scenarios below `active` and green in CI (process mode, mock model, a test skill in the e2e world, no Microsoft); the VAM app unit suites green on the merged `feature/connectors`; the P14 line below recorded.
 
 Scope, sliced on the owner's word to the mail and calendar tools: `ToolSpec.ui` (`show`, `ask`), the `List` primitive in `vam/1`, and what a mail-list result needs to render as a card and a send or book to ask with the skill's card, args bound in, an edited submit recorded as AMENDED. Out: `Query`, App pages, component libraries, a jig catalog kind (D19), the `.jig` text form, `Link`, the real `m365-mail` skill (Phase 4).
@@ -1432,7 +1431,7 @@ Scoreboard expectation: 0 green until wave 4 (A, D), 4 after wave 5; flat in
 waves 1, 2, 6 (unit), movement without green in wave 3 (stated so it is not
 flagged).
 
-**Lane overlap (Phase 2 runs now; `launch-0.1.0.md` §4 conflict rule).**
+**Lane overlap (Phase 2 runs now; `phase-playbook.md` §11.2 conflict rule).**
 Before each wave the orchestrator checks Phase 2's open PRs and wave rows for
 these paths; a Phase 3 wave never starts while a Phase 2 wave is building in
 one of its files.
@@ -1557,7 +1556,7 @@ skill replaces it with real mail and calendar.
 enabled from the marketplace.
 **Depends on:** Phases 2 and 3 (both released)
 **Plan:** drafted 2026-11-09 by the phase-breakdown agent; **approved by the owner 2026-11-09** with recommendations 1 (CN-4.3 exact paths) and 2 (CN-4.7 journal connection writes); open question 1 answered (a), open question 2 answered Apache-2.0; other defaults accepted.
-**Exit:** the seven scenarios below `active` and green in CI (process mode, mock model, mock login and Graph, runner-made Git repos); the VAM app unit suites green on the merged `feature/connectors`; `squrell-inc/vam-marketplace` CI green on `microsoft-365-v1.0.0`; the walkthrough on tenant `9f1b09f9-…` with the P6 number recorded; the seven-day lane on the owner's word.
+**Exit:** the seven scenarios below `active` and green in CI (process mode, mock model, mock login and Graph, runner-made Git repos); the VAM app unit suites green on the merged `feature/connectors`; `squrell-inc/vam-marketplace` CI green on `microsoft-365-v1.0.0`; the walkthrough on the owner's test tenant with the P6 number recorded; the seven-day lane on the owner's word.
 **Scope:** design §10 Phase 4 row and §9.1 (the Git marketplace, D23–D25):
 trusted marketplace URLs per node, index reading, listing import at a tag,
 Squrell-domain admission, "update available", the Org settings Marketplace
@@ -1694,7 +1693,7 @@ on `connectors-reach-members-only-after-an-org-admin-enables-them`.
 
 | Line (`design/benchmark.md` §1) | Baseline on this base | Measured at phase close by | Expected after |
 |---|---|---|---|
-| **new P6 line:** minutes and clicks from the admin's Install/Enable to a member's first successful mail read, real tenant, member given no instructions | Not possible (no listing, no mail skill). Phase 1's Enable → Connected is still out with the team | CN-4.10, by hand on tenant `9f1b09f9-…`, timed | first number recorded |
+| **new P6 line:** minutes and clicks from the admin's Install/Enable to a member's first successful mail read, real tenant, member given no instructions | Not possible (no listing, no mail skill). Phase 1's Enable → Connected is still out with the team | CN-4.10, by hand on the owner's test tenant, timed | first number recorded |
 | **new P6/P13 line:** a scheduled Microsoft 365 run survives seven days unattended with zero reconnect prompts; on a forced revoke it parks, the user reconnects, it resumes with zero duplicate effects | Revoke-park-resume proven interactively on mocks (Phase 2 scenario D); no scheduled Microsoft run exists | mock half: the last three scenarios on every PR; real half: benchmark lane B (seven days, **owner's word**) | 0 reconnect prompts in 7 days; 1 send per approved send |
 | P6 tasks through brokered connections, 0 secret bytes in guest output | Probe skill only | `secret-absent` in the Microsoft scenarios | 0 bytes |
 | P9 malicious-skill tasks that fail safely: **new tasks** "a listing from an added marketplace ships a connector or takes a Squrell or org name" and "a create tool forwards or sends" | Not possible / admitted by prefix today | the second and fourth scenarios | 100% refused |
@@ -1911,7 +1910,7 @@ approval (docs only).
 - **Decide.** `Decide: NOW — proof 3 (D23: the URL every node trusts), cost 3 (a new repo) → kept to one small wave: no site, no hub`
 
 **CN-4.10 Real-tenant run and the two benchmark lines (last).**
-- **Scope.** On tenant `9f1b09f9-…`, a node deployed from the base (Firecracker
+- **Scope.** On the owner's test tenant, a node deployed from the base (Firecracker
   mode, so the Bun tools run in the VM through port 55 for the first time; see
   risks), real model on the owner's word. Admin opens Marketplace, installs
   Microsoft 365 from `github.com/squrell-inc/vam-marketplace` at
@@ -2072,8 +2071,8 @@ Scoreboard expectation after the fold: 8 scenarios; 3 green after wave 4, 4 afte
 15. **Uninstall and fork.** Default: not in this phase. Disabling a
     marketplace hides its listings and keeps installs.
 16. **Real-tenant run.** Default: a node deployed from the bases in
-    Firecracker mode, a real model on the owner's word, the owner's tenant
-    `9f1b09f9-…` (publisher verification not needed for the owner's own
+    Firecracker mode, a real model on the owner's word, the owner's test
+    tenant (publisher verification not needed for the owner's own
     tenant, per Phase 1).
 17. **Phase 2 findings.** Default: none blocks this phase or the seven-day
     run. The `/` prefix and legacy-policy findings are handled by narrow
@@ -2116,7 +2115,7 @@ runs the microVM lane once); team checklist out.
 
 **Backlog recorded this phase:** nodes behind a corporate HTTPS proxy cannot fetch marketplaces (`Decide: BACKLOG — proof 1, cost 1`); community connectors beyond remote MCP with discovery (API-key connection kind; installed REST bindings in the egress gate) (`Decide: BACKLOG — proof 2, cost 2`); the receipt's `effects` section still says "not journaled" (E12 Phase 3); a multi-write tool call is protected as a whole.
 
-**Wave 9 runbook (real tenant `9f1b09f9-…`, owner at the keyboard, real model on the owner's word):**
+**Wave 9 runbook (the owner's test tenant, owner at the keyboard, real model on the owner's word):**
 1. Node deployed in Firecracker mode from `main` (or the bases); vamd can reach `github.com` and `graph.microsoft.com`; `git` installed (`VAMD_GIT_BIN` if not on `PATH`).
 2. Admin: Org settings → Marketplace. The Squrell marketplace is listed with the Squrell badge; Refresh; the "Microsoft 365" listing shows its tools, hosts and paths. **Start the P6 timer.**
 3. Install (confirm dialog). Agents, playbooks and skills show the Squrell badge, read-only.
@@ -2181,8 +2180,8 @@ init`, `validate`, `test`. Rubric: cost 3 (new trust boundary).
 | 2026-11-08 | 1 | **Wave 4 merged**: Microsoft 365 connection (tenant gate before write, connection-kind vault rows, fixed consent-tenant token endpoint, Entra refresh with no `resource` and no secret, check/disconnect, CLI). Scoreboard: C green (active): **all 5 Phase 1 scenarios active and green**; `--fast` 104/104; workspace suite green but the known root-only `hsp_uds`; release gate PASS; 0 fix cycles. Fourth container restart, again at the smoke step of a `--full` run; the split run had memory under 1 GB, so memory is not the cause. Note for wave 7: real id tokens may lack `preferred_username` (no `profile` scope); label falls back to `upn`/`email`. vam side of Phase 1 done; wave 5 (the VAM app) started. |
 | 2026-11-08 | 1 | **Wave 5 merged**: Org settings "Connectors" (users:admin), Enable/Disable, Microsoft admin consent via `adminconsent` (no `prompt`/`resource`, state checked, tenant GUID) with manual fallback, five Tauri commands. Orchestrator re-run: pnpm test 805/805, tsc clean, src-tauri 58/58 (GTK/WebKit dev packages installed in the session). Consent actions show after Enable (listing carries `provider` only once enabled). 0 fix cycles. Wave 6 started. |
 | 2026-11-08 | 1 | **Wave 6 merged**: member Connections tiles (§3.1 states, Connect/Reconnect/Disconnect, nothing secret shown), Linear through the existing MCP OAuth flow with the fixed id and URL, Microsoft 365 through the Entra profile (discovery skipped, no `resource`/`prompt`, `tid` and `iss` checked before vamd, tokens cleared). Orchestrator re-run: pnpm test 818/818, tsc clean, src-tauri 58/58. 0 fix cycles. **Waves 0–6 done; all 5 scenarios active and green.** Wave 7 (real tenant) blocked on the owner items. Team checklist written (Linear steps runnable now). |
-| 2026-11-08 | 1 | **Owner registered the Squrell Entra app** (multi-tenant, public client, `squrell://oauth` + `http://localhost`, 8 delegated Graph scopes incl. `profile`, `email`; admin consent not granted in the portal so the app's flow is tested). **Wave 7 code merged**: real client id `082509e4-…` in `microsoft-365.json`, scopes + `profile`/`email`; tests for an unconfigured node set the placeholder explicitly (no unit test can reach Microsoft). 5/5 connector scenarios pass, workspace lib tests green. Pending: owner's manual run of checklist steps 1, 6, 7 on tenant `9f1b09f9-…` and the P6 numbers. Publisher verification still open (needed for other orgs' tenants, not for this test). |
-| 2026-11-08 | 1 | **Released to `main`** on the owner's word: (merge commit; Actions in full once: checks, workspace tests, smoke scenarios, microVM lane all green) and (merge commit; test green). Bases fast-forwarded to `main`. **Phase 1 scoreboard:** 5 scenarios added, 5 active and green; waves 0–7 (wave 7 code only), 3 fix cycles in total (W2 scenario isolation, W3 observation spec change, W7 test config); Actions used only by the release PR. Status: released, checklist out. Open: team checklist (incl. Microsoft steps 6–7 on tenant `9f1b09f9-…`, P6 minutes and clicks), publisher verification, owner's one-line note in `design/mcp-oauth-connections.md` (Q12). A checklist failure becomes a fix wave on `feat/connectors` / `feature/connectors`. |
+| 2026-11-08 | 1 | **Owner registered the Squrell Entra app** (multi-tenant, public client, `squrell://oauth` + `http://localhost`, 8 delegated Graph scopes incl. `profile`, `email`; admin consent not granted in the portal so the app's flow is tested). **Wave 7 code merged**: real client id `082509e4-…` in `microsoft-365.json`, scopes + `profile`/`email`; tests for an unconfigured node set the placeholder explicitly (no unit test can reach Microsoft). 5/5 connector scenarios pass, workspace lib tests green. Pending: owner's manual run of checklist steps 1, 6, 7 on the owner's test tenant and the P6 numbers. Publisher verification still open (needed for other orgs' tenants, not for this test). |
+| 2026-11-08 | 1 | **Released to `main`** on the owner's word: (merge commit; Actions in full once: checks, workspace tests, smoke scenarios, microVM lane all green) and (merge commit; test green). Bases fast-forwarded to `main`. **Phase 1 scoreboard:** 5 scenarios added, 5 active and green; waves 0–7 (wave 7 code only), 3 fix cycles in total (W2 scenario isolation, W3 observation spec change, W7 test config); Actions used only by the release PR. Status: released, checklist out. Open: team checklist (incl. Microsoft steps 6–7 on the owner's test tenant, P6 minutes and clicks), publisher verification, owner's one-line note in `design/mcp-oauth-connections.md` (Q12). A checklist failure becomes a fix wave on `feat/connectors` / `feature/connectors`. |
 | 2026-11-08 | 2 | **Breakdown drafted** (phase-breakdown agent,), awaiting owner approval: 5 scenarios (A–E), CN-2.1–2.8, waves 0–5 (W2 and W3 Sonnet high: token attach, envelope, refresh), 13 open questions with defaults. Shared surfaces with the Phase 3 lane named (`skills.proto`, `validation.rs`, `session.rs`, `security.rs`/`hitl.rs`, the e2e runner, app thread cards); all Phase 2 proto and validation edits in the small W1 scaffold, HOLD rule per wave, next free field numbers at rebase. |
 | 2026-11-08 | 2 | **Breakdown approved** (owner) with recommendation 1 (open question 1's default; the background-process residual risk recorded as a finding) and recommendation 2 (clarifying line under locked decision 7); other defaults accepted. Wave 0 started. |
 | 2026-11-08 | 2 | **Wave 0 merged** (squash into `feat/connectors`, `[skip ci]` + `skip-vm-lane`): 5 scenarios pending, mock Graph, probe skill (`files:` on skill pieces), runner switches `PASS_SKILL_CONNECTOR_FIELDS` / `PASS_GRAPH_ENDPOINT` (false). Orchestrator re-run: `--fast` all steps pass, 109 scenarios: 104 pass, 0 fail, 5 red right reason (A, B, C at when.4; D at when.6; E at when.2; class product); vam-e2e unit 243/243. Wave session `--full`: only the known root-only `hsp_uds` fails. Scoreboard: 0 green, 5 red right reason, 0 fix cycles, ~100 min. Local note: as root, `LOCAL_CI_OUT` must be `mkdir -m 755` (tool user reads fixtures). Phase 3 wave 0 released to start. Wave 1 next. |

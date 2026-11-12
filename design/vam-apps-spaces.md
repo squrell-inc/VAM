@@ -1,6 +1,6 @@
 # Apps and Spaces: who a run is for, and where it lives
 
-**Status:** Proposed (replaces the model in `design/vam-subjects.md` §4–§7, §10); amended 2026-10-29 (run grants and opaque Space and thread ids for the E5 slice)
+**Status:** Proposed (replaces an earlier App/Subject draft); amended 2026-10-29 (run grants and opaque Space and thread ids for the E5 slice)
 **Date:** 2026-10-09
 **Owner:** maintainer
 **Repos:** `squrell-inc/VAM`
@@ -13,7 +13,7 @@ breaks in four places:
 
 1. A website using one key puts every visitor in one workspace with one writer
    lock, and every visitor runs with the developer's full authority and
-   secrets (`vam-subjects.md` §2, Facts 1–2).
+   secrets.
 2. Nothing is ever cleaned up (Fact 3).
 3. "Which agent runs here" is a storage detail (`WorkspaceMeta` in
    `.vam/workspace.json`) surfaced only as `AgentWorkspaceMismatch` /
@@ -22,7 +22,7 @@ breaks in four places:
 4. Brokers (`design/hsp-triggers.md`) need to act for someone without
    inventing identity.
 
-`vam-subjects.md` proposed `App` and `Subject` as new identities. Review found
+An earlier draft proposed `App` and `Subject` as new identities. Review found
 that a Subject never logs in, never calls VAM, and has no role: it is a place,
 not an identity. Modelling it as a principal invites identity features VAM must
 not have, and ties it to "a visitor" when brokers need channels, tickets, and
@@ -43,7 +43,7 @@ who may ask, and for which App.
 
 > Personal use stays zero-config. Sharing is just a second kind of App.
 
-## Audience and positioning
+## Audience
 
 Two groups, one model:
 
@@ -70,10 +70,6 @@ Two groups, one model:
 
 ## Why
 
-- Prior art (E2B, Modal, Vercel, Daytona, Fly, Cloudflare; `vam-subjects.md`
-  §3) converges on: a thin developer-owned principal, developer-named
-  instances with get-or-create, opaque handles with no PII, and per-account
-  quotas. All kept here.
 - A place keyed by an opaque `ref` is all VAM needs to isolate work. The ref
   can be anything, which is what brokers need.
 - One Credential type means one hashing, revoke, list, and audit path
@@ -88,9 +84,9 @@ Two groups, one model:
 - Org accounts (Account = User for now; `tenant_id` unchanged).
 - Per-App HITL approver; Apps with more than one agent.
 - Environment promotion and rollback (DX Phase 8).
-- Usage rollup and spend ceilings (`vam-subjects.md` §9).
-- Space-scoped secrets / customers' own credentials (`vam-subjects.md` §12).
-- Read-only App-level shared mount (`vam-subjects.md` §6.1).
+- Usage rollup and spend ceilings.
+- Space-scoped secrets / customers' own credentials.
+- Read-only App-level shared mount.
 - Broker development (see `design/hsp-triggers.md`).
 
 ## Amendment 2026-10-29: run grants and opaque ids for the E5 slice
@@ -99,7 +95,7 @@ Written by a design session against `main`. It is the plan of
 record for the parts of this design that E5 Phase 1 ("grants, gateway and
 ids") builds; the phases are in `design/hsp-triggers.md` § "Phases (E5
 getting-started slice)". Apps, shared Spaces, App authority and retention
-stay as designed and stay cut from 0.1.0 (`design/launch-0.1.0.md` §2). Where
+stay as designed and stay cut from 0.1.0 (0.1.0 launch scope). Where
 `main` contradicts an earlier section, `main` is the fact. Locked rows this
 touches are in §6, as proposals for the owner.
 
@@ -338,7 +334,7 @@ Spaces.
 
 Written by a design session against `main`. The plan of record
 for the primary agent is now `design/primary-agent.md`. Apps are cut from
-0.1.0 (`design/launch-0.1.0.md` §2), so the primary agent is designed
+0.1.0 (0.1.0 launch scope), so the primary agent is designed
 without them. Superseded in this doc, for the primary agent only:
 
 - Problem 3's "no home for the planned 'primary agent'" (line 21): the home
@@ -356,7 +352,7 @@ without them. Superseded in this doc, for the primary agent only:
 - The row "Alice changes her primary agent" (§ Scenarios): she sets
   `PUT /v1/me/primary-agent`; runs keep naming their agent.
 - "Absorbs primary agent and default workspace" (§ What changed from
-  `vam-subjects.md`): the default workspace is absorbed by Spaces (amendment
+  the App/Subject draft): the default workspace is absorbed by Spaces (amendment
   2026-10-29); the primary agent is not absorbed by Apps.
 - `users.default_app_id` (§ Data model) is not added for the primary.
 
@@ -424,7 +420,7 @@ today), and only with `spaces:create` for shared Apps.
 - **Cedar shape:** add an `App` entity; the run principal is a member of it,
   so App policies use `principal in Vam::App::"…"`. Space is passed as
   context (`space_id`), not an entity. Needs the `principal ==` vs `in` audit
-  (`vam-subjects.md` §5.1).
+ .
 - **CallerContext** gains `app_id`, `space_id`, `space_ref` (host-stamped).
   A broker can route replies from `space_ref` without its own lookup table.
 - **HITL** still routes to the App owner.
@@ -459,9 +455,9 @@ today), and only with `spaces:create` for shared Apps.
 | Alice revokes the scheduler | — | — | — | Next broker request `DENIED` |
 | Alice changes her primary agent | — | New default App | — | Runs that name no App go to the new agent |
 
-### What changed from `vam-subjects.md`
+### What changed from the App/Subject draft
 
-| `vam-subjects.md` | This design | Why |
+| App/Subject draft | This design | Why |
 | --- | --- | --- |
 | Subject is an identity | Space is a place | Subjects never authenticate |
 | Subject = visitor | `ref` = anything | Brokers need channels, tickets, schedules |

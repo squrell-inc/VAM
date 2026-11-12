@@ -298,12 +298,76 @@ already in progress finish under their existing plan.
   (§6), beside scenarios green and red. A line that did not move is written
   down as a finding. A problem with no line gets its line first.
 - **Decision line.** Every item, wave, backlog row and new design carries
-  one line from the rubric in `design/launch-0.1.0.md` §3:
+  one line from the rubric below:
   `Decide: NOW | SLICE | BACKLOG | CUT — proof N, cost N, line <metric or
   launch proof>`. The breakdown agent writes it, the orchestrator checks
   it, the owner reads it. A proposal with no line is not planned.
 - **Overrides.** A finding that weakens P1 is NOW whatever the cost. A
   locked decision is never scored; it is a conversation with the owner.
+
+### 11.1 The rubric: build now, slice, backlog, or cut
+
+Any session proposing an item (a wave, a phase item, a backlog row, a new
+design) answers five questions in the tracker, then scores two axes.
+
+**Five questions**
+
+1. Which problem (P1–P14) does it serve, and which benchmark line
+   (`design/benchmark.md` §1) or launch proof does it move?
+2. What is the smallest slice that moves that line?
+3. How many waves, which model, and what new surface (API, proto, guest,
+   policy, docs) does the slice add?
+4. Which locked decision does it touch? (Touching one means stop and ask;
+   §10.)
+5. Is it reversible? Could it ship behind a flag or as a docs-only
+   change first?
+
+**Two axes, 0 to 3 each**
+
+| Proof (value) | Meaning |
+|---|---|
+| 3 | A launch proof cannot be made true without it, or it moves a must-be-zero line |
+| 2 | It moves a published benchmark line or closes a confirmed defect |
+| 1 | It serves a problem with no line yet, or improves a line already green |
+| 0 | No problem, no line, no proof |
+
+| Cost | Meaning |
+|---|---|
+| 0 | One wave, files already touched this phase, no new surface |
+| 1 | One wave, new tests, no new surface |
+| 2 | One phase, or a new API or proto field |
+| 3 | More than one phase, a new guest path, a new trust boundary, or a new repo |
+
+**Decision**
+
+| | Cost 0–1 | Cost 2–3 |
+|---|---|---|
+| **Proof 3–2** | **NOW**: plan it in the current or next phase | **SLICE**: find the Cost 0–1 piece that moves the line; plan that; backlog the rest with a trigger ("after B1 shows X") |
+| **Proof 1–0** | **BACKLOG**: never its own wave; carried by a wave that already touches the files; reviewed each phase plan | **CUT** for this release; recorded with the number that would change the decision |
+
+**Two overrides**
+
+- **Security floor always NOW.** A finding that weakens P1 (a secret
+  path, a bypass, a panic in the daemon) is Proof 3 whatever the cost
+  (E10 locked decision 1).
+- **A locked decision is never scored.** Changing one is a conversation
+  with the owner, then an edit to the list.
+
+**How it is written in a tracker**
+
+```
+Decide: SLICE — proof 3 (demo: gate decided from Slack), cost 3 (E5 full) →
+slice: schedule trigger + notify approve only, cost 1. Rest: backlog, trigger "after 0.1.0".
+```
+
+One line per item, next to the item. The phase-breakdown agent fills it;
+the orchestrator checks it; the owner reads it.
+
+### 11.2 Lanes: the conflict rule
+
+Two lanes never build in the same file at the same time. If a pair appears
+in a breakdown, the later lane holds its build waves and does breakdown and
+scenarios meanwhile.
 
 ## 12. CI minutes and disk in cloud sessions (owner, 2026-10-30)
 

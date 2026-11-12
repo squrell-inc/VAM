@@ -201,8 +201,7 @@ Never delete build caches to free disk (`target/`, `src-tauri/target`); trim
   zero-job failed push run. Set runner paths in a step (`>> "$GITHUB_ENV"`).
 - **CI runs in the session; GitHub Actions is for the microVM lane and
   releases (owner, 2026-10-30; replaces the 2026-10-25 "CI and merging"
-  rule).** Actions minutes are a shared, finite budget: about 800 minutes went
-  into fewer than six PRs in two days. So:
+  rule).** Actions minutes are a shared, finite budget. So:
   - Every wave PR opens as a **draft** (drafts run no CI) and stays a draft
     while it is built. The wave session and then the orchestrator run
     `scripts/ci/local.sh` in the session: `--fast` while building (fmt,

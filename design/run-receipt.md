@@ -8,13 +8,9 @@ planned. Placement: see `agent-experience.md` "Build order" and §5 below.
 
 A **run receipt** is the one document a run leaves behind: what the host
 observed, who decided what, which effects happened, what it cost, and a
-signature that lets someone verify it later without `vamd`. It is the
-product's signature artifact. Every other part of VAM (microVM, brokers,
-Cedar, playbooks, the effect journal, telemetry) exists to make the receipt
-true.
-
-> The agent ran in a microVM and came back with a receipt.
-> (`playbooks.md`, "Audience and positioning")
+signature that lets someone verify it later without `vamd`. Every other part
+of VAM (microVM, brokers, Cedar, playbooks, the effect journal, telemetry)
+exists to make the receipt true.
 
 Today `vam evidence receipt <run>` prints playbook step state from
 `GET /v1/runs/{id}` (`crates/vam-cli/src/cmd/evidence.rs`
@@ -30,10 +26,6 @@ app and `vam.notify` surfaces.
   better")** are the two problems `agent-experience.md` Part I marks as
   least served. Both are answered by a receipt that a controller or auditor
   reads without opening the app.
-- The market evaluation of 2026-10-19 found no vendor offering a
-  host-observed, signed record of an agent run on the customer's own
-  hardware. Managed runtimes keep the loop and the transcript on their
-  control plane. The receipt is what lets a security team say yes.
 - The data already exists on the host: `RunStatus.step_statuses`,
   `resolved_refs`, HITL decisions, PEP decisions with side-effect class,
   run-level metering (H1), the telemetry journey, and the evidence pack.
@@ -55,8 +47,8 @@ Do not re-litigate without editing this list.
 3. **Denials and asks are first-class lines.** A tool call denied by Cedar
    or a playbook guard, and a call that waited for approval, are shown
    with the rule and scope that decided (`classify_tools` already names
-   them). The denial before an approval is the line that sells the
-   product.
+   them). The denial before an approval is the line a reviewer reads
+   first.
 4. **Approval provenance.** For every gate or tool approval: who decided,
    from which surface (app, CLI, Slack, email), when, and the validated
    response (the selected subset). Later calls constrained by
