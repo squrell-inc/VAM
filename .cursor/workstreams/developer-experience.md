@@ -86,7 +86,7 @@ Do not re-litigate without editing this list.
 16. **A playbook is a dual-layer procedure, not a DAG (DX-80).** Revised
     2026-09-24 by the product owner, superseding an earlier prose-only ruling.
 
-    **Amended 2026-10-09 by the product owner** (`design/playbooks.md`): the
+    **Amended 2026-10-09 by the product owner** (`docs/src/content/docs/runtime/workflow.md`): the
     host now tracks step state and rejects illegal transitions. The agent may
     still reorder available steps but may not skip a required step.
     Enforcement of effects stays on tools, now including deny-only playbook
@@ -1384,7 +1384,7 @@ and someone else installs it unmodified.
   driving default grant behaviour.
 - [ ] **DX-124** Search and discovery, including an installed-skill index so
   the model can choose what to load without loading everything. Shares a design
-  with `design/improving-the-vam.md`, which is solving the same shape of
+  with `docs/src/content/docs/authoring/skill-manifest.md`, which is solving the same shape of
   problem for large skill docs.
 - [ ] **DX-125** Agent-proposes / human-grants install flow. Reuse the existing
   HITL approval machinery.

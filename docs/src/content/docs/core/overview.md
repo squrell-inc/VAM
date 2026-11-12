@@ -84,5 +84,4 @@ At teardown the jail is removed and stale jails left by a dead `vamd` are swept 
 
 - **CPU and memory limits.** The jailer is given no cgroup resource limit. A guest is bounded by its
   vCPU and memory size only.
-- **I/O rate limits.** The Firecracker rate limiter is always `None` (`vmm.rs:35,841,1079`). The old
-  design is archived in `design/docs-archive/core/ratelimit.md`.
+- **I/O rate limits.** The Firecracker rate limiter is always `None` (`vmm.rs:35,841,1079`).

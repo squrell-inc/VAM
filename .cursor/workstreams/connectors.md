@@ -6,8 +6,8 @@ slug: connectors
 current_phase: 4 build done 2026-11-09 (8 scenarios active and green; waves 0–7 merged), real-tenant wave 9 and lane B wait for the owner; 2 and 3 released to main 2026-11-09, checklists out; Phase 1 released, checklist out
 design_docs:
   - design/connectors.md
-  - design/mcp-oauth-connections.md
-  - design/hsp-triggers.md
+  - docs/src/content/docs/runtime/tools.md
+  - `docs/src/content/docs/hosted/triggered-runs.md`
   - design/jig.md
 ```
 
@@ -371,7 +371,7 @@ Shared invariants (every item holds them; the orchestrator checks in review):
 - **Scope.** `vam connectors list` (id, name, node state, my state, label),
   `enable <id> [--tenant <guid>]`, `disable <id>` (W2); `disconnect <id>`,
   `check <id>` (W4). No CLI sign-in: the app stays the OAuth client
-  (`design/mcp-oauth-connections.md`, CLI deferred).
+  (`docs/src/content/docs/runtime/tools.md`, CLI deferred).
 - **Files.** `crates/vam-cli/src/cmd/connectors.rs`, `cmd/mod.rs`.
 - **Acceptance.** Unit tests on the line formatting and request shapes, as
   in `cmd/node.rs`; a member's `enable` prints the 403 text.
@@ -490,7 +490,7 @@ Connectors are in 0.1.0 as a second product lane (0.1.0 launch scope rows
 18–21, beside rows 10 E12 Phase 3 and 12 E4 slice); the lane conflict rule
 applies: before each wave, check that no other lane is building in its files
 (likely overlaps: the VAM app `OrgSettingsPage.tsx`, `Sidebar.tsx`, `lib.rs`,
-`vamd.rs`; vam `api/mod.rs` routes). The `mcp-oauth-connections.md`
+`vamd.rs`; vam `api/mod.rs` routes). The `docs/src/content/docs/runtime/tools.md`
 amendment puts a connector profile's client id ahead of DCR, which matches
 CN-1.3/1.4/1.7. It does **not** exempt connectors from "send `resource` on
 authorize, token and refresh" (that doc, lines ~117 and ~174): still open,
@@ -545,7 +545,7 @@ change for it beyond keeping the definition open (CN-1.1 already does).
 11. **"Needs reconnect" for Microsoft 365 in Phase 1.** Default: set only by
     an explicit `check` (tile button, `vam connectors check`); no background
     refresh (mcp-oauth design keeps refresh reactive).
-12. **`resource` for Entra vs `design/mcp-oauth-connections.md`.** That doc
+12. **`resource` for Entra vs `docs/src/content/docs/runtime/tools.md`.** That doc
    still says to send `resource` on authorize, token and refresh; locked
    decision 11 says never for Entra, and the 2026-11-07 amendment did not
    cover it. Default: locked decision 11 wins for connectors whose profile is
@@ -593,7 +593,7 @@ text, plus the minutes and clicks from steps 2–3 (P6, Linear).
 
 **Goal:** a skill calls Microsoft Graph as the user without holding a token.
 **Depends on:** Phase 1. The three-line amendment to
-`design/mcp-oauth-connections.md` (design §12) was approved and applied
+`docs/src/content/docs/runtime/tools.md` (design §12) was approved and applied
 2026-11-07. Scope now includes the per-call egress envelope for
 connection bindings (owner, 2026-11-07; design §10, question 8, finding F8).
 **Plan:** approved 2026-11-08 (owner) with recommendation 1 (required: open question 1's default, the host's active call window, with its residual risk recorded as a finding: a background process left by a read tool could ride a later, approved send window) and recommendation 2 (the clarifying line under locked decision 7). Other open questions: defaults accepted. Wave 0 started.
@@ -2181,7 +2181,7 @@ init`, `validate`, `test`. Rubric: cost 3 (new trust boundary).
 | 2026-11-08 | 1 | **Wave 5 merged**: Org settings "Connectors" (users:admin), Enable/Disable, Microsoft admin consent via `adminconsent` (no `prompt`/`resource`, state checked, tenant GUID) with manual fallback, five Tauri commands. Orchestrator re-run: pnpm test 805/805, tsc clean, src-tauri 58/58 (GTK/WebKit dev packages installed in the session). Consent actions show after Enable (listing carries `provider` only once enabled). 0 fix cycles. Wave 6 started. |
 | 2026-11-08 | 1 | **Wave 6 merged**: member Connections tiles (§3.1 states, Connect/Reconnect/Disconnect, nothing secret shown), Linear through the existing MCP OAuth flow with the fixed id and URL, Microsoft 365 through the Entra profile (discovery skipped, no `resource`/`prompt`, `tid` and `iss` checked before vamd, tokens cleared). Orchestrator re-run: pnpm test 818/818, tsc clean, src-tauri 58/58. 0 fix cycles. **Waves 0–6 done; all 5 scenarios active and green.** Wave 7 (real tenant) blocked on the owner items. Team checklist written (Linear steps runnable now). |
 | 2026-11-08 | 1 | **Owner registered the Squrell Entra app** (multi-tenant, public client, `squrell://oauth` + `http://localhost`, 8 delegated Graph scopes incl. `profile`, `email`; admin consent not granted in the portal so the app's flow is tested). **Wave 7 code merged**: real client id `082509e4-…` in `microsoft-365.json`, scopes + `profile`/`email`; tests for an unconfigured node set the placeholder explicitly (no unit test can reach Microsoft). 5/5 connector scenarios pass, workspace lib tests green. Pending: owner's manual run of checklist steps 1, 6, 7 on the owner's test tenant and the P6 numbers. Publisher verification still open (needed for other orgs' tenants, not for this test). |
-| 2026-11-08 | 1 | **Released to `main`** on the owner's word: (merge commit; Actions in full once: checks, workspace tests, smoke scenarios, microVM lane all green) and (merge commit; test green). Bases fast-forwarded to `main`. **Phase 1 scoreboard:** 5 scenarios added, 5 active and green; waves 0–7 (wave 7 code only), 3 fix cycles in total (W2 scenario isolation, W3 observation spec change, W7 test config); Actions used only by the release PR. Status: released, checklist out. Open: team checklist (incl. Microsoft steps 6–7 on the owner's test tenant, P6 minutes and clicks), publisher verification, owner's one-line note in `design/mcp-oauth-connections.md` (Q12). A checklist failure becomes a fix wave on `feat/connectors` / `feature/connectors`. |
+| 2026-11-08 | 1 | **Released to `main`** on the owner's word: (merge commit; Actions in full once: checks, workspace tests, smoke scenarios, microVM lane all green) and (merge commit; test green). Bases fast-forwarded to `main`. **Phase 1 scoreboard:** 5 scenarios added, 5 active and green; waves 0–7 (wave 7 code only), 3 fix cycles in total (W2 scenario isolation, W3 observation spec change, W7 test config); Actions used only by the release PR. Status: released, checklist out. Open: team checklist (incl. Microsoft steps 6–7 on the owner's test tenant, P6 minutes and clicks), publisher verification, owner's one-line note in `docs/src/content/docs/runtime/tools.md` (Q12). A checklist failure becomes a fix wave on `feat/connectors` / `feature/connectors`. |
 | 2026-11-08 | 2 | **Breakdown drafted** (phase-breakdown agent,), awaiting owner approval: 5 scenarios (A–E), CN-2.1–2.8, waves 0–5 (W2 and W3 Sonnet high: token attach, envelope, refresh), 13 open questions with defaults. Shared surfaces with the Phase 3 lane named (`skills.proto`, `validation.rs`, `session.rs`, `security.rs`/`hitl.rs`, the e2e runner, app thread cards); all Phase 2 proto and validation edits in the small W1 scaffold, HOLD rule per wave, next free field numbers at rebase. |
 | 2026-11-08 | 2 | **Breakdown approved** (owner) with recommendation 1 (open question 1's default; the background-process residual risk recorded as a finding) and recommendation 2 (clarifying line under locked decision 7); other defaults accepted. Wave 0 started. |
 | 2026-11-08 | 2 | **Wave 0 merged** (squash into `feat/connectors`, `[skip ci]` + `skip-vm-lane`): 5 scenarios pending, mock Graph, probe skill (`files:` on skill pieces), runner switches `PASS_SKILL_CONNECTOR_FIELDS` / `PASS_GRAPH_ENDPOINT` (false). Orchestrator re-run: `--fast` all steps pass, 109 scenarios: 104 pass, 0 fail, 5 red right reason (A, B, C at when.4; D at when.6; E at when.2; class product); vam-e2e unit 243/243. Wave session `--full`: only the known root-only `hsp_uds` fails. Scoreboard: 0 green, 5 red right reason, 0 fix cycles, ~100 min. Local note: as root, `LOCAL_CI_OUT` must be `mkdir -m 755` (tool user reads fixtures). Phase 3 wave 0 released to start. Wave 1 next. |

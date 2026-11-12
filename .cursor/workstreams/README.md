@@ -30,3 +30,10 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | [`journey-debug-capture`](archive/journey-debug-capture.md) | Redacted tool args + LLM outcomes on run events for journey debug | done | done |
 | [`workspace-files-ui`](archive/workspace-files-ui.md) | Workspace Files UI: Tauri bridge, list panel, save/open over Drive9 HEAD | done | done |
 | [`workspace-files-upload`](archive/workspace-files-upload.md) | Owner upload into committed Drive9 HEAD under workspace/ | done | done |
+
+## Backlog (no tracker)
+
+| Item | Note |
+|---|---|
+| E11 Jig, the larger plan | Queries and mutations, composed components, jig packages and a registry, agent-written `.jig`, Slack and A2UI adapters. The basics are shipped (`docs/src/content/docs/runtime/jig.md`); the earlier plan is in git history. |
+| Primary agent | One default agent per user that asks the other agents the user may run (a delegate broker, depth one). Not started; the earlier proposal is in git history. |

@@ -66,7 +66,7 @@ vam/
 ├── crates/                    # 13 workspace crates (plus vam-build, not a member): the machine (see section 3)
 ├── brokers/                   # First-party HSP brokers, one crate each, own process (see section 3)
 └── docs/                      # Astro Starlight documentation site (@vam/docs)
-    └── src/content/docs/      # Docs pages; pages in design/docs-archive/ are design intent, not behaviour
+    └── src/content/docs/      # Docs pages: what the node does today
 ```
 
 ---
@@ -227,7 +227,7 @@ When working on a specific subsystem, refer to the corresponding documentation d
 | Image building (planned) | `docs/src/content/docs/build/overview.md` | `docs/src/content/docs/build/rootfs.md` |
 | Agent / skill authoring | `docs/src/content/docs/authoring/agent-spec.md` | `docs/src/content/docs/authoring/run-spec.md`, `docs/src/content/docs/authoring/skill-manifest.md` |
 
-Pages in `design/docs-archive/` are design intent, not behaviour; never cite them as what the node does.
+Files in `design/` are proposals for open work, not behaviour; never cite them as what the node does.
 
 ---|---|
 | **Overview & Architecture** | `docs/src/content/docs/architecture/` (`overview.md`, `isolation.md`, `cold-start.md`, `testing.md`, `drive9.md`) |

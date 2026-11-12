@@ -90,6 +90,33 @@ connection are offered to the model on the first turn. The test file covers what
 connection, the token upsert and that a listing shows no secret
 (`crates/vam-orchestrator/tests/mcp_connections_tests.rs`). Calls to a live MCP server are not proved.
 
+### OAuth
+
+A connection uses one of two auth modes: `static` (the default) or `oauth`.
+
+- **Static.** One or more headers are stored per connection (`secretValue` is shorthand for a single
+  `Authorization` header). Values are write-only: a listing never returns them.
+- **OAuth.** The app is the OAuth client. It discovers the authorization server, registers a client
+  (dynamic client registration), runs the authorization-code flow with PKCE (S256) and sends an RFC 8707
+  `resource` for the MCP server, then hands the tokens to `vamd` with
+  `PUT /v1/mcp/connections/:id/oauth/tokens`. `vamd` never opens a browser and never sees the
+  authorization code. The discovery and browser steps live in the app, not in this repository.
+
+`vamd` stores the access and refresh tokens as `connection` vault rows, each pinned to one host
+(`mcp_registry.rs`, `store_mcp_oauth_tokens`): the access token to the MCP server host, the refresh token to the token
+endpoint host. The host sends the access token as `Authorization: Bearer` on each MCP request and sends
+a token only to its own audience; there is no token passthrough.
+
+When an MCP call returns HTTP 401, `vamd` refreshes once and retries the call once. Concurrent calls on the same
+connection share one refresh (a per-connection gate), so a refresh token is not spent twice. The
+token endpoint request goes to a DNS-pinned public IP, with no redirects, and sends `resource` again
+(`mcp_oauth_refresh.rs`). A definitive failure such as `invalid_grant` marks the connection `needs_reauth`: later
+calls fail at once with an `mcp needs_reauth:` error, without contacting the MCP server, until the user
+reconnects. A network failure records `lastRefreshError` but does not mark `needs_reauth`. There is no
+background refresh for plain MCP connections.
+
+Not built yet: refresh before expiry for plain MCP connections (only connector bindings refresh early).
+
 ### MCP credentials are host-only
 
 Every row a connection writes (`{id}/auth-header`, `{id}/header/*`, `{id}/oauth/*`) has the vault
@@ -111,3 +138,10 @@ manifest names the token gets nothing), plus the tests in `mcp_credentials_stay_
 
 - The confinement of tool processes (Landlock, uid 1000, limits).
 - Calls to a live MCP server and the token refresh against a real provider.
+
+## Design notes
+
+- `vamd` is not the OAuth client because it has no browser and no loopback listener. Keeping the
+  authorization code in the app means the host holds only tokens, and the app holds none after the hand-off.
+- Static header auth stays as a permanent mode: not every server speaks OAuth, and a pasted token is the
+  only option for those.

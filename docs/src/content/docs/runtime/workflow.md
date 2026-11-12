@@ -41,6 +41,17 @@ against the schema captured when the gate opened (`crates/vam-orchestrator/src/h
 `timeout` waits 72 hours; publish refuses a timeout above 30 days (`workflow.rs:49-51`). A decided gate finishes
 the run (`gate-decided-finishes-the-run`); stopping the run ends it (`gate-offers-its-options-and-stop-ends-the-run`).
 
+A human wait parks the run, not the VM. After a keep-warm window (5 minutes unless the gate sets `keepWarm`) the
+VM is shut down and a fresh one resumes the run when the decision arrives. Parked time does not count toward the
+run's duration limit, and the parked run keeps its workspace reserved.
+
+## Guards
+
+A playbook `guards[]` entry is a deny-only rule the host checks on every tool call, next to the permission policy.
+It matches by tool name or side-effect class, applies only when the run's step state does not satisfy `allowedWhen`,
+and can bound arguments with `argsWithin`. A guard never grants a permission. The fields are in
+[Playbook spec](/authoring/playbook-spec/).
+
 ## Tool approvals
 
 When the policy answers "ask", the call becomes an approval and the run is `PAUSED`. The routes are
@@ -81,3 +92,16 @@ not make a used token valid again. The signer and the replay rule have no test u
 
 `POST /v1/playbook-tests` (`api/mod.rs:159`, `playbook_test.rs:122`) runs a playbook against a scenario and
 aggregates trials. The CLI front end is `vam playbook test` (`crates/vam-cli/src/cmd/catalog.rs:413`), covered by `crates/vam-cli/tests/playbook_test_cli.rs`.
+It reports `passed`, `repeat` and `passK`, which is `(passed / repeat)^repeat`: 1 only when every trial passes.
+`vam playbook test` can also run locally against a scenario file (`crates/vam-cli/src/cmd/playbook_local.rs`).
+
+## Design notes
+
+- Effects are strict, reasoning is free, waiting is free. The host enforces the order of side effects and human
+  decisions; it does not dictate the order of the agent's reasoning.
+- A host-walked graph, one guest task per node, was rejected. A node that keeps the full tool set can still call
+  the tool meant for a later node, so walking the path does not enforce effects. Guards on tool calls do.
+- Guided execution is the default: one agent session sees the whole procedure and may work available steps in any
+  order, while the host validates each `step_complete`, gate and exit condition.
+- Human waits can last days, so a live VM is not held for them. The run parks and resumes on a fresh VM.
+- Prose-only playbooks were removed. A procedure with no host tracking is guidance, and guidance belongs in a skill.

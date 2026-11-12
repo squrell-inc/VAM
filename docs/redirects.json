@@ -8,7 +8,7 @@
     "to": "/architecture/overview/"
   },
   "/architecture/design-principles/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/architecture/overview/"
   },
   "/architecture/drive9/": {
@@ -20,7 +20,7 @@
     "to": "/architecture/isolation/"
   },
   "/architecture/session-lifecycle/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/orchestrator/session/"
   },
   "/architecture/trust-boundaries/": {
@@ -28,43 +28,43 @@
     "to": "/architecture/isolation/"
   },
   "/build/errors/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/build/overview/"
   },
   "/build/hardening/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/build/overview/"
   },
   "/build/invariants/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/build/overview/"
   },
   "/build/oci/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/build/overview/"
   },
   "/build/optimization/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/build/overview/"
   },
   "/build/reproducibility/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/build/overview/"
   },
   "/build/security/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/build/overview/"
   },
   "/build/signing/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/build/overview/"
   },
   "/build/supply-chain/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/build/overview/"
   },
   "/build/testing/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/build/overview/"
   },
   "/core/api-client/": {
@@ -96,7 +96,7 @@
     "to": "/core/overview/"
   },
   "/core/ratelimit/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/core/overview/"
   },
   "/core/security-model/": {
@@ -136,7 +136,7 @@
     "to": "/hosted/overview/"
   },
   "/hosted/first-party/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/hosted/overview/"
   },
   "/hosted/hooks/": {
@@ -148,15 +148,11 @@
     "to": "/hosted/overview/"
   },
   "/hosted/resources/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/hosted/overview/"
   },
   "/hosted/roadmap/": {
-    "kind": "design",
-    "to": "/hosted/overview/"
-  },
-  "/hosted/triggered-runs/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/hosted/overview/"
   },
   "/network/architecture/": {
@@ -168,7 +164,7 @@
     "to": "/network/overview/"
   },
   "/network/dns/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/network/overview/"
   },
   "/network/ebpf/": {
@@ -192,11 +188,11 @@
     "to": "/network/overview/"
   },
   "/network/modes/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/network/overview/"
   },
   "/network/nat/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/network/overview/"
   },
   "/network/policy/": {
@@ -208,7 +204,7 @@
     "to": "/network/overview/"
   },
   "/network/tap/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/network/overview/"
   },
   "/network/telemetry/": {
@@ -220,11 +216,11 @@
     "to": "/architecture/testing/"
   },
   "/network/traffic-control/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/network/overview/"
   },
   "/orchestrator/admission/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/orchestrator/overview/"
   },
   "/orchestrator/daemon/": {
@@ -260,11 +256,11 @@
     "to": "/orchestrator/overview/"
   },
   "/orchestrator/router/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/orchestrator/overview/"
   },
   "/orchestrator/scheduler/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/orchestrator/overview/"
   },
   "/orchestrator/security/": {
@@ -368,11 +364,11 @@
     "to": "/security/secrets-proxy/"
   },
   "/security/seccomp/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/architecture/isolation/"
   },
   "/security/spiffe/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/architecture/isolation/"
   },
   "/security/testing/": {
@@ -444,7 +440,7 @@
     "to": "/storage/overview/"
   },
   "/storage/backends/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/storage/overview/"
   },
   "/storage/cache/": {
@@ -464,7 +460,7 @@
     "to": "/storage/overview/"
   },
   "/storage/encryption/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/storage/overview/"
   },
   "/storage/errors/": {
@@ -472,7 +468,7 @@
     "to": "/storage/overview/"
   },
   "/storage/fuse/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/storage/overview/"
   },
   "/storage/invariants/": {
@@ -488,7 +484,7 @@
     "to": "/storage/overview/"
   },
   "/storage/sync/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/storage/overview/"
   },
   "/storage/testing/": {
@@ -544,7 +540,7 @@
     "to": "/telemetry/overview/"
   },
   "/telemetry/roadmap/": {
-    "kind": "design",
+    "kind": "retired",
     "to": "/telemetry/overview/"
   },
   "/telemetry/streaming/": {

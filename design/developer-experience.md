@@ -938,7 +938,7 @@ Fifty installed skills cannot fit their tool definitions in a context window.
 the *index*: a compact, searchable manifest of what is installed and what it is
 for, so the model can choose what to load without loading everything.
 
-`design/improving-the-vam.md` is already solving the same shape of problem for
+`docs/src/content/docs/authoring/skill-manifest.md` is already solving the same shape of problem for
 large skill documentation corpora (`INDEX.md`, grep-the-index-first). **The
 same pattern generalises to the installed-skill set**, and the two efforts
 should share a design rather than diverge.

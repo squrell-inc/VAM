@@ -19,7 +19,7 @@ form generator have no test or scenario outside `crates/vam-spec/src/jig/tests.r
 A **jig** is a small, declarative piece of UI made only from a closed catalog of
 primitives. The model picks a built-in jig and fills data; it never writes UI.
 `vamd` checks the data before anything is drawn and checks every answer before
-the task resumes. The design is in `design/jig.md`; the files are in `spec/jig/`
+the task resumes. The files are in `spec/jig/`
 and are embedded in `vam-spec` (`vam_spec::jig`).
 
 ## The IR
@@ -58,10 +58,14 @@ The checked form of a jig is its **IR**, plain JSON. The app paints only the IR.
 
 ## The catalog (`vam/1`)
 
-Stack, Text, Badge, KeyValue, ProgressBar, Input, TextArea, NumberInput, Toggle,
+Stack, Text, List, Badge, KeyValue, ProgressBar, Input, TextArea, NumberInput, Toggle,
 Select, MultiSelect, DateInput, FileInput and Button. `spec/jig/catalog.json`
 lists each one's props in order, their types, the closed style tokens (`gap`,
 `tone`) and the allowed actions. There is no free CSS and no HTML.
+
+`List` repeats one child subtree over an array bound with `{"$data": "/path"}`. Inside that subtree
+`{"$item": "/ptr"}` reads a field of the current element. A `List` paints at most 100 items and then "and N more",
+and it is display only: it has no selection. A `List` inside a `List` is an error.
 
 ## The checker
 
@@ -149,9 +153,16 @@ A `submit` result is the union of the button action's `set` names (literals) and
 `with` names (state values), so `vam.approve` carries `decision` from `set`. Its
 `decision` is `approve`, `deny`, `always` or `always_deny`.
 
+## Cards a skill ships for its tools
+
+A skill tool can name cards in `ToolSpec.ui` (`proto/vam/v1/skills.proto`): `show` for a successful result (needs
+`output_schema_json`) and `ask` for the approval of a call. Each name is a JSON IR file `jigs/<name>.json` in the
+skill package. The host checks the cards at publish (a bad card is a 400 naming the tool, file and JSON pointer)
+and again when a session starts, and a run reads only the checked IRs
+(`crates/vam-orchestrator/src/skill_cards.rs`).
+
 ## Planned
 
-These are not built. Queries and mutations, lists and tables, composed components, packages, agent
-written `.jig` files, and any A2UI adapter. `spec/jig/a2ui.md` maps the catalog
-and IR to A2UI v0.9.1 on paper so the adapter can be written later without
-changing the IR.
+These are not built: queries and mutations (the names are reserved and refused), tables, composed components,
+packages, agent-written `.jig` files, and any A2UI adapter. `spec/jig/a2ui.md` maps the catalog and IR to A2UI
+v0.9.1 on paper so an adapter can be written later without changing the IR.

@@ -1,7 +1,7 @@
 # Scenarios: test-first phases and the E2E harness
 
 Status: **confirmed direction, 2026-10-18** (owner). Replaces
-[`e2e-journeys.md`](e2e-journeys.md) as epic **E9**. Tracker:
+the earlier journeys harness (removed) as epic **E9**. Tracker:
 `.cursor/workstreams/e2e-scenarios.md` (written from scratch). The
 `phase-playbook.md` changes in §9 land in E9 Phase 1.
 

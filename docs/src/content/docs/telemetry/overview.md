@@ -69,4 +69,4 @@ Token usage is recorded on each run as `vam.v1.inference.completed` events. At f
 - No TLS on the gRPC stream.
 - No per-user telemetry quota.
 
-Earlier pages for architecture, OpenTelemetry, trace context, CloudEvents, streaming, reliability, metrics, cost, latency, audit ledger, privacy, retention, errors and invariants described a larger design. They were folded into this page; the unbuilt parts are kept in the design archive at `design/docs-archive/telemetry/roadmap.md`, which is design intent, not behaviour.
+Earlier pages for architecture, OpenTelemetry, trace context, CloudEvents, streaming, reliability, metrics, cost, latency, audit ledger, privacy, retention, errors and invariants described a larger design. They were folded into this page; the unbuilt parts are listed under "Not built" above.

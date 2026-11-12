@@ -101,6 +101,16 @@ build if a default `vamd` or guest contains it (`scripts/e2e/check-release-gate.
 - **No eBPF.** There is no kernel-level egress filter. The only network controls are the absent
   guest route, the guest proxy and the host proxy and gate.
 
+## Design notes
+
+- Egress is brokered, not filtered. A session's guest has no network route; the host proxy makes every
+  connection and applies the gate. With no packet path from the guest to the network, there is nothing for a kernel
+  filter to inspect, and the claim "the guest cannot reach the network" is stronger than "a filter blocks some packets".
+- A kernel filter was removed for that reason, along with its stub and doc claims.
+- It would be worth reopening if a network mode with a direct guest route appears, if the userspace proxy
+  becomes the bottleneck at many VMs per host, or if kernel-enforced egress is required as an attestable control.
+  The first step then would be nftables with an address set filled by the DNS proxy, then eBPF for scale.
+
 ## Related
 
 - [Architecture overview](/architecture/overview/): planes, crates, one run end to end.
