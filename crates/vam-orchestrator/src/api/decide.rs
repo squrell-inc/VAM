@@ -1,4 +1,4 @@
-//! The one way an approval is decided (NT-2.4; `design/notifications.md` section 3.6).
+//! The one way an approval is decided (NT-2.4; docs: orchestrator/notifications).
 //!
 //! [`decide_as`] is the body of the HTTP route `POST /v1/approvals/:id/decide`, moved here: the
 //! "remember" rule write, the decision, the run state flip and the resume dispatch. It has two

@@ -6,7 +6,7 @@
 //! This module is a child of `engine`, so it reads the engine's private state; the shared
 //! runner files only register the steps and call the probe hook.
 //!
-//! Wire shapes the steps read (`design/notifications.md` section 3.2):
+//! Wire shapes the steps read (docs: orchestrator/notifications):
 //! - `GET /v1/notifications?state=open|all&pageSize=` answers `{ records: [...], pagination:
 //!   { nextPageToken } }`; a record has `id`, `kind`, `severity`, `runId`, `approvalId`,
 //!   `receiptDigest`, `count`, `createdAt`, `firstShownAt`, `readAt`, `actedAt`, `actedSurface`,

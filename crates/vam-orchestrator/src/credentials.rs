@@ -286,7 +286,7 @@ impl SqliteWorkflowStore {
     }
 }
 
-// ---- action handles (NT-2.4; `design/notifications.md` section 3.6) ----------------------------
+// ---- action handles (NT-2.4; docs: orchestrator/notifications) ----------------------------
 
 /// Prefix of an action handle token: `vam_` + the id (`na_...`) gives `vam_na_<id>.<secret>`.
 pub const HANDLE_TOKEN_PREFIX: &str = "vam_";

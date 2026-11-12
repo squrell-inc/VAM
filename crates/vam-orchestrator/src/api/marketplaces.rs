@@ -1,4 +1,4 @@
-//! `/v1/marketplaces`: the Git marketplaces this node trusts (CN-4.4, `design/connectors.md` §9.1)
+//! `/v1/marketplaces`: the Git marketplaces this node trusts (CN-4.4)
 //! and the installs from them (CN-4.5).
 //!
 //! Every route needs `users:admin`; a member gets 403 on all of them (including the list). The

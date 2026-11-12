@@ -1348,7 +1348,7 @@ static PASSTHROUGH_HOSTS: RwLock<Vec<String>> = RwLock::new(Vec::new());
 static EGRESS_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_EGRESS_MAX_BYTES);
 
 /// Scripts for the scripted mock model. `None` unless `vamd` loaded them from
-/// `VAMD_E2E_MOCK_SCRIPTS` (design/e2e-journeys.md D3).
+/// `VAMD_E2E_MOCK_SCRIPTS`; test only.
 /// The run event for one mock trace. The message preview goes through the telemetry redactor.
 pub(crate) fn mock_trace_event(
     trace: &vam_inference::MockTrace,

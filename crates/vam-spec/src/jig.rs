@@ -1,5 +1,5 @@
 //! Jig: the closed UI catalog, the IR checker and the built-in jigs
-//! (`design/jig.md`, E10 Phase 3 AR-3.4).
+//! (docs: runtime/jig; AR-3.4).
 //!
 //! The files in `spec/jig/` are the source of truth and are embedded here.
 //! Three checks, all pure:

@@ -1,4 +1,4 @@
-//! Honest tool-call errors (`design/harness.md` L3, locked decision 5).
+//! Honest tool-call errors (docs: runtime/agent).
 //!
 //! The guest checks a model's tool arguments before anything runs. Unparsable or
 //! non-object arguments are never turned into `{}`; a schema violation is a typed

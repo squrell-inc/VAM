@@ -1,5 +1,5 @@
 //! The `harness` run input: every lever of the agent loop as a named switch
-//! (`design/harness.md` section 6.1).
+//! (docs: runtime/agent).
 //!
 //! A caller may send `inputs.harness` as a partial object of overrides. The node
 //! resolves it once, when the run is created, into a host-owned record that
@@ -19,7 +19,7 @@
 //! profile whose evidence is `pending` is never applied implicitly (locked
 //! decision 3). An unknown name is an error naming `profile`.
 //!
-//! Rules (design/harness.md locked decisions 1, 3 and 6):
+//! Rules:
 //! - an unknown key at any depth is an error naming the switch;
 //! - a switch whose lever is not built on this version accepts only its default;
 //! - `process.*` accepts only `true` (an off switch would loosen a guard or gate);

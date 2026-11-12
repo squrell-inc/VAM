@@ -1,5 +1,5 @@
 //! Validation of a skill's connection egress declaration: `SkillManifest.requires_connector`
-//! and `ToolSpec.egress` (design/connectors.md 4.1). Declared here, enforced by vamd.
+//! and `ToolSpec.egress`. Declared here, enforced by vamd.
 
 use crate::v1::{
     tool_spec::ExecutionProvider, SideEffectClass, SkillManifest, ToolEgress, ToolSpec,

@@ -1,7 +1,6 @@
 //! Permission targets and [`AgentPermissions`] validation.
 //!
-//! Design: `design/agent-experience.md` §IV.2 and §IV.11. Locked decisions
-//! 11, 13, 15, 22, and 24.
+//! See docs: security/permissions.
 //!
 //! # Canonical MCP server id
 //!

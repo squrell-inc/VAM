@@ -30,7 +30,7 @@ fi
 if [[ -n "${VAMD_BOOTSTRAP_ADMIN_PASSWORD:-}" ]]; then
   BOOTSTRAP_ADMIN_PASSWORD_EXPORT="export VAMD_BOOTSTRAP_ADMIN_PASSWORD=$(printf '%q' "$VAMD_BOOTSTRAP_ADMIN_PASSWORD")"
 fi
-# Scripted mock model (test only, design/e2e-journeys.md D3). Forwarded only when the caller sets it.
+# Scripted mock model (test only). Forwarded only when the caller sets it.
 MOCK_SCRIPTS_EXPORT=""
 if [[ -n "${VAMD_E2E_MOCK_SCRIPTS:-}" ]]; then
   MOCK_SCRIPTS_EXPORT="export VAMD_E2E_MOCK_SCRIPTS=$(printf '%q' "$VAMD_E2E_MOCK_SCRIPTS")"

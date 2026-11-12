@@ -122,7 +122,7 @@ jobs:
         if: github.event_name == 'push' || github.base_ref == 'main'
         run: scripts/e2e/check-release-gate.sh
 
-  # Clippy gate (isolation-truth IT-3.10): -D warnings on the default and the
+  # Clippy gate: -D warnings on the default and the
   # process-guest feature sets. The toolchain is pinned, not `stable`, so a new Rust
   # release cannot turn PRs red with no code change. Keep the version equal to
   # CLIPPY_TOOLCHAIN in scripts/ci/local.sh; a Rust bump is one PR that changes both
@@ -197,7 +197,7 @@ jobs:
         if: always()
         run: df -h /
 
-  # Process-mode scenarios (design/scenarios.md). The test-only vamd and
+  # Process-mode scenarios (docs: architecture/testing). The test-only vamd and
   # vam-runtime (process-guest) are built here and never reach the test job.
   scenarios:
     name: scenarios (smoke)
@@ -246,7 +246,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # Boots real Firecracker microVMs (design/isolation-truth.md). Advisory on ordinary PRs; on a
+  # Boots real Firecracker microVMs (docs: architecture/isolation). Advisory on ordinary PRs; on a
   # release PR (into main from feat/*, or labelled `release`) it always runs and
   # `release lane (microVM)` (end of file) fails the PR unless this job succeeds. Needs no secrets; the VM tests use the mock path only.
   firecracker:
