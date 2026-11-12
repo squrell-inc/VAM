@@ -3,7 +3,7 @@
 //! `extends` is inheritance of a pinned agent definition. It is not a call.
 //! The child does not invoke the parent, and this module does not delegate.
 //!
-//! Locked as developer-experience decision 20. The caller resolves the chain
+//! Merge rules are locked (docs: authoring/agent-spec). The caller resolves the chain
 //! and passes it root-first. This function does not fetch from the catalog.
 //!
 //! # What merges

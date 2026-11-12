@@ -3,9 +3,9 @@
 Status: **direction agreed with the owner 2026-11-07** (the decision record
 below, D1 to D22; D23 to D27, the Git marketplace and installable connectors,
 agreed 2026-11-09). **Owner, 2026-11-07 (later):** connectors are in 0.1.0
-(`design/launch-0.1.0.md` §4 rows 18 to 21); the per-call egress envelope
+(0.1.0 launch scope); the per-call egress envelope
 (open question 8) is part of Phase 2; the three-line amendment to
-`design/mcp-oauth-connections.md` (§12) is approved and applied. Phases are proposed and are planned one at a time; Phase 1
+`docs/src/content/docs/runtime/tools.md` (§12) is approved and applied. Phases are proposed and are planned one at a time; Phase 1
 is planned by a separate session. Written by a design session against `main`
 at and brought up to date with `main` (notifications
 Phase 2 released: `vam.notify`, Slack, contacts;
@@ -15,20 +15,12 @@ earlier design, `main` is the fact. Nothing in a tracker is edited by this
 doc; amendments to other designs are listed in §12. Tracker slug proposed:
 `connectors`, item prefix `CN`.
 
-The owner, 2026-11-04: "If we could not deliver the right use cases that the
-market is looking for, or if we don't provide enough connections where they
-can use it for their day-to-day activity, it doesn't make any sense to have
-such a good machine." And on the first product: "most organizations hold
-Microsoft 365 as their communication channel ... an individual user can sign
-in to their account of Microsoft 365, and then they should be able to query
-their Outlook mails and schedule events on their calendars."
-
 ## Decision record
 
 | # | Topic | Decision |
 |---|---|---|
 | D1 | Tenancy | One `vamd` node per customer organization. Its employees are the users; its catalog holds its use cases. Squrell services (hubs, OAuth apps, relays) are shared across nodes; everything else is per node. |
-| D2 | Microsoft route | Designed, not inherited. The skills built for an earlier prototype agent and the MCP path are both inputs. |
+| D2 | Microsoft route | Designed fresh. Graph skills and the MCP path are both inputs. |
 | D3 | OAuth apps | Squrell owns the OAuth app registrations for Microsoft, Google and Slack. Customers never see a client id. The org admin consents for the organization once; each user connects their own account. |
 | D4 | Admin gate | The admin of each node decides which marketplace items its users may use. Nothing reaches a member before the admin enables it. |
 | D5 | Brokers | Third-party brokers are not ruled out; the bar is product stability and the risk of untrusted code on the node. First-party brokers are fine now. |
@@ -39,12 +31,10 @@ their Outlook mails and schedule events on their calendars."
 | D10 | Direction | Dependencies point downward: agent → playbook → skill → connector. A skill declares `requiresConnector`. Jigs live inside the skill that owns the tool they render. |
 | D11 | Bundling and discovery | A marketplace **listing** bundles (connector + skills + playbooks + agent) for one-click install. Discovery uses reverse lookup: a connector's page shows the skills, playbooks and agents that depend on it, computed from their references. |
 | D12 | Databases | Approach recorded (§7); build parked. Until it exists, no database password goes into an egress secret or a skill. |
-| D13 | IP | Artifacts are not IP-protected. An installed release is a full, readable, auditable copy on the node. The only protection is access: only a subscribed org can pull a release and its updates. |
+| D13 | Readable artifacts | An installed release is a full, readable, auditable copy on the node. Artifacts are not hidden from the node's admin. |
 | D14 | Proprietary logic and data | Proprietary logic belongs behind a connector (the publisher's own service) or a broker. Data leaves the enterprise only through a connector the admin enabled. Squrell artifacts never send data off the node. |
-| D15 | Inference | Customers pay for inference with their own model keys. |
-| D16 | Marketplaces | Live outside VAM (`hub.squrell.cloud` first; others may speak the same protocol). The protocol is OCI-based. The node keeps trusted hubs, allow-lists, installs and entitlements as VAM records. |
+| D16 | Marketplaces | Live outside VAM (`hub.squrell.cloud` first; others may speak the same protocol). The protocol is OCI-based. The node keeps trusted hubs, allow-lists, installs as VAM records. |
 | D17 | Install | Pulls a signed, digest-pinned release into the node catalog under its publisher URN, read-only. Updates arrive as new releases per org policy. An org may fork into its own namespace at any time, which ends the upstream link. |
-| D18 | Agents in the marketplace | Version one: Squrell starter agents only. Community agents later. |
 | D19 | Jigs | Minimal in version one: cards live inside skills. No separate jig catalog kind yet. |
 | D20 | Scopes | One scope set per connector in version one. Writes are governed by tool defaults (`ask`) and agent rules, not by withholding scopes. |
 | D21 | First connectors | `microsoft-365` (REST, Squrell public client) and `linear` (remote MCP) ship built into `vamd` for version one. The hub and OCI pull come after. |
@@ -68,10 +58,9 @@ handing an AI the keys. Today:
 - **Microsoft and Google do not connect.** Entra has no dynamic client
   registration and publishes a templated issuer; Google rejects custom URL
   schemes. A Squrell-owned app is required.
-- **Building an integration is mostly auth and packaging.** An earlier
-  prototype agent built Microsoft 365 as Graph skills; most of its logged
-  effort went to device-code auth, token caches, digest mismatches, tool-name
-  collisions and a release deadlock, not to mail logic.
+- **Building an integration is mostly auth and packaging**: device-code
+  auth, token caches, digest mismatches, tool-name collisions and release
+  deadlocks, not mail logic.
 - **Connections belong to the user, not the agent.** Every MCP connection
   the user can see is seeded into every session
   (`crates/vam-orchestrator/src/mcp_registry.rs` `seed_mcp_skills`), and
@@ -393,12 +382,11 @@ bindings.
 
 ### 6.2 Why not Microsoft's hosted MCP servers
 
-The per-app Agent 365 MCP servers are labelled legacy; their successor,
-Work IQ MCP, bills Copilot Credits per call, may need Copilot seats and an
-admin enable step, and its use by a multi-tenant vendor app is undocumented.
-It stays an optional connector for customers already on Copilot. A
-Squrell-hosted Graph MCP server was rejected: mail and tokens would transit
-Squrell's cloud, which contradicts D14.
+Microsoft's hosted MCP servers are not the base: the per-app servers are
+labelled legacy, and their successor needs an admin enable step and has
+undocumented use by a multi-tenant app. A Squrell-hosted Graph MCP server was
+rejected: mail and tokens would transit Squrell's cloud, which contradicts
+D14.
 
 ### 6.3 Providers that need a secret
 
@@ -449,7 +437,7 @@ first-party while third-party brokers may not hold grants.
 | Trigger gateway: the broker calls `RequestRunTrigger`; `vamd` checks the grant and starts the run through the one start path, as the user | built | `gateway.rs`, `api/run_start.rs` |
 | `FIRE_KIND_EVENT` in the fire kinds | exists, accepted and labelled | `hosted_services.proto` `FireKind` |
 | `event_context` (what happened) on a trigger | **reserved, not built** | `hosted_services.proto` field 8 |
-| `DeliverEvent` and resume grants (wake a waiting task) | designed, not built | `design/hsp-triggers.md` amendment §2 |
+| `DeliverEvent` and resume grants (wake a waiting task) | designed, not built | ``docs/src/content/docs/hosted/triggered-runs.md` |
 | Inbound Slack over Socket Mode (no public endpoint), verified contacts mapping a Slack user to a VAM user, single-use handles | built for **deciding** approvals and gates, not for starting runs | `brokers/vam-notify`, `notify_gateway.rs` |
 
 So today a broker can wake a run, but cannot say what the event was, and
@@ -596,8 +584,7 @@ vam-marketplace/
   with a pinned `vam` CLI, and a per-listing tag (`microsoft-365-v1.0.0`)
   is the release. Air-gapped nodes mirror the repo.
 - **Why a separate repo**: the marketplace URL is what every node trusts, so
-  it is sticky; content releases on its own cadence; its licence is chosen
-  apart from `vam`'s, whether or not `vam` goes open source.
+  it is sticky; content releases on its own cadence.
 
 ### 9.2 How the org's own catalog and marketplaces fit together (D27)
 
@@ -629,7 +616,7 @@ vam-marketplace/
 ### 9.3 Later: the hub (after 0.1.0)
 
 - **Hubs** are services outside VAM: listings, publisher accounts, review,
-  signatures, entitlements, billing. The community lives there.
+  signatures. The community lives there.
 - **The protocol is OCI**, the standard behind container registries. Each
   release is an OCI artifact with a VAM media type; the URN maps to the
   registry name (`urn:vam:skill:hub.squrell.cloud/squrell/m365-mail@1.2.0` ↔
@@ -637,7 +624,7 @@ vam-marketplace/
   stays the identity; signatures attach as OCI referrers. Customers can
   mirror a hub inside an air-gapped network with Harbor or Artifactory.
 - **The node** keeps trusted hubs, allow-lists of publishers and artifacts,
-  installs (URN, channel, pinned digest, source hub) and entitlements.
+  installs (URN, channel, pinned digest, source hub).
   `vamd` pulls, verifies, and admits the release through the existing release
   path with its origin.
 - **Install is a pull, not a transfer of ownership** (D17). Updates follow
@@ -648,16 +635,6 @@ vam-marketplace/
   appended instructions, tighten-only rules, its own connector bindings. This
   needs `extends` merged at run time (`crates/vam-spec/src/extends.rs`
   `merge_agent_chain` exists; nothing calls it).
-- **Entitlements** are signed tokens from the hub (org, nodes, seats,
-  expiry, grace period) verified offline by `vamd`.
-- **Usage metering** builds on receipts, already signed per run
-  (`receipt.rs`). They need the skill each tool call came from, a cost
-  field, and an admin export.
-- **IP** (D13, D14): what is installed is readable. Publishers who need
-  secrecy put their logic behind a connector to their own service. Research
-  supports this: prompts are extractable everywhere (custom-GPT studies
-  88–97%), and Salesforce tells its partners packaged prompt templates stay
-  visible and cloneable.
 
 ## 10. Phases to the minimal version
 
@@ -665,11 +642,11 @@ vam-marketplace/
 |---|---|---|---|
 | **0 Security floor and paperwork** | nothing visible | **Done 2026-11-07.** DX-139 merged as (also covers the HTTP host adapter and notify tokens). The Squrell Entra app and publisher verification are owner items carried into Phase 1's real-tenant wave (`.cursor/workstreams/connectors.md`). | Security floor: done |
 | **1 Connectors on the node** | Admin enables a connector and consents; members see tiles, connect, see status. Linear works as a connector. | Connector definition in `vam-spec`; `microsoft-365` and `linear` built into `vamd`; `GET /v1/connectors` (merged with node enablement); `node_enabled_connectors` with consent record and `PUT` for org admins (`users:admin`: enabling is the org admin's decision, D4, unlike the operator-only Notifications place); Org settings "Connectors" place; daily Connections tiles; MCP connectors with fixed id and vetted risk classes; Entra profile in the app's OAuth flow (no issuer check, no `resource`, `offline_access`, tenant from consent). | Proof: P6 line below. Cost 2. |
-| **2 The connection behind skills** | A skill reaches Microsoft Graph as the user without holding a token. | Account-kind connection (refresh token pinned to the login host, per-audience access token); bindings from the connector become session egress bindings; refresh-before-swap in the egress provider (reusing `mcp_oauth_refresh.rs`); reauth park for egress calls; `connection.needs_reauth` notification kind (not on `main` yet; once recorded, it reaches the app and, through `vam.notify`, a Slack DM); `requiresConnector` on skills and a "connect to continue" park. **Per-call egress envelope (owner, 2026-11-07):** each code tool that uses a connection binding declares its egress shape (host, methods, path prefixes); the egress provider attaches the user's token only to a request inside the calling tool's declared shape and refuses the rest, so a tool declared as a read cannot POST a send (question 8, finding F8). | Cost 2–3: amends three lines of `design/mcp-oauth-connections.md` (§12). |
+| **2 The connection behind skills** | A skill reaches Microsoft Graph as the user without holding a token. | Account-kind connection (refresh token pinned to the login host, per-audience access token); bindings from the connector become session egress bindings; refresh-before-swap in the egress provider (reusing `mcp_oauth_refresh.rs`); reauth park for egress calls; `connection.needs_reauth` notification kind (not on `main` yet; once recorded, it reaches the app and, through `vam.notify`, a Slack DM); `requiresConnector` on skills and a "connect to continue" park. **Per-call egress envelope (owner, 2026-11-07):** each code tool that uses a connection binding declares its egress shape (host, methods, path prefixes); the egress provider attaches the user's token only to a request inside the calling tool's declared shape and refuses the rest, so a tool declared as a read cannot POST a send (question 8, finding F8). | Cost 2–3: amends three lines of `docs/src/content/docs/runtime/tools.md` (§12). |
 | **3 Cards from skills** | Tool results render as cards; send and book ask with a richer card. | `ToolSpec.ui`; `List` primitive in `vam/1`; jig sources in skill packages, checked at publish; host attaches cards; app renders them. Can run as a parallel lane with Phase 2 (different files). | Proof: P14. Cost 2. |
 | **4 Microsoft 365 in use** | The walkthrough on a real tenant, enabled from the marketplace. | The Git marketplace (§9.1): trusted marketplace URLs per node, index reading, listing import at a tag, Squrell-domain admission, "update available", the Org settings Marketplace page; `squrell-inc/vam-marketplace` bootstrapped with CI; the `m365-mail` skill, the Executive assistant starter agent, the morning triage playbook on `vam.schedule`. Built-in connectors loaded from every file in `spec/connectors/`; import code generic across artifact kinds. **Phase 5 folded in (owner, 2026-11-09):** connectors ship as files in listings (D26 as amended), the install summary shows a connector's capabilities, an update that changes them needs Enable again. | Cost 3: a new repo, an app page, third-party connector files. |
 | **5 Installable connectors** (folded into Phase 4, owner 2026-11-09; what remains below is later) | Developers ship connectors from any marketplace without a Squrell release (D26). | Connector as a catalog kind (`urn:vam:connector`, draft and release, digest), imported like other artifacts; `GET /v1/connectors` merges built-in and installed; qualified connection ids and Squrell-reserved ids; the admin's approved snapshot of each connector's capability summary, and re-approval for an upgrade that widens it; a generic OAuth profile with "bring your own client" (the admin enters a client id and, if needed, a secret kept in the vault); `vam connector init`, `validate`, `test`. What still needs Squrell: its own OAuth apps, new auth mechanics (profiles, relays, signing, databases), brokers. | Cost 3: third-party connectors are a new trust boundary. About 5–6 waves. |
-| Later | | Hub and OCI pull, entitlements, reverse lookup; Teams relay; Google with the secret relay; databases; verified publishers (namespace proof, signing); GitHub. | |
+| Later | | Hub and OCI pull, reverse lookup; Teams relay; Google with the secret relay; databases; verified publishers (namespace proof, signing); GitHub. | |
 
 About four phases to the minimal version. With Phases 2 and 3 in parallel
 lanes, it is three steps in sequence after Phase 0. The Microsoft paperwork
@@ -693,11 +670,11 @@ this work:
    connection row seems right.
 3. Org-held connections (a shared mailbox, a database): grant to agents, to
    groups of people, or both?
-4. Who may run a Squrell relay and where (region, data processing terms)?
-5. Hub revenue share and who is merchant of record for partner hubs.
+4. Who may run a Squrell relay and where (region)?
+5. (Withdrawn.)
 6. Can partner hubs sign releases themselves, or does Squrell countersign?
 7. Revocation latency for air-gapped nodes: how long may an offline node
-   run after an entitlement is revoked?
+   run after a release is yanked?
 8. ~~The per-call egress envelope~~ **Decided (owner, 2026-11-07): yes, in
    Phase 2.** A code tool's declared egress shape (host, methods, path
    prefixes) is enforced per call for connection bindings, so a tool declared
@@ -712,7 +689,7 @@ this work:
 
 ## 12. Amendments to other designs (the first bullet applied 2026-11-07 with the owner's approval; the rest proposed)
 
-- `design/mcp-oauth-connections.md`: "No generic OAuth broker for non-MCP
+- `docs/src/content/docs/runtime/tools.md`: "No generic OAuth broker for non-MCP
   egress", "No proactive background refresh scheduler" and "Refresh owner:
   vamd, triggered by 401" are amended for connector bindings: `vamd` mints
   per-audience access tokens and refreshes before swap. "Client
@@ -720,7 +697,7 @@ this work:
   DCR. "No token passthrough" still holds: a token goes only to its audience.
 - `.cursor/workstreams/developer-experience.md` D20 ("MCP is a platform
   ability, not marketplace supply"): set aside for connectors by D6.
-- `design/launch-0.1.0.md`: the marketplace backend stays cut from 0.1.0;
+- the 0.1.0 launch plan: the marketplace backend stays cut from 0.1.0;
   version one of connectors uses built-in connectors and Git import, which
   matches "install-from-Git plus a curated gallery".
 - `proto/vam/v1/hosted_services.proto`: `CapabilityManifest` field 11 is now
@@ -737,26 +714,8 @@ this work:
 | Every connector as a broker | A broker is an extension of the machine, rare and trusted. Most SaaS calls are one HTTP request; a marketplace of brokers would put code on every node. |
 | Declarative HTTP tools in the connector (a template and projection language) | Removes code but limits what builders can do; skills as code already work. Kept on the shelf as an optional execution kind for host-enforced side effects. |
 | Connector bundles its skills, playbooks and jigs | Many skills from different authors use one connector; every new skill would force a connector release with security review. The listing bundles instead (D11). |
-| Microsoft-hosted MCP as the base | Licensing and credits, admin enable step, legacy servers (§6.2). |
+| Microsoft-hosted MCP as the base | Admin enable step, legacy servers (§6.2). |
 | Squrell-hosted Graph MCP | Mail and tokens transit Squrell (D14). |
-| Device-code sign-in | Commonly blocked by Conditional Access; the agent-driven handshake in the prototype also confused models. |
-| Protected (hidden) artifacts on the node | The customer is root; prompts are extractable; protection would be deterrence only. Proprietary logic goes behind connectors (D13, D14). |
+| Device-code sign-in | Commonly blocked by Conditional Access; an agent-driven handshake also confuses models. |
+| Protected (hidden) artifacts on the node | The node's admin is root; prompts are extractable; protection would be deterrence only. Private logic goes behind connectors (D13, D14). |
 | Raw `execute(sql)` for database writes | Unreviewable approvals; business-level write tools instead. |
-
-## Appendix B. Evidence
-
-- Internal prototypes: Microsoft 365 as Graph skills, MCP connector
-  exploration, Google and Microsoft OAuth blockers, and a proof of concept
-  (Linear agent, BA agent, `vam.schedule`).
-- Microsoft: Agent 365 and Work IQ MCP documentation; Entra publisher
-  verification and admin consent; refresh token lifetimes; Graph throttling
-  and delta queries; Teams proactive messaging (research of 2026-11-04,
-  sources in the session record).
-- Reference models: Claude and ChatGPT connector admin controls; Nango,
-  Paragon, Composio, Pipedream, Arcade, Auth0 token vault; Home Assistant
-  account linking; Slack, Google Workspace, Atlassian admin approval models.
-- Distribution: Salesforce managed and unmanaged packages; Snowflake Native
-  Apps; AWS Marketplace metering and license manager; Atlassian Data Center
-  licensing; HashiCorp and Replicated signed licences; OCI artifacts and
-  cosign; prompt-extraction studies (arXiv 2311.11538, 2505.08148,
-  2510.09023).

@@ -1,5 +1,5 @@
-//! `GET /v1/connectors`, `PUT /v1/connectors/{id}/node` and the REST connection routes
-//! (`design/connectors.md` sections 3.1 and 4). Anyone with `node:read` lists the built-in
+//! `GET /v1/connectors`, `PUT /v1/connectors/{id}/node` and the REST connection routes.
+//! Anyone with `node:read` lists the built-in
 //! connectors with the node state and their own state. Only an org administrator (`users:admin`)
 //! enables or disables one and records the admin consent. A member with `secrets:write` connects
 //! a REST connector (`PUT …/connection`), checks it (`POST …/connection/check`) and disconnects

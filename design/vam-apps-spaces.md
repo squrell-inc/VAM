@@ -1,6 +1,6 @@
 # Apps and Spaces: who a run is for, and where it lives
 
-**Status:** Proposed (replaces the model in `design/vam-subjects.md` §4–§7, §10); amended 2026-10-29 (run grants and opaque Space and thread ids for the E5 slice)
+**Status:** Proposed (replaces an earlier App/Subject draft); amended 2026-10-29 (run grants and opaque Space and thread ids for the E5 slice)
 **Date:** 2026-10-09
 **Owner:** maintainer
 **Repos:** `squrell-inc/VAM`
@@ -13,16 +13,16 @@ breaks in four places:
 
 1. A website using one key puts every visitor in one workspace with one writer
    lock, and every visitor runs with the developer's full authority and
-   secrets (`vam-subjects.md` §2, Facts 1–2).
+   secrets.
 2. Nothing is ever cleaned up (Fact 3).
 3. "Which agent runs here" is a storage detail (`WorkspaceMeta` in
    `.vam/workspace.json`) surfaced only as `AgentWorkspaceMismatch` /
    `WorkspaceNotBound` errors. There is no named, deployed agent (DX-90) and
    no home for the planned "primary agent" or default workspace/thread.
-4. Brokers (`design/hsp-triggers.md`) need to act for someone without
+4. Brokers (`docs/src/content/docs/hosted/triggered-runs.md`) need to act for someone without
    inventing identity.
 
-`vam-subjects.md` proposed `App` and `Subject` as new identities. Review found
+An earlier draft proposed `App` and `Subject` as new identities. Review found
 that a Subject never logs in, never calls VAM, and has no role: it is a place,
 not an identity. Modelling it as a principal invites identity features VAM must
 not have, and ties it to "a visitor" when brokers need channels, tickets, and
@@ -43,7 +43,7 @@ who may ask, and for which App.
 
 > Personal use stays zero-config. Sharing is just a second kind of App.
 
-## Audience and positioning
+## Audience
 
 Two groups, one model:
 
@@ -70,10 +70,6 @@ Two groups, one model:
 
 ## Why
 
-- Prior art (E2B, Modal, Vercel, Daytona, Fly, Cloudflare; `vam-subjects.md`
-  §3) converges on: a thin developer-owned principal, developer-named
-  instances with get-or-create, opaque handles with no PII, and per-account
-  quotas. All kept here.
 - A place keyed by an opaque `ref` is all VAM needs to isolate work. The ref
   can be anything, which is what brokers need.
 - One Credential type means one hashing, revoke, list, and audit path
@@ -88,18 +84,17 @@ Two groups, one model:
 - Org accounts (Account = User for now; `tenant_id` unchanged).
 - Per-App HITL approver; Apps with more than one agent.
 - Environment promotion and rollback (DX Phase 8).
-- Usage rollup and spend ceilings (`vam-subjects.md` §9).
-- Space-scoped secrets / customers' own credentials (`vam-subjects.md` §12).
-- Read-only App-level shared mount (`vam-subjects.md` §6.1).
-- Broker development (see `design/hsp-triggers.md`).
+- Usage rollup and spend ceilings.
+- Space-scoped secrets / customers' own credentials.
+- Read-only App-level shared mount.
+- Broker development (see `docs/src/content/docs/hosted/triggered-runs.md`).
 
 ## Amendment 2026-10-29: run grants and opaque ids for the E5 slice
 
 Written by a design session against `main`. It is the plan of
 record for the parts of this design that E5 Phase 1 ("grants, gateway and
-ids") builds; the phases are in `design/hsp-triggers.md` § "Phases (E5
-getting-started slice)". Apps, shared Spaces, App authority and retention
-stay as designed and stay cut from 0.1.0 (`design/launch-0.1.0.md` §2). Where
+ids") builds; the phases are in the `work-outside-chat` tracker. Apps, shared Spaces, App authority and retention
+stay as designed and stay cut from 0.1.0 (0.1.0 launch scope). Where
 `main` contradicts an earlier section, `main` is the fact. Locked rows this
 touches are in §6, as proposals for the owner.
 
@@ -140,7 +135,7 @@ holder `http`, target Account).
 - **AS-1.1** `api_keys` gains nullable `holder`, `target_kind`, `target_id`,
   `constraints_json`, `issued_via`, `external_ref`, `expires_at`, and, for
   provenance, `source_run_id`, `tool_name`. The grant's values are in
-  `design/hsp-triggers.md` amendment §4.
+  ``docs/src/content/docs/hosted/triggered-runs.md`.
 - **AS-1.2** `check_credential(secret, transport)`: hash, holder matches the
   transport (`http`, or `broker:<id>` on that broker's gateway socket), not
   revoked, not expired; returns owner, target, permissions, constraints.
@@ -162,7 +157,7 @@ always set.
 **Open question 4 (grant expiry): answered.** Default 90 days, cap 365; a
 one-off schedule's grant at most its fire time + 24 h; renewal is a re-bind
 the user approves; `grant.expiring` is emitted 7 days ahead
-(`hsp-triggers.md` amendment §7).
+(`docs/src/content/docs/hosted/triggered-runs.md`).
 
 ### 3. Spaces before Apps
 
@@ -241,7 +236,7 @@ CREATE TABLE threads (
   as a row before its first run writes the directory.
 
 **Proto** (`proto/vam/v1/workflow.proto`; field numbers in
-`hsp-triggers.md` amendment §3):
+`docs/src/content/docs/hosted/triggered-runs.md`):
 - `RunSpec.space_id = 12`, `RunSpec.thread_id = 13`. The comment on
   `thread_ref = 9` (`:223`) becomes "thread **name** (or, after resolution,
   its directory key); prefer `thread_id`".
@@ -295,7 +290,7 @@ CREATE TABLE threads (
   clients; what changes is what the host **stores**: grants, queued
   requests, run records and `RunStatus` carry ids. Ending name lookups is a
   later owner decision, not part of E5.
-- **Grants bind ids, never names** (`hsp-triggers.md` amendment §4): a
+- **Grants bind ids, never names** (`docs/src/content/docs/hosted/triggered-runs.md`): a
   deleted and recreated workspace with the same name is a different Space,
   and a grant for the old one answers `DENIED TARGET_GONE`.
 - **Backfill** (the AS-3.2 pattern; only adds rows, safe to rerun):
@@ -337,13 +332,13 @@ Spaces.
 ## Amendment 2026-11-01: the primary agent without Apps
 
 Written by a design session against `main`. The plan of record
-for the primary agent is now `design/primary-agent.md`. Apps are cut from
-0.1.0 (`design/launch-0.1.0.md` §2), so the primary agent is designed
+for the primary agent is now the primary-agent proposal (backlog in `.cursor/workstreams/README.md`). Apps are cut from
+0.1.0 (0.1.0 launch scope), so the primary agent is designed
 without them. Superseded in this doc, for the primary agent only:
 
 - Problem 3's "no home for the planned 'primary agent'" (line 21): the home
   is `users.primary_agent_urn` (NULL = the node's default primary),
-  `primary-agent.md` §3.
+  the primary-agent proposal
 - "the 'primary agent' is their default App" (Audience, line 52).
 - The second sentence of the locked row "Personal Apps … Account default
   App = primary agent." **Proposal P-B, owner to confirm**; the first
@@ -356,7 +351,7 @@ without them. Superseded in this doc, for the primary agent only:
 - The row "Alice changes her primary agent" (§ Scenarios): she sets
   `PUT /v1/me/primary-agent`; runs keep naming their agent.
 - "Absorbs primary agent and default workspace" (§ What changed from
-  `vam-subjects.md`): the default workspace is absorbed by Spaces (amendment
+  the App/Subject draft): the default workspace is absorbed by Spaces (amendment
   2026-10-29); the primary agent is not absorbed by Apps.
 - `users.default_app_id` (§ Data model) is not added for the primary.
 
@@ -398,7 +393,7 @@ Everything else in this doc stands.
 
 ### Starting a run
 
-One internal entry point, shared with `design/hsp-triggers.md`:
+One internal entry point, shared with `docs/src/content/docs/hosted/triggered-runs.md`:
 
 ```text
 start_run(caller, target { app, space_ref, thread }, prompt, inputs)
@@ -424,7 +419,7 @@ today), and only with `spaces:create` for shared Apps.
 - **Cedar shape:** add an `App` entity; the run principal is a member of it,
   so App policies use `principal in Vam::App::"…"`. Space is passed as
   context (`space_id`), not an entity. Needs the `principal ==` vs `in` audit
-  (`vam-subjects.md` §5.1).
+ .
 - **CallerContext** gains `app_id`, `space_id`, `space_ref` (host-stamped).
   A broker can route replies from `space_ref` without its own lookup table.
 - **HITL** still routes to the App owner.
@@ -459,9 +454,9 @@ today), and only with `spaces:create` for shared Apps.
 | Alice revokes the scheduler | — | — | — | Next broker request `DENIED` |
 | Alice changes her primary agent | — | New default App | — | Runs that name no App go to the new agent |
 
-### What changed from `vam-subjects.md`
+### What changed from the App/Subject draft
 
-| `vam-subjects.md` | This design | Why |
+| App/Subject draft | This design | Why |
 | --- | --- | --- |
 | Subject is an identity | Space is a place | Subjects never authenticate |
 | Subject = visitor | `ref` = anything | Brokers need channels, tickets, schedules |
@@ -522,8 +517,7 @@ need no change.
 
 > **2026-10-29:** E5 Phase 1 builds AS-1.1 to AS-1.4 (grants only), the id
 > parts of AS-0.1 and AS-0.2, and AS-3.1 and AS-3.2 without Apps (amendment
-> §2–§5). The plan and its scenarios are in `design/hsp-triggers.md` § "Phases
-> (E5 getting-started slice)". Everything else below stays as designed and
+> §2–§5). The plan and its scenarios are in the `work-outside-chat` tracker. Everything else below stays as designed and
 > cut from 0.1.0.
 
 IDs (`AS-x.y`) are local and become Linear issues; each must be independently

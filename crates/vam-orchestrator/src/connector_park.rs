@@ -1,4 +1,4 @@
-//! Connector gate at the tool intent (CN-2.5, `design/connectors.md` section 3.1).
+//! Connector gate at the tool intent (CN-2.5).
 //!
 //! A tool whose skill declares `requiresConnector` is checked before the policy decision:
 //! a connector that is unknown or not enabled is refused ("ask your admin", nothing to park on:

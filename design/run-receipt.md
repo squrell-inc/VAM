@@ -8,13 +8,9 @@ planned. Placement: see `agent-experience.md` "Build order" and §5 below.
 
 A **run receipt** is the one document a run leaves behind: what the host
 observed, who decided what, which effects happened, what it cost, and a
-signature that lets someone verify it later without `vamd`. It is the
-product's signature artifact. Every other part of VAM (microVM, brokers,
-Cedar, playbooks, the effect journal, telemetry) exists to make the receipt
-true.
-
-> The agent ran in a microVM and came back with a receipt.
-> (`playbooks.md`, "Audience and positioning")
+signature that lets someone verify it later without `vamd`. Every other part
+of VAM (microVM, brokers, Cedar, playbooks, the effect journal, telemetry)
+exists to make the receipt true.
 
 Today `vam evidence receipt <run>` prints playbook step state from
 `GET /v1/runs/{id}` (`crates/vam-cli/src/cmd/evidence.rs`
@@ -30,10 +26,6 @@ app and `vam.notify` surfaces.
   better")** are the two problems `agent-experience.md` Part I marks as
   least served. Both are answered by a receipt that a controller or auditor
   reads without opening the app.
-- The market evaluation of 2026-10-19 found no vendor offering a
-  host-observed, signed record of an agent run on the customer's own
-  hardware. Managed runtimes keep the loop and the transcript on their
-  control plane. The receipt is what lets a security team say yes.
 - The data already exists on the host: `RunStatus.step_statuses`,
   `resolved_refs`, HITL decisions, PEP decisions with side-effect class,
   run-level metering (H1), the telemetry journey, and the evidence pack.
@@ -55,8 +47,8 @@ Do not re-litigate without editing this list.
 3. **Denials and asks are first-class lines.** A tool call denied by Cedar
    or a playbook guard, and a call that waited for approval, are shown
    with the rule and scope that decided (`classify_tools` already names
-   them). The denial before an approval is the line that sells the
-   product.
+   them). The denial before an approval is the line a reviewer reads
+   first.
 4. **Approval provenance.** For every gate or tool approval: who decided,
    from which surface (app, CLI, Slack, email), when, and the validated
    response (the selected subset). Later calls constrained by
@@ -176,7 +168,7 @@ conventions of `RunStatus`. The exact schema is open question 1.
 | Phase | Outcome | Contents | Depends on | Exit |
 |---|---|---|---|---|
 | **1 Canonical receipt** | One document, two tiers, signed | `GET /v1/runs/{id}/receipt`; run record gains model, endpoint, workspace HEADs, isolation facts; PEP decisions stored per run with deciding rule and scope; gate provenance on steps; Ed25519 signature; `vam receipt show` and `verify`; receipt in the evidence pack; the "effects not journaled" line | E10 Phase 2 (run record and context shape) | Scenario: a playbook run with a denial, an ask and a gate produces a receipt whose host tier matches the scenario's expectations line by line, and `vam receipt verify` passes offline and fails on one changed byte |
-| **2 Surfaces** | The same receipt everywhere; every decision names its surface | App receipt view (built-in jig); the run-finished notification links the receipt, delivered through the notification module's channels (`design/notifications.md`, slice 2, Slack first); gate decisions taken from a channel are recorded with their surface from the handle `vamd` issued | Phase 1, notifications slice 2 | Scenario: a gate decided from Slack shows `slack` on the receipt |
+| **2 Surfaces** | The same receipt everywhere; every decision names its surface | App receipt view (built-in jig); the run-finished notification links the receipt, delivered through the notification module's channels (`docs/src/content/docs/orchestrator/notifications.md`, slice 2, Slack first); gate decisions taken from a channel are recorded with their surface from the handle `vamd` issued | Phase 1, notifications slice 2 | Scenario: a gate decided from Slack shows `slack` on the receipt |
 | **3 Effects and outcomes** | Receipts count effects and feed outcomes | Effects section from the effect journal; receipts aggregated per agent version into E4's success, cost and pass^k; a release diff that compares receipts of the previous version | Phase 1, E10 Phase 4 | Kill-mid-task benchmark run ends with a receipt reporting 0 duplicates and 0 unknown; the agent page shows the aggregate |
 
 Phase 1 is the getting-started slice and is small: it assembles data that

@@ -113,7 +113,7 @@ struct TokenResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefreshProfile<'a> {
     /// A remote MCP server: RFC 8707 `resource` on every refresh, and `client_secret` when the
-    /// connection has one (`design/mcp-oauth-connections.md`, implementer constraints).
+    /// connection has one (docs: runtime/tools, MCP connections).
     Mcp { resource: &'a str },
     /// Microsoft Entra (`entra` connector profile): no `resource` (the audience is in the
     /// scopes), no `client_secret` (a public client), and the definition's `scope`.

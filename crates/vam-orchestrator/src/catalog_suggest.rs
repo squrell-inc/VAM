@@ -1,5 +1,5 @@
 //! Release-version suggestion: compares the caller's draft with the latest
-//! release and proposes the next semver (design/agent-experience.md §II.4).
+//! release and proposes the next semver (docs: orchestrator/catalog).
 //!
 //! One pure `classify_*` function per kind returns the highest matching level
 //! and every matching reason. [`build_suggestion`] turns that into the wire

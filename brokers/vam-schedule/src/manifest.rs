@@ -1,6 +1,6 @@
 //! The broker's manifest, as the operator registers it with `PUT /v1/hosted/brokers`.
 
-/// The manifest body (design/schedule-broker.md "Manifest").
+/// The manifest body (docs: hosted/schedule).
 pub const MANIFEST_JSON: &str = r#"{
   "brokerId": "vam.schedule",
   "trustTier": "TRUST_TIER_FIRST_PARTY",

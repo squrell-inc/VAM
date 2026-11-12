@@ -1,4 +1,4 @@
-//! The channel adapter interface (design/notifications.md 9.1). `vamd` produces one neutral
+//! The channel adapter interface (docs: hosted/notify). `vamd` produces one neutral
 //! rendering; an adapter turns it into a channel message and turns a channel event into a relay.
 
 use std::collections::BTreeMap;
