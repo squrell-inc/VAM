@@ -81,7 +81,7 @@ CLI; all sessions signed out, API keys kept; wrong attempts limited.
 green on `feat/user-identity`; OpenAPI and docs describe the route and who can do what.
 
 - [x] Scenarios and harness steps land pending, red for the right reason (W0, #2)
-- [ ] Server: route, store method, attempt limiter, proto (W1)
+- [x] Server: route, store method, attempt limiter, proto (W1, #8)
 - [ ] CLI `vam passwd`, OpenAPI, docs (W2)
 
 **Scenario delta**
@@ -109,7 +109,7 @@ operator is the bootstrap key and has no password.
   as `pending`. Accept: `cargo run -p vam-e2e -- check` passes; each scenario fails at
   its first `change-password` step with class `product` (404 from vamd); `cargo test -p
   vam-e2e`. Turns green: none.
-- [ ] `UI-1.2` — Proto `ChangeMyPasswordRequest/Response` + rpc; store
+- [x] `UI-1.2` — Proto `ChangeMyPasswordRequest/Response` + rpc; store
   `change_own_password` in `users.rs` reusing `reset_user_password`; shared
   `validate_password`; per-user attempt limiter in `api/rate_limit.rs`; handler in
   `api/me.rs`; route in `api/mod.rs`. Accept: design §3.1 table, every row tested in
@@ -131,8 +131,8 @@ operator is the bootstrap key and has no password.
 |---|---|---|---|---|---|---|---|---|---|
 | 0 docs | design + tracker | — | vam | orchestrator | 30 min | — | none | [x] | #1 |
 | 0 | `UI-1.1` | — (pending, red for the right reason) | vam | Sonnet 5.5 medium (harness code in `vam-e2e`, not only YAML) | 60 min | 0 docs | none | [x] | #2 |
-| 1 | `UI-1.2` | all six | vam | Sonnet 5.5 high (auth, sessions, rate limit: security boundary) | 90 min | 0 | none | [~] | |
-| 2 | `UI-1.3` | — (keeps six green) | vam | Sonnet 5.5 medium (CLI + OpenAPI + docs, two crates) | 75 min | 1 | none | [ ] | |
+| 1 | `UI-1.2` | all six | vam | Sonnet 5.5 high (auth, sessions, rate limit: security boundary) | 90 min | 0 | none | [x] | #8 |
+| 2 | `UI-1.3` | — (keeps six green) | vam | Sonnet 5.5 medium (CLI + OpenAPI + docs, two crates) | 75 min | 1 | none | [~] | |
 
 **Open questions** (each with a default)
 
@@ -188,3 +188,4 @@ in design §4.2 is closed row by row.
 |---|---|---|
 | 2026-11-12 | 1 | Tracker opened; design `design/user-identity.md`; Phase 1 plan (owner brief) |
 | 2026-11-12 | 1 | W0 docs (#1) and W0 scenarios (#2) merged: harness steps `login`, `change-password`, `identity-request`; six scenarios pending, all red for the right reason (404 at the first change-password). Scoreboard: 0 green, 6 red (right reason), 0 fix cycles, about 75 min. Session note: the session runs as root, so `LOCAL_CI_OUT` must sit in a 0755 directory under a short path (a long path overflows the 107-byte socket limit; a 0700 `mktemp -d` dir breaks the 10 Microsoft 365 smoke scenarios: probe.py permission denied). Never two builds at once on the shared target. |
+| 2026-11-12 | 1 | W1 server merged (#8): `POST /v1/me/password`, store `change_own_password`, per-user attempt limiter (reserve before verify, refund unless wrong; review found and fixed a check-then-charge race, concurrent API test proves 5 of 16), 14 API tests incl. operator. Orchestrator `--full` at head: all steps ok, 4458 tests, smoke 140/140. Scoreboard: 6 green, 0 red, 1 fix cycle (review), about 100 min. |
