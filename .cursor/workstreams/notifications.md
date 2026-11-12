@@ -92,7 +92,7 @@ Do not re-litigate without editing this list. Decisions 1 to 9 copied from
 
 ## Phases
 
-### Done phases (archived)
+### Done phases
 
 Full sections: not kept; see the progress log and git history.
 

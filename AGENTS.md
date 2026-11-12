@@ -129,8 +129,10 @@ libraries, never on `vam-orchestrator` (locked decision 22 in
 | [`crates/vam-cli`](crates/vam-cli) | CLI Binary | **Developer CLI (`vam`)**: Commands for starting, stopping, inspecting sessions, managing rootfs images, and interacting with `vamd`. |
 | [`crates/vam-e2e`](crates/vam-e2e) | Library / Binary | **E2E Scenario Catalog**: typed scenario and world-piece formats, `vam-e2e check` (catalog lint, runs nothing) and the runner seams. Never depends on `vam-orchestrator`, `vam-core` or `vam-runtime`. |
 | [`crates/vam-build`](crates/vam-build) | Design/Lib | *(Planned/In-Design)* RootFS image build pipeline & OCI-to-ext4 converter. See `crates/vam-build/SKILLS.md`. |
-| [`crates/vam-telemetry`](crates/vam-telemetry) | Library | **Host-Centric Observability**: Correlation spine, W3C traceparent/baggage validators, semantic conventions, zero-I/O pre-spool redaction. Docs: `docs/src/content/docs/telemetry/overview.md`. Tracker: `.cursor/workstreams/archive/telemetry.md`. |
+| [`crates/vam-telemetry`](crates/vam-telemetry) | Library | **Host-Centric Observability**: Correlation spine, W3C traceparent/baggage validators, semantic conventions, zero-I/O pre-spool redaction. Docs: `docs/src/content/docs/telemetry/overview.md`. |
 | [`brokers/vam-web`](brokers/vam-web) | Binary / Lib | **Web Broker (`vam-web-broker`)**: HSP broker exposing `web_search` (provider interface, Brave adapter, mock) and `web_fetch` (own guarded fetch: per-hop DNS pinning, robots.txt, HTML to markdown). Search key arrives per invoke from `vamd`, never from env or disk. |
+| [`brokers/vam-schedule`](brokers/vam-schedule) | Binary / Lib | **Schedule Broker (`vam.schedule`)**: HSP broker that owns the clock (cron and once, IANA zones, catch-up) and fires runs through the trigger gateway with a run grant the user approved. Docs: `docs/src/content/docs/hosted/schedule.md`. |
+| [`brokers/vam-notify`](brokers/vam-notify) | Binary / Lib | **Notify Broker (`vam.notify`)**: HSP broker that delivers notification records to channels (Slack first) and relays decisions back; keeps only delivery facts. Docs: `docs/src/content/docs/hosted/notify.md`. |
 
 ---
 
@@ -221,27 +223,13 @@ When working on a specific subsystem, refer to the corresponding documentation d
 | Receipts, evidence | `docs/src/content/docs/security/run-receipt.md` |  |
 | Storage, workspaces (`vam-storage`) | `docs/src/content/docs/storage/overview.md` | `docs/src/content/docs/storage/turn-commits.md` |
 | Telemetry (`vam-telemetry`), audit, events | `docs/src/content/docs/telemetry/overview.md` | `docs/src/content/docs/telemetry/event-catalog.md` |
-| Hosted brokers (HSP), `vam.web` | `docs/src/content/docs/hosted/overview.md` | `docs/src/content/docs/hosted/web.md` |
+| Hosted brokers (HSP), `vam.web`, `vam.schedule`, `vam.notify`, triggers | `docs/src/content/docs/hosted/overview.md` | `docs/src/content/docs/hosted/web.md`, `hosted/schedule.md`, `hosted/notify.md`, `hosted/triggered-runs.md` |
 | Contracts, proto | `docs/src/content/docs/spec/overview.md` | `proto/vam/v1/` |
 | Tests and scenarios | `docs/src/content/docs/architecture/testing.md` | `e2e/README.md` |
 | Image building (planned) | `docs/src/content/docs/build/overview.md` | `docs/src/content/docs/build/rootfs.md` |
 | Agent / skill authoring | `docs/src/content/docs/authoring/agent-spec.md` | `docs/src/content/docs/authoring/run-spec.md`, `docs/src/content/docs/authoring/skill-manifest.md` |
 
 Files in `design/` are proposals for open work, not behaviour; never cite them as what the node does.
-
----|---|
-| **Overview & Architecture** | `docs/src/content/docs/architecture/` (`overview.md`, `isolation.md`, `cold-start.md`, `testing.md`, `drive9.md`) |
-| **Getting Started & Onboarding** | `docs/src/content/docs/getting-started/` (`introduction.md`, `platform-tour.md`, `project-status.md`, `users-and-roles.md`) |
-| **Core & Hypervisor** | `docs/src/content/docs/core/` (`overview.md`, `prerequisites.md`) |
-| **Guest Runtime (`vam-runtime`)** | `docs/src/content/docs/runtime/` (`overview.md`, `init.md`, `agent.md`, `context.md`, `tools.md`, `hitl.md`) |
-| **Host Daemon (`vamd` / Orchestrator)** | `docs/src/content/docs/orchestrator/` (`overview.md`, `reconciliation.md`, `session.md`, `api.md`) |
-| **Hosted Services (HSP)** | `docs/src/content/docs/hosted/` (`overview.md`, `architecture.md`, `protocol.md`, `hooks.md`, `first-party.md`, `roadmap.md`) |
-| **Telemetry & Observability** | `docs/src/content/docs/telemetry/` (`roadmap.md`, `overview.md`, `architecture.md`, `otel.md`, `trace-context.md`, `event-catalog.md`) |
-| **Inference Broker (`vam-inference`)** | `docs/src/content/docs/runtime/inference.md` (broker, providers, catalog, prompt caching, cost) and `runtime/agent.md` (compaction); no `inference/` section exists |
-| **Network & Security** | `docs/src/content/docs/network/` & `docs/src/content/docs/security/` |
-| **Storage & Drive9** | `docs/src/content/docs/storage/` (`overview.md`, `architecture.md`, `checkpoint.md`, `turn-commits.md`, `quota-gc.md`) |
-| **Image Building (`vam-build`)** | `docs/src/content/docs/build/` (`architecture.md`, `rootfs.md`, `vamfile.md`) |
-| **Agent / Skill Manifest Authoring** | `docs/src/content/docs/authoring/` (`agent-package.md`, `agent-spec.md`, `run-spec.md`, `skill-manifest.md`) |
 
 ---
 

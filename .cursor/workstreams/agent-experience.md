@@ -129,7 +129,7 @@ Do not re-litigate without editing this list.
 
 ## Phases
 
-### Done phases (archived)
+### Done phases
 
 Earlier phase detail is in git history.
 

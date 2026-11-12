@@ -1,13 +1,22 @@
-# Design plans of record
+# Design proposals
 
-- [Apps and Spaces](vam-apps-spaces.md) — Account → App → Space → Thread plus one Credential type: who a run is for, where it lives, who asked. Covers personal use, shared Apps and broker run grants. Space and thread ids and Credentials are shipped; Apps are not.
-- [Connectors](connectors.md) — how VAM reaches the systems people work in: a connector is connectivity only (provider, whose credential, reach, how it is attached; for MCP the server and vetted tools), skills require connectors, listings bundle; Squrell-owned OAuth apps, admin enable and consent per node, per-user connect; Microsoft 365 and Linear first, built into `vamd`; cards from skills as the minimal Jig piece; databases parked; a temporary Git marketplace (`squrell-inc/vam-marketplace`) for 0.1.0, installable connectors in Phase 5, hubs over OCI later. Direction agreed 2026-11-07; marketplace decisions 2026-11-09.
-- [Jig](jig.md) — one UI protocol for agents and people: closed component catalog, checked IR, three uses (Ask in playbook gates and tool approvals, Show cards, standalone App), four levels up to micro-apps in the marketplace, security rules, A2UI as an adapter. Epic E11; a basic version in E10 Phase 3. Builds on the draft on branch `cursor/jig-design-c926`.
-- [Agent runtime](agent-runtime.md) — agents that finish the job: problems P12 (can't use what it's given) and P13 (can't do real, ongoing work), eight user situations, epic E10 in seven phases (first try, web, context, steer, never twice, long work, learns), reliability model (effect journal, turn commits, inbox), benchmark, and placement after E1 Phase 7. Confirmed 2026-10-15. Tracker: `.cursor/workstreams/agent-runtime.md`.
-- [Scenarios](scenarios.md) — E9 from scratch, confirmed direction 2026-10-18: scenarios as the spec (named by behaviour, never by epic or phase), seed data as named world pieces, test-first phase planning (scenario delta, a scenarios wave, red for the right reason), a process-mode guest so most E2E runs on every PR and in cloud sessions, one run contract with `brief.md` and failure classes, stop rules against loops, cleanup of the old harness. Tracker: `.cursor/workstreams/e2e-scenarios.md`.
-- [Agent experience](agent-experience.md) — problem-led roadmap (P1–P11 → epics E1–E7, each with a getting-started slice), how we build it (planning and build sessions), E7 machine images and Vamfile, and Epic 1: private versionless drafts, versions on release, server-owned pins, skill/playbook composition, permission toggles, URN domain as origin. Tracker: `.cursor/workstreams/agent-experience.md`.
-- [Developer experience](developer-experience.md) — artifact map (agent/run/skill/policy/playbook/HSP broker), current authoring flow, confirmed defects, versioning and release gaps, and the road to a package marketplace. Brainstorming, not yet a plan of record.
-- [Isolation verify closeout](isolation-verify-closeout.md) — catalog read for members, workspace agent-version pin, operator model allowlist. Tracker: `.cursor/workstreams/isolation-verify-closeout.md`.
-- [Harness](harness.md) — standing track H: the lever inventory in eight layers with evidence and the model class each helps, run-level switches recorded on the receipt, an ablation grid per model, harness profiles per model class pinned in the catalog, the walkthrough-challenge page, and offline recursive harnessing (Harness²-style) later. Supplies the configurations `benchmark.md` measures. Proposed.
-- [Benchmark](benchmark.md) — standing track B: a public, reproducible benchmark of business procedures, per model and per machine mode (`on` vs `off`), with one measured line per problem P1–P14; every phase names the lines it moves and records before and after. Extends `agent-runtime.md` Part VI. Proposed.
-- [Run receipt](run-receipt.md) — the signed record of what an agent did: two trust tiers (host-observed facts, model-written text labelled as such), every pin on the page, denials and approvals with who decided and from where, effect accounting, offline verification. Epic E12; placed after E10 Phase 3 in `agent-experience.md` "Build order (revised 2026-10-21)". Proposed.
+`design/` holds proposals for open or in-progress work only. What the node does today is in the
+docs site (`docs/src/content/docs/`). When a design's work ships, its user-facing facts move into
+the docs (with a short "Design notes" section where the reasoning is worth keeping) and the design
+doc is deleted; git history keeps it. Trackers for active work are in `.cursor/workstreams/`.
+
+Several docs below are partly shipped. Their shipped parts are trimmed as each workstream closes.
+
+| Design | Open work | Tracker |
+|---|---|---|
+| [Agent experience](agent-experience.md) | Problem-led roadmap (problems P1–P14, epics E1–E8); machine images and Vamfile (E7 Phases 2–5); egress Phases 4–5. Shipped parts: drafts and versions, permissions as data, egress Phases 1–3. | `agent-experience`, `machine-base` |
+| [Agent runtime](agent-runtime.md) | E10: effect journal (Phase 4), long work (Phase 5), memory (Phase 6). Phases 0–3 shipped. | `agent-runtime` |
+| [Apps and Spaces](vam-apps-spaces.md) | Apps, shared Spaces, App authority, retention, per-App quotas. Space and thread ids and Credentials shipped (`hosted/triggered-runs`). | none yet |
+| [Connectors](connectors.md) | Real-tenant proof, installable connectors, more providers. Phases 0–4 built. | `connectors` |
+| [Developer experience](developer-experience.md) | Packages and lockfile, `vam init`/`validate`/`dev`, signing, deployments (tracker Phases 3–11). | `developer-experience` |
+| [Harness](harness.md) | Ablation grid, harness profiles per model class, recursive harnessing (H2–H4). H0 and H1 shipped. | `harness` |
+| [Benchmark](benchmark.md) | Machine-off runs, business task set, on-vs-off table (B1–B3). B0 shipped (`runtime/benchmark-results`). | `harness` |
+| [Isolation verify closeout](isolation-verify-closeout.md) | App-side version pin and model picker, member surfaces. Server side shipped. | `isolation-verify-closeout` |
+| [Jig](jig.md) | Shipped basics only (`runtime/jig`); the larger E11 plan is a backlog line. | none |
+| [Run receipt](run-receipt.md) | Phase 2: receipt surfaces (app view). Phases 1 and 3 shipped (`security/run-receipt`). | `run-receipt` |
+| [Scenarios](scenarios.md) | UI layer and `--changed` selection (S4–S5); coverage appendix. The rest is in `architecture/testing` and `e2e/README.md`. | `e2e-scenarios` |

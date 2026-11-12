@@ -100,7 +100,7 @@ per success) and 7 (the benchmark lane is the scenario runner).
 
 ## Phases
 
-### Done phases (archived)
+### Done phases
 
 Earlier phase detail is in git history.
 

@@ -65,7 +65,7 @@ run every wave to the end without waiting.
 
 ## Phases
 
-### Done phases (archived)
+### Done phases
 
 | Phase | Name | Done |
 |---|---|---|
