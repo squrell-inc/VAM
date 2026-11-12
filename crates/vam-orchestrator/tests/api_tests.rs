@@ -9912,3 +9912,705 @@ async fn agent_outcomes_diff_names_the_base_and_is_404_for_a_foreign_agent() {
     let (status, _) = outcomes_as(&app, &bob, "/diff?version=1.0.0", foreign).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// POST /v1/me/password: self-service password change (user-identity UI-1.2)
+// ---------------------------------------------------------------------------
+
+fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn login_response(
+    app: &axum::Router,
+    username: &str,
+    password: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/login",
+            serde_json::json!({ "username": username, "password": password }),
+        ))
+        .await
+        .unwrap()
+}
+
+/// Logs in and returns `(access token, refresh token)`.
+async fn login_tokens(app: &axum::Router, username: &str, password: &str) -> (String, String) {
+    let response = login_response(app, username, password).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&response_body(response).await).unwrap();
+    (
+        v["token"].as_str().expect("token").to_string(),
+        v["refreshToken"]
+            .as_str()
+            .expect("refreshToken")
+            .to_string(),
+    )
+}
+
+/// `POST /v1/me/password` with a bearer, an optional Idempotency-Key and a raw body.
+async fn post_my_password(
+    app: &axum::Router,
+    bearer: Option<&str>,
+    idempotency_key: Option<&str>,
+    body: String,
+) -> axum::response::Response {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/v1/me/password")
+        .header("content-type", "application/json");
+    if let Some(b) = bearer {
+        builder = builder.header("authorization", format!("Bearer {b}"));
+    }
+    if let Some(k) = idempotency_key {
+        builder = builder.header("Idempotency-Key", k);
+    }
+    app.clone()
+        .oneshot(builder.body(Body::from(body)).unwrap())
+        .await
+        .unwrap()
+}
+
+fn passwords(current: &str, new: &str) -> String {
+    serde_json::json!({ "currentPassword": current, "newPassword": new }).to_string()
+}
+
+async fn assert_error(
+    response: axum::response::Response,
+    status: StatusCode,
+    code: &str,
+    message_contains: &str,
+) {
+    assert_eq!(response.status(), status);
+    let body = response_body(response).await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("error body is json");
+    assert_eq!(v["code"], code, "{body}");
+    let message = v["message"].as_str().unwrap_or_default();
+    assert!(message.contains(message_contains), "{body}");
+}
+
+async fn assert_login_ok(app: &axum::Router, username: &str, password: &str) {
+    let response = login_response(app, username, password).await;
+    assert_eq!(response.status(), StatusCode::OK, "login as {username}");
+}
+
+async fn assert_login_refused(app: &axum::Router, username: &str, password: &str) {
+    let response = login_response(app, username, password).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "login as {username}"
+    );
+}
+
+async fn assert_me_status(app: &axum::Router, bearer: &str, status: StatusCode) {
+    let response = app
+        .clone()
+        .oneshot(bearer_get("/v1/me", bearer))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), status);
+}
+
+/// A member with a key and a password.
+fn member_with_password(store: &SqliteWorkflowStore, user_id: &str, password: &str) -> String {
+    let key = mint_user_key(store, user_id, UserRole::Member, MEMBER_SCOPES);
+    store
+        .reset_user_password(user_id, password)
+        .expect("seed password");
+    key
+}
+
+#[tokio::test]
+async fn change_my_password_unauthenticated_is_401() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let app = test_app(app_state_http_only(store));
+
+    let none = post_my_password(&app, None, Some("idem-1"), passwords("a", "b")).await;
+    assert_eq!(none.status(), StatusCode::UNAUTHORIZED);
+    let bogus = post_my_password(
+        &app,
+        Some("vam_st_not-a-real-token"),
+        Some("idem-2"),
+        passwords("a", "b"),
+    )
+    .await;
+    assert_eq!(bogus.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn change_my_password_member_api_key_is_403_and_changes_nothing() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let key = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store));
+
+    let response = post_my_password(
+        &app,
+        Some(&key),
+        Some("idem-key"),
+        passwords("old-alice-secret", "new-alice-secret"),
+    )
+    .await;
+    assert_error(
+        response,
+        StatusCode::FORBIDDEN,
+        "PermissionDenied",
+        "changing a password needs a password session (vam login); API keys cannot change a password",
+    )
+    .await;
+    assert_login_ok(&app, "alice", "old-alice-secret").await;
+    assert_login_refused(&app, "alice", "new-alice-secret").await;
+
+    // The credential kind is judged first: no Idempotency-Key is still the 403.
+    let no_idem = post_my_password(&app, Some(&key), None, passwords("a", "b")).await;
+    assert_eq!(no_idem.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn change_my_password_bootstrap_key_is_403() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let secret = mint_api_key_secret();
+    let scopes: Vec<String> = BOOTSTRAP_SCOPES.iter().map(|s| s.to_string()).collect();
+    store
+        .create_api_key(
+            BOOTSTRAP_KEY_ID,
+            "bootstrap",
+            &secret,
+            BOOTSTRAP_PRINCIPAL,
+            &scopes,
+        )
+        .unwrap();
+    store
+        .reset_user_password(OPERATOR_USER_ID, "operator-secret")
+        .expect("operator password");
+    let app = test_app(app_state_http_only(store.clone()));
+
+    let response = post_my_password(
+        &app,
+        Some(&secret),
+        Some("idem-master"),
+        passwords("operator-secret", "operator-new"),
+    )
+    .await;
+    assert_error(
+        response,
+        StatusCode::FORBIDDEN,
+        "PermissionDenied",
+        "password session",
+    )
+    .await;
+    assert!(store
+        .verify_user_password(OPERATOR_USER_ID, "operator-secret")
+        .unwrap());
+}
+
+#[tokio::test]
+async fn change_my_password_wrong_current_is_403_never_401_and_changes_nothing() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let key = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store));
+    let (token, refresh) = login_tokens(&app, "alice", "old-alice-secret").await;
+
+    let response = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-wrong"),
+        passwords("not-the-password", "new-alice-secret"),
+    )
+    .await;
+    assert_error(
+        response,
+        StatusCode::FORBIDDEN,
+        "PermissionDenied",
+        "current password is incorrect",
+    )
+    .await;
+
+    // Nothing changed: the old password signs in, the new one does not, the session lives.
+    assert_login_ok(&app, "alice", "old-alice-secret").await;
+    assert_login_refused(&app, "alice", "new-alice-secret").await;
+    assert_me_status(&app, &token, StatusCode::OK).await;
+    assert_me_status(&app, &key, StatusCode::OK).await;
+    let refreshed = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/v1/login/refresh",
+            serde_json::json!({ "refreshToken": refresh }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refreshed.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn change_my_password_five_wrong_tries_then_429_even_with_the_right_password() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let _ = member_with_password(&store, "alice", "old-alice-secret");
+    let _ = member_with_password(&store, "bob", "old-bob-secret");
+    let app = test_app(app_state_http_only(store));
+    let (alice, _) = login_tokens(&app, "alice", "old-alice-secret").await;
+    let (bob, _) = login_tokens(&app, "bob", "old-bob-secret").await;
+
+    for i in 0..5 {
+        let response = post_my_password(
+            &app,
+            Some(&alice),
+            Some(&format!("idem-wrong-{i}")),
+            passwords("wrong", "new-alice-secret"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "try {i}");
+    }
+
+    let sixth = post_my_password(
+        &app,
+        Some(&alice),
+        Some("idem-sixth"),
+        passwords("wrong", "new-alice-secret"),
+    )
+    .await;
+    assert_eq!(sixth.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        sixth
+            .headers()
+            .get("X-VAM-Rate-Limited-Reason")
+            .and_then(|v| v.to_str().ok()),
+        Some("password-attempt-rate")
+    );
+    let retry_after: u64 = sixth
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("Retry-After header");
+    assert!((1..=60).contains(&retry_after), "retry-after {retry_after}");
+    let body = response_body(sixth).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["code"], "RESOURCE_EXHAUSTED");
+    assert_eq!(v["retryable"], true);
+    assert_eq!(
+        v["message"],
+        format!("too many wrong password attempts; retry after {retry_after}s")
+    );
+
+    // The right password is not even verified while the bucket is empty.
+    let right = post_my_password(
+        &app,
+        Some(&alice),
+        Some("idem-right"),
+        passwords("old-alice-secret", "new-alice-secret"),
+    )
+    .await;
+    assert_eq!(right.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        right
+            .headers()
+            .get("X-VAM-Rate-Limited-Reason")
+            .and_then(|v| v.to_str().ok()),
+        Some("password-attempt-rate")
+    );
+    assert_login_ok(&app, "alice", "old-alice-secret").await;
+
+    // The limit is per user: bob is untouched.
+    let bobs = post_my_password(
+        &app,
+        Some(&bob),
+        Some("idem-bob"),
+        passwords("old-bob-secret", "new-bob-secret"),
+    )
+    .await;
+    assert_eq!(bobs.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn change_my_password_invalid_input_costs_no_attempt() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let _ = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store));
+    let (token, _) = login_tokens(&app, "alice", "old-alice-secret").await;
+
+    for i in 0..10 {
+        let response = post_my_password(
+            &app,
+            Some(&token),
+            Some(&format!("idem-empty-{i}")),
+            passwords("", "new-alice-secret"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = post_my_password(
+            &app,
+            Some(&token),
+            Some(&format!("idem-empty-new-{i}")),
+            passwords("old-alice-secret", ""),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    // Still a normal wrong-password answer, not 429, and the right password still works.
+    let wrong = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-wrong"),
+        passwords("wrong", "new-alice-secret"),
+    )
+    .await;
+    assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
+    let right = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-right"),
+        passwords("old-alice-secret", "new-alice-secret"),
+    )
+    .await;
+    assert_eq!(right.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn change_my_password_same_password_is_400_and_keeps_the_session() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let _ = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store));
+    let (token, _) = login_tokens(&app, "alice", "old-alice-secret").await;
+
+    let response = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-same"),
+        passwords("old-alice-secret", "old-alice-secret"),
+    )
+    .await;
+    assert_error(
+        response,
+        StatusCode::BAD_REQUEST,
+        "InvalidArgument",
+        "new password must differ from the current password",
+    )
+    .await;
+    assert_me_status(&app, &token, StatusCode::OK).await;
+    assert_login_ok(&app, "alice", "old-alice-secret").await;
+}
+
+#[tokio::test]
+async fn change_my_password_validates_inputs_with_400() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let _ = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store));
+    let (token, _) = login_tokens(&app, "alice", "old-alice-secret").await;
+
+    let empty_new = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-1"),
+        passwords("old-alice-secret", ""),
+    )
+    .await;
+    assert_error(
+        empty_new,
+        StatusCode::BAD_REQUEST,
+        "InvalidArgument",
+        "password must be non-empty",
+    )
+    .await;
+
+    let too_long = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-2"),
+        passwords("old-alice-secret", &"x".repeat(1025)),
+    )
+    .await;
+    assert_error(
+        too_long,
+        StatusCode::BAD_REQUEST,
+        "InvalidArgument",
+        "password exceeds 1024 bytes",
+    )
+    .await;
+
+    let empty_current = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-3"),
+        passwords("", "new-alice-secret"),
+    )
+    .await;
+    assert_error(
+        empty_current,
+        StatusCode::BAD_REQUEST,
+        "InvalidArgument",
+        "currentPassword is required",
+    )
+    .await;
+
+    let missing_current = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-4"),
+        serde_json::json!({ "newPassword": "new-alice-secret" }).to_string(),
+    )
+    .await;
+    assert_error(
+        missing_current,
+        StatusCode::BAD_REQUEST,
+        "InvalidArgument",
+        "currentPassword is required",
+    )
+    .await;
+
+    let malformed =
+        post_my_password(&app, Some(&token), Some("idem-5"), "not json".to_string()).await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    assert_me_status(&app, &token, StatusCode::OK).await;
+    assert_login_ok(&app, "alice", "old-alice-secret").await;
+}
+
+#[tokio::test]
+async fn change_my_password_needs_an_idempotency_key() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let _ = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store));
+    let (token, _) = login_tokens(&app, "alice", "old-alice-secret").await;
+
+    let response = post_my_password(
+        &app,
+        Some(&token),
+        None,
+        passwords("old-alice-secret", "new-alice-secret"),
+    )
+    .await;
+    assert_error(
+        response,
+        StatusCode::BAD_REQUEST,
+        "InvalidArgument",
+        "Idempotency-Key",
+    )
+    .await;
+    assert_me_status(&app, &token, StatusCode::OK).await;
+    assert_login_ok(&app, "alice", "old-alice-secret").await;
+}
+
+#[tokio::test]
+async fn change_my_password_success_signs_out_every_session_and_keeps_api_keys() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let key = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store.clone()));
+    let (calling, calling_refresh) = login_tokens(&app, "alice", "old-alice-secret").await;
+    let (other, other_refresh) = login_tokens(&app, "alice", "old-alice-secret").await;
+    assert_ne!(calling, other);
+    assert_me_status(&app, &calling, StatusCode::OK).await;
+    assert_me_status(&app, &other, StatusCode::OK).await;
+
+    let response = post_my_password(
+        &app,
+        Some(&calling),
+        Some("idem-change"),
+        passwords("old-alice-secret", "new-alice-secret"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_body(response).await;
+    assert!(!body.contains("old-alice-secret") && !body.contains("new-alice-secret"));
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["reloginRequired"], true, "{body}");
+    assert_eq!(v["user"]["userId"], "alice", "{body}");
+    assert_eq!(v["user"]["username"], "alice", "{body}");
+    assert_eq!(v["user"]["hasPassword"], true, "{body}");
+    // proto3 JSON writes int64 as a string.
+    let updated: i64 = v["passwordUpdatedAt"]
+        .as_str()
+        .expect("passwordUpdatedAt is a string")
+        .parse()
+        .expect("passwordUpdatedAt is an integer");
+    assert!(updated > 0);
+    assert_eq!(
+        Some(updated),
+        store.get_user("alice").unwrap().password_updated_at
+    );
+
+    // Every session is gone, the caller's and the other one, and so are the refresh tokens.
+    assert_me_status(&app, &calling, StatusCode::UNAUTHORIZED).await;
+    assert_me_status(&app, &other, StatusCode::UNAUTHORIZED).await;
+    for refresh in [calling_refresh, other_refresh] {
+        let refreshed = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/v1/login/refresh",
+                serde_json::json!({ "refreshToken": refresh }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refreshed.status(), StatusCode::UNAUTHORIZED);
+    }
+    // The API key is a separate credential and still answers.
+    assert_me_status(&app, &key, StatusCode::OK).await;
+
+    assert_login_refused(&app, "alice", "old-alice-secret").await;
+    assert_login_ok(&app, "alice", "new-alice-secret").await;
+}
+
+#[tokio::test]
+async fn change_my_password_operator_changes_their_own_password() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    // What `vamd --reset-password` does for the operator row.
+    vam_orchestrator::password::apply_admin_password_reset(&store, "operator", "operator-old")
+        .expect("operator password");
+    let app = test_app(app_state_http_only(store.clone()));
+    let (token, _) = login_tokens(&app, "operator", "operator-old").await;
+
+    let response = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-operator"),
+        passwords("operator-old", "operator-new"),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response_body(response).await
+    );
+    assert_me_status(&app, &token, StatusCode::UNAUTHORIZED).await;
+    assert_login_refused(&app, "operator", "operator-old").await;
+    assert_login_ok(&app, "operator", "operator-new").await;
+}
+
+#[tokio::test]
+async fn change_my_password_only_touches_the_callers_own_password() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let _ = member_with_password(&store, "alice", "old-alice-secret");
+    let _ = member_with_password(&store, "bob", "old-bob-secret");
+    let app = test_app(app_state_http_only(store));
+    let (alice, _) = login_tokens(&app, "alice", "old-alice-secret").await;
+    let (bob, _) = login_tokens(&app, "bob", "old-bob-secret").await;
+
+    let response = post_my_password(
+        &app,
+        Some(&alice),
+        Some("idem-alice"),
+        passwords("old-alice-secret", "new-alice-secret"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_me_status(&app, &bob, StatusCode::OK).await;
+    assert_login_ok(&app, "bob", "old-bob-secret").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_my_password_concurrent_wrong_guesses_get_at_most_five_tries() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let _ = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store.clone()));
+    let (token, _) = login_tokens(&app, "alice", "old-alice-secret").await;
+
+    // A stolen session guessing in parallel: each request holds argon2 for a while, so a
+    // check-then-charge limiter would let far more than five through.
+    let handles: Vec<_> = (0..16)
+        .map(|i| {
+            let app = app.clone();
+            let token = token.clone();
+            let request = Request::builder()
+                .method("POST")
+                .uri("/v1/me/password")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .header("Idempotency-Key", format!("idem-race-{i}"))
+                .body(Body::from(passwords(
+                    &format!("guess-{i}"),
+                    "new-alice-secret",
+                )))
+                .unwrap();
+            // The router is moved into the task, so the requests run on separate workers.
+            tokio::spawn(async move { app.oneshot(request).await.unwrap().status() })
+        })
+        .collect();
+    let mut forbidden = 0;
+    let mut limited = 0;
+    for handle in handles {
+        match handle.await.expect("request task") {
+            StatusCode::FORBIDDEN => forbidden += 1,
+            StatusCode::TOO_MANY_REQUESTS => limited += 1,
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    assert_eq!(forbidden, 5, "exactly the burst was verified");
+    assert_eq!(limited, 11, "the rest were refused without a verify");
+    assert_login_ok(&app, "alice", "old-alice-secret").await;
+}
+
+#[tokio::test]
+async fn change_my_password_refused_same_password_costs_no_attempt() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let _ = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store));
+    let (token, _) = login_tokens(&app, "alice", "old-alice-secret").await;
+
+    // The same-password 400 is not a wrong guess: ten of them leave the full burst.
+    for i in 0..10 {
+        let response = post_my_password(
+            &app,
+            Some(&token),
+            Some(&format!("idem-same-{i}")),
+            passwords("old-alice-secret", "old-alice-secret"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "try {i}");
+    }
+    for i in 0..5 {
+        let response = post_my_password(
+            &app,
+            Some(&token),
+            Some(&format!("idem-wrong-{i}")),
+            passwords("wrong", "new-alice-secret"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "wrong try {i}");
+    }
+    let sixth = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-wrong-6"),
+        passwords("wrong", "new-alice-secret"),
+    )
+    .await;
+    assert_eq!(sixth.status(), StatusCode::TOO_MANY_REQUESTS);
+}
