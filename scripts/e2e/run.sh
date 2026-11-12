@@ -5,7 +5,7 @@
 #   scripts/e2e/run.sh --bench --mock [-k N]   # the `model` scenarios k times on the mock; writes bench-results.json (never publishable)
 #   scripts/e2e/run.sh --bench ... [--profile NAME] [--max-usd N]   # a harness profile for every trial; stop starting trials past N USD (e2e/README.md)
 # Set VAM_E2E_SKIP_BUILD=1 to skip the build (then VAM_E2E_VAMD and VAMD_PROCESS_GUEST_BIN
-# must name the process-mode vamd and guest; VAM_E2E_CLI the `vam` for verify-receipt steps). See design/scenarios.md section 7.
+# must name the process-mode vamd and guest; VAM_E2E_CLI the `vam` for verify-receipt steps). See e2e/README.md.
 #
 # The scenarios run on a TEST-ONLY node: vamd and vam-runtime are built with their
 # `process-guest` feature (guests are host processes, no isolation; mock-model only).

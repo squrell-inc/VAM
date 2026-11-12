@@ -96,7 +96,7 @@ pub struct AppState {
     pub draining: Arc<AtomicBool>,
     pub ready: Arc<AtomicBool>,
     /// True when this node loaded scripts from `VAMD_E2E_MOCK_SCRIPTS`. Only such a node
-    /// accepts `mock-model` (design/e2e-journeys.md D3).
+    /// accepts `mock-model` (test only).
     pub e2e_mock_scripts: bool,
 }
 

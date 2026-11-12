@@ -1,4 +1,4 @@
-//! Connector files shipped in a marketplace listing (CN-4.11, `design/connectors.md` D25 and D26).
+//! Connector files shipped in a marketplace listing (CN-4.11).
 //!
 //! A listing folder may hold a connector file (`connector.json`, the format of
 //! `spec/connectors/*.json`). The node imports it like the other artifacts, but a connector is

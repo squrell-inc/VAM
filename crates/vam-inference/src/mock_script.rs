@@ -1,4 +1,4 @@
-//! Scripted mock model for the E2E journeys (`design/e2e-journeys.md` §6; locked decisions D3-D5).
+//! Scripted mock model for the E2E journeys (test only; see `e2e/README.md`).
 //!
 //! A script is one JSON file per journey. Its `id` must equal the file stem:
 //!
@@ -13,11 +13,11 @@
 //!       "reply": {"text": "Turn answer.", "fillerBytes": 13000} } ] }
 //! ```
 //!
-//! **Selection (D5).** A request uses script `<id>` when a `system` message contains the marker
+//! **Selection.** A request uses script `<id>` when a `system` message contains the marker
 //! `mock-script:<id>`. When no system message has the marker, any message may carry it. A request
 //! without a marker is not scripted: the content fixtures in `provider.rs` answer it as before.
 //!
-//! **Matching (D4).** Stateless: the reply is a pure function of the request's messages and offered
+//! **Matching.** Stateless: the reply is a pure function of the request's messages and offered
 //! tools, so it survives guest restarts, HITL resume and the playbook-finish loop. The first rule
 //! whose `when` holds decides the reply. Conditions are ANDed, and an empty `when` always holds.
 //! - `lastRole`: `user` or `tool`, the role of the last message.

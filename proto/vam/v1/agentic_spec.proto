@@ -31,10 +31,10 @@ message AgentSpec {
   repeated ResourceRef skill_refs = 10;   // Skill dependencies. Version may be omitted; host resolves to latest released and records the pin on the run.
 
   // Host-governed policies referenced by custom reference types.
-  // Deprecated: design/agent-experience.md Part IV. Read only on the legacy
+  // Deprecated (docs: security/permissions). Read only on the legacy
   // compatibility path. New drafts use `permissions`.
   CapabilityPolicyRef capability_policy = 11; // AWS Cedar security and network egress profile
-  // Deprecated: design/agent-experience.md Part IV. `monitored_tools` are read
+  // Deprecated (docs: security/permissions). `monitored_tools` are read
   // only on the legacy compatibility path. New drafts use `permissions`.
   HitlPolicyRef hitl_policy = 12;              // Human-in-the-loop validation triggers
   TelemetryPolicyRef telemetry_policy = 13;    // PII redaction and audit logging level
@@ -59,7 +59,7 @@ message AgentSpec {
   // Instructions append or replace; skills add or remove; capabilities grant or revoke.
   AgentOverlay overlay = 22;
 
-  // Rules as data (design/agent-experience.md Part IV). Absent on legacy agents,
+  // Rules as data (docs: security/permissions). Absent on legacy agents,
   // which keep `capability_policy` and `hitl_policy`.
   AgentPermissions permissions = 23;
 }
@@ -119,7 +119,7 @@ enum HostDefault {
 }
 
 // How an extending agent combines with its parent.
-// Merge rules are locked as developer-experience decision 20.
+// Merge rules are locked (docs: authoring/agent-spec).
 message AgentOverlay {
   InstructionOverlay instructions = 1;
   SkillOverlay skills = 2;

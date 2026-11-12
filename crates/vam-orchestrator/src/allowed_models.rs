@@ -339,7 +339,7 @@ pub fn normalize_allowed_models(models: &[String]) -> Result<Vec<String>, Orches
 }
 
 /// The scripted mock model id. A node answers it only when it loaded scripts from
-/// `VAMD_E2E_MOCK_SCRIPTS` (design/e2e-journeys.md D3).
+/// `VAMD_E2E_MOCK_SCRIPTS`; test only.
 pub const MOCK_MODEL: &str = "mock-model";
 
 /// Refuses `mock-model` on a node without loaded scripts. Every other model passes unchanged.

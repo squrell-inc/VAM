@@ -1,5 +1,5 @@
 //! `/v1/me/contacts`: link, list and unlink the caller's own channel contacts
-//! (`design/notifications.md` section 9.5). A foreign id is "not found". The link code is returned
+//! (docs: hosted/notify). A foreign id is "not found". The link code is returned
 //! once by the POST that starts the link and is never listed; it is stored hashed. Verification is
 //! the broker's `LinkChannelAccount` (`SqliteWorkflowStore::verify_contact_with_code`).
 

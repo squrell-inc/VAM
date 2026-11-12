@@ -1,4 +1,4 @@
-//! The notification record (`design/notifications.md` section 2): one row per event and
+//! The notification record (docs: orchestrator/notifications): one row per event and
 //! recipient user, written by `vamd` inside the transaction of the fact it reports.
 //!
 //! Host facts only: titles and bodies come from fixed templates over ids, tool names and step
@@ -18,13 +18,13 @@ pub const MAX_ROWS_PER_USER: i64 = 2000;
 const INFO_RETENTION_SECS: i64 = 30 * 86_400;
 const WARN_RETENTION_SECS: i64 = 90 * 86_400;
 pub const METRIC_NOTIFICATIONS_TOTAL: &str = "vam_notifications_total";
-/// `runs.source` of an asked (delegated) run: `design/primary-agent.md` section 5 (the asked
-/// run's `runs.source` is `broker:vam.delegate`). It starts with `broker:`, so the trigger rule
+/// `runs.source` of an asked (delegated) run, reserved for a future delegated-run source
+/// (`broker:vam.delegate`). It starts with `broker:`, so the trigger rule
 /// of `run.finished` must name it to leave it out: the asking user gets `report.arrived` or
-/// `delegation.*` instead (`design/notifications.md` section 2.3).
+/// `delegation.*` instead.
 pub const DELEGATE_RUN_SOURCE: &str = "broker:vam.delegate";
-/// Prefix of the `runs.source` of a report run (`report:<childRunId>`, `design/primary-agent.md`
-/// section 5, report back). Never a person's run and never a trigger's.
+/// Prefix of the `runs.source` of a report run (`report:<childRunId>`, reserved for a future
+/// report-back source). Never a person's run and never a trigger's.
 pub const REPORT_RUN_SOURCE_PREFIX: &str = "report:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,7 +613,7 @@ impl SqliteWorkflowStore {
     }
 }
 
-/// Whether a run's end is a notification (`design/notifications.md` section 2.3). Pure over host
+/// Whether a run's end is a notification (docs: orchestrator/notifications). Pure over host
 /// facts: `source` (`runs.source`), `state`, `result_json`, and whether a published approval row
 /// exists (the run waited on a person).
 pub fn run_finished_wanted(
@@ -753,8 +753,8 @@ fn agent_label_of(agent_urn: &str) -> String {
         .to_string()
 }
 
-/// Facts of a report back or an asked run that sends none (`design/primary-agent.md` section 5).
-/// Nothing calls these functions yet; the primary agent's report-back task will.
+/// Facts of a report back or an asked run that sends none.
+/// Nothing calls these functions yet; a future report-back task will.
 #[derive(Debug, Clone)]
 pub struct DelegationFacts {
     pub asking_user_id: String,
@@ -1336,7 +1336,7 @@ impl SqliteWorkflowStore {
 // ---- grant, budget and trigger producers (NT-2.7) -----------------------------------------
 
 /// The `error` of a run the active-duration budget stopped (`expire_over_active_budget`). A run
-/// with this result has `budget.hit` and no `run.finished` (`design/notifications.md` 2.3).
+/// with this result has `budget.hit` and no `run.finished`.
 pub const DURATION_STOP_ERROR: &str = "run exceeded max_duration of active time";
 
 fn is_duration_stop(result_json: Option<&str>) -> bool {

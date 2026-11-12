@@ -1,7 +1,6 @@
 //! Effective permissions, explain, and the Squrell preset catalog.
 //!
-//! Design: `design/agent-experience.md` §IV.6 and §IV.9. Locked decisions 18
-//! and 25. The HTTP handlers live in `api/permissions.rs`.
+//! See docs: security/permissions. The HTTP handlers live in `api/permissions.rs`.
 //!
 //! Effective rows are one tool the caller can see: builtins, the agent's
 //! skills, and the caller's visible MCP connections. The guest name maps to

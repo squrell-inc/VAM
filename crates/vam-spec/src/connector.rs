@@ -1,4 +1,4 @@
-//! Connector definition (design/connectors.md section 4): serde types, the
+//! Connector definition: serde types, the
 //! validator, and the built-in definitions embedded from `spec/connectors/`.
 
 use serde::{Deserialize, Serialize};
