@@ -1,4 +1,4 @@
-//! Trusted marketplaces on the node (CN-4.4, `design/connectors.md` §9.1, D23–D25).
+//! Trusted marketplaces on the node (CN-4.4).
 //!
 //! A marketplace is a Git repository whose root `marketplace.json` lists *listings*: bundles of
 //! skills, playbooks and agents released at a tag. An org admin trusts a marketplace by URL; the

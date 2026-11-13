@@ -1,7 +1,6 @@
 //! One permissions resolver for agent, source, and org scopes.
 //!
-//! Design: `design/agent-experience.md` §IV.2 "Resolution" and "Defaults",
-//! §IV.5, §IV.9. Locked decisions 11, 13, and 15. Within a scope the most
+//! See docs: security/permissions. Within a scope the most
 //! specific matching rule wins ([`Target::specificity`]). Across scopes the
 //! strictest wins, which the AX-5.2 platform policy evaluates from the
 //! attributes this module writes. Source and org rules can only tighten.

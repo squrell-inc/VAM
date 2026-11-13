@@ -56,10 +56,10 @@ pub struct ModelBlock {
     pub task: String,
     /// The task-set version the task belongs to (`e2e/task-sets.yaml`).
     pub version: String,
-    /// Trials per model (benchmark.md section 2: 5).
+    /// Trials per model (docs: runtime/benchmark-results; default 5).
     #[serde(default = "default_k")]
     pub k: u32,
-    /// Only `on` exists until `machine off` does (B1).
+    /// Only `on` exists until `machine off` does.
     #[serde(default = "default_modes")]
     pub modes: Vec<String>,
     /// Per-trial timeout (300ms, 45s, 10m); the scenario budget when omitted.

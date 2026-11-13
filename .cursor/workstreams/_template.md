@@ -30,9 +30,9 @@ Do not re-litigate without editing this list.
 
 ## Phases
 
-### Done phases (archived)
+### Done phases
 
-Full sections: [archive/<slug>.md](archive/<slug>.md).
+Done phase sections are deleted; git history keeps them.
 
 | Phase | Name | Done |
 |---|---|---|

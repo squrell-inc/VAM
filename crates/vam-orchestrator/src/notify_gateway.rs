@@ -1,4 +1,4 @@
-//! The notification gateway (NT-2.3, NT-2.5; `design/notifications.md` sections 3.5, 3.6, 9.4).
+//! The notification gateway (NT-2.3, NT-2.5; docs: hosted/notify).
 //!
 //! `HostedNotificationGateway` is served by `vamd` on the per-broker gateway socket of a channel
 //! broker (`gateway.rs::sync_broker` opens it for a manifest with `notification_channel`). **The

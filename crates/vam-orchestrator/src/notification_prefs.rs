@@ -1,4 +1,4 @@
-//! Per-user notification preferences (`design/notifications.md` section 3.5): per kind on or off,
+//! Per-user notification preferences (docs: orchestrator/notifications): per kind on or off,
 //! quiet hours, and kinds that are always sent. No digests (slice 3).
 //!
 //! Defaults when a user sets nothing: the node's kind defaults (`node_notify`), else the table in

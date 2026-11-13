@@ -786,7 +786,7 @@ features:
   - id: notifications-vam-notify-slack-contacts
     area: "Notifications"
     surface: "vam.notify, Slack channel and linked contacts, quiet hours, decisions from Slack"
-    dev: []
+    dev: [orchestrator/notifications, hosted/notify]
     arch: []
     proves:
       - notifications-are-never-shown-to-another-user
@@ -796,7 +796,29 @@ features:
       - slack-decision-needs-the-handle-and-the-linked-account
       - restarted-approval-keeps-one-notification
       - skipped-schedule-is-told-once-a-day
-    pending_page: true
+  - id: broker-triggered-runs-run-grants-and-gateway
+    area: "Hosted brokers"
+    surface: "run grants, HostedTriggerGateway, run source on the receipt"
+    dev: []
+    arch: [hosted/triggered-runs]
+    proves:
+      - trigger-starts-a-run-as-the-grant-owner
+      - grant-token-is-refused-over-http
+      - revoked-grant-starts-nothing
+      - repeated-fire-with-the-same-key-starts-one-run
+      - trigger-on-a-busy-workspace-runs-after-the-task
+      - triggered-run-cannot-arm-another-trigger
+  - id: vam-schedule-broker
+    area: "Hosted brokers"
+    surface: "vam.schedule tools, cron and once with IANA zones, catch-up, busy queue or skip"
+    dev: [hosted/schedule]
+    arch: [hosted/schedule]
+    proves:
+      - scheduled-message-runs-at-its-time
+      - deleted-schedule-never-fires-again
+      - missed-fire-runs-once-after-the-broker-restarts
+      - schedule-is-saved-only-after-the-user-approves
+      - schedule-set-to-skip-does-not-wait-for-a-busy-workspace
   - id: connectors-microsoft-365-and-linear
     area: "Connectors"
     surface: "connectors admin enable, member connect, Microsoft 365 and Linear skills, tool cards"

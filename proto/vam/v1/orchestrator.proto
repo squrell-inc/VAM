@@ -207,7 +207,7 @@ message GetAgentRequest {
   string urn = 1;
 }
 
-// Where a catalog row a marketplace installed came from (CN-4.5, `design/connectors.md` §9.1).
+// Where a catalog row a marketplace installed came from (CN-4.5).
 // Absent on every row that was not installed from a marketplace.
 message CatalogOrigin {
   // Id of the trusted marketplace on this node (`squrell` for the preconfigured one).
@@ -1104,7 +1104,7 @@ message HostedBrokerRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Spaces and threads (opaque ids; vam-apps-spaces.md amendment section 4)
+// Spaces and threads (opaque ids; docs: hosted/triggered-runs)
 // ---------------------------------------------------------------------------
 
 message Space {

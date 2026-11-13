@@ -277,7 +277,7 @@ async fn main() {
         egress_max_bytes = config.egress_max_bytes,
         "vamd per-session egress byte cap (0 = unlimited)"
     );
-    // Scripted mock model for the E2E journeys (design/e2e-journeys.md D3). Off unless
+    // Scripted mock model for the E2E journeys (test only). Off unless
     // VAMD_E2E_MOCK_SCRIPTS names a directory; a bad directory stops vamd here.
     let mock_scripts_dir = std::env::var("VAMD_E2E_MOCK_SCRIPTS").ok();
     let mock_scripts =

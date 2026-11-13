@@ -64,9 +64,9 @@ Do not re-litigate without editing this list. Owner decisions, 2026-11-12.
 
 ## Phases
 
-### Done phases (archived)
+### Done phases
 
-Full sections: [archive/user-identity.md](archive/user-identity.md).
+Done phase sections are deleted; git history keeps them.
 
 | Phase | Name | Done |
 |---|---|---|

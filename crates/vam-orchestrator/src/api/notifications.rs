@@ -1,5 +1,5 @@
 //! `GET /v1/notifications`, `/summary`, `/{id}`, `POST /read`, `/{id}/read`, `/{id}/acted`
-//! (`design/notifications.md` section 3.2). Every route answers only the caller's rows; a
+//! (docs: orchestrator/notifications). Every route answers only the caller's rows; a
 //! foreign id is "not found". The API never decides an approval.
 
 use std::collections::HashMap;

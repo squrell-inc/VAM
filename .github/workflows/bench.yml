@@ -1,4 +1,4 @@
-# VAM real-model benchmark on a KVM runner (design/benchmark.md B3, e2e/README.md "Bench on GitHub Actions").
+# VAM real-model benchmark on a KVM runner (docs: runtime/benchmark-results; e2e/README.md "Bench on GitHub Actions").
 #
 # SAFETY BY CONSTRUCTION: this workflow is dispatch-only. It has no pull_request or push trigger,
 # so GitHub never hands the repository secret VERCEL_AI_GATEWAY_API_KEY to a fork PR or to any
@@ -73,7 +73,7 @@ jobs:
           MOCK: ${{ inputs.mock }}
         run: |
           if [ "$MODE" != "on" ]; then
-            echo "::error::mode=$MODE is not available yet: the runner has no machine-off flag (design/benchmark.md B1). Use mode=on."
+            echo "::error::mode=$MODE is not available yet: the runner has no machine-off flag. Use mode=on."
             exit 1
           fi
           if [ "$MOCK" = "true" ]; then MODELS="mock"; PROFILES="base"; fi

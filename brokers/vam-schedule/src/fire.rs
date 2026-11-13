@@ -1,4 +1,4 @@
-//! The fire loop (design/schedule-broker.md "The clock" and "Firing").
+//! The fire loop (docs: hosted/schedule).
 //!
 //! One loop sleeps until the earliest due time (at most 30 s, woken early by [`Scheduler::wake_handle`]),
 //! starts at most 4 fires at once, and records each fire's outcome and advances its schedule in one

@@ -315,7 +315,7 @@ service HostedBroker {
 }
 
 // ---------------------------------------------------------------------------
-// Run grants and the trigger gateway (E5; design/hsp-triggers.md amendment 2026-10-29 section 3)
+// Run grants and the trigger gateway (E5; docs: hosted/triggered-runs)
 // ---------------------------------------------------------------------------
 
 message RunGrant {
@@ -439,7 +439,7 @@ message RevokeRunGrantRequest { string run_grant = 1; }   // proves possession
 message RevokeRunGrantResponse { ErrorStatus error = 1; }
 
 // ---------------------------------------------------------------------------
-// Notification channels (NT-2; design/notifications.md sections 3.5, 3.6, 9)
+// Notification channels (NT-2; docs: hosted/notify)
 // ---------------------------------------------------------------------------
 
 // Served by a channel broker on its HSP socket, beside HostedBroker.

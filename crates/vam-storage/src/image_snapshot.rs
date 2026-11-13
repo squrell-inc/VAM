@@ -12,7 +12,7 @@
 //!
 //! The copy is a new inode, created `O_EXCL` with mode 0600 and never given the
 //! source's permissions or owner. It is never staged into a jail: no writable
-//! inode is shared with a VMM (isolation-truth W4b). The host reads it later
+//! inode is shared with a VMM (docs: architecture/isolation). The host reads it later
 //! with the safe reader ([`crate::image_read`]); the guest never sees it.
 
 use crate::error::{io_at, Drive9Error};

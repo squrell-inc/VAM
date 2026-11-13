@@ -1,4 +1,4 @@
-//! The SQLite store: `schedules`, `fires`, `pending_revokes` (design/schedule-broker.md "The store").
+//! The SQLite store: `schedules`, `fires`, `pending_revokes` (docs: hosted/schedule).
 //!
 //! Opens and migrates the store, and holds the queries the fire loop needs (due selection, the
 //! fire ledger, one transaction that records an outcome and advances the row) and the
