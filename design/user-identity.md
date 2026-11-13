@@ -201,6 +201,18 @@ operator is the bootstrap key and the operator row has no password until
 `vamd --reset-password`, so a scenario would need a host-shell step for no extra
 proof.
 
+### 3.7 Audit (owner, 2026-11-13)
+
+A successful change appends `vam.v1.user.password_changed` to the audit ledger, node-level
+partition `vam_audit_identity` of the current tenant, attributed to the user (store
+`record_identity_audit_event`, `crates/vam-orchestrator/src/workflow.rs`). Payload: `userId`,
+`username`, `role`, `actor: "self"`, `credential: "session"`, `passwordUpdatedAt`; no password,
+hash or token (a typed struct in `api/me.rs`). Refusals record nothing. The ledger keeps a digest of
+the payload and persists the record to the spool like other audit records. A failed append after the
+change is logged at error level and the request still answers 200, because the password is already
+changed and the sessions revoked; this is the one place the change does not fail closed on the
+ledger. Admin reset and `vamd --reset-password` are not audited yet.
+
 ## 4. Phase 2 — generated user IDs and email usernames (planned)
 
 Not built in phase 1. Recorded so phase 1 does not paint it into a corner.

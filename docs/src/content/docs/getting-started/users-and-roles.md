@@ -11,6 +11,7 @@ proves:
   - api-key-cannot-change-a-password
   - new-password-equal-to-current-is-refused
   - password-change-needs-an-idempotency-key
+  - crates/vam-orchestrator/tests/api_tests.rs::change_my_password_success_writes_one_identity_audit_record_without_secrets
 ---
 
 Isolation is always on. Every durable row has an owner. This page is how to create people on a fresh node and which login to use next.
@@ -71,6 +72,8 @@ There are three ways, for three situations.
 | Reset any password, the operator's too | Whoever has a shell on the node host | `vamd --reset-password` | Host access | Sets the password from the host. |
 
 An API key cannot change a password, not even the key of the same user. Run `vam login` first, then `vam passwd`.
+
+A successful change of your own password is recorded in the audit ledger as `vam.v1.user.password_changed`, with no password in it (`crates/vam-orchestrator/tests/api_tests.rs::change_my_password_success_writes_one_identity_audit_record_without_secrets`). An admin reset (`POST /v1/users/{id}/password`) and `vamd --reset-password` are not audited yet.
 
 ### Change your own password
 

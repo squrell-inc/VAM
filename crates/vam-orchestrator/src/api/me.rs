@@ -55,6 +55,19 @@ pub async fn get_me(
     Ok(json_http_response(code, json))
 }
 
+/// Payload of `vam.v1.user.password_changed`. Field order is the wire order. It holds no
+/// password, hash or session token, and that is the whole point of this type.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PasswordChangedAudit<'a> {
+    user_id: &'a str,
+    username: &'a str,
+    role: &'a str,
+    actor: &'static str,
+    credential: &'static str,
+    password_updated_at: i64,
+}
+
 /// Changes the caller's own password.
 ///
 /// Only a password session (`vam login`) may call it: any API key, the bootstrap key and run
@@ -113,8 +126,30 @@ pub async fn change_my_password(
                 user_id = user_id.as_str(),
                 "user changed their own password"
             );
+            let password_updated_at = user.password_updated_at.unwrap_or_default();
+            // The password is already changed and every session revoked, so a failed audit
+            // write cannot undo it: log loudly and still answer 200.
+            let audit = PasswordChangedAudit {
+                user_id: &user.user_id,
+                username: &user.username,
+                role: user.role.as_str(),
+                actor: "self",
+                credential: "session",
+                password_updated_at,
+            };
+            if let Err(e) = state.store.record_identity_audit_event(
+                &user_id,
+                "vam.v1.user.password_changed",
+                serde_json::to_string(&audit).unwrap_or_default().as_bytes(),
+            ) {
+                tracing::error!(
+                    user_id = user_id.as_str(),
+                    error = %e,
+                    "password changed but the audit record could not be written"
+                );
+            }
             let resp = ChangeMyPasswordResponse {
-                password_updated_at: user.password_updated_at.unwrap_or_default(),
+                password_updated_at,
                 user: Some(user_account(user)),
                 relogin_required: true,
             };

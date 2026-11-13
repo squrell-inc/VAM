@@ -5,6 +5,7 @@ status: shipped
 proves:
   - crates/vam-orchestrator/tests/trajectory_timeline_test.rs
   - crates/vam-orchestrator/tests/trajectory_replay_test.rs
+  - crates/vam-orchestrator/tests/api_tests.rs::change_my_password_success_writes_one_identity_audit_record_without_secrets
 ---
 
 To enable predictable consumption of VAM state transitions by dashboards, analytics pipelines, and external webhooks, VAM maintains a strict **Event Type Catalog**. This page documents the events `vamd` writes to a run's event stream, their producers, and how they are ordered. Every row was checked against the constants and builders in `crates/vam-orchestrator/src/events.rs` and the call sites that append them.
@@ -48,6 +49,7 @@ $$\text{vam} \cdot \text{v1} \cdot \langle\text{domain}\rangle \cdot \langle\tex
 | `vam.v1.secret.accessed` | Host Vault | A vault read for an invoke binding. | logical name only |
 | `vam.v1.web.used` | Host Orchestrator | A web broker tool call finished. Carries no query, snippet, page text or URL path. | broker, tool, host, status, optional code, bytes, sources added |
 | `vam.v1.web.citations_unresolved` | Host Orchestrator | The final answer cited `[S<n>]` ids no source answers to. Flag only. | `unresolved` ids, `resolved`, `total_sources` |
+| `vam.v1.user.password_changed` | Host Orchestrator | A signed-in user changed their own password (`POST /v1/me/password`, success only). Written to the audit ledger partition `vam_audit_identity`, attributed to the user, not to the run event stream. An admin reset and `vamd --reset-password` do not write it yet. | `{userId, username, role, actor: "self", credential: "session", passwordUpdatedAt}`; never a password, a hash or a session token. Proof: `crates/vam-orchestrator/tests/api_tests.rs::change_my_password_success_writes_one_identity_audit_record_without_secrets` |
 | `vam.v1.session.booted` | Host Daemon | A session booted. Filed under the session id and, when a run exists, the run id. Boot path (`manager.rs:1976` passes `cold`). | session id, boot path, snapshot id (none) and a duration that is always 0 (`events.rs:427-436`) |
 | `vam.v1.mock.rule_matched` | Host Inference *(test-only)* | The scripted mock model answered a call from a rule. | script, rule index, optional step label |
 | `vam.v1.mock.unmatched` | Host Inference *(test-only)* | The scripted mock model had no answer for a call (no rule, tool not offered, script not loaded). | script, reason, last role, preview (80 chars, redacted), optional step |

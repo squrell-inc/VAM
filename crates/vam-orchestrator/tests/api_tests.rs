@@ -10614,3 +10614,100 @@ async fn change_my_password_refused_same_password_costs_no_attempt() {
     .await;
     assert_eq!(sixth.status(), StatusCode::TOO_MANY_REQUESTS);
 }
+
+/// Store with a partitioned audit ledger installed, and the identity partition key.
+fn store_with_identity_ledger() -> (
+    Arc<SqliteWorkflowStore>,
+    Arc<vam_telemetry::PartitionedAuditLedger>,
+    String,
+) {
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let ledger = Arc::new(vam_telemetry::PartitionedAuditLedger::new());
+    store.set_audit_ledger(ledger.clone());
+    let partition = vam_telemetry::tenant::TenantContext::partition_key(
+        vam_telemetry::current_tenant_id().as_str(),
+        "vam_audit_identity",
+    );
+    (store, ledger, partition)
+}
+
+#[tokio::test]
+async fn change_my_password_success_writes_one_identity_audit_record_without_secrets() {
+    use sha2::{Digest, Sha256};
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let (store, ledger, partition) = store_with_identity_ledger();
+    let _ = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store.clone()));
+    let (token, _) = login_tokens(&app, "alice", "old-alice-secret").await;
+    assert!(ledger.read_partition(&partition).is_empty());
+
+    let response = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-audit"),
+        passwords("old-alice-secret", "new-alice-secret"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated = store
+        .get_user("alice")
+        .unwrap()
+        .password_updated_at
+        .expect("password_updated_at");
+
+    let records = ledger.read_partition(&partition);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0];
+    assert_eq!(record.event_type, "vam.v1.user.password_changed");
+    assert_eq!(record.user_id.as_deref(), Some("alice"));
+
+    // The ledger keeps the payload digest: rebuild the exact payload and match it.
+    let payload = format!(
+        r#"{{"userId":"alice","username":"alice","role":"member","actor":"self","credential":"session","passwordUpdatedAt":{updated}}}"#
+    );
+    assert_eq!(
+        record.payload_digest,
+        format!("{:x}", Sha256::digest(payload.as_bytes()))
+    );
+    for secret in ["old-alice-secret", "new-alice-secret", token.as_str()] {
+        assert!(!payload.contains(secret));
+    }
+}
+
+#[tokio::test]
+async fn change_my_password_refusals_write_no_identity_audit_record() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let (store, ledger, partition) = store_with_identity_ledger();
+    let key = member_with_password(&store, "alice", "old-alice-secret");
+    let app = test_app(app_state_http_only(store));
+    let (token, _) = login_tokens(&app, "alice", "old-alice-secret").await;
+
+    let wrong = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-a1"),
+        passwords("not-the-password", "new-alice-secret"),
+    )
+    .await;
+    assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
+    let api_key = post_my_password(
+        &app,
+        Some(&key),
+        Some("idem-a2"),
+        passwords("old-alice-secret", "new-alice-secret"),
+    )
+    .await;
+    assert_eq!(api_key.status(), StatusCode::FORBIDDEN);
+    let same = post_my_password(
+        &app,
+        Some(&token),
+        Some("idem-a3"),
+        passwords("old-alice-secret", "old-alice-secret"),
+    )
+    .await;
+    assert_eq!(same.status(), StatusCode::BAD_REQUEST);
+
+    assert!(ledger.read_partition(&partition).is_empty());
+}

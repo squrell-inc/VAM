@@ -9,6 +9,8 @@ proves:
   - crates/vam-orchestrator/tests/trajectory_timeline_test.rs
   - crates/vam-e2e/tests/usage_recorded.rs
   - crates/vam-orchestrator/tests/evidence_pack_test.rs
+  - crates/vam-orchestrator/tests/api_tests.rs::change_my_password_success_writes_one_identity_audit_record_without_secrets
+  - crates/vam-orchestrator/tests/api_tests.rs::change_my_password_refusals_write_no_identity_audit_record
 ---
 
 Telemetry is host-side. `vamd` records events, writes an audit ledger and exports to places you configure. The guest never talks to a collector. The code is in `crates/vam-telemetry` (the library) and `crates/vam-orchestrator` (the wiring in `src/bin/vamd.rs`).
@@ -43,6 +45,8 @@ The OCSF file holds security findings (policy denials, egress blocks, secret rea
 ## Audit ledger
 
 Every audited action appends a record whose hash covers the previous record, per partition (`audit.rs:13-49`). A checkpoint signs the chain head with Ed25519 (`audit.rs:164`). Verification re-walks the chain and fails on any edit (`audit.rs:241`). Proofs: `test_audit_ledger_tamper_detection` and `test_audit_ledger_fail_closed_on_tampered_partition` in `audit_fail_closed_test.rs`.
+
+A successful self-service password change writes one `vam.v1.user.password_changed` record to the node-level `vam_audit_identity` partition, attributed to the user and carrying no password, hash or session token (`crates/vam-orchestrator/tests/api_tests.rs::change_my_password_success_writes_one_identity_audit_record_without_secrets`); a refused change writes none (`crates/vam-orchestrator/tests/api_tests.rs::change_my_password_refusals_write_no_identity_audit_record`). Admin resets and `vamd --reset-password` are not audited yet.
 
 Writes of class A (audit) records are checked against a disk quota first. If the quota is full, the record is refused rather than dropping older ones (`evidence.rs:225-245`, `retention.rs:134-160`). The run receipt and the run attestation are built from the ledger; see [Run receipt](/security/run-receipt/).
 
