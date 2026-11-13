@@ -116,6 +116,7 @@ call it, the operator included. Who may change which password is in
   token you called with answers 401 afterwards. API keys are not touched
   (`password-change-signs-out-every-session-and-keeps-api-keys`). Sign in again with the new
   password (`member-changes-own-password-and-signs-in-with-the-new-one`).
+- **Audit.** A successful change is recorded in the audit ledger as `vam.v1.user.password_changed`, with no password in it (`crates/vam-orchestrator/tests/api_tests.rs::change_my_password_success_writes_one_identity_audit_record_without_secrets`). A refused change writes nothing (`crates/vam-orchestrator/tests/api_tests.rs::change_my_password_refusals_write_no_identity_audit_record`). An admin reset (`POST /v1/users/{id}/password`) and `vamd --reset-password` are not audited yet.
 - **Five wrong tries.** A wrong current password counts against a limit of five per user. One try
   comes back every 60 seconds. The limit is on even with `VAMD_RATE_LIMIT=off`. A correct password
   and a refused new password do not count (`wrong-current-password-is-refused-and-attempts-are-limited`).

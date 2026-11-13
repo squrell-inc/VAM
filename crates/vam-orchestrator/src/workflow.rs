@@ -2994,6 +2994,34 @@ impl SqliteWorkflowStore {
         Ok(())
     }
 
+    /// Records an identity event (no session behind it) in the node-level partition
+    /// `vam_audit_identity` of the current tenant, attributed to `user_id`.
+    /// No ledger installed is `Ok(())`; an append failure is an error, as for the session helpers.
+    /// The payload must never carry a password, a hash or a session token.
+    pub fn record_identity_audit_event(
+        &self,
+        user_id: &str,
+        event_type: &str,
+        payload: &[u8],
+    ) -> Result<(), OrchestratorError> {
+        if let Some(ledger) = self.audit_ledger() {
+            let partition_key = vam_telemetry::tenant::TenantContext::partition_key(
+                vam_telemetry::current_tenant_id().as_str(),
+                IDENTITY_AUDIT_PARTITION,
+            );
+            let record = ledger
+                .record_event_for_user(&partition_key, event_type, payload, Some(user_id))
+                .map_err(|e| {
+                    OrchestratorError::Core(format!(
+                        "Identity audit ledger append failed (fail-closed): {}",
+                        e
+                    ))
+                })?;
+            crate::evidence::persist_audit_record_to_spool(&record);
+        }
+        Ok(())
+    }
+
     /// Append a single outbox row outside a workflow transaction (trajectory events).
     pub fn append_outbox_event(
         &self,
@@ -4860,9 +4888,38 @@ fn map_stored_approval_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredAp
     })
 }
 
+/// Logical name of the node-level identity audit partition (`tenant:{tenant}:vam_audit_identity`).
+pub const IDENTITY_AUDIT_PARTITION: &str = "vam_audit_identity";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_audit_event_without_a_ledger_is_ok() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        store
+            .record_identity_audit_event("alice", "vam.v1.user.password_changed", b"{}")
+            .unwrap();
+    }
+
+    #[test]
+    fn identity_audit_event_lands_in_the_identity_partition_with_the_user() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        let ledger = std::sync::Arc::new(vam_telemetry::PartitionedAuditLedger::new());
+        store.set_audit_ledger(ledger.clone());
+        store
+            .record_identity_audit_event("alice", "vam.v1.user.password_changed", b"{}")
+            .unwrap();
+        let key = vam_telemetry::tenant::TenantContext::partition_key(
+            vam_telemetry::current_tenant_id().as_str(),
+            IDENTITY_AUDIT_PARTITION,
+        );
+        let records = ledger.read_partition(&key);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].event_type, "vam.v1.user.password_changed");
+        assert_eq!(records[0].user_id.as_deref(), Some("alice"));
+    }
     use prost_types::Timestamp;
     use vam_spec::v1::{
         ArtifactRef, Digest, OutcomeTerminal, PlaybookSpec, PlaybookStep, StepBinding, StepKind,
