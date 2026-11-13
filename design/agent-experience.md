@@ -8,7 +8,7 @@ E7 and later epics open their own trackers from their planning session.
 A way of planning VAM from the problems teams face when adopting agents,
 rather than from the parts VAM already has. This document does two things:
 
-1. **Part I** lists the market problems VAM exists to solve. Each one names
+1. **Part I** lists the problems VAM exists to solve. Each one names
    who feels it, what VAM already has, and what is missing. Every later epic
    and story must cite the problems it serves. A story that serves none of
    them waits.
@@ -60,7 +60,7 @@ reflect `main`. Each problem has at least one measured line in
 `design/benchmark.md` §1; a phase that serves a problem reports that line
 before and after.
 
-| # | Problem, as a customer would say it | Who feels it |
+| # | Problem, as a user would say it | Who feels it |
 |---|---|---|
 | P1 | "We can't let an agent touch real systems." | Security, platform teams |
 | P2 | "We don't know what our agents did, or who allowed it." | Security, compliance, managers |
@@ -144,7 +144,7 @@ requests. **E8 (Part V).**
 
 **Already there:** parking and resuming runs on a fresh VM, `on_paused`
 notifications, and playbook gates. Designs exist for broker-triggered runs
-(`hsp-triggers.md`) and Apps/Spaces (`vam-apps-spaces.md`).
+(`docs/src/content/docs/hosted/triggered-runs.md`) and Apps/Spaces (`vam-apps-spaces.md`).
 **Missing:** the triggers themselves (webhook, schedule, event). Delivering
 approvals and results where people already work (Slack, email). Agents
 running in the background on behalf of a team.
@@ -194,7 +194,7 @@ build it").
 | E2 Developer packaging and org registry | P4, P9 | ~4 | `vam init`, `vam.json` holding the version, `vam release` from a folder, install from the org catalog | Ranges and `vam.lock` resolution, `vam dev` tiers, eject and adopt, `extends` in the app |
 | E3 Governance console | P1, P2 | ~5 | Agent inventory (who released what, which version, what it can do), one approvals inbox, and **org guardrails**: org-scope deny/ask rules for tools and hosts, read by the Part IV resolver (§IV.10) | Capability-diff review queue, hand-written forbid-only Cedar guardrails, allowlist-only internet mode, guardrail release and audit |
 | E4 Outcomes | P5, P8 | ~4 | Success, failure and cost per agent version on the agent page | Evaluations gate releases, rollback, budgets per agent and team |
-| E5 Work outside chat | P7, P6 | ~5 | Built right after E10 Phase 6: Credentials (AS-1.1, AS-1.2), the trigger gateway with resume delivery, task waits on events (`wait_for`), `vam.schedule` and `vam.github` brokers (`hsp-triggers.md` amendment, `agent-runtime.md` §IX.4), and "connect your services" on install | Slack and email (`vam.notify`), more event sources, Apps and Spaces |
+| E5 Work outside chat | P7, P6 | ~5 | Built right after E10 Phase 6: Credentials (AS-1.1, AS-1.2), the trigger gateway with resume delivery, task waits on events (`wait_for`), `vam.schedule` and `vam.github` brokers (`docs/src/content/docs/hosted/triggered-runs.md` amendment, `agent-runtime.md` §IX.4), and "connect your services" on install | Slack and email (`vam.notify`), more event sources, Apps and Spaces |
 | E6 Squrell marketplace | P9, P4 | ~4 | A curated Squrell catalog of first-party skills that an org admin installs | Community publishing, signing, trust tiers, review |
 | **E7 Machine and build** | P11, P3, P4 | 5 | Standard bases (Phase 1), image artifact (Phase 2), Vamfile with the core command set (Phase 3), the app's Machine step (Phase 4). **Part III.** | Snapshots, SBOM, signing, marketplace portability |
 | **E8 Egress and secrets** | P6, P1, P3 | 5 | Phases 1–3: TLS-terminating egress proxy with a per-session CA, standard HTTPS clients work unchanged in the guest, secrets injected by destination. **Part V.** | Upstream enterprise proxy (Netskope, Zscaler) with identity headers; egress audit and "ask" for hosts |
@@ -206,14 +206,13 @@ build it").
 (in progress) and Phase 3, then **E12 Run receipt** Phase 1
 (`design/run-receipt.md`), then E5's getting-started slice (triggers, task
 waits, scheduler and GitHub brokers, `vam.notify` for Slack approvals;
-`hsp-triggers.md` amendment) with E12 Phase 2, then E10 Phase 4 (effect
+`docs/src/content/docs/hosted/triggered-runs.md` amendment) with E12 Phase 2, then E10 Phase 4 (effect
 journal) with E12 Phase 3, then **E4's getting-started slice** (success,
 cost and pass^k per agent version, per model, on the agent page, fed by
 receipts), then E8 Phases 2–3, E7 Phase 1, E10 Phases 5–6, E11 Jig
 Phases 1–3, E2, the rest of E7, E3, the rest of E5, the rest of E4, E6.
 
-Why this order (market evaluation, 2026-10-19): the thing VAM can sell that
-no managed runtime offers is a governed run, on the customer's own hardware
+Why this order: the goal is a governed run, on the operator's own hardware
 and model, that comes back with a verifiable receipt. The receipt needs
 host-tracked playbooks (built), triggers and approvals where people work
 (E5), effects that are never repeated (E10 Phase 4), and outcome numbers
@@ -231,12 +230,12 @@ phases that do not wait for an epic boundary:
   and honesty with B0 (one wave); H1 open-model adapters; H2 the ablation
   grid and the first profiles with B1; H3 and H4 as the grid directs. Every
   benchmark row names its harness profile.
-- **IT, isolation truth** (`design/isolation-truth.md`): Phase 1 (CI boots
+- **IT, isolation truth** (`docs/src/content/docs/architecture/isolation.md`): Phase 1 (CI boots
   a microVM, jailer and TLS on by default) now; Phase 2 (known leaks) and
   Phase 3 (honest docs, clippy gate) before 0.1.0.
 
 **What 0.1.0 ships** and what is cut from it, with the decision rubric
-every proposal uses from now on: `design/launch-0.1.0.md`.
+every proposal uses from now on: `.cursor/workstreams/phase-playbook.md` §11.1.
 
 **Order of 2026-10-15 (superseded):** H0, H1, E1 Phase 7, E10 Phases 0–3,
 E8 Phases 2–3, E7 Phase 1, E10 Phases 4–6, E5's getting-started slice, E11
@@ -278,7 +277,7 @@ sets the order in which they are pulled.
   benchmark proves outcomes with real ones; a phase needs both.
 - **Every proposal is scored before it is planned (added 2026-10-21).**
   Waves, items, backlog rows and new designs carry a one-line decision
-  from the rubric in `launch-0.1.0.md` §3: NOW, SLICE, BACKLOG or CUT,
+  from the rubric in `phase-playbook.md` §11.1: NOW, SLICE, BACKLOG or CUT,
   with the proof and cost scores and the line it moves.
 - **The repo is the source of truth.** Trackers hold the work queue; issue
   IDs are local to each tracker.

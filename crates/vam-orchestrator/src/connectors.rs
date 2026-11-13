@@ -1,4 +1,4 @@
-//! Node enablement of connectors (`design/connectors.md` sections 3.1 and 4; CN-1.2).
+//! Node enablement of connectors (CN-1.2).
 //!
 //! The built-in definitions come from `vam_spec::builtin_connectors()`. This module adds what is
 //! node state: whether the org administrator enabled a connector, the recorded admin consent

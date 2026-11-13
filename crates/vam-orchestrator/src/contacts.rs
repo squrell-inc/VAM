@@ -1,4 +1,4 @@
-//! Contacts: the verified address a user has for a channel (`design/notifications.md` section 9.5).
+//! Contacts: the verified address a user has for a channel (docs: hosted/notify).
 //!
 //! An address is a verified contact, never a login field. A user starts linking (`start_contact_link`)
 //! and gets a ten-minute, single-use code bound to them. The code is stored **hashed**; the plain

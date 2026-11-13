@@ -44,5 +44,3 @@ Each agent gets its own workspace id. The `agent-workspaces-are-isolated` scenar
 * No FUSE layer. No crate mounts a FUSE file system in the guest; the guest sees an ext4 disk or a directory.
 * No cloud object-store backends, and no background sync to one.
 * No encryption of workspace data at rest.
-
-Notes on these ideas are kept in `design/docs-archive/storage/`.

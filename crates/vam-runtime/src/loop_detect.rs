@@ -1,4 +1,4 @@
-//! Loop detector (`loop.detect`, `design/harness.md` L5).
+//! Loop detector (`loop.detect`, docs: runtime/agent).
 //!
 //! Three patterns over the task's own tool calls: the same call N times in a row,
 //! an A-B alternation of M cycles, the same error result R times in a row. The

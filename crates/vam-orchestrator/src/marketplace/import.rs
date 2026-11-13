@@ -1,4 +1,4 @@
-//! Listing import at a tag (CN-4.5, `design/connectors.md` §9.1, D23–D25): the one function that
+//! Listing import at a tag (CN-4.5): the one function that
 //! writes `marketplace`-tier catalog rows, for `POST /v1/marketplaces/{id}/listings/{listing}/install`,
 //! `…/update` and `vam catalog import`.
 //!

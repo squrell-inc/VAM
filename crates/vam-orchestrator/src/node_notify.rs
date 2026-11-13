@@ -1,4 +1,4 @@
-//! Operator notification settings for the node (`design/notifications.md` section 9.4): which
+//! Operator notification settings for the node (docs: hosted/notify): which
 //! channel adapters are enabled, the vault secret **refs** each needs, the org's defaults for which
 //! kinds go out, and the app URL for the Open in VAM link.
 //!

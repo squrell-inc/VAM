@@ -1,5 +1,5 @@
-//! `GET/PUT /v1/node/notify`: the operator's notification settings (`design/notifications.md`
-//! section 9.4). The operator sets them (`brokers:admin`); anyone with `node:read` can read which
+//! `GET/PUT /v1/node/notify`: the operator's notification settings (docs: hosted/notify).
+//! The operator sets them (`brokers:admin`); anyone with `node:read` can read which
 //! adapters are on and the org's kind defaults, but only the operator sees the vault ref names.
 //! Values never pass through here: a ref is a vault secret name, checked for existence only.
 

@@ -110,7 +110,7 @@ Depending on your engineering focus, you can jump directly to relevant architect
   - Read [Security Overview](/security/overview/) and [Threat Model](/architecture/isolation/).
   - Read [Permissions](/security/permissions/) and [Network](/network/overview/).
 * **Storage & Virtualization Contributors**
-  - Read [Storage Overview](/storage/overview/) and [FUSE Frontend Driver](/storage/fuse/).
+  - Read [Storage Overview](/storage/overview/).
   - Read [Core Overview](/core/overview/) and [AWS Jailer Sandbox](/core/overview/).
 * **In-VM Guest Engine & Agent Runtime Developers**
   - Read [Runtime Overview](/runtime/overview/) and [PID 1 Guest Init](/runtime/overview/).

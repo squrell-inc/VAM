@@ -97,7 +97,7 @@ message ToolSpec {
   bool approval_required = 12;
   // Effect class and optional verify read (journal and resume). Absent: inferred from side_effect.
   EffectSpec effect = 13;
-  // Hosts this tool may reach through the member's connection (design/connectors.md 4.1).
+  // Hosts this tool may reach through the member's connection.
   // Declared here; vamd enforces it. Needs a local_exec provider and requires_connector.
   repeated ToolEgress egress = 14;
   // Cards for this tool's result (show) and its approval (ask). Names of jig files in the package.
@@ -161,7 +161,7 @@ message SkillManifest {
   // `policy` until DX-62.
   repeated string capabilities = 9;
 
-  // Deprecated: design/agent-experience.md Part IV. Skills ship no Cedar.
+  // Deprecated (docs: security/permissions). Skills ship no Cedar.
   // Ignored. A skill marks its own tools `approval_required` instead.
   // Unvalidated until that deprecation is enforced. Do not load this from an
   // untrusted source.

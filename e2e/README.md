@@ -273,7 +273,7 @@ Two more files feed the same `check`:
 - `docs/redirects.json` maps an old URL to `{ "to": "/new/", "kind": "retired" | "design" }`.
   `docs/astro.config.mjs` reads it into Astro's `redirects`; rule `docs-redirect` checks that the
   old page is gone, the target is a page (not itself redirected) and no page links to an old URL
-  (absolute links only). Pages moved to `design/docs-archive/` use kind `design`.
+  (absolute links only). Pages retired as design intent once used kind `design`; they now use `retired`.
 
 Style rules for docs pages:
 

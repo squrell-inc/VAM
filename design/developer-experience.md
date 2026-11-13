@@ -12,7 +12,7 @@ Proposals in §6–§8 are explicitly labelled as proposals.
 **Part II (§10–§17)** works from the *intended* product model — stated in
 session — and designs the artifact model, capability system, Git↔marketplace
 marriage, and hosted-scale concerns needed to deliver it.
-**Part III (§18–§23)** takes the developer's point of view: positioning, the
+**Part III (§19–§23)** takes the developer's point of view: the
 image/packaging decision, CLI vs UI vs API, and a stage-by-stage journey
 roadmap from first evaluation to publishing on a marketplace.
 
@@ -154,9 +154,6 @@ It is worth being explicit, because the gap list below is long:
   `Shadow` mode that already exists.
 - **HSP admission is rigorous.** `hsp_registry.rs` rejects unapproved brokers,
   extra tools, and extra secrets against the operator-approved manifest.
-- **The design-doc culture works.** `design/vam-subjects.md` is a genuinely
-  strong piece of work — validated against seven comparable platforms with
-  citations. This document tries to meet that bar.
 
 The foundation is much closer to a marketplace than the CLI surface suggests.
 Most of what follows is about **exposing and reconciling** what already exists.
@@ -504,9 +501,8 @@ What is actually missing, in dependency order:
    able to say "I need exactly these capabilities", and the installing user must
    be able to see and diff that. **A capability diff on install/upgrade — "this
    update additionally requests network egress to `*.foo.com`" — is the single
-   highest-leverage trust feature we could ship**, and VAM is unusually well
-   positioned for it because Cedar makes capabilities explicit and auditable.
-   This is a genuine differentiator, not table stakes.
+   highest-leverage trust feature we could ship**, and Cedar makes capabilities
+   explicit and auditable, which supports it.
 6. **Sandboxed third-party brokers.** Today a broker is a trusted host process.
    Marketplace brokers must run in isolated microVMs over vsock — acknowledged
    as future work in `hosted/architecture.md`, and gated on P12.
@@ -516,7 +512,7 @@ What is actually missing, in dependency order:
    revocation semantics need deciding explicitly.
 
 **Sequencing view.** Items 1–3 are prerequisites and are mostly cheap. Item 5
-is the differentiator. Item 6 is the expensive one and can be deferred by
+is the highest-leverage trust feature. Item 6 is the expensive one and can be deferred by
 launching the marketplace with **skills and policies only** — both are
 declarative, already versioned, already digest-addressed, and do not require
 new isolation work. Agents follow once P3/P5 land. Brokers come last.
@@ -716,7 +712,7 @@ actions, not three parallel mechanisms. Recommend collapsing.
 ## 12. Playbooks, taken seriously
 
 The intent for playbooks is the least-served and, I suspect, the most
-commercially valuable.
+valuable.
 
 ### 12.1 Why a playbook shipped with a skill is a strong idea
 
@@ -736,13 +732,9 @@ A playbook spanning multiple skills is a **composition artifact** — and it is
 the one that delivers an outcome. Users do not want `slack@2.1` and `jira@3.0`;
 they want "weekly sprint report posted to Slack every Friday."
 
-> **Product implication: the playbook is probably the highest-value marketplace
-> SKU, not the skill.** Skills are ingredients, playbooks are recipes, the agent
-> is the cook. Marketplaces monetise outcomes. Lakhs of skills is a supply
-> statistic; a few thousand *excellent* playbooks is the demand-side product.
-
-This argues for investing in playbook authoring, testing and discovery well
-beyond its current status as the artifact nobody mentions.
+Skills are ingredients, playbooks are recipes, the agent is the cook. Playbook
+authoring, testing and discovery deserve investment well beyond their current
+status as the artifact nobody mentions.
 
 ### 12.3 Required schema changes
 
@@ -807,7 +799,7 @@ skill changes two committed files, and upgrading one changes a single lockfile
 stanza. The "my repo churns when their skill releases" problem disappears
 because their code was never in the repo.
 
-### 13.2 The part that makes VAM's Git story better than npm's
+### 13.2 Resolved capabilities in the lockfile
 
 Record the **resolved capability set** in the lockfile, not just the version.
 Then a routine dependency bump produces a reviewable diff:
@@ -825,15 +817,14 @@ Then a routine dependency bump produces a reviewable diff:
 ```
 
 A reviewer sees, in a pull request, that a patch-level Slack upgrade started
-asking for admin scope and AWS egress. **npm structurally cannot do this** — it
-has no capability model. VAM can, because Cedar already makes capabilities
-explicit.
+asking for admin scope and AWS egress. A version-only
+lockfile cannot show this. A lockfile that records capabilities can, because
+Cedar already makes capabilities explicit.
 
 Make it enforceable: `vam validate` (and therefore CI) **fails** when the
 lockfile's resolved capabilities exceed the grants in `vam.json`. A capability
 expansion cannot merge without a human explicitly widening the grant. This is
-supply-chain protection that the ecosystem genuinely lacks, it is cheap once the
-capability model exists, and it should be a launch feature rather than a v2.
+supply-chain protection, it is cheap once the capability model exists, and it should be a launch feature rather than a v2.
 
 ### 13.3 `extends`: install and customise without forking
 
@@ -947,7 +938,7 @@ Fifty installed skills cannot fit their tool definitions in a context window.
 the *index*: a compact, searchable manifest of what is installed and what it is
 for, so the model can choose what to load without loading everything.
 
-`design/improving-the-vam.md` is already solving the same shape of problem for
+`docs/src/content/docs/authoring/skill-manifest.md` is already solving the same shape of problem for
 large skill documentation corpora (`INDEX.md`, grep-the-index-first). **The
 same pattern generalises to the installed-skill set**, and the two efforts
 should share a design rather than diverge.
@@ -1056,7 +1047,7 @@ building tooling for a model the schema cannot represent.
 ### 17.1 Sharpest open questions after Part II
 
 1. **Rigid DAG or soft procedure for playbooks (§12.4)?** Blocks playbook
-   investment, and playbooks may be the main SKU.
+   investment, and playbooks may be the main marketplace artifact.
 2. **Can a skill's policy fragment ever `forbid`?** Permits are scopeable and
    safe; a `forbid` from a skill is unscopeable and lets one skill disable
    another. Current recommendation: no.
@@ -1067,7 +1058,7 @@ building tooling for a model the schema cannot represent.
    around.
 5. **Who owns the org baseline in a hosted multi-tenant world** — and how does
    it interact with the `App`/`Subject` identity work in
-   `design/vam-subjects.md`? These two designs need to be reconciled; both add
+   `design/vam-apps-spaces.md`? These two designs need to be reconciled; both add
    principals to the same Cedar evaluation.
 
 ---
@@ -1078,71 +1069,6 @@ building tooling for a model the schema cannot represent.
 Parts I and II were about artifacts. Part III is about **the human**: how a
 developer starts, gets value, grows, ships, and distributes — and what the CLI
 and UI each owe them at every stage.
-
----
-
-## 18. Does the VAM idea actually work?
-
-An honest answer, because the roadmap depends on it.
-
-### 18.1 The isolation is not the moat
-
-Firecracker microVM isolation for untrusted agent code is **already
-commoditised**. E2B, Modal, Daytona, Vercel Sandbox, Fly Machines and Cloudflare
-all ship sandboxed execution, several on Firecracker or gVisor, several
-well-funded. Competing on "we run agent code safely in a microVM" means
-competing on a feature that buyers increasingly assume.
-
-This is not an argument against the architecture — the architecture is sound and
-the trust boundary is genuinely well-built. It is an argument about **where the
-defensibility lives**.
-
-### 18.2 The moat is governance
-
-What VAM has that the sandbox vendors do not:
-
-- **Declarative capabilities** — what an agent may do is data, not code.
-- **Cedar as a real PDP** — externalised, auditable, composable authorization.
-- **HITL as a first-class primitive** — approvals, signing, amendment.
-- **An evidence pack** — `vam evidence export` / `vam evidence verify`, already
-  implemented, producing offline-verifiable records of what an agent did.
-
-That set answers a question enterprises are being forced to answer right now and
-mostly cannot: *"we want to deploy agents; prove to me what they can and cannot
-do, and show me what they did."* A sandbox answers "it can't escape." VAM can
-answer "here is the exact capability set, here is who approved the change, here
-is the signed record of every action." Those are different products with
-different buyers.
-
-### 18.3 The positioning consequence
-
-| Positioning | Competing against | Buyer | Assessment |
-|---|---|---|---|
-| "Secure sandbox for agents" | E2B, Modal, Daytona, Cloudflare | app developer | Commodity. Hard. |
-| "Governed agent platform — where security says yes" | internal spreadsheets, nothing coherent | platform / security team | Differentiated. Urgent. |
-
-**Recommendation: lead with governance and audit; treat isolation as the proof,
-not the pitch.** The evidence pack is the most under-marketed thing in the
-repository — it is built, it works, and nobody else has it.
-
-This also changes the journey: the person who must be delighted is not only the
-developer building an agent, but the **platform engineer who has to approve
-agents for production**. That persona has no surface today at all (§14).
-
-### 18.4 The honest risks
-
-- **Scope.** Twelve crates, a hypervisor integration, a policy engine, a
-  registry, a build system, a telemetry spine, and a marketplace. Each is a
-  product. The build system in particular (§19) is 21 specification documents
-  against zero implementation.
-- **Cold start is the reason to choose Firecracker.** Any decision that puts a
-  per-agent image build on the critical path spends the advantage that
-  justified the architecture.
-- **Marketplace supply.** Lakhs of skills do not appear because a registry
-  exists. See §22.
-- **Design debt.** This repository specifies faster than it implements. That is
-  not automatically bad — `design/vam-subjects.md` is excellent work — but
-  `build/` shows what happens when the ratio runs unchecked.
 
 ---
 
@@ -1305,9 +1231,7 @@ cliff — you can run a bundled example, and then you are on your own.
 Two hard rules:
 
 - **Value before setup.** Nothing of value today happens before ten setup steps
-  including KVM or Lima (§3). That is fatal for adoption and is the single
-  strongest strategic argument for squrell.cloud being the *front door* rather
-  than a later hosted offering.
+  including KVM or Lima (§3). That is fatal for adoption.
 - **The inner loop is the product.** Stage 3's edit→test cycle determines
   whether anyone stays. If it requires a microVM boot, it is already too slow.
 
@@ -1323,10 +1247,10 @@ Two hard rules:
 | **UI** | Marketplace listing → "Try it" → chat. No signup until they want to keep something. |
 | **CLI** | *(not yet — do not make the terminal the front door)* |
 | **Value moment** | An agent does real work, and a panel shows **exactly which tools it used and which were denied**. |
-| **Needs** | Hosted playground; ephemeral sandbox workspaces (see `design/vam-subjects.md` — `Subject` identity is the primitive); published demo agents. |
+| **Needs** | Hosted playground; ephemeral sandbox workspaces (see `design/vam-apps-spaces.md` — a Space is the primitive); published demo agents. |
 
-The denial panel matters more than the success. It is the thing no competitor
-can show, and it plants the governance value proposition in the first minute.
+The denial panel matters more than the success. It shows
+the governance model in the first minute.
 
 ---
 
@@ -1396,8 +1320,8 @@ tractable.
 | **Value moment** | A test proves a dangerous action is blocked — **and** that the intended one is not. |
 | **Needs** | Layered policy sets (§11); `vam policy test` fixtures; scoped-permit validation; org baseline as a real artifact. |
 
-This is where the security persona enters, and where VAM's differentiation
-becomes tangible to the buyer.
+This is where the security persona enters, and where the governance model
+becomes tangible to the reviewer.
 
 ---
 
@@ -1467,8 +1391,8 @@ struggling with whether to allow them. VAM's answer writes itself:
 > *Run any MCP server inside a hardware-isolated microVM, with its capabilities
 > declared, policy-enforced, human-approved, and fully audited.*
 
-That is simultaneously a supply solution and the clearest possible expression of
-the governance positioning in §18. It converts VAM's strengths into an immediate
+That is simultaneously a supply solution and a direct use of the governance
+model (§11, §15.1). It converts VAM's strengths into an immediate
 catalogue.
 
 ### 22.2 What it requires
@@ -1496,8 +1420,9 @@ would undermine exactly the credibility this strategy is meant to build.
 If the goal is a developer experience that holds together end to end, and given
 that Part I's cleanup items (§9.1–2) are cheap and should happen regardless:
 
-1. **Decide positioning** (§18.3). It determines who the journey is designed
-   for, and everything below inherits from it.
+1. **Decide who the journey is designed for**: the developer building an agent,
+   or also the platform engineer who approves agents for production (§14).
+   Everything below inherits from it.
 2. **`extends`** (§13.3). Unblocks Stage 2, where most users will live. Small
    schema change, disproportionate effect.
 3. **`vam dev`** (Stage 3). The inner loop is the product; nothing else in the
@@ -1506,7 +1431,7 @@ that Part I's cleanup items (§9.1–2) are cheap and should happen regardless:
    the marketplace simultaneously.
 5. **Golden base image, properly stocked** (§19.5). Defer `vam-build`; most of
    its 21 documents may never need implementing.
-6. **MCP import** (§22). Supply and differentiation in one move.
+6. **MCP import** (§22). Supply and governance in one move.
 7. **Deployments and environments** (Stage 5). The last gap before VAM is
    operable in production by someone who did not build it.
 
@@ -1540,7 +1465,7 @@ Its grounds for banning tool bindings — "a mixed graph has no defined join" �
 did not survive review. That is an argument about graphs, and it does not
 reach a bound call in a linear sequence, where there is no join. The actual
 reasons to bind a tool are fewer inference round trips, reproducible runs, and
-a playbook a buyer can read before purchase. None were addressed.
+a playbook an installer can read before installing it. None were addressed.
 
 The honest limit of this decision: binding adds no *safety*. Tool calls inside
 the agent loop already pass Cedar and HITL. Binding buys determinism, cost
@@ -1638,7 +1563,7 @@ is two additional modes alongside the one it already permits.
 
 A `bound` step's arguments are known at authoring time. That means its
 canonical args digest can be computed at **publish** time, using the
-`canonical_args_digest` that Phase 0 just centralised in `vam-spec`. A buyer
+`canonical_args_digest` that Phase 0 just centralised in `vam-spec`. An installer
 can see exactly what a playbook will do before running it, and the capability
 check can happen before the run starts rather than mid-flight.
 
@@ -1769,7 +1694,7 @@ argument synthesis.
 step transition is emitted as a telemetry event, so conformance is *measured*
 rather than enforced. This fits what VAM already is — the evidence pack and
 trajectory replay machinery exists (`vam-telemetry/src/replay.rs`,
-`evidence.rs`), and governance-by-audit is the positioning (§18). A playbook
+`evidence.rs`), and governance-by-audit is the model. A playbook
 then ships with a conformance report: which steps ran, in what order, which
 were skipped. That is a better marketplace artifact than a promise, and it
 does not require building a workflow engine.
@@ -1819,7 +1744,7 @@ anyone wants MCP.
 ### 25.5 A way through, in order of cost
 
 **Tier 1 — uncredentialed guest MCP.** What DX-110 already describes. Ship it,
-but market it honestly: it is the local-tools tier.
+but describe it honestly: it is the local-tools tier.
 
 **Tier 2 — MCP over the host tool adapter.** The interesting move. The
 `HostToolAdapter` path already exists and is marked implemented

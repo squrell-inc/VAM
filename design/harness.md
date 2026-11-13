@@ -141,14 +141,14 @@ proposals for the `harness` struct.
 
 | Lever | What | Today | Helps | Switch |
 |---|---|---|---|---|
-| System prompt altitude and size | Short principles over long rules; the April 2026 Claude Code regression came from prompt changes | fixed template v11 | B | `context.prompt_variant` |
+| System prompt altitude and size | Short principles over long rules; prompt changes alone can regress an agent | fixed template v11 | B | `context.prompt_variant` |
 | Progressive disclosure | Skills load their body on demand; docs grepped through an index | present | B | fixed |
 | Summary compaction | Trigger, keep window, summary instruction | present (70% trigger, keep 3 rounds) | B | `context.compaction` (thresholds) |
 | Clearing old tool results | Drop stale results, keep pointers | present (every 8 rounds) | B | `context.clearing` |
 | File memory and notes | `PLAN.md`, `notes/`; Harness-1 and StateM show gains from externalised bookkeeping | prompt guidance only | W | `context.file_memory` |
-| Todo recitation | Re-read the todo at every turn (Manus) | `todo_write` exists, no recitation | W | `context.recite_todo` |
+| Todo recitation | Re-read the todo at every turn | `todo_write` exists, no recitation | W | `context.recite_todo` |
 | Cache-aware layout | Stable prefix, append-only, breakpoints | present (host cache plan) | B | fixed |
-| Reminders | The three `SYSTEM.md` bullets (`improving-the-vam.md`) | present | B | `context.reminders` |
+| Reminders | The three `SYSTEM.md` bullets (`docs/src/content/docs/authoring/skill-manifest.md`) | present | B | `context.reminders` |
 
 ### L5 Control loop
 
@@ -156,12 +156,12 @@ proposals for the `harness` struct.
 |---|---|---|---|---|
 | Budgets | Iterations, step timeout, duration, spend | present | B | fixed caps |
 | Stop conditions | No-tool reply, `task_complete`, finish check | present | B | fixed |
-| Loop detection | Repeated identical call, A-B-A-B, repeated error, monologue; inject an observation, then stop | absent (Gemini CLI: 5/10/50 constants; OpenHands `StuckDetector`) | W | `loop.detect` (default on) |
+| Loop detection | Repeated identical call, A-B-A-B, repeated error, monologue; inject an observation, then stop | absent (open-source loop detectors use fixed repeat-count constants) | W | `loop.detect` (default on) |
 | Planning step | A plan before acting; +11.6 for small models, cost only for strong | prompt guidance (`PLAN.md`) | W | `loop.plan_first` |
 | Reflection or verification turn | A check turn before finish on long tasks | absent | B | `loop.verify_before_finish` |
 | Escalation ladder | Routine turns on a small model, failed repairs or planning to a stronger allowed model | absent (`agent-runtime.md` §X.4) | W | `loop.escalate` |
 | Context reset on long runs | Fresh session at 80 to 100k tokens for models that loop (Kimi K3 reports) | compaction only | W | `loop.reset_at_tokens` |
-| Fresh-context helper (in-VM sub-agent) | A second model call with a clean context, same VM, same permissions, that reviews, verifies or summarises and returns a short result (Cognition's clean-context reviewer; Codex's review guardian; Anthropic: sub-agents return 1 to 2k-token summaries). Not delegation, not fan-out | absent | B | `loop.helper` (review, verify, summarise) |
+| Fresh-context helper (in-VM sub-agent) | A second model call with a clean context, same VM, same permissions, that reviews, verifies or summarises and returns a short result (a clean-context reviewer; sub-agents that return 1 to 2k-token summaries). Not delegation, not fan-out | absent | B | `loop.helper` (review, verify, summarise) |
 
 ### L6 Process (what the machine holds)
 
@@ -374,7 +374,7 @@ the rest land in H0 to H3.
 2. Guided decoding: on by default for `open-small`, given the reports that
    grammars can suppress the call entirely? Proposal: off; `strict` on;
    measure in H2.
-3. Loop detector thresholds: Gemini CLI's constants (5 identical calls, 10
+3. Loop detector thresholds: a common constant pair (5 identical calls, 10
    identical results) as the start, or tuned per class in H2?
 4. Escalation ladder: which decisions escalate (planning, repair failure,
    finish check) and who sets the allowed stronger model?

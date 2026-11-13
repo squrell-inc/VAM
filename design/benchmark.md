@@ -3,18 +3,17 @@
 Status: **proposed** (2026-10-21). Standing track **B** (like the E9
 scenario harness): it has its own tracker once Phase B0 is planned, and
 every product phase after it names the benchmark lines it moves. Extends
-`agent-runtime.md` Part VI (task set U1–U9, metrics, gate) and Part X
-(positioning). Amends `agent-experience.md` "How we build it".
+`agent-runtime.md` Part VI (task set U1–U9, metrics, gate). Amends `agent-experience.md` "How we build it".
 
 ## What we are building
 
 A **public, reproducible benchmark of business procedures** that answers
 one question per problem in `agent-experience.md` Part I: *is it solved,
 on which model, at what cost?* It is the proof behind the run receipt
-(`run-receipt.md`) and the table a buyer, a model lab or a community
+(`run-receipt.md`) and the table a model lab, an operator or a community
 member can run themselves.
 
-Three properties make it VAM's rather than another agent leaderboard:
+Three properties:
 
 1. **Two axes.** Every task runs per **model** and per **machine mode**:
    `machine on` (playbook, guards, gates, ranked tools, journal) and
@@ -30,8 +29,8 @@ Three properties make it VAM's rather than another agent leaderboard:
    adds the isolation facts to the receipt. No KVM is needed to reproduce
    a score.
 
-> Claim outcomes per cost plus sovereignty, measured, not "beats Claude".
-> (`agent-runtime.md` §X.5)
+> Claim outcomes per cost plus sovereignty, measured. (`agent-runtime.md`
+> §X.5)
 
 ## Why
 
@@ -39,11 +38,10 @@ Three properties make it VAM's rather than another agent leaderboard:
   unanswered. The runner exists (`vam-e2e --bench`; the old shell runner is retired), the task set is
   designed, and no real-model number has been recorded (E10 Phase 0 and
   Phase 1 exits were both logged "open, not measured").
-- The market evaluation of 2026-10-19 found that the only claim VAM can
-  make that nobody else can is *outcome per dollar with the model as a
-  dial*: open-weight models are near parity on bounded tool tasks and far
-  behind on open-ended ones, and the host-enforced machine is what makes
-  the bounded case fair. That claim is worth nothing unpublished.
+- The claim to measure is *outcome per dollar with the model as a dial*:
+  open-weight models are near parity on bounded tool tasks and far behind
+  on open-ended ones, and the host-enforced machine is what makes the
+  bounded case fair. That claim is worth nothing unpublished.
 - **Phases need a way to show they solved a problem**, not only that
   their scenarios are green. Scenarios prove behaviour with a scripted
   model; the benchmark proves outcomes with real models. A phase close
@@ -130,7 +128,7 @@ Per task, model, machine mode, task-set version:
 | Metric | Definition |
 |---|---|
 | pass^k | runs where every `then` holds, over k |
-| cost per success | sum of run cost over k, divided by successes (tokens priced from the catalog; tokens only when no price). **Price source (owner, 2026-10-27):** always the model maker's own list price (Anthropic for Claude, Alibaba for Qwen, DeepSeek, Moonshot for Kimi), also when the run goes through a gateway; the gateway is transport, not a price. What a gateway actually charged is recorded internally per row and never published |
+| cost per success | sum of run cost over k, divided by successes (tokens priced from the catalog; tokens only when no price). **Price source (owner, 2026-10-27):** always the model maker's own list price (Anthropic for Claude, Alibaba for Qwen, DeepSeek, Moonshot for Kimi), also when the run goes through a gateway; the gateway is transport, not a price |
 | tokens per success, turns per success, wall time per success | same shape |
 | parked cost | cost accrued while a run is parked (must be 0) |
 | duplicate effects, lost tasks | from the receipt's effects section (must be 0) |
@@ -164,9 +162,8 @@ Amends `agent-experience.md` "How we build it" and `phase-playbook.md` §6:
 - **Models:** the benchmarked tier in `agent-runtime.md` §VIII.7 (two
   Claude, one OpenAI) plus, from Phase B1, open-weight models **through
   Vercel AI Gateway** (owner, 2026-10-26: no self-hosted vLLM or Ollama for
-  the launch table; the P10 self-hosted row is added when a design partner
-  needs it). Owner's word for any run on a paid endpoint beyond the smoke
-  set (playbook §10).
+  the launch table; the P10 self-hosted row is added when needed). Owner's word
+  for any run on a paid endpoint beyond the smoke set (playbook §10).
 
 ## 5. Phases
 
@@ -191,14 +188,12 @@ Phase 2; it changes `scripts/bench/`, `crates/vam-e2e` and one docs page.
 
 1. Noise band: standard error over k, or a fixed threshold per metric?
 2. Which open-weight model is the reference row in B1 (GLM-5.x, Qwen3.6,
-   DeepSeek V4), and where does it run (a Squrell vLLM host, or the
-   owner's)?
+   DeepSeek V4), and where does it run (a self-hosted vLLM host, or
+   a gateway)?
 3. Does the public lane run on every PR (cost) or nightly on `main` with
    a PR label to opt in?
 4. `machine off` for tasks that need a gate: tool-level HITL ask (as
    proposed) or no human at all?
-5. Comparison rows for Claude Code and Codex (Part VI): keep, as a
-   manual, dated appendix, or drop until B3?
 
 ## What we are not building
 

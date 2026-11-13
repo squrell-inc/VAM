@@ -81,7 +81,7 @@ packet filter for egress. Reopen the question as its own design if one of three 
 
 * a direct-route network mode for traffic the proxy cannot terminate;
 * the userspace proxy becoming the bottleneck at many VMs per host;
-* a buyer requiring kernel-enforced egress as an attestable control.
+* kernel-enforced egress being required as an attestable control.
 
 The first answer then would be an nftables set that a DNS proxy fills.
 
@@ -93,9 +93,6 @@ The first answer then would be an nftables set that a DNS proxy fills.
 * `LinuxKernelNetAdapter`, the TAP name and address helpers in `ipam.rs`, and the policy compiler
   are built for that direct mode.
 * `SessionDnsProxy` (`dns.rs`) has no caller in `vam-orchestrator`.
-
-The earlier pages for modes, TAP, NAT, DNS filtering and traffic control describe this unused
-design. They now live in `design/docs-archive/network/` and are design intent, not behaviour.
 
 ## Not built yet
 

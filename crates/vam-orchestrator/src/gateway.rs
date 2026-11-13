@@ -1,4 +1,4 @@
-//! The trigger gateway (E5, `design/hsp-triggers.md` amendment 2026-10-29 section 5).
+//! The trigger gateway (E5; docs: hosted/triggered-runs).
 //!
 //! One Unix socket per approved broker that declares `run_request_permission`. The broker is the
 //! socket a call arrived on: no request field names it. A call carries a grant token; the
