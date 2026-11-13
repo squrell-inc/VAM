@@ -86,7 +86,7 @@ green on `feat/user-identity`; OpenAPI and docs describe the route and who can d
 - [x] Scenarios and harness steps land pending, red for the right reason (W0, #2)
 - [x] Server: route, store method, attempt limiter, proto (W1, #8)
 - [x] CLI `vam passwd`, OpenAPI, docs (W2, #9)
-- [~] Audit event for a successful change (W3, owner 2026-11-13)
+- [x] Audit event for a successful change (W3, #11, owner 2026-11-13)
 
 **Scenario delta**
 
@@ -195,3 +195,4 @@ in design §4.2 is closed row by row.
 | 2026-11-12 | 1 | W1 server merged (#8): `POST /v1/me/password`, store `change_own_password`, per-user attempt limiter (reserve before verify, refund unless wrong; review found and fixed a check-then-charge race, concurrent API test proves 5 of 16), 14 API tests incl. operator. Orchestrator `--full` at head: all steps ok, 4458 tests, smoke 140/140. Scoreboard: 6 green, 0 red, 1 fix cycle (review), about 100 min. |
 | 2026-11-12 | 1 | W2 merged (#9): `vam passwd` (hidden prompts, env flags, clears the stored session after 200), OpenAPI `/v1/me/password` + shape test, docs (users-and-roles who-can-change table, host API, CLI), feature row. `cli.md` stays in the docs baseline (shipping it needs proofs for 13 unrelated rows). Orchestrator `--full` at head: all steps ok, 4470 tests, smoke 140/140; `vam-e2e check` ok. **Phase 1 closed in base**: 6/6 scenarios active and green, 1 fix cycle in the phase, about 4.5 h wall. Open for the owner: merge `main` (4147270) into the base; Phase 2 decisions relayed by another session (`usr_` ids; migration refuses case-insensitive clashes) await confirmation. |
 | 2026-11-13 | 1 | Owner: merge `main` (#10, conflict in design/README.md only; `--full` green, 4470 tests, smoke 140/140), keep the open-question defaults, add an audit event before release. W3 built: `vam.v1.user.password_changed` in partition `vam_audit_identity`, 2 API and 2 unit tests. Then the release PR into `main`. |
+| 2026-11-13 | 1 | W3 merged (#11): audit event. Orchestrator `--full` at b507173: all steps ok, 4474 tests, smoke 140/140; `vam-e2e check` ok. Scoreboard: 6 green, 0 red, 0 fix cycles. Release PR into `main` opened on the owner's word. |
