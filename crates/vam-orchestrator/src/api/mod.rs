@@ -409,6 +409,8 @@ async fn create_key(
     state.pdp.authorize(&auth, "CreateApiKey", "keys:admin")?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let req: CreateApiKeyRequest = parse_json_body("vam.v1.CreateApiKeyRequest", &body)?;
+    crate::owner::reject_reserved_bootstrap_name("key name", &req.name)?;
+    crate::owner::reject_reserved_bootstrap_name("principal", &req.principal)?;
     let key_id = format!("key-{}", uuid_like());
     let secret = mint_api_key_secret();
     let owner_ref = if req.user_id.is_empty() {
@@ -2739,13 +2741,14 @@ async fn run_lifecycle(
     let heads_before = record_run_heads_before(&store, &run_id, &session_id, &workspace_id);
     record_run_isolation_fact(&store, &run_id, &session_id).await;
 
-    let _ = store.persist_run_spec(
+    let _ = store.persist_run_spec_with_owner(
         &run_id,
         &spec_json,
         Some(&session_id),
         &agent_urn,
         Some(&spec_idem),
         &owner,
+        &owner_user_id,
     );
 
     let materialized = materialized_dir_for_session(&session_id);

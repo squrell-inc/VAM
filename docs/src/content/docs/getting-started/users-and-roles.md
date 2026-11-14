@@ -47,6 +47,7 @@ On [macOS + Lima](/getting-started/macos-lima/), export the two vars **before** 
 - Signs in with the **bootstrap API key** (`VAMD_BOOTSTRAP_API_KEY`, or the admin key `vam node init` shows once on the first run; `vamd` never logs it). That is not a password.
 - Node owner: `keys:admin`, `brokers:admin`, plus user admin. Use it for the daemon, broker install, and CI.
 - Do not use it as a tenant login in the VAM app day to day.
+- `bootstrap` is reserved to that key. No user can be named `bootstrap` (any letter case), and no API key can be minted with the name `bootstrap` or the principal `User::"bootstrap"`; the node answers 400.
 
 `admin` in conversation means **`org_admin`**, not operator.
 

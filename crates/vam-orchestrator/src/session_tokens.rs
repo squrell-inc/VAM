@@ -351,6 +351,12 @@ impl SqliteWorkflowStore {
     }
 }
 
+/// Cedar principal of a session: `User::"<user_id>"`. The immutable id, never the
+/// renameable username, so no username can collide with a reserved principal.
+pub(crate) fn session_principal(user: &UserRecord) -> String {
+    format!("User::\"{}\"", user.user_id)
+}
+
 fn session_authenticated_key(record: &SessionTokenRecord, user: &UserRecord) -> AuthenticatedKey {
     let scopes = default_scopes_for_role(user.role);
     AuthenticatedKey {
@@ -358,7 +364,7 @@ fn session_authenticated_key(record: &SessionTokenRecord, user: &UserRecord) -> 
             key_id: record.token_id.clone(),
             name: "session".to_string(),
             sha256_secret: record.sha256_secret.clone(),
-            principal: format!("User::\"{}\"", user.username),
+            principal: session_principal(user),
             scopes,
             created_at: record.created_at,
             last_used_at: record.last_used_at,
@@ -544,5 +550,104 @@ mod tests {
             store.authenticate_session_bearer(&issued.refresh_token),
             Err(OrchestratorError::Unauthenticated)
         ));
+    }
+
+    fn login_auth(store: &SqliteWorkflowStore, username: &str, secret: &str) -> AuthenticatedKey {
+        let issued = store.login_with_password(username, secret).expect("login");
+        store
+            .authenticate_session_bearer(&issued.token)
+            .expect("session authenticates")
+    }
+
+    #[test]
+    fn session_principal_is_the_user_id() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        // The seeded operator and a user created with an explicit id that differs from
+        // the username.
+        store
+            .reset_user_password(crate::users::OPERATOR_USER_ID, "operator-secret-1")
+            .expect("operator password");
+        store
+            .create_managed_user(
+                "u-7f3a",
+                "alice",
+                "alice-secret-123",
+                crate::users::UserRole::Member,
+            )
+            .expect("alice");
+        let operator = login_auth(&store, "operator", "operator-secret-1");
+        assert_eq!(operator.record.principal, "User::\"operator\"");
+        let alice = login_auth(&store, "alice", "alice-secret-123");
+        assert_eq!(alice.record.principal, "User::\"u-7f3a\"");
+        assert_eq!(alice.record.owner_user_id, "u-7f3a");
+        // A user whose id equals the username keeps the same string as before.
+        store
+            .create_managed_user(
+                "bob",
+                "bob",
+                "bob-secret-12345",
+                crate::users::UserRole::Member,
+            )
+            .expect("bob");
+        let bob = login_auth(&store, "bob", "bob-secret-12345");
+        assert_eq!(bob.record.principal, "User::\"bob\"");
+    }
+
+    #[test]
+    fn session_of_a_legacy_user_named_bootstrap_is_not_the_operator() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        {
+            // A row written before the name was reserved; the API can no longer make one.
+            let connection = store.connection.lock().expect("lock");
+            connection
+                .execute(
+                    "INSERT INTO users (user_id, username, tenant_id, created_at, role)
+                     VALUES ('bootstrap', 'bootstrap', 'bootstrap', 1, 'member')",
+                    [],
+                )
+                .expect("legacy user");
+        }
+        store
+            .reset_user_password("bootstrap", "legacy-secret-123")
+            .expect("password");
+        let auth = login_auth(&store, "bootstrap", "legacy-secret-123");
+        assert_eq!(auth.record.principal, crate::owner::BOOTSTRAP_PRINCIPAL);
+        assert_eq!(auth.role, crate::users::UserRole::Member);
+        assert_eq!(
+            crate::owner::owner_user_id_for_authenticated_key(&auth.record),
+            "bootstrap"
+        );
+        assert_ne!(
+            crate::owner::owner_user_id_for_authenticated_key(&auth.record),
+            crate::users::OPERATOR_USER_ID
+        );
+    }
+
+    #[test]
+    fn a_user_cannot_be_created_or_renamed_to_bootstrap() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        for name in ["bootstrap", "Bootstrap", "BOOTSTRAP"] {
+            assert!(matches!(
+                store.create_managed_user(
+                    name,
+                    name,
+                    "some-secret-1234",
+                    crate::users::UserRole::Member
+                ),
+                Err(OrchestratorError::InvalidContract(_))
+            ));
+            assert!(matches!(
+                store.create_user(name, name),
+                Err(OrchestratorError::InvalidContract(_))
+            ));
+            assert!(matches!(
+                store.update_username(LOCAL_USER_ID, name),
+                Err(OrchestratorError::InvalidContract(_))
+            ));
+        }
+        // An id that merely contains the word is fine.
+        store
+            .create_user("bootstrapper", "bootstrapper")
+            .expect("not reserved");
     }
 }
