@@ -195,7 +195,8 @@ mod tests {
         let store = crate::workflow::SqliteWorkflowStore::in_memory().expect("store");
         let user =
             apply_headless_admin_bootstrap(&store, "admin", "bootstrap-secret").expect("bootstrap");
-        assert_eq!(user.user_id, "admin");
+        assert!(crate::users::is_generated_user_id(&user.user_id));
+        assert_eq!(user.username, "admin");
         assert!(user.has_password);
         assert!(store
             .verify_user_password("admin", "bootstrap-secret")

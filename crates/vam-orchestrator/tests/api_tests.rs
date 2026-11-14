@@ -294,7 +294,7 @@ async fn keys_mint_attaches_user_id() {
             &scopes,
         )
         .unwrap();
-    store
+    let admin_user = store
         .bootstrap_first_admin("admin", "headless-admin-secret")
         .unwrap();
     let app = test_app(app_state_http_only(store.clone()));
@@ -324,7 +324,8 @@ async fn keys_mint_attaches_user_id() {
         .into_iter()
         .find(|k| k.name == "admin-ci")
         .expect("minted key");
-    assert_eq!(minted.owner_user_id, "admin");
+    // `userId` named the login name; the key is owned by the resolved, generated id.
+    assert_eq!(minted.owner_user_id, admin_user.user_id);
     assert!(!minted.scopes.iter().any(|s| s == "keys:admin"));
     assert!(minted.scopes.iter().any(|s| s == "node:read"));
 }
@@ -7052,13 +7053,15 @@ async fn org_admin_can_create_list_and_deactivate_users() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        created.status(),
-        StatusCode::OK,
-        "{}",
-        response_body(created).await
-    );
-    let carol = store.get_user("carol").expect("carol");
+    let created_status = created.status();
+    let created_text = response_body(created).await;
+    assert_eq!(created_status, StatusCode::OK, "{created_text}");
+    // The node generated the id: read the user back by the id the response carries.
+    let created_body: serde_json::Value = serde_json::from_str(&created_text).expect("create body");
+    let carol_id = created_body["user"]["userId"].as_str().expect("userId");
+    assert!(carol_id.starts_with("usr_"), "{carol_id}");
+    let carol = store.get_user(carol_id).expect("carol");
+    assert_eq!(carol.username, "carol");
     assert_eq!(carol.role, UserRole::Member);
     assert!(carol.has_password);
     assert!(!carol.is_deactivated());
@@ -7078,7 +7081,7 @@ async fn org_admin_can_create_list_and_deactivate_users() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/users/carol/deactivate")
+                .uri(format!("/v1/users/{carol_id}/deactivate"))
                 .header("authorization", format!("Bearer {admin}"))
                 .header("Idempotency-Key", "deactivate-carol")
                 .body(Body::empty())
@@ -7092,7 +7095,7 @@ async fn org_admin_can_create_list_and_deactivate_users() {
         "{}",
         response_body(deactivated).await
     );
-    assert!(store.get_user("carol").expect("carol").is_deactivated());
+    assert!(store.get_user(carol_id).expect("carol").is_deactivated());
 }
 
 #[tokio::test]
@@ -10710,4 +10713,585 @@ async fn change_my_password_refusals_write_no_identity_audit_record() {
     assert_eq!(same.status(), StatusCode::BAD_REQUEST);
 
     assert!(ledger.read_partition(&partition).is_empty());
+}
+
+// ---- Phase 2 (user-identity UI-2.2 to UI-2.4): generated ids, login names, resolution ----
+
+async fn identity_call(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    secret: &str,
+    idempotency: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {secret}"));
+    if method != "GET" {
+        request = request.header("Idempotency-Key", idempotency);
+    }
+    let body = match body {
+        Some(json) => {
+            request = request.header("content-type", "application/json");
+            Body::from(json.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = app
+        .clone()
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let text = response_body(response).await;
+    let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+    (status, json)
+}
+
+async fn identity_login(
+    app: &axum::Router,
+    username: &str,
+    password: &str,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "username": username, "password": password }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let text = response_body(response).await;
+    let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+    (status, json)
+}
+
+fn is_generated_id(value: &str) -> bool {
+    vam_orchestrator::users::is_generated_user_id(value)
+}
+
+#[tokio::test]
+async fn created_user_gets_a_generated_id_and_signs_in_by_name_or_id() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let app = test_app(app_state_http_only(store.clone()));
+
+    let (status, body) = identity_call(
+        &app,
+        "POST",
+        "/v1/users",
+        &admin,
+        "create-erin",
+        Some(serde_json::json!({
+            "username": "Erin.Quinn+work@Example.Test",
+            "password": "erin-secret"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let user_id = body["user"]["userId"].as_str().expect("userId").to_string();
+    assert!(is_generated_id(&user_id), "{user_id}");
+    assert_eq!(body["user"]["username"], "Erin.Quinn+work@Example.Test");
+    let stored = store
+        .get_user(&user_id)
+        .expect("stored by the generated id");
+    assert_eq!(stored.username, "Erin.Quinn+work@Example.Test");
+    assert_ne!(stored.user_id, stored.username);
+
+    // Two creates never share an id.
+    let (_, second) = identity_call(
+        &app,
+        "POST",
+        "/v1/users",
+        &admin,
+        "create-finn",
+        Some(serde_json::json!({ "username": "finn", "password": "finn-secret" })),
+    )
+    .await;
+    assert_ne!(second["user"]["userId"], body["user"]["userId"]);
+
+    // The list shows the generated id.
+    let (status, listed) = identity_call(&app, "GET", "/v1/users", &admin, "", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed.to_string().contains(&user_id), "{listed}");
+
+    // Sign-in by the name as typed, in lower case, in upper case, and by the id.
+    for login in [
+        "Erin.Quinn+work@Example.Test",
+        "erin.quinn+work@example.test",
+        "ERIN.QUINN+WORK@EXAMPLE.TEST",
+        user_id.as_str(),
+    ] {
+        let (status, session) = identity_login(&app, login, "erin-secret").await;
+        assert_eq!(status, StatusCode::OK, "{login}: {session}");
+        assert_eq!(session["userId"], user_id.as_str(), "{login}");
+        // The response keeps the stored name, not the typed one.
+        assert_eq!(
+            session["username"], "Erin.Quinn+work@Example.Test",
+            "{login}"
+        );
+    }
+    let (status, _) = identity_login(&app, "ERIN.QUINN+WORK@EXAMPLE.TEST", "wrong").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // The upper-cased id is not an id and not a name.
+    let (status, _) = identity_login(&app, &user_id.to_uppercase(), "erin-secret").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // The session reads as the generated id.
+    let (_, session) = identity_login(&app, "ERIN.QUINN+WORK@EXAMPLE.TEST", "erin-secret").await;
+    let token = session["token"].as_str().expect("token");
+    let (status, me) = identity_call(&app, "GET", "/v1/me", token, "", None).await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(me["userId"], user_id.as_str());
+    assert_eq!(me["username"], "Erin.Quinn+work@Example.Test");
+}
+
+#[tokio::test]
+async fn create_user_with_a_chosen_user_id_is_400_and_makes_no_row() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let app = test_app(app_state_http_only(store.clone()));
+    let before = store.user_count().unwrap();
+
+    for (key, chosen) in [
+        ("chosen-1", "usr_aaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        ("chosen-2", "dana"),
+        ("chosen-3", " "),
+    ] {
+        let (status, body) = identity_call(
+            &app,
+            "POST",
+            "/v1/users",
+            &admin,
+            key,
+            Some(serde_json::json!({
+                "username": "dana",
+                "password": "dana-secret",
+                "userId": chosen
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{chosen:?}: {body}");
+        assert!(
+            body.to_string()
+                .contains("userId is generated by the node; leave it empty"),
+            "{body}"
+        );
+    }
+    assert_eq!(
+        store.user_count().unwrap(),
+        before,
+        "a refused create makes no row"
+    );
+    assert!(store.get_user_by_username("dana").is_err());
+
+    // The same username without a userId is created right after.
+    let (status, body) = identity_call(
+        &app,
+        "POST",
+        "/v1/users",
+        &admin,
+        "chosen-ok",
+        Some(serde_json::json!({ "username": "dana", "password": "dana-secret" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(is_generated_id(body["user"]["userId"].as_str().unwrap()));
+    assert_eq!(store.user_count().unwrap(), before + 1);
+}
+
+#[tokio::test]
+async fn create_user_refuses_case_twins_reserved_and_malformed_names() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let app = test_app(app_state_http_only(store.clone()));
+    let (status, body) = identity_call(
+        &app,
+        "POST",
+        "/v1/users",
+        &admin,
+        "twin-first",
+        Some(serde_json::json!({ "username": "Ada@Example.Test", "password": "ada-secret" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let count = store.user_count().unwrap();
+
+    // A name equal ignoring letter case is a conflict, whatever the case.
+    for (i, twin) in ["ADA@EXAMPLE.TEST", "ada@example.test", "OPERATOR", "Local"]
+        .into_iter()
+        .enumerate()
+    {
+        let (status, body) = identity_call(
+            &app,
+            "POST",
+            "/v1/users",
+            &admin,
+            &format!("twin-{i}"),
+            Some(serde_json::json!({ "username": twin, "password": "x-secret" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{twin}: {body}");
+    }
+    // Reserved and malformed names are 400.
+    for (i, bad) in [
+        "usr_chosen",
+        "USR_chosen",
+        "bootstrap",
+        "BootStrap",
+        "a@b@c",
+        "has space",
+        "ünï",
+        "pct%40sign",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (status, body) = identity_call(
+            &app,
+            "POST",
+            "/v1/users",
+            &admin,
+            &format!("bad-{i}"),
+            Some(serde_json::json!({ "username": bad, "password": "x-secret" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    assert_eq!(
+        store.user_count().unwrap(),
+        count,
+        "no refused create made a row"
+    );
+
+    // A different name is accepted.
+    let (status, body) = identity_call(
+        &app,
+        "POST",
+        "/v1/users",
+        &admin,
+        "twin-ok",
+        Some(serde_json::json!({ "username": "someone-else", "password": "x-secret" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn bootstrap_admin_gets_a_generated_id_and_signs_in_in_any_case() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let admin = store
+        .bootstrap_first_admin("Root.Admin", "headless-admin-secret")
+        .unwrap();
+    assert!(is_generated_id(&admin.user_id), "{}", admin.user_id);
+    assert_eq!(admin.username, "Root.Admin");
+    // Idempotent by name, in any letter case: no second row, same id.
+    let again = store
+        .bootstrap_first_admin("ROOT.ADMIN", "ignored")
+        .unwrap();
+    assert_eq!(again.user_id, admin.user_id);
+    let app = test_app(app_state_http_only(store));
+    let (status, session) = identity_login(&app, "root.admin", "headless-admin-secret").await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    assert_eq!(session["userId"], admin.user_id.as_str());
+    assert_eq!(session["username"], "Root.Admin");
+}
+
+#[tokio::test]
+async fn admin_user_key_routes_reach_a_user_by_id_and_by_any_case_name() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let member = store
+        .create_managed_user_generated(
+            "Ada.Lovelace+e2e@Example.Test",
+            "ada-secret",
+            UserRole::Member,
+        )
+        .unwrap();
+    let app = test_app(app_state_http_only(store.clone()));
+
+    let paths = [
+        member.user_id.clone(),
+        "Ada.Lovelace+e2e@Example.Test".to_string(),
+        "ADA.LOVELACE+E2E@EXAMPLE.TEST".to_string(),
+        "ada.lovelace+e2e@example.test".to_string(),
+    ];
+    for (i, who) in paths.iter().enumerate() {
+        // Mint through the path, then list through the same path.
+        let (status, minted) = identity_call(
+            &app,
+            "POST",
+            &format!("/v1/users/{who}/keys"),
+            &admin,
+            &format!("mint-{i}"),
+            Some(serde_json::json!({ "name": format!("ci-{i}"), "scopes": ["node:read"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{who}: {minted}");
+        let (status, listed) = identity_call(
+            &app,
+            "GET",
+            &format!("/v1/users/{who}/keys"),
+            &admin,
+            "",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{who}: {listed}");
+        for j in 0..=i {
+            assert!(
+                listed.to_string().contains(&format!("ci-{j}")),
+                "{who}: {listed}"
+            );
+        }
+    }
+    // Every key landed on the same member, whichever path named them.
+    let owned: Vec<String> = store
+        .list_api_keys_for_owner(&member.user_id)
+        .unwrap()
+        .into_iter()
+        .map(|k| k.name)
+        .collect();
+    for i in 0..paths.len() {
+        assert!(owned.contains(&format!("ci-{i}")), "{owned:?}");
+    }
+    // Revoke by the upper-cased name.
+    let key_id = store
+        .list_api_keys_for_owner(&member.user_id)
+        .unwrap()
+        .into_iter()
+        .find(|k| k.name == "ci-0")
+        .unwrap()
+        .key_id;
+    let (status, body) = identity_call(
+        &app,
+        "DELETE",
+        &format!("/v1/users/ADA.LOVELACE+E2E@EXAMPLE.TEST/keys/{key_id}"),
+        &admin,
+        "revoke-0",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // An unknown name is 404, not a guess.
+    let (status, _) =
+        identity_call(&app, "GET", "/v1/users/nobody-here/keys", &admin, "", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn operator_in_any_letter_case_is_refused_on_every_user_key_route() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let operator_keys_before = store
+        .list_api_keys_for_owner(OPERATOR_USER_ID)
+        .unwrap()
+        .len();
+    let app = test_app(app_state_http_only(store.clone()));
+    for (i, who) in ["operator", "OPERATOR", "Operator", "oPeRaToR"]
+        .into_iter()
+        .enumerate()
+    {
+        let (status, body) = identity_call(
+            &app,
+            "GET",
+            &format!("/v1/users/{who}/keys"),
+            &admin,
+            "",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "list {who}: {body}");
+        let (status, body) = identity_call(
+            &app,
+            "POST",
+            &format!("/v1/users/{who}/keys"),
+            &admin,
+            &format!("op-mint-{i}"),
+            Some(serde_json::json!({ "name": "evil", "scopes": ["node:read"] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "mint {who}: {body}");
+        let (status, body) = identity_call(
+            &app,
+            "DELETE",
+            &format!("/v1/users/{who}/keys/key-any"),
+            &admin,
+            &format!("op-revoke-{i}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "revoke {who}: {body}");
+    }
+    assert_eq!(
+        store
+            .list_api_keys_for_owner(OPERATOR_USER_ID)
+            .unwrap()
+            .len(),
+        operator_keys_before,
+        "no key reached the operator"
+    );
+}
+
+#[tokio::test]
+async fn the_id_beats_a_legacy_username_equal_to_it_on_user_key_routes() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    // A legacy cross-match: user `x` is named `carol`, and a user whose id is `carol` exists
+    // under another name. Created in this order the node's own checks allow it, as an older
+    // node did.
+    let x = store.create_user("x", "carol").unwrap();
+    let carol = store.create_user("carol", "caroline").unwrap();
+    for (user, key) in [(&x, "key-x"), (&carol, "key-carol")] {
+        store
+            .create_api_key_owned(
+                key,
+                &format!("owned-by-{}", user.user_id),
+                &mint_api_key_secret(),
+                &format!("User::\"{}\"", user.user_id),
+                &["node:read".to_string()],
+                &user.user_id,
+            )
+            .unwrap();
+    }
+    let app = test_app(app_state_http_only(store));
+    // The id `carol` is `carol`, not the user named carol.
+    let (status, listed) =
+        identity_call(&app, "GET", "/v1/users/carol/keys", &admin, "", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed.to_string().contains("owned-by-carol"), "{listed}");
+    assert!(!listed.to_string().contains("owned-by-x"), "{listed}");
+    // The name in another letter case still reaches the user who holds it.
+    let (status, listed) =
+        identity_call(&app, "GET", "/v1/users/CAROL/keys", &admin, "", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(listed.to_string().contains("owned-by-x"), "{listed}");
+    assert!(!listed.to_string().contains("owned-by-carol"), "{listed}");
+    // And login follows the same rule.
+    set_password_and_login_as_id(&app, &admin, "carol", "carol-pw").await;
+}
+
+/// Sets a password through the org-admin route (id only) so the login rule can be exercised.
+async fn set_password_and_login_as_id(
+    app: &axum::Router,
+    admin: &str,
+    user_id: &str,
+    password: &str,
+) {
+    let (status, body) = identity_call(
+        app,
+        "POST",
+        &format!("/v1/users/{user_id}/password"),
+        admin,
+        &format!("pw-{user_id}"),
+        Some(serde_json::json!({ "password": password })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, session) = identity_login(app, user_id, password).await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    assert_eq!(session["userId"], user_id, "the id wins at login");
+}
+
+#[tokio::test]
+async fn operator_creates_a_key_for_a_user_named_in_any_case() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let (store, bootstrap) = bootstrap_store();
+    let member = store
+        .create_managed_user_generated("Grace@Example.Test", "grace-secret", UserRole::Member)
+        .unwrap();
+    let app = test_app(app_state_http_only(store.clone()));
+    for (i, who) in [
+        "Grace@Example.Test",
+        "GRACE@EXAMPLE.TEST",
+        member.user_id.as_str(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (status, body) = identity_call(
+            &app,
+            "POST",
+            "/v1/keys",
+            &bootstrap,
+            &format!("op-key-{i}"),
+            Some(serde_json::json!({
+                "name": format!("grace-{i}"),
+                "userId": who,
+                "scopes": ["node:read"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{who}: {body}");
+    }
+    let owned = store.list_api_keys_for_owner(&member.user_id).unwrap();
+    assert_eq!(owned.len(), 3, "{owned:?}");
+}
+
+#[tokio::test]
+async fn admin_cannot_rename_or_reach_users_through_the_id_only_routes_by_name() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let member = store
+        .create_managed_user_generated("Hana", "hana-secret", UserRole::Member)
+        .unwrap();
+    let app = test_app(app_state_http_only(store.clone()));
+    // Id-only routes stay id-only: the login name is a 404, the id works.
+    let (status, _) = identity_call(
+        &app,
+        "POST",
+        "/v1/users/hana/deactivate",
+        &admin,
+        "deact-name",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = identity_call(
+        &app,
+        "POST",
+        "/v1/users/HANA/password",
+        &admin,
+        "pw-name",
+        Some(serde_json::json!({ "password": "new-secret" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!store.get_user(&member.user_id).unwrap().is_deactivated());
+    let (status, body) = identity_call(
+        &app,
+        "POST",
+        &format!("/v1/users/{}/deactivate", member.user_id),
+        &admin,
+        "deact-id",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

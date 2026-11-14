@@ -19,5 +19,4 @@ then:
 guards:
   - vam:crates/vam-orchestrator/src/users.rs
   - vam:crates/vam-orchestrator/src/api/users_keys_admin.rs
-status: pending
-expectFail: { step: given, class: product }
+status: active

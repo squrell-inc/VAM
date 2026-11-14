@@ -21,5 +21,4 @@ guards:
   - vam:crates/vam-orchestrator/src/users.rs
   - vam:crates/vam-orchestrator/src/bin/vamd.rs
   - vam:crates/vam-orchestrator/src/session_tokens.rs
-status: pending
-expectFail: { step: given, class: product }
+status: active
