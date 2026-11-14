@@ -12,7 +12,7 @@ pub enum KeysCmd {
         name: String,
         #[arg(long)]
         scope: Vec<String>,
-        /// Bind the key to this `users.user_id` (or username). Defaults to the caller.
+        /// Bind the key to this user: a user id or a login name (any letter case). Defaults to the caller.
         #[arg(long)]
         user_id: Option<String>,
         /// Reuse this idempotency key (default: mint a fresh key).

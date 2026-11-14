@@ -7,6 +7,13 @@ proves:
   - crates/vam-orchestrator/tests/api_tests.rs
   - crates/vam-orchestrator/src/secrets.rs::import_env_secrets_are_org_scope_and_ignore_user_rows
   - crates/vam-orchestrator/tests/login_tests.rs
+  - email-username-signs-in-in-any-letter-case
+  - new-user-gets-a-generated-id-it-cannot-choose
+  - username-differing-only-in-letter-case-is-refused
+  - user-path-resolves-by-id-then-by-login-name
+  - generated-id-and-email-login-survive-a-restart
+  - crates/vam-orchestrator/tests/vamd_username_clash.rs
+  - crates/vam-orchestrator/tests/user_identity_migration_tests.rs
   - crates/vam-orchestrator/tests/me_tests.rs
   - crates/vam-orchestrator/tests/node_login_probe_tests.rs
   - crates/vam-orchestrator/tests/isolation_coverage_map_tests.rs
@@ -29,12 +36,14 @@ The first admin is created from the command line, with `vamd --bootstrap-admin` 
 
 | Call | Route | Notes |
 |---|---|---|
-| Login | `POST /v1/login`, `/v1/login/refresh`, `/v1/logout` | Username and password give a short session token and a refresh token (`api/mod.rs:98-100`). |
+| Login | `POST /v1/login`, `/v1/login/refresh`, `/v1/logout` | Username and password give a short session token and a refresh token (`api/mod.rs:98-100`). The username matches ignoring letter case; a user id also works. |
 | Who am I | `GET /v1/me` | Any authenticated caller gets `userId`, `username`, `role` and the bearer's scopes. A deactivated user or revoked key is a 401 (`api/me.rs`). |
 | API keys | `POST`, `GET /v1/keys`, `DELETE /v1/keys/{id}` | Keys bind to a user when minted. List and revoke are per user; `keys:admin` sees every `http` key. A grant issued to a broker (`?holder=broker\|all`) is listed and revoked by its owner only, and an HTTP bearer never accepts one (401). |
-| Users | `POST`, `GET /v1/users`, `deactivate`, `password`, `keys` under `/v1/users/{id}` | Scope `users:admin`. A password reset revokes session tokens and keeps API keys; deactivate revokes both. |
+| Users | `POST`, `GET /v1/users`, `deactivate`, `password`, `keys` under `/v1/users/{id}` | Scope `users:admin`. A password reset revokes session tokens and keeps API keys; deactivate revokes both. The user id is generated (`usr_` and 26 characters) and cannot be chosen; the login name is unique ignoring letter case. On `/v1/users/{id}/keys*`, `{id}` is a user id or a login name in any case: an exact id first, then the name (`users.rs`). |
 | Publish grant | `DELETE /v1/users/{id}/publish-grant` | Moves a publisher back to member. |
 | Reassign | `POST /v1/catalog/reassign-owner` | Moves catalog ownership; released versions stay released. |
+
+A node whose existing usernames clash ignoring case does not serve until an admin renames them with `vamd --rename-user` (see [Users and roles](/getting-started/users-and-roles/)). A legacy username that starts `usr_` or equals another user's id is kept; the id wins, and `vamd` logs a warning at start.
 
 Routes: `api/mod.rs:98-126`. Proved by `login_tests.rs`, `me_tests.rs` and
 `node_login_probe_tests.rs`.
