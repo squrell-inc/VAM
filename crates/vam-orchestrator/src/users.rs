@@ -526,6 +526,14 @@ impl SqliteWorkflowStore {
                 "username must be non-empty".to_string(),
             ));
         }
+        if new_username
+            .trim()
+            .eq_ignore_ascii_case(crate::owner::BOOTSTRAP_KEY_ID)
+        {
+            return Err(OrchestratorError::InvalidContract(
+                "username 'bootstrap' is reserved".to_string(),
+            ));
+        }
         let connection = self
             .connection
             .lock()
@@ -781,6 +789,11 @@ fn validate_username(value: &str) -> Result<&str, OrchestratorError> {
     {
         return Err(OrchestratorError::InvalidContract(
             "username may contain only ASCII letters, digits, '.', '-', and '_'".to_string(),
+        ));
+    }
+    if trimmed.eq_ignore_ascii_case(crate::owner::BOOTSTRAP_KEY_ID) {
+        return Err(OrchestratorError::InvalidContract(
+            "username 'bootstrap' is reserved".to_string(),
         ));
     }
     Ok(trimmed)

@@ -23,11 +23,13 @@ pub const BOOTSTRAP_KEY_ID: &str = "bootstrap";
 
 /// Map a calling API key to a `users.user_id`.
 ///
-/// Bootstrap → `operator`. Every other key uses the stored
-/// `api_keys.owner_user_id` (Phase 2 per-user keys). Empty owner falls back
-/// to `local`.
+/// Only the genuine bootstrap key (`key_id` = [`BOOTSTRAP_KEY_ID`], minted
+/// server-side at first start) is the operator. Every other key uses the stored
+/// `api_keys.owner_user_id`; an empty owner falls back to `local`. The Cedar
+/// principal string is never consulted: principals are caller-influenced (a
+/// key name, a client-sent field, a username).
 pub fn owner_user_id_for_authenticated_key(record: &ApiKeyRecord) -> &str {
-    if is_bootstrap_key(record.key_id.as_str(), record.principal.as_str()) {
+    if is_bootstrap_key(record.key_id.as_str()) {
         OPERATOR_USER_ID
     } else if !record.owner_user_id.is_empty() {
         record.owner_user_id.as_str()
@@ -36,18 +38,36 @@ pub fn owner_user_id_for_authenticated_key(record: &ApiKeyRecord) -> &str {
     }
 }
 
-/// Map a key id + Cedar principal string to a `users.user_id`.
-pub fn owner_user_id_for_key(key_id: &str, principal: &str) -> &'static str {
-    if is_bootstrap_key(key_id, principal) {
+/// Map a key id to a `users.user_id` for a key with no stored owner. The
+/// principal is accepted for call-shape compatibility and ignored.
+pub fn owner_user_id_for_key(key_id: &str, _principal: &str) -> &'static str {
+    if is_bootstrap_key(key_id) {
         OPERATOR_USER_ID
     } else {
         LOCAL_USER_ID
     }
 }
 
-/// True when this is the deployment bootstrap key.
-pub fn is_bootstrap_key(key_id: &str, principal: &str) -> bool {
-    key_id == BOOTSTRAP_KEY_ID || principal == BOOTSTRAP_PRINCIPAL
+/// True when this is the deployment bootstrap key. Decided by the key id alone.
+pub fn is_bootstrap_key(key_id: &str) -> bool {
+    key_id == BOOTSTRAP_KEY_ID
+}
+
+/// True when a name is reserved for the deployment bootstrap key, ignoring
+/// ASCII case: the bootstrap name itself or the bootstrap Cedar principal.
+pub fn is_reserved_bootstrap_name(name: &str) -> bool {
+    let name = name.trim();
+    name.eq_ignore_ascii_case(BOOTSTRAP_KEY_ID) || name.eq_ignore_ascii_case(BOOTSTRAP_PRINCIPAL)
+}
+
+/// Refuse a key name or client-sent principal reserved for the bootstrap key.
+pub fn reject_reserved_bootstrap_name(field: &str, name: &str) -> Result<(), OrchestratorError> {
+    if is_reserved_bootstrap_name(name) {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "{field} '{BOOTSTRAP_KEY_ID}' is reserved"
+        )));
+    }
+    Ok(())
 }
 
 /// Tables that persist a Phase 1 `owner_user_id` stamp (recorded, not ACL).
@@ -95,11 +115,12 @@ impl SqliteWorkflowStore {
             ",
         )?;
 
-        // Bootstrap key is the operator (ALTER DEFAULT may have filled 'local').
+        // The genuine bootstrap key, by key id only, is the operator (ALTER DEFAULT may
+        // have filled 'local'). A principal string never promotes a row: principals
+        // are caller-influenced, so another key's stored owner is never rewritten here.
         connection.execute(
-            "UPDATE api_keys SET owner_user_id = ?1
-             WHERE key_id = ?2 OR principal = ?3",
-            params![OPERATOR_USER_ID, BOOTSTRAP_KEY_ID, BOOTSTRAP_PRINCIPAL],
+            "UPDATE api_keys SET owner_user_id = ?1 WHERE key_id = ?2",
+            params![OPERATOR_USER_ID, BOOTSTRAP_KEY_ID],
         )?;
         for table in OWNER_STAMP_TABLES {
             // table names are a fixed allow-list.
@@ -746,9 +767,10 @@ mod tests {
             owner_user_id_for_key(BOOTSTRAP_KEY_ID, "User::\"other\""),
             OPERATOR_USER_ID
         );
+        // The principal never promotes a key: it is caller-influenced.
         assert_eq!(
             owner_user_id_for_key("key-1", BOOTSTRAP_PRINCIPAL),
-            OPERATOR_USER_ID
+            LOCAL_USER_ID
         );
         assert_eq!(
             owner_user_id_for_key("test-key", "User::\"tester\""),
@@ -780,6 +802,126 @@ mod tests {
             owner_user_id_for_authenticated_key(&auth.record),
             LOCAL_USER_ID
         );
+    }
+
+    fn key_record(key_id: &str, principal: &str, owner: &str) -> ApiKeyRecord {
+        ApiKeyRecord {
+            key_id: key_id.to_string(),
+            name: "k".to_string(),
+            sha256_secret: "hash".to_string(),
+            principal: principal.to_string(),
+            owner_user_id: owner.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn principal_string_never_grants_operator() {
+        // A member's key or session whose principal is the bootstrap principal keeps
+        // its own owner.
+        assert_eq!(
+            owner_user_id_for_authenticated_key(&key_record("key-1", BOOTSTRAP_PRINCIPAL, "alice")),
+            "alice"
+        );
+        assert_eq!(
+            owner_user_id_for_authenticated_key(&key_record(
+                "sess_0123",
+                BOOTSTRAP_PRINCIPAL,
+                "bootstrap"
+            )),
+            "bootstrap"
+        );
+        // No stored owner falls back to local, never to the operator.
+        assert_eq!(
+            owner_user_id_for_authenticated_key(&key_record("key-1", BOOTSTRAP_PRINCIPAL, "")),
+            LOCAL_USER_ID
+        );
+        assert!(!is_bootstrap_key("key-1"));
+        assert!(!is_bootstrap_key("Bootstrap"));
+    }
+
+    #[test]
+    fn genuine_bootstrap_key_is_the_operator() {
+        for owner in ["", LOCAL_USER_ID, OPERATOR_USER_ID] {
+            assert_eq!(
+                owner_user_id_for_authenticated_key(&key_record(
+                    BOOTSTRAP_KEY_ID,
+                    BOOTSTRAP_PRINCIPAL,
+                    owner
+                )),
+                OPERATOR_USER_ID,
+                "owner {owner:?}"
+            );
+        }
+        assert!(is_bootstrap_key(BOOTSTRAP_KEY_ID));
+    }
+
+    #[test]
+    fn bootstrap_names_are_reserved_ignoring_case() {
+        for reserved in [
+            "bootstrap",
+            "Bootstrap",
+            "BOOTSTRAP",
+            " bootstrap ",
+            BOOTSTRAP_PRINCIPAL,
+            "user::\"BOOTSTRAP\"",
+        ] {
+            assert!(is_reserved_bootstrap_name(reserved), "{reserved:?}");
+            assert!(
+                matches!(
+                    reject_reserved_bootstrap_name("key name", reserved),
+                    Err(OrchestratorError::InvalidContract(_))
+                ),
+                "{reserved:?}"
+            );
+        }
+        for fine in ["", "bootstrap2", "my-bootstrap", "User::\"alice\"", "alice"] {
+            assert!(!is_reserved_bootstrap_name(fine), "{fine:?}");
+            reject_reserved_bootstrap_name("key name", fine).expect("allowed");
+        }
+    }
+
+    #[test]
+    fn backfill_never_promotes_a_member_key_by_principal() {
+        let path = temp_db_path("bootstrap-principal");
+        {
+            let store = SqliteWorkflowStore::open(&path).expect("store");
+            store.create_user("alice", "alice").expect("alice");
+            store
+                .create_api_key_owned(
+                    "key-member",
+                    "member",
+                    &mint_api_key_secret(),
+                    BOOTSTRAP_PRINCIPAL,
+                    &scopes(),
+                    "alice",
+                )
+                .expect("member key with the bootstrap principal");
+            store
+                .create_api_key(
+                    BOOTSTRAP_KEY_ID,
+                    "bootstrap",
+                    &mint_api_key_secret(),
+                    BOOTSTRAP_PRINCIPAL,
+                    &scopes(),
+                )
+                .expect("genuine bootstrap key");
+        }
+        // A restart runs the backfill again.
+        let store = SqliteWorkflowStore::open(&path).expect("reopen");
+        store.initialize_owner_stamps().expect("backfill");
+        let owner_of = |key_id: &str| {
+            store
+                .list_api_keys()
+                .expect("keys")
+                .into_iter()
+                .find(|k| k.key_id == key_id)
+                .map(|k| k.owner_user_id)
+                .expect("key")
+        };
+        assert_eq!(owner_of("key-member"), "alice");
+        assert_eq!(owner_of(BOOTSTRAP_KEY_ID), OPERATOR_USER_ID);
+        cleanup(&path);
     }
 
     #[test]
@@ -826,13 +968,14 @@ mod tests {
         );
 
         store
-            .persist_run_spec(
+            .persist_run_spec_with_owner(
                 &run_id("run-op").urn,
                 "{}",
                 Some("sess-op"),
                 "urn:vam:agent:op",
                 Some("idem-op"),
                 BOOTSTRAP_PRINCIPAL,
+                OPERATOR_USER_ID,
             )
             .expect("run op");
         store
@@ -1159,13 +1302,14 @@ mod tests {
         assert!(ids.contains(&"sess-loc"));
 
         store
-            .persist_run_spec(
+            .persist_run_spec_with_owner(
                 &run_id("r-op").urn,
                 "{}",
                 None,
                 "agent",
                 Some("k-op"),
                 BOOTSTRAP_PRINCIPAL,
+                OPERATOR_USER_ID,
             )
             .expect("run op");
         store
