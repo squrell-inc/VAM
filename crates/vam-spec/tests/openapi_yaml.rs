@@ -54,6 +54,51 @@ fn openapi_has_the_self_service_password_change() {
 }
 
 #[test]
+fn openapi_has_generated_ids_and_case_insensitive_login_names() {
+    let doc = load();
+    let create = &doc["paths"]["/v1/users"]["post"];
+    for code in ["400", "403", "409"] {
+        assert!(
+            create["responses"][code].is_mapping(),
+            "missing response {code}"
+        );
+    }
+    let text = create["description"].as_str().unwrap();
+    for needle in ["generates", "254", "ignoring"] {
+        assert!(text.contains(needle), "create description lacks {needle}");
+    }
+    let schemas = &doc["components"]["schemas"];
+    let user_id = &schemas["CreateUserRequest"]["properties"]["userId"];
+    assert_eq!(user_id["deprecated"].as_bool(), Some(true));
+    assert!(user_id["description"].as_str().unwrap().contains("empty"));
+    let username = &schemas["CreateUserRequest"]["properties"]["username"];
+    assert_eq!(username["maxLength"].as_u64(), Some(254));
+    let account_id = schemas["UserAccount"]["properties"]["userId"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(account_id.contains("generated"), "{account_id}");
+    assert!(
+        schemas["LoginRequest"]["properties"]["username"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("ignoring letter case")
+    );
+    for p in ["/v1/users/{id}/keys", "/v1/users/{id}/keys/{key_id}"] {
+        let verb = if p.ends_with("{key_id}") {
+            "delete"
+        } else {
+            "get"
+        };
+        let d = doc["paths"][p][verb]["description"].as_str().unwrap();
+        assert!(d.contains("login name"), "{p} lacks login name text");
+    }
+    let ns = schemas["GetMeResponse"]["properties"]["defaultNamespace"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(ns.contains("`+tag`"), "{ns}");
+}
+
+#[test]
 fn every_local_ref_resolves() {
     fn walk(v: &serde_yaml::Value, doc: &serde_yaml::Value, bad: &mut Vec<String>) {
         match v {

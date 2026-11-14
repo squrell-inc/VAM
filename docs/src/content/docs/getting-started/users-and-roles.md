@@ -1,9 +1,16 @@
 ---
 title: Users and roles
-description: Create the first admin, use the operator bootstrap key, pick org admin, publisher, or member, and change a password.
+description: Create the first admin, use the operator bootstrap key, pick org admin, publisher, or member, name users, and change a password.
 status: shipped
 proves:
   - crates/vam-orchestrator/tests/login_tests.rs
+  - email-username-signs-in-in-any-letter-case
+  - new-user-gets-a-generated-id-it-cannot-choose
+  - username-differing-only-in-letter-case-is-refused
+  - user-path-resolves-by-id-then-by-login-name
+  - generated-id-and-email-login-survive-a-restart
+  - crates/vam-orchestrator/tests/vamd_username_clash.rs
+  - crates/vam-orchestrator/tests/user_identity_migration_tests.rs
   - member-chats-with-a-released-agent
   - member-changes-own-password-and-signs-in-with-the-new-one
   - password-change-signs-out-every-session-and-keeps-api-keys
@@ -40,6 +47,47 @@ vam login --username admin
 The VAM app password sign-in uses the same user.
 
 On [macOS + Lima](/getting-started/macos-lima/), export the two vars **before** `./scripts/start-vamd-lima.sh`. The script forwards them into the VM.
+
+## Login names and user ids
+
+A user has two names. The **login name** (`username`) is what people type. The **user id** (`userId`) is
+what the node uses inside: `usr_` and 26 lower-case letters and digits, such as
+`usr_mfrggzdfmztwq2lknnwg23tpoa`. The node generates it when the user is created. You cannot choose it:
+`POST /v1/users` with a non-empty `userId` is a 400. It is not made from the login name, so renaming a
+login name never changes the id.
+
+A login name is ASCII letters, digits and `._+@-`, with at most one `@`, up to 254 characters. An email
+address works. It may not start with `usr_`, may not be `bootstrap` (reserved), and may not equal
+another user's id. The name keeps the case it was typed in, and every screen shows it that way.
+
+Names are unique ignoring letter case: `Ada@Example.com` and `ada@example.com` are one name, and the second
+create is a 409. Sign-in ignores case too, so `ADA@EXAMPLE.COM` signs in as `Ada@Example.com`. Login also
+accepts a user id.
+
+Routes under `/v1/users/{x}/keys` and `vam keys create --user-id` take either a user id or a login name in
+any case. The node reads `x` as a user id first, then as a login name. If a legacy name and a different
+user's id are the same string, the id wins. Routes that take only an id (`deactivate`, `password`,
+`publish-grant`, catalog reassign) still take only an id.
+
+Users that exist already keep their ids and names. Nothing is renamed on upgrade.
+
+The default URN namespace of a user is the login name lowercased. For an email name it is the part before
+the `@`, without a `+tag`: `Ada.Lovelace+work@Example.com` gives `ada.lovelace`. If that is not a valid
+segment, it is `default`.
+
+### Two names that clash
+
+A node that held `Bob` and `bob` before this rule refuses to serve, and refuses `--init`, until all but one
+name in each group is renamed. It exits with code 1, lists each group with the user ids, and names the fix.
+Rename offline, from the host, with the id from the list:
+
+```bash
+vamd --rename-user usr_mfrggzdfmztwq2lknnwg23tpoa bob-2
+```
+
+`--rename-user <user_id> <new_username>` checks the new name by the rules above, prints the old and new
+name and exits. Like `--reset-password`, it works on a database that has clashes. Start `vamd` again after
+the last rename. There is no HTTP route for a rename.
 
 ## Operator is not that admin
 
@@ -115,7 +163,7 @@ Error: Wrong: too many wrong password attempts; retry after 33s.
 
 The limit is five wrong current passwords per user. One more try comes back every 60 seconds. It is on even when `VAMD_RATE_LIMIT=off`. A node restart clears the count (no test proves that part).
 
-Proved by `member-changes-own-password-and-signs-in-with-the-new-one`, `password-change-signs-out-every-session-and-keeps-api-keys` (sessions end, keys stay), `wrong-current-password-is-refused-and-attempts-are-limited` (the wrong password and the limit), `api-key-cannot-change-a-password`, `new-password-equal-to-current-is-refused`, and `password-change-needs-an-idempotency-key`. The route and its errors are on [Host API](/orchestrator/api/).
+Login names and ids are proved by `new-user-gets-a-generated-id-it-cannot-choose`, `username-differing-only-in-letter-case-is-refused`, `email-username-signs-in-in-any-letter-case`, `user-path-resolves-by-id-then-by-login-name` and `generated-id-and-email-login-survive-a-restart`; the clash refusal and `--rename-user` by `crates/vam-orchestrator/tests/vamd_username_clash.rs`. Passwords are proved by `member-changes-own-password-and-signs-in-with-the-new-one`, `password-change-signs-out-every-session-and-keeps-api-keys` (sessions end, keys stay), `wrong-current-password-is-refused-and-attempts-are-limited` (the wrong password and the limit), `api-key-cannot-change-a-password`, `new-password-equal-to-current-is-refused`, and `password-change-needs-an-idempotency-key`. The route and its errors are on [Host API](/orchestrator/api/).
 
 ## Which page next
 

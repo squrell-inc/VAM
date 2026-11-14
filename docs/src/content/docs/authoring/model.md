@@ -47,7 +47,7 @@ Any other domain is **Other**: it is accepted for agents, playbooks and policies
 
 A node that has not set `VAMD_REGISTRY_DOMAIN` uses `local.vam.dev`, so everything on it is Local. The domain is part of an artifact's identity: changing it later does not rename existing artifacts.
 
-The namespace defaults to your username, lowercased. If that is not a valid URN segment, it is `default`. `GET /v1/me` returns it as `defaultNamespace`. It is a default, not a rule: you may still choose another namespace.
+The namespace defaults to your username, lowercased. For an email username it is the part before the `@`, without a `+tag`: `Ada.Lovelace+work@Example.com` gives `ada.lovelace`. If that is not a valid URN segment, it is `default`. It is never made from the generated user id. `GET /v1/me` returns it as `defaultNamespace`. It is a default, not a rule: you may still choose another namespace.
 
 Write use cases on a **local** domain, or on your org's registry domain. `local.vam.dev` is the one the examples use. Restrictions that are enforced:
 
