@@ -187,12 +187,12 @@ below pass; `scripts/ci/local.sh --full` green on the base; OpenAPI and docs say
 login names work.
 
 - [x] Audit of username use outside `users` (design §4.2, closed 2026-11-14)
-- [ ] Scenarios and harness steps land pending, red for the right reason (W0)
-- [ ] Generated ids for new users; `CreateUserRequest.user_id` no longer client-chosen (W1)
-- [ ] Login-name validation and case-insensitive uniqueness, with migration (W1)
-- [ ] One resolution rule; operator guard after resolution (W1)
-- [ ] Session principal from the user id; no name maps to the bootstrap key (W2)
-- [ ] Namespace for email usernames; OpenAPI, docs, CLI help (W3)
+- [x] Scenarios and harness steps land pending, red for the right reason (W0, #14)
+- [x] Generated ids for new users; `CreateUserRequest.user_id` no longer client-chosen (W1, #15)
+- [x] Login-name validation and case-insensitive uniqueness, with migration (W1, #15)
+- [x] One resolution rule; operator guard after resolution (W1, #15)
+- [~] Session principal from the user id; no name maps to the bootstrap key (W2 replaced by hotfix #16 into `main`, owner 2026-11-14; reaches the base when `main` is merged back)
+- [x] Namespace for email usernames; OpenAPI, docs, CLI help (W3, #17)
 
 **Chosen details** (proposals in this breakdown; design §4.1, §4.3, §4.4)
 
@@ -251,7 +251,7 @@ marketplace): `--smoke` is the regression guard.
 
 **Items** (each names the pending scenarios it turns green)
 
-- [ ] `UI-2.1` — Harness (`crates/vam-e2e`: `world.rs`, `scenario.rs`, `check.rs`, `engine.rs`,
+- [x] `UI-2.1` — Harness (`crates/vam-e2e`: `world.rs`, `scenario.rs`, `check.rs`, `engine.rs`,
   `identity.rs`, README "Password steps"): `org` piece field `username` (template with `{tag}`;
   new piece `e2e/world/org-member-email.yaml`, role Member, a mixed-case `…+e2e@Example.Test`
   name); `login: { case: as-created | lower | upper }`; `identity-request` gains `fields` (same
@@ -266,7 +266,7 @@ marketplace): `--smoke` is the regression guard.
   charset), `new-user-gets-a-generated-id-it-cannot-choose` at `create-user` with a `userId`
   (answered 200). Turns green: none.
   Decide: NOW — locked decisions 15, 16 (owner); not scored.
-- [ ] `UI-2.2` — Generated ids. `api/users_admin.rs:69-77`: non-empty `userId` → 400; else mint
+- [x] `UI-2.2` — Generated ids. `api/users_admin.rs:69-77`: non-empty `userId` → 400; else mint
   `usr_` with `spaces::mint_id`, retry on a primary-key clash (at most 3). `bootstrap_first_admin`
   (`users.rs:262`) mints too (idempotent by name, unchanged). Store `create_user*` keep an
   explicit id for seeds and tests. Proto comment on `CreateUserRequest.user_id` (deprecated, must
@@ -275,7 +275,7 @@ marketplace): `--smoke` is the regression guard.
   `cargo test -p vam-orchestrator --lib users`. Turns green:
   `new-user-gets-a-generated-id-it-cannot-choose`.
   Decide: NOW — locked decision 15; not scored.
-- [ ] `UI-2.3` — Login names and migration (`users.rs`, `bin/vamd.rs`, `daemon.rs`). Validator
+- [x] `UI-2.3` — Login names and migration (`users.rs`, `bin/vamd.rs`, `daemon.rs`). Validator
   for usernames: ASCII `[A-Za-z0-9._+@-]`, at most one `@`, length per open question 2, not
   starting `usr_` (any case), not `bootstrap` (any case), not equal (ignoring case) to another
   user's id; ids keep the old validator. Clash check and NOCASE index in
@@ -288,7 +288,7 @@ marketplace): `--smoke` is the regression guard.
   `username-differing-only-in-letter-case-is-refused`,
   `generated-id-and-email-login-survive-a-restart` (with UI-2.4).
   Decide: NOW — locked decision 16; not scored.
-- [ ] `UI-2.4` — Resolution (`users.rs:482-501`, `:557-564`, `session_tokens.rs:114`,
+- [x] `UI-2.4` — Resolution (`users.rs:482-501`, `:557-564`, `session_tokens.rs:114`,
   `api/users_keys_admin.rs:26-37`, `:53-54`, `api/mod.rs:414-419`): `get_user_by_username` and
   `resolve_user` match `username = ?1 COLLATE NOCASE` after an exact id miss; login uses
   `resolve_user` (open question 5); `reject_operator_user_admin_target` runs on the resolved
@@ -300,7 +300,7 @@ marketplace): `--smoke` is the regression guard.
   `user-path-resolves-by-id-then-by-login-name`.
   Decide: NOW — proof 3 (security floor: the raw-string operator guard would be bypassed by case
   folding), cost 0 (files already in W1).
-- [ ] `UI-2.5` — Principal and bootstrap match (found by the audit, rows 2 and 3). Today a session
+- [~] `UI-2.5` (hotfix #16 into `main`) — Principal and bootstrap match (found by the audit, rows 2 and 3). Today a session
   principal is `User::"<username>"` (`session_tokens.rs:361`) and any principal
   `User::"bootstrap"` maps to the operator (`owner.rs:29-51`), so a user an org admin names
   `bootstrap`, or a key an org admin mints with name `bootstrap` (`users_keys_admin.rs:92-96`),
@@ -313,13 +313,13 @@ marketplace): `--smoke` is the regression guard.
   legacy user `bootstrap` owns its own rows; mint named `bootstrap` 400; restart keeps a member
   key's owner). Turns green: none (Rust-proven).
   Decide: NOW — proof 3 (security floor override: org admin to operator ownership), cost 1.
-- [ ] `UI-2.6` — Namespace (`vam-spec/src/origin.rs:166`, `api/me.rs:47`): for a username with
+- [x] `UI-2.6` — Namespace (`vam-spec/src/origin.rs:166`, `api/me.rs:47`): for a username with
   `@`, the default namespace is the local part, `+tag` dropped, lowercased; `default` when that is
   not a slug (open question 1). Names without `@` or `+` give exactly today's result, so existing
   users are unchanged. Accept: `cargo test -p vam-spec`; `tests/me_tests.rs` row for an email
   user. Turns green: `email-username-signs-in-in-any-letter-case`.
   Decide: NOW — proof 2 (closes a confirmed defect: every email user would get `default`), cost 0.
-- [ ] `UI-2.7` — Docs and contract: `docs/api/openapi.yaml` (`CreateUserRequest.userId`
+- [x] `UI-2.7` — Docs and contract: `docs/api/openapi.yaml` (`CreateUserRequest.userId`
   deprecated/400, username charset, 409, `UserAccount.userId` is opaque) and
   `crates/vam-spec/tests/openapi_yaml.rs`; `getting-started/users-and-roles.md` (login names,
   case, generated ids, the clash and `vamd --rename-user`), `orchestrator/user-isolation.md`,
@@ -335,10 +335,10 @@ marketplace): `--smoke` is the regression guard.
 | Wave | Items | Turns green | Repo | Model | Budget | Depends on | Actions | Status | PR |
 |---|---|---|---|---|---|---|---|---|---|
 | 0 docs | design + tracker | — | vam | orchestrator | 30 min | — | none | [~] | |
-| 0 | `UI-2.1` | — (pending, red for the right reason) | vam | Sonnet 5.5 medium (harness code in `vam-e2e`, not only YAML) | 60 min | 0 docs | none | [ ] | |
-| 1 | `UI-2.2`, `UI-2.3`, `UI-2.4` | `new-user-gets-a-generated-id-it-cannot-choose`, `username-differing-only-in-letter-case-is-refused`, `user-path-resolves-by-id-then-by-login-name`, `generated-id-and-email-login-survive-a-restart` | vam | Sonnet 5.5 high (migration, id generation, login and resolution: data integrity and auth) | 120 min | 0 | none | [ ] | |
-| 2 | `UI-2.5` | — (Rust-proven; keeps W1's four green) | vam | Sonnet 5.5 high (principal to owner mapping: auth boundary) | 60 min | 1 | none | [ ] | |
-| 3 | `UI-2.6`, `UI-2.7` | `email-username-signs-in-in-any-letter-case` | vam | Sonnet 5.5 medium (vam-spec + OpenAPI + docs, two crates) | 75 min | 2 | none | [ ] | |
+| 0 | `UI-2.1` | — (pending, red for the right reason) | vam | Sonnet 5.5 medium (harness code in `vam-e2e`, not only YAML) | 60 min | 0 docs | none | [x] | #14 |
+| 1 | `UI-2.2`, `UI-2.3`, `UI-2.4` | `new-user-gets-a-generated-id-it-cannot-choose`, `username-differing-only-in-letter-case-is-refused`, `user-path-resolves-by-id-then-by-login-name`, `generated-id-and-email-login-survive-a-restart` | vam | Sonnet 5.5 high (migration, id generation, login and resolution: data integrity and auth) | 120 min | 0 | none | [x] | #15 |
+| 2 | `UI-2.5` | — (Rust-proven; keeps W1's four green) | vam | Sonnet 5.5 high (principal to owner mapping: auth boundary) | 60 min | 1 | none | replaced | #16 (hotfix into `main`) |
+| 3 | `UI-2.6`, `UI-2.7` | `email-username-signs-in-in-any-letter-case` | vam | Sonnet 5.5 medium (vam-spec + OpenAPI + docs, two crates) | 75 min | 2 | none | [x] | #17 |
 
 Decide (waves): W0–W3 NOW — locked decisions 15, 16 and two security-floor findings; four PRs
 into `feat/user-identity-phase2`. W2 touches no file W3 does; W1 and W2 share
@@ -367,6 +367,8 @@ into `feat/user-identity-phase2`. W2 touches no file W3 does; W1 and W2 share
    and in the identity audit payload. Default: shown as stored; it is what the admin typed.
 8. Ship UI-2.5 to `main` ahead of the phase (it is a pre-existing escalation, not new)? Default:
    no; it lands in W2 and the release follows the phase, unless the owner says otherwise.
+   **Owner 2026-11-14: yes.** Shipped as hotfix #16 from `main`; W2 is dropped and `main` is
+   merged back into the base after #16 lands. Questions 1–7 keep their defaults (owner, same day).
 
 ## Explicitly later
 
@@ -384,3 +386,7 @@ into `feat/user-identity-phase2`. W2 touches no file W3 does; W1 and W2 share
 | 2026-11-13 | 1 | Owner: merge `main` (#10, conflict in design/README.md only; `--full` green, 4470 tests, smoke 140/140), keep the open-question defaults, add an audit event before release. W3 built: `vam.v1.user.password_changed` in partition `vam_audit_identity`, 2 API and 2 unit tests. Then the release PR into `main`. |
 | 2026-11-13 | 1 | W3 merged (#11): audit event. Orchestrator `--full` at b507173: all steps ok, 4474 tests, smoke 140/140; `vam-e2e check` ok. Scoreboard: 6 green, 0 red, 0 fix cycles. Release PR into `main` opened on the owner's word. |
 | 2026-11-14 | 2 | Decisions 15–16 recorded; audit closed (design §4.2: 2 security-floor findings, operator guard before resolution and the `bootstrap` principal match); Phase 2 plan (5 scenarios, 7 items, W0–W3). Scoreboard: 0 green, 0 red, 0 fix cycles. |
+| 2026-11-14 | 2 | W0 merged (#14): harness steps `create-user`, `login case`, `identity-request` fields, `matches` matcher, `expectFail.step: given`; five scenarios pending. Scoreboard: 0 green, 5 red (right reason), 0 fix cycles. |
+| 2026-11-14 | 2 | W1 merged (#15): `usr_` ids, login-name validator, NOCASE unique index, start-up refusal on case clashes with `vamd --rename-user`, one resolution rule, operator guard after resolution. `--full` green. Scoreboard: 4 green, 1 red (right reason, namespace at `then.0`), 0 fix cycles. |
+| 2026-11-14 | 2 | Owner: Q8 yes, Q1–7 defaults. UI-2.5 built from `main` as hotfix #16 (operator only for key id `bootstrap`, `bootstrap` reserved, upgrade revokes keys the old backfill made operator-owned); `--full --release` and all 9 Actions green; awaits the owner's merge. W2 dropped. |
+| 2026-11-14 | 2 | W3 (#17): email-username namespace, OpenAPI, docs, feature row; email scenario active. Scoreboard: 5 green, 0 red, 0 fix cycles. Note: an agent's wait-for-free-build loop matched its own command line and stalled about 2 h; the wait script must not run in the same shell line as `cargo`. |
