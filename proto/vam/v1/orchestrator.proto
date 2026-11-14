@@ -625,6 +625,20 @@ message ResetUserPasswordResponse {
   UserAccount user = 1;
 }
 
+// Self-service password change (`POST /v1/me/password`). Only a password session may call it;
+// API keys are refused. Both passwords are write-only and never logged.
+message ChangeMyPasswordRequest {
+  string current_password = 1;
+  string new_password = 2;
+}
+
+message ChangeMyPasswordResponse {
+  UserAccount user = 1;
+  // Always true: every session of the user, this one included, was revoked.
+  bool relogin_required = 2;
+  int64 password_updated_at = 3;
+}
+
 // Identity read for any authenticated caller (password session or API key).
 // Not `users:admin`. Scopes are the bearer's live scopes, not the role default.
 message GetMeRequest {}
@@ -1136,6 +1150,7 @@ service Vamd {
   rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
   rpc DeactivateUser(DeactivateUserRequest) returns (DeactivateUserResponse);
   rpc ResetUserPassword(ResetUserPasswordRequest) returns (ResetUserPasswordResponse);
+  rpc ChangeMyPassword(ChangeMyPasswordRequest) returns (ChangeMyPasswordResponse);
   rpc AdminMintUserApiKey(AdminMintUserApiKeyRequest) returns (CreateApiKeyResponse);
   rpc ListUserApiKeys(ListUserApiKeysRequest) returns (ListApiKeysResponse);
   rpc AdminRevokeUserApiKey(AdminRevokeUserApiKeyRequest) returns (RevokeApiKeyResponse);

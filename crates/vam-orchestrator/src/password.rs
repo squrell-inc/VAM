@@ -124,7 +124,8 @@ pub fn apply_headless_admin_bootstrap(
     store.bootstrap_first_admin(username, password)
 }
 
-fn validate_password(password: &str) -> Result<(), PasswordError> {
+/// Same rules for every password a caller sets: non-empty, at most 1024 bytes.
+pub(crate) fn validate_password(password: &str) -> Result<(), PasswordError> {
     if password.is_empty() {
         return Err(PasswordError::Empty);
     }

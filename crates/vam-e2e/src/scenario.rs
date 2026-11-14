@@ -248,6 +248,14 @@ pub enum Step {
     MarketplaceUpdate(crate::engine::marketplace::MarketplaceAct),
     /// `catalog-write: { kind, urn, action, as, refused }`: a write to an (installed) artifact.
     CatalogWrite(crate::engine::marketplace::CatalogWrite),
+    /// `login: { as, password, refused }`: `POST /v1/login` as an `org` identity.
+    Login(crate::engine::identity::Login),
+    /// `change-password: { as, via, current, new, idempotencyKey, status, contains }`:
+    /// `POST /v1/me/password` with the identity's session or key.
+    ChangePassword(crate::engine::identity::ChangePassword),
+    /// `identity-request: { as, credential, method, path, status }`: one request with one of the
+    /// identity's credentials, judged by status.
+    IdentityRequest(crate::engine::identity::IdentityRequest),
 }
 
 /// A `cli` step. `{{root}}` (the scratch tree) and `{{vamd}}` (the built `vamd`) are replaced in
@@ -401,6 +409,9 @@ impl<'de> Deserialize<'de> for Step {
             "marketplace-install" => Step::MarketplaceInstall(val(v)?),
             "marketplace-update" => Step::MarketplaceUpdate(val(v)?),
             "catalog-write" => Step::CatalogWrite(val(v)?),
+            "login" => Step::Login(val(v)?),
+            "change-password" => Step::ChangePassword(val(v)?),
+            "identity-request" => Step::IdentityRequest(val(v)?),
             other => return Err(D::Error::custom(format!("unknown step `{other}`"))),
         })
     }

@@ -123,6 +123,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/login/refresh", post(login::refresh_login))
         .route("/v1/logout", post(login::logout))
         .route("/v1/me", get(me::get_me))
+        .route("/v1/me/password", post(me::change_my_password))
         .route("/v1/keys", post(create_key).get(list_keys))
         .route("/v1/keys/:id", delete(revoke_key))
         .route("/v1/users", users_admin::users_collection_route())

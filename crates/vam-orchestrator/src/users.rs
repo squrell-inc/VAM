@@ -158,6 +158,15 @@ pub fn reject_operator_user_admin_target(user_id: &str) -> Result<(), Orchestrat
     Ok(())
 }
 
+/// Result of [`SqliteWorkflowStore::change_own_password`].
+#[derive(Debug)]
+pub enum ChangeOwnPassword {
+    /// The password was replaced and every session of the user revoked.
+    Changed(UserRecord),
+    /// `current` did not verify (or the user has no password). Nothing changed.
+    WrongCurrent,
+}
+
 impl SqliteWorkflowStore {
     /// Create the `users` table (idempotent) and seed operator + local rows.
     pub fn initialize_users_schema(&self) -> Result<(), OrchestratorError> {
@@ -586,6 +595,40 @@ impl SqliteWorkflowStore {
         drop(connection);
         self.revoke_sessions_for_user(&user.user_id)?;
         self.get_user(&user.user_id)
+    }
+
+    /// Self-service change: the caller proves `current`, then the password is replaced.
+    ///
+    /// Looks the user up by immutable `user_id` only and has no role check (the subject is
+    /// always the caller, operator included). `current` must verify against the stored hash;
+    /// a mismatch, or a user with no password, is [`ChangeOwnPassword::WrongCurrent`] and
+    /// changes nothing. A `new_password` that matches the stored hash is refused as
+    /// `InvalidContract` (reachable only after `current` verified, so it reveals nothing).
+    /// Then the same path as [`Self::reset_user_password`]: new hash, `password_updated_at`,
+    /// every session and refresh token revoked, API keys untouched. Callers must not log
+    /// either password.
+    pub fn change_own_password(
+        &self,
+        user_id: &str,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<ChangeOwnPassword, OrchestratorError> {
+        let user = self.get_user(user_id)?;
+        reject_deactivated_login(&user)?;
+        let stored = match self.user_password_hash(&user.user_id)? {
+            Some(hash) => hash,
+            None => return Ok(ChangeOwnPassword::WrongCurrent),
+        };
+        if !verify_password(current_password, &stored)? {
+            return Ok(ChangeOwnPassword::WrongCurrent);
+        }
+        if verify_password(new_password, &stored)? {
+            return Err(OrchestratorError::InvalidContract(
+                "new password must differ from the current password".to_string(),
+            ));
+        }
+        let updated = self.reset_user_password(&user.user_id, new_password)?;
+        Ok(ChangeOwnPassword::Changed(updated))
     }
 
     /// Org-admin HTTP reset. Same hash + session-revoke as
@@ -1294,5 +1337,178 @@ mod tests {
         store
             .authenticate_bearer(&secret)
             .expect("api key still valid");
+    }
+
+    fn alice_with_key(store: &SqliteWorkflowStore) -> String {
+        store
+            .create_managed_user("alice", "alice", "old-secret", UserRole::Member)
+            .expect("create");
+        let secret = crate::keys::mint_api_key_secret();
+        let scopes: Vec<String> = crate::keys::MEMBER_SCOPES
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        store
+            .create_api_key_owned(
+                "alice-ci",
+                "alice",
+                &secret,
+                "User::\"alice\"",
+                &scopes,
+                "alice",
+            )
+            .expect("key");
+        secret
+    }
+
+    #[test]
+    fn change_own_password_replaces_hash_revokes_sessions_keeps_keys() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        let key = alice_with_key(&store);
+        let issued = store
+            .login_with_password("alice", "old-secret")
+            .expect("login");
+        let before = store.get_user("alice").expect("user");
+
+        let out = store
+            .change_own_password("alice", "old-secret", "new-secret")
+            .expect("change");
+        let ChangeOwnPassword::Changed(user) = out else {
+            panic!("expected Changed");
+        };
+        assert_eq!(user.user_id, "alice");
+        assert!(user.has_password);
+        assert!(user.password_updated_at >= before.password_updated_at);
+        assert!(store
+            .verify_user_password("alice", "new-secret")
+            .expect("new"));
+        assert!(!store
+            .verify_user_password("alice", "old-secret")
+            .expect("old"));
+        assert!(matches!(
+            store.authenticate_session_bearer(&issued.token),
+            Err(OrchestratorError::Unauthenticated)
+        ));
+        assert!(matches!(
+            store.refresh_session(&issued.refresh_token),
+            Err(OrchestratorError::Unauthenticated)
+        ));
+        store
+            .authenticate_bearer(&key)
+            .expect("api key still valid");
+        let hash = store
+            .user_password_hash("alice")
+            .expect("hash")
+            .expect("some");
+        assert!(is_argon2id_phc(&hash));
+    }
+
+    #[test]
+    fn change_own_password_wrong_current_changes_nothing() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        alice_with_key(&store);
+        let issued = store
+            .login_with_password("alice", "old-secret")
+            .expect("login");
+        let hash_before = store.user_password_hash("alice").expect("h");
+
+        let out = store
+            .change_own_password("alice", "not-the-secret", "new-secret")
+            .expect("outcome");
+        assert!(matches!(out, ChangeOwnPassword::WrongCurrent));
+        assert_eq!(store.user_password_hash("alice").expect("h"), hash_before);
+        store
+            .authenticate_session_bearer(&issued.token)
+            .expect("session survives");
+        // A wrong current that equals the new password is still just wrong.
+        let out = store
+            .change_own_password("alice", "new-secret", "new-secret")
+            .expect("outcome");
+        assert!(matches!(out, ChangeOwnPassword::WrongCurrent));
+    }
+
+    #[test]
+    fn change_own_password_same_password_is_invalid_contract() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        alice_with_key(&store);
+        let issued = store
+            .login_with_password("alice", "old-secret")
+            .expect("login");
+        let hash_before = store.user_password_hash("alice").expect("h");
+
+        let err = store
+            .change_own_password("alice", "old-secret", "old-secret")
+            .expect_err("same");
+        match err {
+            OrchestratorError::InvalidContract(m) => {
+                assert_eq!(m, "new password must differ from the current password")
+            }
+            other => panic!("expected InvalidContract, got {other:?}"),
+        }
+        assert_eq!(store.user_password_hash("alice").expect("h"), hash_before);
+        store
+            .authenticate_session_bearer(&issued.token)
+            .expect("session survives");
+    }
+
+    #[test]
+    fn change_own_password_without_a_stored_password_is_wrong_current() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        let out = store
+            .change_own_password(LOCAL_USER_ID, "anything", "new-secret")
+            .expect("outcome");
+        assert!(matches!(out, ChangeOwnPassword::WrongCurrent));
+        assert!(!store.get_user(LOCAL_USER_ID).expect("local").has_password);
+    }
+
+    #[test]
+    fn change_own_password_unknown_user_is_not_found() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        let err = store
+            .change_own_password("nobody", "a", "b")
+            .expect_err("missing");
+        assert!(matches!(err, OrchestratorError::NotFound(_)));
+    }
+
+    #[test]
+    fn change_own_password_looks_up_by_user_id_not_username() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store
+            .create_managed_user("uid-1", "bob", "bob-secret", UserRole::Member)
+            .expect("create");
+        let err = store
+            .change_own_password("bob", "bob-secret", "bob-new")
+            .expect_err("username is not an id");
+        assert!(matches!(err, OrchestratorError::NotFound(_)));
+        assert!(matches!(
+            store
+                .change_own_password("uid-1", "bob-secret", "bob-new")
+                .expect("by id"),
+            ChangeOwnPassword::Changed(_)
+        ));
+    }
+
+    #[test]
+    fn change_own_password_works_for_operator_and_rejects_deactivated() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store
+            .reset_user_password(OPERATOR_USER_ID, "operator-old")
+            .expect("operator password");
+        let out = store
+            .change_own_password(OPERATOR_USER_ID, "operator-old", "operator-new")
+            .expect("operator change");
+        assert!(matches!(out, ChangeOwnPassword::Changed(_)));
+        assert!(store
+            .verify_user_password(OPERATOR_USER_ID, "operator-new")
+            .expect("verify"));
+
+        store
+            .create_managed_user("dave", "dave", "dave-secret", UserRole::Member)
+            .expect("create");
+        store.deactivate_user("dave").expect("deactivate");
+        let err = store
+            .change_own_password("dave", "dave-secret", "dave-new")
+            .expect_err("deactivated");
+        assert!(matches!(err, OrchestratorError::Unauthenticated));
     }
 }

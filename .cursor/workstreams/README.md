@@ -18,6 +18,7 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | `notifications` | Notifications (E12 lane, row 7): one per-user record, many surfaces (app, CLI, agent tool; Slack in slice 2) | shipped | slices 1 and 2 shipped (records, API, CLI, agent tool, `vam.notify` with Slack); slice 3 (email, push, digests) backlog; docs: `orchestrator/notifications`, `hosted/notify` |
 | `connectors` | Connectors: connectivity, admin enable and consent, per-user connect; Microsoft 365 and Linear first (`design/connectors.md`) | active | 1 released to `main` 2026-11-08, checklist out; 0 done 2026-11-07 |
 | `machine-base` | Machine base (E7 Phase 1 + install slice, launch row 14): Debian slim default base with Python and git, `requiresRuntime` check, `vam node init` | active | 1 closed in base 2026-11-10 (W0-W5, 5/5 scenarios active); release PR into `main` open |
+| `user-identity` | User identity: self-service password change (`POST /v1/me/password`, `vam passwd`), then opaque user IDs and email usernames | active | 1 closed in base 2026-11-12 (self-service password change); 2 (opaque ids, email usernames) not drafted |
 
 
 ## Backlog (no tracker)

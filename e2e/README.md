@@ -350,6 +350,29 @@ are in `e2e/world/`. Copy `agent-workspaces-are-isolated.yaml`.
 - `expect: { run: <state> }` on a run parked on a pending approval or gate fails
   after the settle time as `product` ("parked on approval for <tool>").
 
+### Password steps (`crates/vam-e2e/src/identity.rs`)
+
+An `org` piece of a member role keeps its username, user id and generated password in memory for the
+scenario (never printed, logged or briefed; a failure shows the status and the body with every secret
+hidden). Three steps act as that identity. A missing session or credential is class `scenario`; a wrong
+status is class `product`.
+
+- `login: { as, password: current | previous, refused }`: `POST /v1/login` with the identity's username and
+  its current (default) or previous password. On 200 the returned `token` becomes the identity's current
+  session; the session it replaces is kept as `previous-session`. `refused: true` passes only on 401 and
+  stores nothing.
+- `change-password: { as, via: session | key, current: right | wrong, new: fresh | same, idempotencyKey,
+  status, contains }`: `POST /v1/me/password` with `{ currentPassword, newPassword }`, bearer the identity's
+  current session (`via: session`, default) or its API key (`via: key`). `as` may be omitted with `via: key`
+  to use the bootstrap Owner key. `current: wrong` sends a random wrong password; `new: same` sends the
+  current password as the new one, `fresh` (default) a new random one. `idempotencyKey: false` omits the
+  `Idempotency-Key` header (default: a fresh one is sent). `status` is required and exact; `contains` is a
+  substring the body must hold. A 200 with `current: right` and `new: fresh` moves the current password to
+  `previous` and the new one becomes current. The identity's session is not replaced: it stays whatever
+  `login` last stored, so after a change it is the token the change used.
+- `identity-request: { as, credential: session | previous-session | key, method, path, status }`: one
+  request (`method` defaults to `get`) with that credential as bearer, judged by exact status.
+
 ## Receipt expectations and offline verify
 
 - `expect: { receipt: { fields } }` reads `GET /v1/runs/{id}/receipt` of the latest run and

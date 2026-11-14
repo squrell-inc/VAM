@@ -7,6 +7,12 @@ proves:
   - api-rate-limits-a-flood
   - node-reports-the-isolation-it-runs
   - oversize-response-with-a-secret-never-reaches-the-guest
+  - member-changes-own-password-and-signs-in-with-the-new-one
+  - password-change-signs-out-every-session-and-keeps-api-keys
+  - wrong-current-password-is-refused-and-attempts-are-limited
+  - api-key-cannot-change-a-password
+  - new-password-equal-to-current-is-refused
+  - password-change-needs-an-idempotency-key
   - crates/vam-orchestrator/tests/rate_limit_api_tests.rs
   - crates/vam-orchestrator/src/paging_store_tests.rs::sessions_page_newest_first_and_a_new_session_does_not_shift_the_next_page
   - crates/vam-orchestrator/src/paging_store_tests.rs::runs_page_newest_first_by_rowid_cursor
@@ -85,6 +91,51 @@ page (tests `sessions_page_newest_first_and_a_new_session_does_not_shift_the_nex
 Each error type maps to one status in `api/error.rs:40-234`: 400 bad request, 401 and 403 auth,
 404 missing or foreign row, 409 conflict, 412 failed precondition, 502 upstream failure, 503
 node cannot take the call, 504 a stop still settling.
+
+## Change your own password
+
+`POST /v1/me/password` lets the signed-in user set a new password for themselves. Any role may
+call it, the operator included. Who may change which password is in
+[Users and roles](/getting-started/users-and-roles/#who-can-change-a-password); the CLI is
+[`vam passwd`](/getting-started/cli/#change-your-password-vam-passwd).
+
+- **Auth.** It needs a password session (`vam login`). An API key is a 403, even the user's own
+  (proved by `api-key-cannot-change-a-password`). The call needs an `Idempotency-Key` header, like
+  every write (`password-change-needs-an-idempotency-key`).
+- **Request.** `{"currentPassword": "…", "newPassword": "…"}`. Both are write-only: the node
+  stores the new one as argon2id and never logs or returns either.
+- **Response.** `200` with `{"user": {…}, "reloginRequired": true, "passwordUpdatedAt": "…"}`.
+  `passwordUpdatedAt` is Unix seconds written as a JSON string, as `createdAt` is. A real answer,
+  secrets and ids shortened:
+
+  ```json
+  {"user":{"userId":"admin","username":"admin","role":"org_admin","hasPassword":true,"createdAt":"1794…"},"reloginRequired":true,"passwordUpdatedAt":"1794…"}
+  ```
+
+- **Sessions end, keys stay.** Every session of the user is revoked, the calling one too, so the
+  token you called with answers 401 afterwards. API keys are not touched
+  (`password-change-signs-out-every-session-and-keeps-api-keys`). Sign in again with the new
+  password (`member-changes-own-password-and-signs-in-with-the-new-one`).
+- **Audit.** A successful change is recorded in the audit ledger as `vam.v1.user.password_changed`, with no password in it (`crates/vam-orchestrator/tests/api_tests.rs::change_my_password_success_writes_one_identity_audit_record_without_secrets`). A refused change writes nothing (`crates/vam-orchestrator/tests/api_tests.rs::change_my_password_refusals_write_no_identity_audit_record`). An admin reset (`POST /v1/users/{id}/password`) and `vamd --reset-password` are not audited yet.
+- **Five wrong tries.** A wrong current password counts against a limit of five per user. One try
+  comes back every 60 seconds. The limit is on even with `VAMD_RATE_LIMIT=off`. A correct password
+  and a refused new password do not count (`wrong-current-password-is-refused-and-attempts-are-limited`).
+  The count lives in the node's memory, so a restart clears it (not proved by a test).
+
+| Status | `code` in the body | `message` | Cause |
+|---|---|---|---|
+| 400 | `InvalidArgument` | `Idempotency-Key header is required for mutating requests` | No key sent |
+| 400 | `InvalidArgument` | `currentPassword is required` | Empty current password |
+| 400 | `InvalidArgument` | `new password must differ from the current password` | Same password again (`new-password-equal-to-current-is-refused`) |
+| 400 | `InvalidArgument` | `password must be non-empty`, `password exceeds 1024 bytes` | New password breaks a rule |
+| 401 | `Unauthenticated` | | No bearer, or a revoked or expired session |
+| 403 | `PermissionDenied` | `changing a password needs a password session (vam login); API keys cannot change a password` | The caller used an API key |
+| 403 | `PermissionDenied` | `current password is incorrect` | Wrong current password; counts as one of the five |
+| 429 | `RESOURCE_EXHAUSTED` | `too many wrong password attempts; retry after Ns` | The five tries are used |
+
+The 429 carries `Retry-After` (seconds) and `X-VAM-Rate-Limited-Reason: password-attempt-rate`.
+Its `code` is spelled `RESOURCE_EXHAUSTED`, like every other 429; the other codes are the error
+type's name.
 
 ## Secret kinds
 

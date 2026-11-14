@@ -20,3 +20,4 @@ Several docs below are partly shipped. Their shipped parts are trimmed as each w
 | [Jig](jig.md) | Shipped basics only (`runtime/jig`); the larger E11 plan is a backlog line. | none |
 | [Run receipt](run-receipt.md) | Phase 2: receipt surfaces (app view). Phases 1 and 3 shipped (`security/run-receipt`). | `run-receipt` |
 | [Scenarios](scenarios.md) | UI layer and `--changed` selection (S4–S5); coverage appendix. The rest is in `architecture/testing` and `e2e/README.md`. | `e2e-scenarios` |
+| [User identity](user-identity.md) | Phase 2: opaque generated user IDs for new users, case-insensitive login names that may be email addresses, the audit of username use outside `users`. Phase 1 (self-service password change) shipped (`getting-started/users-and-roles`, `orchestrator/api`). | `user-identity` |
