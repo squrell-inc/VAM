@@ -1,0 +1,25 @@
+id: generated-id-and-email-login-survive-a-restart
+title: A member's generated id, any-case login and API key are unchanged after a restart
+description: >
+  A member created under an email address has a generated id and a working key. After vamd
+  restarts the id is the same, the key still reaches the member, and the name signs in in lower,
+  upper and as-typed case.
+tags: [members]
+needs: process
+given:
+  - { piece: org-member-email, as: member }
+when:
+  - identity-request: { as: member, credential: key, path: /v1/me, status: 200, fields: { userId: { matches: "^usr_[a-z2-7]{26}$" } } }
+  - restart-vamd: {}
+then:
+  - identity-request: { as: member, credential: key, path: /v1/me, status: 200, fields: { userId: "{member.userId}", username: "{member.username}" } }
+  - login: { as: member, case: lower }
+  - login: { as: member, case: upper }
+  - login: { as: member }
+  - identity-request: { as: member, credential: session, path: /v1/me, status: 200, fields: { userId: "{member.userId}" } }
+guards:
+  - vam:crates/vam-orchestrator/src/users.rs
+  - vam:crates/vam-orchestrator/src/bin/vamd.rs
+  - vam:crates/vam-orchestrator/src/session_tokens.rs
+status: pending
+expectFail: { step: given, class: product }

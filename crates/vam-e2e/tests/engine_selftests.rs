@@ -1405,7 +1405,13 @@ fn a_member_identity_is_created_and_its_key_runs_and_decides() {
     assert_eq!(name, "org-member-fixture-tg1");
     let password = user["password"].as_str().unwrap().to_string();
     assert_eq!(password.len(), 48, "24 random bytes as hex");
-    assert_eq!(fake.count("POST", &format!("/v1/users/{name}/keys")), 1);
+    // The node answers a generated id, and the key is minted for that id, never for the name.
+    let id = support::stub_user_id(name);
+    assert!(
+        id.starts_with("usr_") && id.len() == 30 && id != name,
+        "{id}"
+    );
+    assert_eq!(fake.count("POST", &format!("/v1/users/{id}/keys")), 1);
     let secret = format!("secret-of-{name}");
     // The run, its approval list, its run reads and its decision all used the member's key;
     // setup used the bootstrap key.

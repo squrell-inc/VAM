@@ -1,0 +1,24 @@
+id: username-differing-only-in-letter-case-is-refused
+title: A username that differs only in letter case is refused, and reserved names are refused
+description: >
+  An admin creates a user whose username is the upper-cased email address of an existing member
+  and is answered 409. A username that starts like a generated id, and the name the node keeps for
+  its own key, are answered 400. A different name is accepted, and the member still signs in.
+tags: [members]
+needs: process
+given:
+  - { piece: org-administrator, as: admin }
+  - { piece: org-member-email, as: member }
+when:
+  - create-user: { as: admin, username: "{member.USERNAME}", status: 409 }
+  - create-user: { as: admin, username: "usr_chosen-{tag}", status: 400 }
+  - create-user: { as: admin, username: bootstrap, status: 400 }
+then:
+  - create-user: { as: admin, username: "someone-else-{tag}", status: 200 }
+  - login: { as: member }
+  - identity-request: { as: member, credential: session, path: /v1/me, status: 200, fields: { username: "{member.username}" } }
+guards:
+  - vam:crates/vam-orchestrator/src/users.rs
+  - vam:crates/vam-orchestrator/src/api/users_admin.rs
+status: pending
+expectFail: { step: given, class: product }
