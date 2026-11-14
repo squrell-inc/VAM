@@ -79,6 +79,22 @@ pub fn check(root: &Path) -> Vec<CheckError> {
                 ));
             }
         }
+        if let Some(u) = &w.username {
+            let shape = u.replace("{tag}", "");
+            let bad = w.kind != PieceKind::Org
+                || shape.is_empty()
+                || shape.matches('@').count() > 1
+                || !shape
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._+@-".contains(c));
+            if bad {
+                errors.push(CheckError::new(
+                    &p,
+                    "piece-body",
+                    "`username` belongs to an `org` piece and holds only letters, digits, `. _ + - @` (at most one `@`) and `{tag}`".to_string(),
+                ));
+            }
+        }
         match w.kind {
             PieceKind::Org | PieceKind::Secret | PieceKind::Broker => {}
             PieceKind::GitMarketplace => {
@@ -699,8 +715,25 @@ fn check_scenario(
                     ));
                 }
             }
+            Step::CreateUser(x) => {
+                refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
+                if x.username.trim().is_empty() || !(100..600).contains(&x.status) {
+                    errors.push(CheckError::new(
+                        p,
+                        "create-user",
+                        format!("{pos}: `create-user` needs a `username` and an HTTP status"),
+                    ));
+                }
+                refer_placeholders(errors, p, &pos, &org_aliases, &x.username);
+            }
             Step::IdentityRequest(x) => {
                 refer_org(errors, p, &pos, &org_aliases, Some(&x.as_));
+                refer_placeholders(errors, p, &pos, &org_aliases, &x.path);
+                if let Some(f) = &x.fields {
+                    for ph in crate::engine::identity::field_placeholders(f) {
+                        refer_placeholders(errors, p, &pos, &org_aliases, &format!("{{{ph}}}"));
+                    }
+                }
                 if !x.path.starts_with('/')
                     || !["get", "post", "put", "patch", "delete"]
                         .contains(&x.method.to_lowercase().as_str())
@@ -812,13 +845,14 @@ fn check_scenario(
     }
     if let Some(ef) = &s.expect_fail {
         match ef.position() {
+            Some(("given", _)) if !s.given.is_empty() => {}
             Some(("when", i)) if i < s.when.len() => {}
             Some(("then", i)) if i < s.then.len() => {}
             _ => errors.push(CheckError::new(
                 p,
                 "expect-fail",
                 format!(
-                    "step `{}` is not a step of this scenario (use when.N or then.N)",
+                    "step `{}` is not a step of this scenario (use given, when.N or then.N)",
                     ef.step
                 ),
             )),
@@ -941,6 +975,33 @@ fn check_model(
 }
 
 /// `as:` must name an `org` piece of `given`.
+/// Every `{<alias>.<word>}` in `text` names an org alias in `given` and a known word.
+fn refer_placeholders(
+    errors: &mut Vec<CheckError>,
+    p: &str,
+    pos: &str,
+    orgs: &BTreeSet<String>,
+    text: &str,
+) {
+    for (alias, word) in crate::engine::identity::placeholders(text) {
+        if !crate::engine::identity::PLACEHOLDER_FIELDS.contains(&word) {
+            errors.push(CheckError::new(
+                p,
+                "step-placeholder",
+                format!(
+                    "{pos}: `{{{alias}.{word}}}` is not a placeholder (userId, username or USERNAME)"
+                ),
+            ));
+        } else if !orgs.contains(alias) {
+            errors.push(CheckError::new(
+                p,
+                "step-alias",
+                format!("{pos}: `{{{alias}.{word}}}` names `{alias}`, which is not an org piece in `given`"),
+            ));
+        }
+    }
+}
+
 fn refer_org(
     errors: &mut Vec<CheckError>,
     p: &str,

@@ -1,5 +1,5 @@
-//! The steps that act as a user with a password: `login`, `change-password` and
-//! `identity-request`. An `org` piece keeps its username, user id and generated password in
+//! The steps that act as a user with a password: `login`, `change-password`,
+//! `identity-request` and `create-user`. An `org` piece keeps its username, user id and generated password in
 //! memory (`Account`); nothing here prints, logs or briefs a password or a token.
 //!
 //! This module is a child of `engine`, so it reads the engine's private state; the shared
@@ -22,7 +22,28 @@ pub enum LoginPassword {
     Previous,
 }
 
-/// `login: { as, password, refused }`
+/// The letter case the login name is sent in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoginCase {
+    /// The name the user was created under.
+    #[default]
+    AsCreated,
+    Lower,
+    Upper,
+}
+
+impl LoginCase {
+    fn apply(self, name: &str) -> String {
+        match self {
+            LoginCase::AsCreated => name.to_string(),
+            LoginCase::Lower => name.to_ascii_lowercase(),
+            LoginCase::Upper => name.to_ascii_uppercase(),
+        }
+    }
+}
+
+/// `login: { as, password, case, refused }`
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Login {
@@ -30,6 +51,9 @@ pub struct Login {
     pub as_: String,
     #[serde(default)]
     pub password: LoginPassword,
+    /// The case of the login name sent: as created (default), lower or upper.
+    #[serde(default)]
+    pub case: LoginCase,
     /// `true`: the login must be refused (401) and nothing is stored.
     #[serde(default)]
     pub refused: bool,
@@ -95,7 +119,11 @@ pub enum Credential {
     Key,
 }
 
-/// `identity-request: { as, credential, method, path, status }`
+/// `identity-request: { as, credential, method, path, status, fields }`
+///
+/// `path` and the string values of `fields` may hold `{<alias>.userId}`, `{<alias>.username}`
+/// and `{<alias>.USERNAME}` (the login name upper-cased) of any `org` identity in `given`; in
+/// `path` the value is percent-encoded.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityRequest {
@@ -107,6 +135,81 @@ pub struct IdentityRequest {
     pub path: String,
     /// The exact status vamd must answer.
     pub status: u16,
+    /// Dotted paths into the JSON body, matched as in other `fields` (exact, `contains`,
+    /// `matches`, `present`, `absent`).
+    pub fields: Option<std::collections::BTreeMap<String, serde_yaml::Value>>,
+}
+
+/// `create-user: { as, username, userId, status, contains }`: `POST /v1/users` with a fresh
+/// password the runner keeps to itself. `as` omitted is the bootstrap key. `username` may hold
+/// `{tag}` (a token unique to the scenario and run) and the placeholders of `identity-request`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateUser {
+    #[serde(rename = "as")]
+    pub as_: Option<String>,
+    pub username: String,
+    /// Sent as `userId` when given (a client-chosen id; the node refuses it).
+    #[serde(rename = "userId")]
+    pub user_id: Option<String>,
+    /// The exact status vamd must answer.
+    pub status: u16,
+    /// A substring the response body must contain.
+    pub contains: Option<String>,
+}
+
+/// A short token (eight lowercase hex digits) that is the same for the same parts and differs
+/// between runs, scenarios and aliases: the parts carry the run tag.
+pub(super) fn unique_token(parts: &[&str]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    parts.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
+}
+
+/// The words a `{<alias>.<word>}` placeholder can use.
+pub const PLACEHOLDER_FIELDS: [&str; 3] = ["userId", "username", "USERNAME"];
+
+/// Every `{<alias>.<word>}` in `text`: `(alias, word)`. `alias` is letters, digits, `_` and `-`;
+/// `word` is letters. Text such as `{{name}}` or `{contains}` is not one.
+pub fn placeholders(text: &str) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('}') else { break };
+        let inner = &rest[..close];
+        if let Some((alias, word)) = inner.split_once('.') {
+            let alias_ok = !alias.is_empty()
+                && alias
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            let word_ok = !word.is_empty() && word.chars().all(|c| c.is_ascii_alphabetic());
+            if alias_ok && word_ok {
+                out.push((alias, word));
+            }
+        }
+    }
+    out
+}
+
+/// Every placeholder (`alias.word`) in the string values of a `fields` map.
+pub fn field_placeholders(
+    fields: &std::collections::BTreeMap<String, serde_yaml::Value>,
+) -> Vec<String> {
+    fn walk(v: &serde_yaml::Value, out: &mut Vec<String>) {
+        match v {
+            serde_yaml::Value::String(s) => {
+                out.extend(placeholders(s).into_iter().map(|(a, w)| format!("{a}.{w}")))
+            }
+            serde_yaml::Value::Mapping(m) => m.values().for_each(|v| walk(v, out)),
+            serde_yaml::Value::Sequence(q) => q.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    fields.values().for_each(|v| walk(v, &mut out));
+    out
 }
 
 fn get() -> String {
@@ -194,7 +297,7 @@ impl Engine {
             .call(
                 reqwest::Method::POST,
                 "/v1/login",
-                Some(&json!({ "username": acc.username, "password": password.0 })),
+                Some(&json!({ "username": l.case.apply(&acc.username), "password": password.0 })),
                 None,
                 false,
             )
@@ -324,6 +427,50 @@ impl Engine {
         Ok(())
     }
 
+    /// `text` with every `{<alias>.userId|username|USERNAME}` replaced; `encode` percent-encodes
+    /// each value (for a path segment).
+    fn expand(&self, text: &str, encode: bool) -> Result<String, Fail> {
+        let mut out = text.to_string();
+        for (alias, word) in placeholders(text) {
+            if !PLACEHOLDER_FIELDS.contains(&word) {
+                continue;
+            }
+            let acc = self.account(alias)?;
+            let value = match word {
+                "userId" => acc.user_id.clone(),
+                "username" => acc.username.clone(),
+                _ => acc.username.to_ascii_uppercase(),
+            };
+            let value = if encode {
+                crate::api::seg(&value)
+            } else {
+                value
+            };
+            out = out.replace(&format!("{{{alias}.{word}}}"), &value);
+        }
+        Ok(out)
+    }
+
+    fn expand_value(&self, v: &serde_yaml::Value) -> Result<serde_yaml::Value, Fail> {
+        use serde_yaml::Value as Y;
+        Ok(match v {
+            Y::String(s) => Y::String(self.expand(s, false)?),
+            Y::Mapping(m) => {
+                let mut out = serde_yaml::Mapping::new();
+                for (k, v) in m {
+                    out.insert(k.clone(), self.expand_value(v)?);
+                }
+                Y::Mapping(out)
+            }
+            Y::Sequence(q) => Y::Sequence(
+                q.iter()
+                    .map(|v| self.expand_value(v))
+                    .collect::<Result<_, _>>()?,
+            ),
+            other => other.clone(),
+        })
+    }
+
     pub(super) fn identity_request(&mut self, x: &IdentityRequest) -> Result<(), Fail> {
         let acc = self.account(&x.as_)?.clone();
         let (bearer, shown) = match x.credential {
@@ -352,12 +499,21 @@ impl Engine {
                 ))
             }
         };
+        let path = self.expand(&x.path, true)?;
+        let fields = match &x.fields {
+            Some(f) => Some(
+                f.iter()
+                    .map(|(k, v)| Ok((k.clone(), self.expand_value(v)?)))
+                    .collect::<Result<std::collections::BTreeMap<_, _>, Fail>>()?,
+            ),
+            None => None,
+        };
         let write = method != reqwest::Method::GET;
         let body = (method == reqwest::Method::POST).then(|| json!({}));
         let want = format!(
             "{} {} as `{}` with {} answers {}",
             x.method.to_uppercase(),
-            x.path,
+            path,
             x.as_,
             match x.credential {
                 Credential::Session => "its session",
@@ -368,13 +524,71 @@ impl Engine {
         );
         let r = self
             .api
-            .call(method, &x.path, body.as_ref(), Some(&bearer), write)
+            .call(method, &path, body.as_ref(), Some(&bearer), write)
             .map_err(conn)?;
         if r.status != x.status {
             return Err(product(
                 want,
                 scrub(&format!("{} {}", r.status, r.body), &[&bearer]),
             ));
+        }
+        if let Some(fields) = fields {
+            let bad = super::field_problems(&r.json(), &fields);
+            if !bad.is_empty() {
+                return Err(product(
+                    format!("{want} with the expected fields"),
+                    scrub(&bad.join("; "), &[&bearer]),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn create_user(&mut self, c: &CreateUser, scenario_id: &str) -> Result<(), Fail> {
+        let bearer = match &c.as_ {
+            Some(a) => self
+                .key_of(Some(a))?
+                .unwrap_or_else(|| self.api.key().to_string()),
+            None => self.api.key().to_string(),
+        };
+        let token = unique_token(&[scenario_id, &self.eff_tag().0]);
+        let username = self.expand(&c.username, false)?.replace("{tag}", &token);
+        let password = secret_hex(24);
+        let mut body = json!({ "username": username, "password": password, "role": "member" });
+        if let Some(id) = &c.user_id {
+            body["userId"] = json!(id);
+        }
+        let want = format!(
+            "POST /v1/users as {} for `{username}`{} answers {}{}",
+            c.as_.as_deref().unwrap_or("the bootstrap key"),
+            c.user_id
+                .as_deref()
+                .map(|i| format!(" with userId `{i}`"))
+                .unwrap_or_default(),
+            c.status,
+            c.contains
+                .as_deref()
+                .map(|s| format!(" with `{s}`"))
+                .unwrap_or_default()
+        );
+        let r = self
+            .api
+            .call(
+                reqwest::Method::POST,
+                "/v1/users",
+                Some(&body),
+                Some(&bearer),
+                true,
+            )
+            .map_err(conn)?;
+        let seen = scrub(&format!("{} {}", r.status, r.body), &[&bearer, &password]);
+        if r.status != c.status {
+            return Err(product(want, seen));
+        }
+        if let Some(sub) = &c.contains {
+            if !r.body.contains(sub.as_str()) {
+                return Err(product(want, seen));
+            }
         }
         Ok(())
     }
@@ -427,6 +641,41 @@ mod tests {
         assert!(
             serde_yaml::from_str::<IdentityRequest>("{ as: m, path: /v1/me, status: 1 }").is_err()
         );
+        let x: IdentityRequest = serde_yaml::from_str(
+            "{ as: m, credential: key, path: /v1/me, status: 200, fields: { userId: { matches: '^usr_' } } }",
+        )
+        .unwrap();
+        assert_eq!(x.fields.map(|f| f.len()), Some(1));
+    }
+
+    #[test]
+    fn login_case_and_create_user_parse() {
+        let l: Login = serde_yaml::from_str("{ as: m, case: upper }").unwrap();
+        assert_eq!(l.case, LoginCase::Upper);
+        let l: Login = serde_yaml::from_str("{ as: m }").unwrap();
+        assert_eq!(l.case, LoginCase::AsCreated);
+        assert_eq!(LoginCase::Upper.apply("Ab+c@Ex.Test"), "AB+C@EX.TEST");
+        assert_eq!(LoginCase::Lower.apply("Ab+c@Ex.Test"), "ab+c@ex.test");
+        assert_eq!(LoginCase::AsCreated.apply("Ab+c@Ex.Test"), "Ab+c@Ex.Test");
+        assert!(serde_yaml::from_str::<Login>("{ as: m, case: title }").is_err());
+        let c: CreateUser =
+            serde_yaml::from_str("{ username: x, userId: usr_a, status: 400 }").unwrap();
+        assert_eq!((c.as_, c.user_id.as_deref()), (None, Some("usr_a")));
+        assert!(serde_yaml::from_str::<CreateUser>("{ username: x }").is_err());
+        assert!(serde_yaml::from_str::<CreateUser>("{ status: 200 }").is_err());
+    }
+
+    #[test]
+    fn placeholders_are_found_and_plain_braces_are_not() {
+        assert_eq!(
+            placeholders(
+                "/v1/users/{member.userId}/keys {a-b.USERNAME} {{name}} {contains} {x.y.z}"
+            ),
+            vec![("member", "userId"), ("a-b", "USERNAME")]
+        );
+        assert_eq!(unique_token(&["a", "b"]), unique_token(&["a", "b"]));
+        assert_ne!(unique_token(&["a", "b"]), unique_token(&["a", "c"]));
+        assert_eq!(unique_token(&["a"]).len(), 8);
     }
 
     #[test]

@@ -614,7 +614,12 @@ impl Engine {
             }
         }
         if wp.kind == PieceKind::Org {
-            self.make_identity(alias, wp.role.as_deref().unwrap_or("Owner"), &name)?;
+            self.make_identity(
+                alias,
+                wp.role.as_deref().unwrap_or("Owner"),
+                &name,
+                wp.username.as_deref(),
+            )?;
         }
         if wp.kind == PieceKind::Secret {
             self.put_secret_piece(alias, &name, &wp)?;
@@ -652,7 +657,13 @@ impl Engine {
 
     /// An `org` piece with a role other than Owner is a second identity: a user with a random
     /// password and one minted key. The bootstrap key stays the Owner.
-    fn make_identity(&mut self, alias: &str, role: &str, name: &str) -> Result<(), Fail> {
+    fn make_identity(
+        &mut self,
+        alias: &str,
+        role: &str,
+        name: &str,
+        template: Option<&str>,
+    ) -> Result<(), Fail> {
         let norm: String = role
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
@@ -671,7 +682,10 @@ impl Engine {
                 ))
             }
         };
-        let username = identity_name(name, alias, &self.eff_tag().0);
+        let username = match template {
+            Some(t) => t.replace("{tag}", &identity::unique_token(&[alias, name])),
+            None => identity_name(name, alias, &self.eff_tag().0),
+        };
         let password = secret_hex(24);
         let r = self
             .api
@@ -681,16 +695,31 @@ impl Engine {
             )
             .map_err(conn)?;
         if !r.ok() {
+            // A piece that names its own login name tests what the node accepts: a refusal is
+            // the product's answer, not a broken harness.
+            let class = if template.is_some() {
+                Class::Product
+            } else {
+                Class::Harness
+            };
             return Err(Fail::new(
-                Class::Harness,
-                format!("POST /v1/users for org piece `{alias}`"),
+                class,
+                format!("POST /v1/users for org piece `{alias}` creates the user"),
                 format!("{} {}", r.status, r.body),
             ));
         }
         let user_id = r.json()["user"]["userId"]
             .as_str()
             .filter(|u| !u.is_empty())
-            .unwrap_or(&username)
+            .ok_or_else(|| {
+                Fail::new(
+                    Class::Product,
+                    format!(
+                        "POST /v1/users for org piece `{alias}` answers the new user's `userId`"
+                    ),
+                    format!("{} without a userId", r.status),
+                )
+            })?
             .to_string();
         let r = self
             .api
@@ -2245,6 +2274,7 @@ impl Engine {
             Step::Login(x) => self.login(x),
             Step::ChangePassword(x) => self.change_password(x),
             Step::IdentityRequest(x) => self.identity_request(x),
+            Step::CreateUser(x) => self.create_user(x, &s.id),
         }
     }
 }
@@ -2479,8 +2509,9 @@ fn yaml_text(v: &serde_yaml::Value) -> String {
     serde_json::to_string(v).unwrap_or_default()
 }
 
-/// Exact JSON equality. The one looser form is `{contains: "text"}`: a string value that
-/// holds the text.
+/// Exact JSON equality. The looser forms are `{contains: "text"}`: a string value that holds the
+/// text, and `{matches: "regex"}`: a string value the regular expression matches (anchor it
+/// with `^` and `$` to match the whole value).
 fn value_matches(got: &Value, want: &serde_yaml::Value) -> bool {
     if let Some(same) = outcomes::numbers_match(got, want) {
         return same;
@@ -2491,6 +2522,12 @@ fn value_matches(got: &Value, want: &serde_yaml::Value) -> bool {
             if k.as_str() == Some("contains") {
                 return match (got.as_str(), v.as_str()) {
                     (Some(g), Some(w)) => g.contains(w),
+                    _ => false,
+                };
+            }
+            if k.as_str() == Some("matches") {
+                return match (got.as_str(), v.as_str()) {
+                    (Some(g), Some(w)) => regex::Regex::new(w).is_ok_and(|re| re.is_match(g)),
                     _ => false,
                 };
             }

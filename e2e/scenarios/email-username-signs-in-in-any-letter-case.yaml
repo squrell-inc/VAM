@@ -1,0 +1,32 @@
+id: email-username-signs-in-in-any-letter-case
+title: A member whose username is an email address signs in in lower, upper and as-typed case
+description: >
+  A member is created under a mixed-case email address with a plus tag. They sign in with the
+  name in lower case, in upper case and as typed. The node shows the username as it was typed,
+  and the default namespace is the part before the at sign, without the plus tag, in lower case.
+tags: [members]
+needs: process
+given:
+  - { piece: org-member-email, as: member }
+when:
+  - login: { as: member, case: lower }
+  - login: { as: member, case: upper }
+  - login: { as: member }
+then:
+  - identity-request:
+      as: member
+      credential: session
+      path: /v1/me
+      status: 200
+      fields:
+        username: "{member.username}"
+        userId: "{member.userId}"
+        role: member
+        defaultNamespace: ada.lovelace
+guards:
+  - vam:crates/vam-orchestrator/src/users.rs
+  - vam:crates/vam-orchestrator/src/session_tokens.rs
+  - vam:crates/vam-orchestrator/src/api/me.rs
+  - vam:crates/vam-spec/src/origin.rs
+status: pending
+expectFail: { step: given, class: product }

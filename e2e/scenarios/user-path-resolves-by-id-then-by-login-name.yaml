@@ -1,0 +1,23 @@
+id: user-path-resolves-by-id-then-by-login-name
+title: A user path takes the user id or the login name in any case, and never reaches the operator
+description: >
+  An admin lists a member's keys by the member's id, by the login name as typed and by the login
+  name in upper case: all reach the same member. The operator's name in any case is still
+  refused with 403.
+tags: [members]
+needs: process
+given:
+  - { piece: org-administrator, as: admin }
+  - { piece: org-member-email, as: member }
+when:
+  - identity-request: { as: admin, credential: key, path: "/v1/users/{member.userId}/keys", status: 200, fields: { "keys.name=e2e.userId": "{member.userId}" } }
+  - identity-request: { as: admin, credential: key, path: "/v1/users/{member.username}/keys", status: 200, fields: { "keys.name=e2e.userId": "{member.userId}" } }
+  - identity-request: { as: admin, credential: key, path: "/v1/users/{member.USERNAME}/keys", status: 200, fields: { "keys.name=e2e.userId": "{member.userId}" } }
+then:
+  - identity-request: { as: admin, credential: key, path: /v1/users/OPERATOR/keys, status: 403 }
+  - identity-request: { as: admin, credential: key, path: /v1/users/Operator/keys, status: 403 }
+guards:
+  - vam:crates/vam-orchestrator/src/users.rs
+  - vam:crates/vam-orchestrator/src/api/users_keys_admin.rs
+status: pending
+expectFail: { step: given, class: product }
