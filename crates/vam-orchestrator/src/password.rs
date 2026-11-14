@@ -191,6 +191,30 @@ mod tests {
     }
 
     #[test]
+    fn password_headless_bootstrap_of_a_reserved_name_only_reuses_an_existing_admin() {
+        // The `vamd --bootstrap-admin` restart path.
+        let store = crate::workflow::SqliteWorkflowStore::in_memory().expect("store");
+        assert!(apply_headless_admin_bootstrap(&store, "bootstrap", "bootstrap-secret").is_err());
+        {
+            let connection = store.connection.lock().expect("lock");
+            connection
+                .execute(
+                    "INSERT INTO users (user_id, username, tenant_id, created_at, role)
+                     VALUES ('bootstrap', 'bootstrap', 'bootstrap', 1, 'org_admin')",
+                    [],
+                )
+                .expect("legacy admin");
+        }
+        store
+            .reset_user_password("bootstrap", "bootstrap-secret")
+            .expect("password");
+        let user = apply_headless_admin_bootstrap(&store, "bootstrap", "bootstrap-secret")
+            .expect("restart keeps the existing admin");
+        assert_eq!(user.user_id, "bootstrap");
+        assert!(user.has_password);
+    }
+
+    #[test]
     fn password_headless_bootstrap_creates_one_admin() {
         let store = crate::workflow::SqliteWorkflowStore::in_memory().expect("store");
         let user =

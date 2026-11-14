@@ -122,6 +122,7 @@ impl SqliteWorkflowStore {
             "UPDATE api_keys SET owner_user_id = ?1 WHERE key_id = ?2",
             params![OPERATOR_USER_ID, BOOTSTRAP_KEY_ID],
         )?;
+        revoke_principal_promoted_keys(&connection)?;
         for table in OWNER_STAMP_TABLES {
             // table names are a fixed allow-list.
             let sql = format!("UPDATE {table} SET owner_user_id = ?1 WHERE owner_user_id IS NULL");
@@ -493,6 +494,58 @@ impl SqliteWorkflowStore {
                 OrchestratorError::InvalidContract(format!("{label} '{id}' has NULL owner_user_id"))
             })
     }
+}
+
+/// One-time repair of a database written by a version that promoted by principal.
+///
+/// The old backfill stamped `operator` on every key whose principal was
+/// `User::"bootstrap"`, including a member's key that an org admin minted with that
+/// principal; the member it belonged to was not recorded. Those rows would keep
+/// authenticating as the operator, so each unrevoked `http` key that is not the
+/// genuine bootstrap key, has that principal (ASCII case ignored) and is owned by
+/// `operator` is revoked, with a warning naming it. The principal only finds the
+/// rows here; it is never used to authorize. Idempotent: revoked rows are skipped,
+/// and the mint paths no longer produce such rows. Grants (other holders) are left
+/// alone: their owner comes from the run that issued them.
+fn revoke_principal_promoted_keys(connection: &Connection) -> Result<(), OrchestratorError> {
+    let rows: Vec<(String, String)> = {
+        let mut stmt = connection.prepare(
+            "SELECT key_id, name FROM api_keys
+             WHERE key_id != ?1
+               AND lower(principal) = lower(?2)
+               AND owner_user_id = ?3
+               AND revoked_at IS NULL
+               AND (holder IS NULL OR holder IN ('', 'http'))",
+        )?;
+        let found = stmt
+            .query_map(
+                params![BOOTSTRAP_KEY_ID, BOOTSTRAP_PRINCIPAL, OPERATOR_USER_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        found
+    };
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(i64::MAX);
+    for (key_id, name) in rows {
+        connection.execute(
+            "UPDATE api_keys SET revoked_at = ?1 WHERE key_id = ?2 AND revoked_at IS NULL",
+            params![now, key_id],
+        )?;
+        tracing::warn!(
+            key_id = %key_id,
+            key_name = %name,
+            "revoked API key '{key_id}' (name '{name}'): its principal is the reserved \
+             bootstrap principal and an earlier version made it operator-owned, so its real \
+             owner is unknown; mint a replacement key"
+        );
+    }
+    Ok(())
 }
 
 fn add_owner_column(
@@ -921,6 +974,102 @@ mod tests {
         };
         assert_eq!(owner_of("key-member"), "alice");
         assert_eq!(owner_of(BOOTSTRAP_KEY_ID), OPERATOR_USER_ID);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn upgrade_revokes_keys_the_old_backfill_made_operator_by_principal() {
+        let path = temp_db_path("principal-repair");
+        let promoted_secret = mint_api_key_secret();
+        let cased_secret = mint_api_key_secret();
+        let member_secret = mint_api_key_secret();
+        let bootstrap_secret = mint_api_key_secret();
+        let already_revoked_at;
+        {
+            let store = SqliteWorkflowStore::open(&path).expect("store");
+            store.create_user("alice", "alice").expect("alice");
+            // Old shape: the old backfill stamped `operator` on these.
+            store
+                .create_api_key_owned(
+                    "key-promoted",
+                    "promoted",
+                    &promoted_secret,
+                    BOOTSTRAP_PRINCIPAL,
+                    &scopes(),
+                    OPERATOR_USER_ID,
+                )
+                .expect("promoted key");
+            store
+                .create_api_key_owned(
+                    "key-cased",
+                    "cased",
+                    &cased_secret,
+                    "USER::\"Bootstrap\"",
+                    &scopes(),
+                    OPERATOR_USER_ID,
+                )
+                .expect("cased key");
+            store
+                .create_api_key_owned(
+                    "key-old-revoked",
+                    "old revoked",
+                    &mint_api_key_secret(),
+                    BOOTSTRAP_PRINCIPAL,
+                    &scopes(),
+                    OPERATOR_USER_ID,
+                )
+                .expect("revoked key");
+            already_revoked_at = store
+                .revoke_api_key("key-old-revoked")
+                .expect("revoke")
+                .revoked_at
+                .expect("revoked_at");
+            store
+                .create_api_key_owned(
+                    "key-member",
+                    "member",
+                    &member_secret,
+                    BOOTSTRAP_PRINCIPAL,
+                    &scopes(),
+                    "alice",
+                )
+                .expect("member key");
+            store
+                .create_api_key(
+                    BOOTSTRAP_KEY_ID,
+                    "bootstrap",
+                    &bootstrap_secret,
+                    BOOTSTRAP_PRINCIPAL,
+                    &scopes(),
+                )
+                .expect("bootstrap key");
+        }
+        // Opening runs the repair; a second open must change nothing more.
+        for _ in 0..2 {
+            let store = SqliteWorkflowStore::open(&path).expect("reopen");
+            for secret in [&promoted_secret, &cased_secret] {
+                assert!(
+                    matches!(
+                        store.authenticate_bearer(secret),
+                        Err(OrchestratorError::PermissionDenied(_))
+                    ),
+                    "a principal-promoted key no longer authenticates"
+                );
+            }
+            let member = store.authenticate_bearer(&member_secret).expect("member");
+            assert_eq!(member.record.owner_user_id, "alice");
+            assert!(member.record.revoked_at.is_none());
+            let bootstrap = store
+                .authenticate_bearer(&bootstrap_secret)
+                .expect("bootstrap");
+            assert_eq!(bootstrap.record.owner_user_id, OPERATOR_USER_ID);
+            assert!(bootstrap.record.revoked_at.is_none());
+            let keys = store.list_api_keys().expect("keys");
+            let find = |id: &str| keys.iter().find(|k| k.key_id == id).expect("key").clone();
+            assert!(find("key-promoted").revoked_at.is_some());
+            assert!(find("key-cased").revoked_at.is_some());
+            assert_eq!(find("key-old-revoked").revoked_at, Some(already_revoked_at));
+        }
         cleanup(&path);
     }
 
