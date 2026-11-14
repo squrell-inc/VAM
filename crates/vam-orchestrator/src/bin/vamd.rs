@@ -101,6 +101,18 @@ fn prepare_state_dir(dir: &std::path::Path) {
     }
 }
 
+/// Exit 1 with the clash list and the fix when usernames clash ignoring letter case.
+fn refuse_on_username_clashes(store: &SqliteWorkflowStore) {
+    let clashes = store.username_clashes();
+    if !clashes.is_empty() {
+        eprint!(
+            "{}",
+            vam_orchestrator::users::username_clash_message(&clashes)
+        );
+        std::process::exit(1);
+    }
+}
+
 /// `vamd --init`, after the TLS material exists: the DB, the signing keys, then the first
 /// admin key when the node has none. The secret goes to stdout once and nowhere else: not to
 /// tracing, not to an error, not to a file (the DB keeps its sha256).
@@ -116,6 +128,7 @@ fn run_init(config: &DaemonConfig) -> ! {
             std::process::exit(1);
         }
     };
+    refuse_on_username_clashes(&store);
     match vam_orchestrator::signing::NodeKeys::load_or_create(&state_dir) {
         Ok(keys) => eprintln!("vamd: {}", keys.startup_line()),
         Err(e) => {
@@ -324,11 +337,16 @@ async fn main() {
     }
 
     let reset_password_user = config.reset_password_user.clone();
+    let rename_user = config.rename_user.clone();
     let bootstrap_admin = config.bootstrap_admin.clone();
     let bootstrap_admin_oneshot = config.bootstrap_admin_oneshot;
     let store = match SqliteWorkflowStore::open(db_path) {
         Ok(store) => Arc::new(store),
-        Err(e) if reset_password_user.is_some() || bootstrap_admin_oneshot => {
+        Err(e)
+            if reset_password_user.is_some()
+                || rename_user.is_some()
+                || bootstrap_admin_oneshot =>
+        {
             eprintln!("Failed to open DB at {:?}: {e}", db_path);
             std::process::exit(1);
         }
@@ -375,6 +393,47 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+    }
+
+    // Offline rename, the fix for usernames that clash ignoring letter case. Like
+    // `--reset-password` it runs on a database that has clashes, before the refusal below.
+    if let Some((user_id, new_username)) = rename_user {
+        let old = match store.get_user(&user_id) {
+            Ok(user) => user,
+            Err(e) => {
+                eprintln!(
+                    "rename failed: {e}; --rename-user takes a user id (the clash list shows each one)"
+                );
+                std::process::exit(1);
+            }
+        };
+        match store.update_username(&user_id, &new_username) {
+            Ok(user) => {
+                println!(
+                    "Renamed user '{}': username '{}' -> '{}'",
+                    user.user_id, old.username, user.username
+                );
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("rename failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Case-insensitive username clashes: refuse to serve (and to bootstrap) until an admin has
+    // renamed all but one user of each group. The check never failed `open` above, so a clash
+    // does not start an empty in-memory node.
+    refuse_on_username_clashes(&store);
+    match store.legacy_identity_notes() {
+        Ok(notes) if !notes.is_empty() => tracing::warn!(
+            "{} existing username(s) would not be allowed for a new user; they are kept and the user id wins when the name is resolved: {}",
+            notes.len(),
+            notes.join("; ")
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("could not check existing usernames: {e}"),
     }
 
     let bootstrap_admin_password =

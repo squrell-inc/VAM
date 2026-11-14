@@ -414,6 +414,9 @@ pub struct SqliteWorkflowStore {
     /// Queued runs the starter is starting right now (AR-3.8): only these may adopt their
     /// PENDING row, so a client cannot start another user's queued message.
     pub(crate) queue_starting: Mutex<HashSet<String>>,
+    /// Groups of usernames equal ignoring letter case, found when the case-insensitive unique
+    /// index could not be created (never an `open` error; `vamd` reads this and refuses to serve).
+    pub(crate) username_clashes: std::sync::RwLock<Vec<crate::users::UsernameClash>>,
     /// Trigger gateway sockets and request windows (E5).
     pub gateways: crate::gateway::Hub,
     /// In-memory per-session CA. The private key never enters SQLite.
@@ -630,6 +633,7 @@ impl SqliteWorkflowStore {
             queue_wake: tokio::sync::Notify::new(),
             resume_wake: tokio::sync::Notify::new(),
             queue_starting: Mutex::new(HashSet::new()),
+            username_clashes: std::sync::RwLock::new(Vec::new()),
             gateways: crate::gateway::Hub::default(),
             session_cas: std::sync::RwLock::new(std::collections::HashMap::new()),
         };

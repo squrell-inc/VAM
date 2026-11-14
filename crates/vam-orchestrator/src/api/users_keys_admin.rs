@@ -32,8 +32,10 @@ fn resolve_target_user(
             "user_id is required".into(),
         ));
     }
-    reject_operator_user_admin_target(user_id)?;
+    // Names match ignoring letter case, so the operator guard runs on the resolved row: the raw
+    // `OPERATOR` reaches the operator only after resolution.
     let user = state.store.resolve_user(user_id)?;
+    reject_operator_user_admin_target(&user.user_id)?;
     reject_deactivated_user(&user)?;
     Ok(user)
 }
@@ -50,8 +52,8 @@ async fn list_user_keys(
     if user_id.trim().is_empty() {
         return Err(OrchestratorError::InvalidContract("user_id is required".into()).into());
     }
-    reject_operator_user_admin_target(&user_id)?;
     let user = state.store.resolve_user(&user_id)?;
+    reject_operator_user_admin_target(&user.user_id)?;
     let keys = state.store.list_api_keys_for_owner(&user.user_id)?;
     let resp = ListApiKeysResponse {
         keys: keys.iter().map(to_proto_key).collect(),

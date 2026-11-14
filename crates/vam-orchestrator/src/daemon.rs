@@ -72,6 +72,10 @@ pub struct DaemonConfig {
     /// When set, `vamd` hashes a new password for this user (from
     /// `VAMD_RESET_PASSWORD`) and exits. Admin-only; no email.
     pub reset_password_user: Option<String>,
+    /// `vamd --rename-user <user_id> <new_username>`: rename one user on the offline database
+    /// and exit. Works on a database whose usernames clash ignoring letter case, which `vamd`
+    /// otherwise refuses to serve. Admin-only; no HTTP route.
+    pub rename_user: Option<(String, String)>,
     /// Username for headless first-admin bootstrap (`VAMD_BOOTSTRAP_ADMIN`
     /// or `--bootstrap-admin`). Password comes from
     /// `VAMD_BOOTSTRAP_ADMIN_PASSWORD`.
@@ -332,6 +336,13 @@ pub fn one_shot_flag_error(args: &[String]) -> Option<String> {
     if has("--preflight") && has("--init") {
         return Some("--preflight and --init cannot be combined".to_string());
     }
+    // `--rename-user` takes two values. Without both, the parser would skip the flag and `vamd`
+    // would start serving instead of renaming.
+    if let Some(at) = args.iter().skip(1).position(|a| a == "--rename-user") {
+        if args.len() < at + 1 + 3 {
+            return Some("--rename-user needs a user id and a new username".to_string());
+        }
+    }
     None
 }
 
@@ -382,6 +393,7 @@ impl DaemonConfig {
             .unwrap_or_default();
         let mut bootstrap_api_key = None;
         let mut reset_password_user = None;
+        let mut rename_user = None;
         let mut bootstrap_admin = None;
         let mut bootstrap_admin_oneshot = false;
         let mut init_oneshot = false;
@@ -520,6 +532,10 @@ impl DaemonConfig {
                     reset_password_user = Some(args[i + 1].clone());
                     i += 2;
                 }
+                "--rename-user" if i + 2 < args.len() => {
+                    rename_user = Some((args[i + 1].clone(), args[i + 2].clone()));
+                    i += 3;
+                }
                 "--bootstrap-admin" if i + 1 < args.len() && !args[i + 1].starts_with('-') => {
                     bootstrap_admin = Some(args[i + 1].clone());
                     bootstrap_admin_oneshot = true;
@@ -615,6 +631,7 @@ impl DaemonConfig {
             tls_extra_sans,
             bootstrap_api_key,
             reset_password_user,
+            rename_user,
             bootstrap_admin,
             bootstrap_admin_oneshot,
             init_oneshot,

@@ -38,6 +38,33 @@ pub const LOCAL_USER_ID: &str = "local";
 /// Mutable display name for the implicit local owner.
 pub const LOCAL_USERNAME: &str = "local";
 
+/// Prefix of a generated `user_id` (`usr_` plus 26 characters `[a-z2-7]`, minted by
+/// [`crate::spaces::mint_id`]). A new username may not start with it (any letter case), so a
+/// login name and a generated id never collide.
+pub const GENERATED_USER_ID_PREFIX: &str = "usr_";
+/// The name the node keeps for the principal of its own bootstrap key. Never a username.
+pub const RESERVED_BOOTSTRAP_NAME: &str = "bootstrap";
+/// Longest username, in characters (an email address can be longer than the old 64).
+pub const MAX_USERNAME_CHARS: usize = 254;
+/// Longest user id. Ids stay at most 64 characters (workspace prefixes embed them).
+pub const MAX_USER_ID_CHARS: usize = 64;
+/// Attempts at minting a free generated id before a create gives up.
+const MAX_GENERATED_ID_ATTEMPTS: usize = 3;
+/// The unique index that makes usernames case-insensitively unique.
+pub const USERNAME_NOCASE_INDEX: &str = "idx_users_username_nocase";
+
+/// True for the shape of a generated user id: `usr_` plus 26 characters `[a-z2-7]`.
+pub fn is_generated_user_id(value: &str) -> bool {
+    value
+        .strip_prefix(GENERATED_USER_ID_PREFIX)
+        .is_some_and(|rest| {
+            rest.len() == 26
+                && rest
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || (b'2'..=b'7').contains(&c))
+        })
+}
+
 /// Control-plane role persisted on `users`. Exactly one per user.
 ///
 /// HITL reviewer/manager are **not** members of this enum. Decision 9 uses
@@ -149,6 +176,9 @@ pub fn reject_deactivated_user(user: &UserRecord) -> Result<(), OrchestratorErro
 }
 
 /// Org-admin user/key APIs must not target the deployment operator row.
+///
+/// Pass the **resolved** user's `user_id`, never the raw path or body value: names are matched
+/// ignoring letter case, so `OPERATOR` reaches the operator row only after resolution.
 pub fn reject_operator_user_admin_target(user_id: &str) -> Result<(), OrchestratorError> {
     if user_id == OPERATOR_USER_ID {
         return Err(OrchestratorError::PermissionDenied(
@@ -165,6 +195,109 @@ pub enum ChangeOwnPassword {
     Changed(UserRecord),
     /// `current` did not verify (or the user has no password). Nothing changed.
     WrongCurrent,
+}
+
+/// Usernames that are equal once letter case is ignored (ASCII), found when the case-insensitive
+/// unique index could not be created. Each member is `(user_id, username)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsernameClash {
+    pub members: Vec<(String, String)>,
+}
+
+/// What `vamd` prints, and exits 1 on, while clashes exist. Each group lists its usernames with
+/// their user ids; the fix is the offline `--rename-user` flag.
+pub fn username_clash_message(clashes: &[UsernameClash]) -> String {
+    let mut out =
+        String::from("vamd: usernames must be unique ignoring letter case; these clash:\n");
+    for group in clashes {
+        let line = group
+            .members
+            .iter()
+            .map(|(user_id, username)| format!("{username} (user id {user_id})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("  {line}\n"));
+    }
+    out.push_str("Rename all but one user of each group, then start vamd again:\n");
+    out.push_str("  vamd --rename-user <user_id> <new_username>\n");
+    out.push_str(
+        "Use the same database as for serving (--db-path or VAMD_DB_PATH). A user id and every \
+         row it owns stay as they are; only the login name changes.\n",
+    );
+    out
+}
+
+/// Groups of users whose usernames are equal ignoring ASCII case (SQLite `NOCASE` folds ASCII
+/// only, and so does this). Each group has two or more members, oldest first.
+fn find_username_clashes(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<UsernameClash>, OrchestratorError> {
+    let mut stmt = connection
+        .prepare("SELECT user_id, username FROM users ORDER BY created_at ASC, user_id ASC")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut groups: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    for (user_id, username) in rows {
+        let key = username.to_ascii_lowercase();
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push((user_id, username)),
+            None => groups.push((key, vec![(user_id, username)])),
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .filter(|(_, members)| members.len() > 1)
+        .map(|(_, members)| UsernameClash { members })
+        .collect())
+}
+
+/// A username must be free: no other user holds it ignoring letter case, and it is not another
+/// user's id (ignoring letter case), since resolution tries the id first. `own_user_id` is the
+/// row being created or renamed, which never clashes with itself.
+fn ensure_username_available(
+    connection: &rusqlite::Connection,
+    username: &str,
+    own_user_id: &str,
+) -> Result<(), OrchestratorError> {
+    let holder: Option<String> = connection
+        .query_row(
+            "SELECT username FROM users
+             WHERE username = ?1 COLLATE NOCASE AND user_id != ?2 LIMIT 1",
+            params![username, own_user_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if holder.is_some() {
+        return Err(OrchestratorError::Conflict(format!(
+            "username '{username}' is already taken (usernames are matched ignoring letter case)"
+        )));
+    }
+    let id_holder: Option<String> = connection
+        .query_row(
+            "SELECT user_id FROM users
+             WHERE user_id = ?1 COLLATE NOCASE AND user_id != ?2 LIMIT 1",
+            params![username, own_user_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if id_holder.is_some() {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "username '{username}' is the id of another user"
+        )));
+    }
+    Ok(())
+}
+
+/// How one insert of a `users` row ended.
+enum UserInsert {
+    Inserted,
+    /// The primary key was taken (a generated id may retry).
+    IdTaken,
+    /// The username was taken (a unique index, whichever one).
+    NameTaken,
 }
 
 impl SqliteWorkflowStore {
@@ -196,7 +329,115 @@ impl SqliteWorkflowStore {
         add_users_deactivated_column(&connection)?;
         drop(connection);
         self.seed_builtin_users()?;
+        self.ensure_username_nocase_index()?;
         Ok(())
+    }
+
+    /// Make usernames unique ignoring ASCII letter case (decision 16).
+    ///
+    /// Idempotent, run on every open. With the index present there is nothing to do. Without it,
+    /// the users are checked first: when no two usernames are equal ignoring case the unique
+    /// index is created; otherwise **no index is created** and the clashing groups are kept on
+    /// the store ([`Self::username_clashes`]). A clash is never an `open` error: `vamd` falls
+    /// back to an empty in-memory store when `open` fails, which would serve a node with no
+    /// users. `vamd` reads the groups instead and refuses to serve or `--init`.
+    pub(crate) fn ensure_username_nocase_index(&self) -> Result<(), OrchestratorError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let exists: Option<i64> = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [USERNAME_NOCASE_INDEX],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let clashes = if exists.is_some() {
+            Vec::new()
+        } else {
+            let clashes = find_username_clashes(&connection)?;
+            if clashes.is_empty() {
+                connection.execute_batch(&format!(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS {USERNAME_NOCASE_INDEX}
+                     ON users(username COLLATE NOCASE);"
+                ))?;
+            }
+            clashes
+        };
+        drop(connection);
+        *self
+            .username_clashes
+            .write()
+            .map_err(|_| OrchestratorError::StorageUnavailable)? = clashes;
+        Ok(())
+    }
+
+    /// The groups of usernames that clash ignoring letter case, found when this store was
+    /// opened. Empty when the case-insensitive unique index exists.
+    pub fn username_clashes(&self) -> Vec<UsernameClash> {
+        self.username_clashes
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// True when the case-insensitive unique index on `users.username` exists.
+    pub fn username_nocase_index_exists(&self) -> Result<bool, OrchestratorError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let exists: Option<i64> = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [USERNAME_NOCASE_INDEX],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(exists.is_some())
+    }
+
+    /// Existing users whose name the new rules would not allow (a username that starts `usr_`,
+    /// is `bootstrap`, or equals another user's id, ignoring case). They are kept, not renamed;
+    /// resolution prefers the id. `vamd` logs them once at start.
+    pub fn legacy_identity_notes(&self) -> Result<Vec<String>, OrchestratorError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let mut stmt = connection.prepare(
+            "SELECT user_id, username FROM users
+             WHERE user_id NOT LIKE 'marketplace:%' ORDER BY created_at ASC, user_id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut notes = Vec::new();
+        for (user_id, username) in &rows {
+            let lower = username.to_ascii_lowercase();
+            if lower.starts_with(GENERATED_USER_ID_PREFIX) {
+                notes.push(format!(
+                    "username '{username}' (user id {user_id}) starts with '{GENERATED_USER_ID_PREFIX}', which is reserved for generated ids"
+                ));
+            }
+            if lower == RESERVED_BOOTSTRAP_NAME {
+                notes.push(format!(
+                    "username '{username}' (user id {user_id}) is the name the node keeps for its own key"
+                ));
+            }
+            if let Some((other, _)) = rows
+                .iter()
+                .find(|(other, _)| other != user_id && other.eq_ignore_ascii_case(username))
+            {
+                notes.push(format!(
+                    "username '{username}' (user id {user_id}) is the id of user '{other}'; the id wins when that name is resolved"
+                ));
+            }
+        }
+        Ok(notes)
     }
 
     /// Insert well-known operator and local users if missing.
@@ -238,8 +479,9 @@ impl SqliteWorkflowStore {
 
     /// Headless first-admin bootstrap: create (or reuse) one loginable admin.
     ///
-    /// Idempotent when the same username already has a password. Conflicts
-    /// when a *different* user was already bootstrapped. No SMTP and no UI.
+    /// Idempotent when the same username (ignoring letter case) already has a password.
+    /// Conflicts when a *different* user was already bootstrapped. A new admin gets a generated
+    /// `usr_` id like any other new user. No SMTP and no UI.
     pub fn bootstrap_first_admin(
         &self,
         username: &str,
@@ -259,7 +501,7 @@ impl SqliteWorkflowStore {
         let user = match self.resolve_user(&username) {
             Ok(user) => user,
             Err(OrchestratorError::NotFound(_)) => {
-                self.create_user_with_role(&username, &username, UserRole::OrgAdmin)?
+                self.create_generated_user(&username, None, UserRole::OrgAdmin)?
             }
             Err(e) => return Err(e),
         };
@@ -269,39 +511,30 @@ impl SqliteWorkflowStore {
         self.reset_user_password(&user.user_id, password)
     }
 
-    /// Create a control-plane user with an explicit role.
+    /// Create a control-plane user with an explicit id and role.
+    ///
+    /// For seeds and tests only: the API never lets a client choose an id (see
+    /// [`Self::create_managed_user_generated`]). The id keeps the old rules (ASCII letters,
+    /// digits, `.`, `_`, `-`, at most 64); the username follows [`validate_username`].
     pub fn create_user_with_role(
         &self,
         user_id: &str,
         username: &str,
         role: UserRole,
     ) -> Result<UserRecord, OrchestratorError> {
-        let user_id = validate_username(user_id)?;
+        let user_id = validate_user_id(user_id)?;
         let username = validate_username(username)?;
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        let now = unix_timestamp();
-        match connection.execute(
-            "INSERT INTO users (user_id, username, tenant_id, created_at, role)
-             VALUES (?1, ?2, ?1, ?3, ?4)",
-            params![user_id, username, now, role.as_str()],
-        ) {
-            Ok(_) => {}
-            Err(e) if is_unique_violation(&e) => {
-                return Err(OrchestratorError::Conflict(format!(
-                    "user '{user_id}' or username '{username}' already exists"
-                )));
-            }
-            Err(e) => return Err(OrchestratorError::Database(e)),
+        match self.insert_user_row(user_id, username, role, None)? {
+            UserInsert::Inserted => self.get_user(user_id),
+            UserInsert::IdTaken | UserInsert::NameTaken => Err(OrchestratorError::Conflict(
+                format!("user '{user_id}' or username '{username}' already exists"),
+            )),
         }
-        drop(connection);
-        self.get_user(user_id)
     }
 
-    /// Org-admin create: unique username, argon2id password, optional role.
-    /// `user_id` defaults to `username`. Cannot create `operator`.
+    /// Org-admin create with an explicit id: unique username, argon2id password, optional role.
+    /// For seeds and tests; `POST /v1/users` uses [`Self::create_managed_user_generated`].
+    /// Cannot create `operator`.
     pub fn create_managed_user(
         &self,
         user_id: &str,
@@ -314,29 +547,113 @@ impl SqliteWorkflowStore {
                 "cannot create operator via users:admin".to_string(),
             ));
         }
-        let user_id = validate_username(user_id)?;
+        let user_id = validate_user_id(user_id)?;
         let username = validate_username(username)?;
         let encoded = hash_password(password)?;
+        match self.insert_user_row(user_id, username, role, Some(&encoded))? {
+            UserInsert::Inserted => self.get_user(user_id),
+            UserInsert::IdTaken | UserInsert::NameTaken => Err(OrchestratorError::Conflict(
+                format!("user '{user_id}' or username '{username}' already exists"),
+            )),
+        }
+    }
+
+    /// Org-admin create for `POST /v1/users`: the node mints the id (`usr_` plus 26 characters
+    /// `[a-z2-7]`). A unique username (ignoring letter case), an argon2id password and a role.
+    /// Cannot create `operator`.
+    pub fn create_managed_user_generated(
+        &self,
+        username: &str,
+        password: &str,
+        role: UserRole,
+    ) -> Result<UserRecord, OrchestratorError> {
+        if role == UserRole::Operator {
+            return Err(OrchestratorError::PermissionDenied(
+                "cannot create operator via users:admin".to_string(),
+            ));
+        }
+        self.create_generated_user(username, Some(password), role)
+    }
+
+    /// Create a user under a freshly minted id. The password, when given, is hashed once. A
+    /// primary-key clash mints a new id (at most [`MAX_GENERATED_ID_ATTEMPTS`] tries).
+    pub(crate) fn create_generated_user(
+        &self,
+        username: &str,
+        password: Option<&str>,
+        role: UserRole,
+    ) -> Result<UserRecord, OrchestratorError> {
+        self.create_generated_user_with(username, password, role, || {
+            crate::spaces::mint_id(GENERATED_USER_ID_PREFIX)
+        })
+    }
+
+    /// [`Self::create_generated_user`] with the id minter passed in, so a test can force a
+    /// primary-key clash.
+    pub(crate) fn create_generated_user_with(
+        &self,
+        username: &str,
+        password: Option<&str>,
+        role: UserRole,
+        mut mint: impl FnMut() -> String,
+    ) -> Result<UserRecord, OrchestratorError> {
+        let username = validate_username(username)?;
+        let encoded = password.map(hash_password).transpose()?;
+        for _ in 0..MAX_GENERATED_ID_ATTEMPTS {
+            let user_id = mint();
+            match self.insert_user_row(&user_id, username, role, encoded.as_deref())? {
+                UserInsert::Inserted => return self.get_user(&user_id),
+                UserInsert::IdTaken => continue,
+                UserInsert::NameTaken => {
+                    return Err(OrchestratorError::Conflict(format!(
+                        "username '{username}' is already taken (usernames are matched ignoring letter case)"
+                    )));
+                }
+            }
+        }
+        Err(OrchestratorError::Conflict(
+            "could not generate an unused user id; try again".to_string(),
+        ))
+    }
+
+    /// One insert of a `users` row. The username is checked first (taken ignoring letter case,
+    /// or another user's id), so the answer does not depend on which unique index exists.
+    fn insert_user_row(
+        &self,
+        user_id: &str,
+        username: &str,
+        role: UserRole,
+        password_hash: Option<&str>,
+    ) -> Result<UserInsert, OrchestratorError> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        ensure_username_available(&connection, username, user_id)?;
         let now = unix_timestamp();
-        match connection.execute(
-            "INSERT INTO users (user_id, username, tenant_id, created_at, role, password_hash, password_updated_at)
-             VALUES (?1, ?2, ?1, ?3, ?4, ?5, ?3)",
-            params![user_id, username, now, role.as_str(), encoded],
-        ) {
-            Ok(_) => {}
+        let result = match password_hash {
+            Some(hash) => connection.execute(
+                "INSERT INTO users (user_id, username, tenant_id, created_at, role, password_hash, password_updated_at)
+                 VALUES (?1, ?2, ?1, ?3, ?4, ?5, ?3)",
+                params![user_id, username, now, role.as_str(), hash],
+            ),
+            None => connection.execute(
+                "INSERT INTO users (user_id, username, tenant_id, created_at, role)
+                 VALUES (?1, ?2, ?1, ?3, ?4)",
+                params![user_id, username, now, role.as_str()],
+            ),
+        };
+        match result {
+            Ok(_) => Ok(UserInsert::Inserted),
             Err(e) if is_unique_violation(&e) => {
-                return Err(OrchestratorError::Conflict(format!(
-                    "user '{user_id}' or username '{username}' already exists"
-                )));
+                if e.to_string().contains("users.user_id") {
+                    Ok(UserInsert::IdTaken)
+                } else {
+                    Ok(UserInsert::NameTaken)
+                }
             }
-            Err(e) => return Err(OrchestratorError::Database(e)),
+            Err(e) => Err(OrchestratorError::Database(e)),
         }
-        drop(connection);
-        self.get_user(user_id)
     }
 
     /// Mark a user inactive, revoke their API keys and session tokens.
@@ -479,25 +796,37 @@ impl SqliteWorkflowStore {
             })
     }
 
+    /// Look a user up by login name, ignoring ASCII letter case.
+    ///
+    /// With the case-insensitive unique index there is at most one match. On a database that
+    /// still has clashing usernames (`vamd` refuses to serve it, but the offline flags run on
+    /// it) an exact-case match wins, and a name that matches several rows only by case is a
+    /// conflict rather than an arbitrary pick.
     pub fn get_user_by_username(&self, username: &str) -> Result<UserRecord, OrchestratorError> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        connection
-            .query_row(
-                "SELECT user_id, username, tenant_id, created_at, password_hash, password_updated_at, role, deactivated_at
-                 FROM users WHERE username = ?1",
-                [username],
-                parse_user_row,
-            )
-            .map_err(|e| {
-                if e == rusqlite::Error::QueryReturnedNoRows {
-                    OrchestratorError::NotFound(format!("username '{}' not found", username))
-                } else {
-                    OrchestratorError::Database(e)
-                }
-            })
+        let mut stmt = connection.prepare(
+            "SELECT user_id, username, tenant_id, created_at, password_hash, password_updated_at, role, deactivated_at
+             FROM users WHERE username = ?1 COLLATE NOCASE
+             ORDER BY (username = ?1) DESC, created_at ASC, user_id ASC LIMIT 2",
+        )?;
+        let mut rows = stmt
+            .query_map([username], parse_user_row)?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter();
+        match (rows.next(), rows.next()) {
+            (None, _) => Err(OrchestratorError::NotFound(format!(
+                "username '{}' not found",
+                username
+            ))),
+            (Some(only), None) => Ok(only),
+            (Some(first), Some(_)) if first.username == username => Ok(first),
+            (Some(_), Some(_)) => Err(OrchestratorError::Conflict(format!(
+                "username '{username}' matches more than one user ignoring letter case; use the user id"
+            ))),
+        }
     }
 
     pub fn list_users(&self) -> Result<Vec<UserRecord>, OrchestratorError> {
@@ -516,29 +845,44 @@ impl SqliteWorkflowStore {
     }
 
     /// Rename a user. `user_id` is never changed.
+    ///
+    /// The new name follows [`validate_username`] and must be free: another user holding it
+    /// ignoring letter case (or a unique-index violation) is a conflict, and a name equal to
+    /// another user's id is refused. A user may change only the letter case of their own name.
+    /// No HTTP route renames; `vamd --rename-user` is the offline caller.
     pub fn update_username(
         &self,
         user_id: &str,
         new_username: &str,
     ) -> Result<UserRecord, OrchestratorError> {
-        if new_username.trim().is_empty() {
-            return Err(OrchestratorError::InvalidContract(
-                "username must be non-empty".to_string(),
-            ));
-        }
+        let new_username = validate_username(new_username)?;
         let connection = self
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        let changed = connection.execute(
-            "UPDATE users SET username = ?1 WHERE user_id = ?2",
-            params![new_username, user_id],
-        )?;
-        if changed == 0 {
+        let exists: Option<i64> = connection
+            .query_row("SELECT 1 FROM users WHERE user_id = ?1", [user_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        if exists.is_none() {
             return Err(OrchestratorError::NotFound(format!(
                 "user '{}' not found",
                 user_id
             )));
+        }
+        ensure_username_available(&connection, new_username, user_id)?;
+        match connection.execute(
+            "UPDATE users SET username = ?1 WHERE user_id = ?2",
+            params![new_username, user_id],
+        ) {
+            Ok(_) => {}
+            Err(e) if is_unique_violation(&e) => {
+                return Err(OrchestratorError::Conflict(format!(
+                    "username '{new_username}' is already taken (usernames are matched ignoring letter case)"
+                )));
+            }
+            Err(e) => return Err(OrchestratorError::Database(e)),
         }
         drop(connection);
         self.get_user(user_id)
@@ -554,7 +898,10 @@ impl SqliteWorkflowStore {
         Ok(count as usize)
     }
 
-    /// Resolve by immutable `user_id`, then by unique `username`.
+    /// The one resolution rule for a value that may be an id or a login name (login,
+    /// `/v1/users/{x}/keys*`, `POST /v1/keys` `userId`, `vamd --reset-password`): an exact,
+    /// case-sensitive `user_id` wins; otherwise the `username` matches ignoring ASCII letter
+    /// case. Guards that protect the operator must check the **resolved** `user_id`.
     pub fn resolve_user(&self, user_id_or_username: &str) -> Result<UserRecord, OrchestratorError> {
         match self.get_user(user_id_or_username) {
             Ok(user) => Ok(user),
@@ -763,25 +1110,72 @@ fn is_unique_violation(err: &rusqlite::Error) -> bool {
     err.to_string().to_lowercase().contains("unique")
 }
 
-fn validate_username(value: &str) -> Result<&str, OrchestratorError> {
+/// The id rules, unchanged: non-empty, at most 64 characters, ASCII letters, digits, `.`, `-`,
+/// `_`. Existing ids and the ids of seed rows pass; generated ids (`usr_` + 26 of `[a-z2-7]`)
+/// pass too.
+fn validate_user_id(value: &str) -> Result<&str, OrchestratorError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(OrchestratorError::InvalidContract(
-            "username must be non-empty".to_string(),
+            "user_id must be non-empty".to_string(),
         ));
     }
-    if trimmed.len() > 64 {
-        return Err(OrchestratorError::InvalidContract(
-            "username must be at most 64 characters".to_string(),
-        ));
+    if trimmed.len() > MAX_USER_ID_CHARS {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "user_id must be at most {MAX_USER_ID_CHARS} characters"
+        )));
     }
     if !trimmed
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
     {
         return Err(OrchestratorError::InvalidContract(
-            "username may contain only ASCII letters, digits, '.', '-', and '_'".to_string(),
+            "user_id may contain only ASCII letters, digits, '.', '-', and '_'".to_string(),
         ));
+    }
+    Ok(trimmed)
+}
+
+/// The login-name rules for a new or renamed username (decision 16): non-empty, at most
+/// [`MAX_USERNAME_CHARS`] characters, ASCII letters, digits, `.`, `-`, `_`, `+` and `@`, at most
+/// one `@`, not starting with `usr_` (any letter case: generated ids) and not `bootstrap` (any
+/// letter case: the node's own key). Leading and trailing white space is trimmed. Whether the
+/// name is free (letter case ignored, not another user's id) is checked by the store.
+pub fn validate_username(value: &str) -> Result<&str, OrchestratorError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(OrchestratorError::InvalidContract(
+            "username must be non-empty".to_string(),
+        ));
+    }
+    if trimmed.chars().count() > MAX_USERNAME_CHARS {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "username must be at most {MAX_USERNAME_CHARS} characters"
+        )));
+    }
+    if !trimmed.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '+' || c == '@'
+    }) {
+        return Err(OrchestratorError::InvalidContract(
+            "username may contain only ASCII letters, digits, '.', '-', '_', '+', and '@'"
+                .to_string(),
+        ));
+    }
+    if trimmed.matches('@').count() > 1 {
+        return Err(OrchestratorError::InvalidContract(
+            "username may contain at most one '@'".to_string(),
+        ));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with(GENERATED_USER_ID_PREFIX) {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "username must not start with '{GENERATED_USER_ID_PREFIX}' (reserved for generated user ids)"
+        )));
+    }
+    if lower == RESERVED_BOOTSTRAP_NAME {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "username '{RESERVED_BOOTSTRAP_NAME}' is reserved"
+        )));
     }
     Ok(trimmed)
 }
@@ -1050,7 +1444,11 @@ mod tests {
         let admin = store
             .bootstrap_first_admin("admin", "headless-admin-secret")
             .expect("bootstrap");
-        assert_eq!(admin.user_id, "admin");
+        assert!(
+            is_generated_user_id(&admin.user_id),
+            "the first admin gets a generated id, got {}",
+            admin.user_id
+        );
         assert_eq!(admin.username, "admin");
         assert_eq!(admin.role, UserRole::OrgAdmin);
         assert!(admin.has_password);
@@ -1066,7 +1464,13 @@ mod tests {
         let again = store
             .bootstrap_first_admin("admin", "ignored-on-repeat")
             .expect("idempotent");
-        assert_eq!(again.user_id, "admin");
+        assert_eq!(again.user_id, admin.user_id);
+        // ... also when the name is typed in another letter case.
+        let shouted = store
+            .bootstrap_first_admin("ADMIN", "ignored-on-repeat")
+            .expect("idempotent ignoring case");
+        assert_eq!(shouted.user_id, admin.user_id);
+        assert_eq!(store.user_count().expect("users"), 3);
         assert_eq!(store.count_users_with_password().expect("count"), 1);
         assert!(store
             .verify_user_password("admin", "headless-admin-secret")
@@ -1510,5 +1914,585 @@ mod tests {
             .change_own_password("dave", "dave-secret", "dave-new")
             .expect_err("deactivated");
         assert!(matches!(err, OrchestratorError::Unauthenticated));
+    }
+
+    // ---- Phase 2: generated ids, login names, resolution (user-identity UI-2.2 to UI-2.4) ----
+
+    fn remove_db(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    /// A database as an older node left it: a `users` table with the first four columns and
+    /// the given `(user_id, username)` rows, no index but the column's `UNIQUE`.
+    fn old_schema_db(label: &str, rows: &[(&str, &str)]) -> PathBuf {
+        let path = temp_db_path(label);
+        let conn = Connection::open(&path).expect("legacy open");
+        conn.execute_batch(
+            "CREATE TABLE users (
+                user_id TEXT PRIMARY KEY NOT NULL,
+                username TEXT NOT NULL UNIQUE,
+                tenant_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );",
+        )
+        .expect("legacy schema");
+        for (i, (user_id, username)) in rows.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO users (user_id, username, tenant_id, created_at) VALUES (?1, ?2, ?1, ?3)",
+                params![user_id, username, 100 + i as i64],
+            )
+            .expect("legacy row");
+        }
+        path
+    }
+
+    fn invalid(err: OrchestratorError) -> String {
+        match err {
+            OrchestratorError::InvalidContract(msg) => msg,
+            other => panic!("expected InvalidContract, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn username_accepts_login_names_and_email_addresses() {
+        for ok in [
+            "alice",
+            "a.b-c_d",
+            "Ada.Lovelace+work@Example.com",
+            "x@y",
+            "first+tag+more@mail.example.test",
+            "usr",
+            "bootstrapper",
+            "user_x",
+            "  padded  ",
+        ] {
+            assert!(validate_username(ok).is_ok(), "{ok:?} should be allowed");
+        }
+        assert_eq!(validate_username("  padded  ").expect("trim"), "padded");
+        // 254 characters pass, 255 do not.
+        let longest = format!("{}@{}", "a".repeat(100), "b".repeat(153));
+        assert_eq!(longest.len(), 254);
+        assert!(validate_username(&longest).is_ok());
+        let too_long = format!("{longest}c");
+        assert!(invalid(validate_username(&too_long).expect_err("255")).contains("254"));
+    }
+
+    #[test]
+    fn username_rejects_bad_charset_second_at_and_empty() {
+        assert!(invalid(validate_username("").expect_err("empty")).contains("non-empty"));
+        assert!(invalid(validate_username("   ").expect_err("blank")).contains("non-empty"));
+        for bad in [
+            "has space",
+            "tab\there",
+            "ünï",
+            "name/slash",
+            "name:colon",
+            "a,b",
+            "a%40b",
+            "quote\"d",
+        ] {
+            let msg = invalid(validate_username(bad).expect_err(bad));
+            assert!(msg.contains("ASCII letters"), "{bad:?}: {msg}");
+        }
+        let msg = invalid(validate_username("a@b@c").expect_err("two at signs"));
+        assert!(msg.contains("one '@'"), "{msg}");
+    }
+
+    #[test]
+    fn username_rejects_reserved_prefix_and_bootstrap_in_any_case() {
+        for reserved in ["usr_abc", "USR_abc", "Usr_", "uSr_x@y.z"] {
+            let msg = invalid(validate_username(reserved).expect_err(reserved));
+            assert!(msg.contains("usr_"), "{reserved}: {msg}");
+        }
+        for reserved in ["bootstrap", "Bootstrap", "BOOTSTRAP"] {
+            let msg = invalid(validate_username(reserved).expect_err(reserved));
+            assert!(msg.contains("reserved"), "{reserved}: {msg}");
+        }
+    }
+
+    #[test]
+    fn user_ids_keep_the_old_validator() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        // An id may not hold '@' or '+' (workspace prefixes embed ids), and stops at 64.
+        for bad in ["a@b", "a+b", "", &"x".repeat(65)] {
+            assert!(
+                matches!(
+                    store.create_user(bad, "someone"),
+                    Err(OrchestratorError::InvalidContract(_))
+                ),
+                "id {bad:?} should be refused"
+            );
+        }
+        let sixty_four = "x".repeat(64);
+        store
+            .create_user(&sixty_four, "long-id-user")
+            .expect("64 characters");
+        // A username that is allowed to be longer than 64 still is not an id.
+        let long_name = "n".repeat(100);
+        store
+            .create_user("short-id", &long_name)
+            .expect("100-char name");
+        // A generated id passes the id validator.
+        let generated = crate::spaces::mint_id(GENERATED_USER_ID_PREFIX);
+        assert!(validate_user_id(&generated).is_ok());
+        assert!(generated.len() <= MAX_USER_ID_CHARS);
+    }
+
+    #[test]
+    fn generated_users_get_usr_ids_that_differ_from_the_username() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        let a = store
+            .create_managed_user_generated("dana", "dana-secret", UserRole::Member)
+            .expect("create a");
+        let b = store
+            .create_managed_user_generated("erin@example.test", "erin-secret", UserRole::Publisher)
+            .expect("create b");
+        for user in [&a, &b] {
+            assert!(is_generated_user_id(&user.user_id), "{}", user.user_id);
+            assert_ne!(user.user_id, user.username);
+            assert_eq!(user.tenant_id, user.user_id);
+            assert!(user.has_password);
+        }
+        assert_ne!(a.user_id, b.user_id);
+        assert_eq!(b.role, UserRole::Publisher);
+        assert_eq!(b.username, "erin@example.test");
+        // Looked up by the id, and by the name in any letter case.
+        assert_eq!(store.get_user(&a.user_id).expect("by id").username, "dana");
+        assert_eq!(
+            store
+                .resolve_user("ERIN@Example.TEST")
+                .expect("by name")
+                .user_id,
+            b.user_id
+        );
+        // Operator stays refused.
+        assert!(matches!(
+            store.create_managed_user_generated("op2", "pw", UserRole::Operator),
+            Err(OrchestratorError::PermissionDenied(_))
+        ));
+    }
+
+    #[test]
+    fn generated_id_retries_on_a_primary_key_clash_at_most_three_times() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store.create_user("usr_taken", "holder").expect("taken id");
+        // Two clashes, then a free id: created on the third attempt.
+        let mut calls = 0;
+        let user = store
+            .create_generated_user_with("retry-ok", None, UserRole::Member, || {
+                calls += 1;
+                if calls < 3 {
+                    "usr_taken".to_string()
+                } else {
+                    "usr_third".to_string()
+                }
+            })
+            .expect("third attempt");
+        assert_eq!(calls, 3);
+        assert_eq!(user.user_id, "usr_third");
+        // Three clashes: it gives up, and leaves no row.
+        let mut calls = 0;
+        let err = store
+            .create_generated_user_with("retry-fail", None, UserRole::Member, || {
+                calls += 1;
+                "usr_taken".to_string()
+            })
+            .expect_err("three clashes");
+        assert_eq!(calls, 3);
+        assert!(matches!(err, OrchestratorError::Conflict(_)), "{err:?}");
+        assert!(store.get_user_by_username("retry-fail").is_err());
+        // A taken username is a conflict at once, not three retries.
+        let mut calls = 0;
+        let err = store
+            .create_generated_user_with("RETRY-OK", None, UserRole::Member, || {
+                calls += 1;
+                format!("usr_fresh{calls}")
+            })
+            .expect_err("username taken");
+        assert!(matches!(err, OrchestratorError::Conflict(_)), "{err:?}");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn a_username_equal_ignoring_case_to_another_is_a_conflict() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store
+            .create_managed_user_generated("Ada.Lovelace@Example.Test", "pw-ada", UserRole::Member)
+            .expect("first");
+        for twin in ["ada.lovelace@example.test", "ADA.LOVELACE@EXAMPLE.TEST"] {
+            let err = store
+                .create_managed_user_generated(twin, "pw-twin", UserRole::Member)
+                .expect_err(twin);
+            assert!(
+                matches!(err, OrchestratorError::Conflict(_)),
+                "{twin}: {err:?}"
+            );
+        }
+        // The seed rows hold their names too.
+        let err = store
+            .create_managed_user_generated("OPERATOR", "pw-op", UserRole::Member)
+            .expect_err("operator name");
+        assert!(matches!(err, OrchestratorError::Conflict(_)), "{err:?}");
+        // The explicit-id methods answer the same, and no row appears.
+        let before = store.user_count().expect("count");
+        let err = store
+            .create_user("fresh-id", "LOCAL")
+            .expect_err("local name");
+        assert!(matches!(err, OrchestratorError::Conflict(_)), "{err:?}");
+        assert_eq!(store.user_count().expect("count"), before);
+    }
+
+    #[test]
+    fn the_index_enforces_it_below_the_api() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        let connection = store.connection.lock().expect("lock");
+        let err = connection
+            .execute(
+                "INSERT INTO users (user_id, username, tenant_id, created_at)
+                 VALUES ('other', 'OPERATOR', 'other', 1)",
+                [],
+            )
+            .expect_err("a case-different duplicate must fail");
+        assert!(is_unique_violation(&err), "{err}");
+    }
+
+    #[test]
+    fn a_username_may_not_equal_another_users_id() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store.create_user("carol", "caroline").expect("carol");
+        for taken in ["carol", "CAROL"] {
+            let msg = invalid(
+                store
+                    .create_managed_user_generated(taken, "pw", UserRole::Member)
+                    .expect_err(taken),
+            );
+            assert!(msg.contains("id of another user"), "{taken}: {msg}");
+        }
+        // Renaming into another user's id is refused the same way.
+        store.create_user("dave", "dave").expect("dave");
+        let msg = invalid(store.update_username("dave", "Carol").expect_err("rename"));
+        assert!(msg.contains("id of another user"), "{msg}");
+        // A user's own id is fine as their own name.
+        store
+            .update_username("carol", "carol")
+            .expect("own id as name");
+    }
+
+    #[test]
+    fn rename_validates_refuses_a_clash_and_keeps_the_id() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        let ada = store
+            .create_managed_user_generated("ada", "pw-ada", UserRole::Member)
+            .expect("ada");
+        store
+            .create_managed_user_generated("bea", "pw-bea", UserRole::Member)
+            .expect("bea");
+        // Validation.
+        for bad in ["", "a b", "x@y@z", "usr_new", "Bootstrap"] {
+            assert!(
+                matches!(
+                    store.update_username(&ada.user_id, bad),
+                    Err(OrchestratorError::InvalidContract(_))
+                ),
+                "rename to {bad:?}"
+            );
+        }
+        // A name another user holds, in any letter case, is a conflict.
+        for taken in ["bea", "BEA", "Bea"] {
+            assert!(
+                matches!(
+                    store.update_username(&ada.user_id, taken),
+                    Err(OrchestratorError::Conflict(_))
+                ),
+                "rename to {taken:?}"
+            );
+        }
+        // Unknown user.
+        assert!(matches!(
+            store.update_username("nobody", "whoever"),
+            Err(OrchestratorError::NotFound(_))
+        ));
+        // Success keeps the id, and a change of letter case only is allowed.
+        let renamed = store
+            .update_username(&ada.user_id, "Ada.L+x@Example.Test")
+            .expect("rename");
+        assert_eq!(renamed.user_id, ada.user_id);
+        assert_eq!(renamed.username, "Ada.L+x@Example.Test");
+        let recased = store
+            .update_username(&ada.user_id, "ada.l+x@example.test")
+            .expect("recase");
+        assert_eq!(recased.username, "ada.l+x@example.test");
+        assert!(store.get_user_by_username("ada").is_err());
+    }
+
+    #[test]
+    fn the_unique_index_is_created_once_and_kept() {
+        let path = old_schema_db("index-once", &[("alice", "alice"), ("bob", "Bob")]);
+        let store = SqliteWorkflowStore::open(&path).expect("first open");
+        assert!(store.username_nocase_index_exists().expect("index"));
+        assert!(store.username_clashes().is_empty());
+        drop(store);
+        let again = SqliteWorkflowStore::open(&path).expect("second open");
+        assert!(again.username_nocase_index_exists().expect("index"));
+        assert!(again.username_clashes().is_empty());
+        // Exactly one index of that name.
+        let count: i64 = again
+            .connection
+            .lock()
+            .expect("lock")
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [USERNAME_NOCASE_INDEX],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 1);
+        // A fresh store has it too.
+        let fresh = SqliteWorkflowStore::in_memory().expect("fresh");
+        assert!(fresh.username_nocase_index_exists().expect("index"));
+        drop(again);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn a_clash_leaves_no_index_is_held_on_the_store_and_open_still_succeeds() {
+        let path = old_schema_db(
+            "clash",
+            &[
+                ("alice", "alice"),
+                ("bob", "bob"),
+                ("bob-2", "Bob"),
+                ("cy", "cy"),
+                ("cy-2", "CY"),
+                ("cy-3", "Cy"),
+            ],
+        );
+        let store = SqliteWorkflowStore::open(&path).expect("a clash is not an open error");
+        assert!(!store.username_nocase_index_exists().expect("index"));
+        let clashes = store.username_clashes();
+        assert_eq!(clashes.len(), 2, "{clashes:?}");
+        assert_eq!(
+            clashes[0].members,
+            vec![
+                ("bob".to_string(), "bob".to_string()),
+                ("bob-2".to_string(), "Bob".to_string())
+            ]
+        );
+        assert_eq!(clashes[1].members.len(), 3);
+        // Every row is untouched.
+        assert_eq!(store.get_user("bob-2").expect("row").username, "Bob");
+        let message = username_clash_message(&clashes);
+        for needle in [
+            "bob (user id bob)",
+            "Bob (user id bob-2)",
+            "CY (user id cy-2)",
+            "vamd --rename-user <user_id> <new_username>",
+            "start vamd again",
+        ] {
+            assert!(
+                message.contains(needle),
+                "{needle:?} missing in:\n{message}"
+            );
+        }
+        // Reopening with the clash still there stays the same and creates nothing.
+        drop(store);
+        let again = SqliteWorkflowStore::open(&path).expect("reopen");
+        assert!(!again.username_nocase_index_exists().expect("index"));
+        assert_eq!(again.username_clashes().len(), 2);
+        // Fix every group, then the next open creates the index.
+        again
+            .update_username("bob-2", "bobby")
+            .expect("rename bob-2");
+        again
+            .update_username("cy-2", "cy-two")
+            .expect("rename cy-2");
+        // A rename that would still clash is refused.
+        assert!(matches!(
+            again.update_username("cy-3", "CY"),
+            Err(OrchestratorError::Conflict(_))
+        ));
+        again
+            .update_username("cy-3", "cy-three")
+            .expect("rename cy-3");
+        assert!(!again
+            .username_nocase_index_exists()
+            .expect("no index until a start"));
+        drop(again);
+        let fixed = SqliteWorkflowStore::open(&path).expect("open after the fix");
+        assert!(fixed.username_nocase_index_exists().expect("index"));
+        assert!(fixed.username_clashes().is_empty());
+        drop(fixed);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn existing_users_keep_their_ids_names_and_cross_matches() {
+        // `usr_old` starts like a generated id, `bootstrap` is the node's key name, and user
+        // `y` is named like user `carol`'s id.
+        let path = old_schema_db(
+            "legacy",
+            &[
+                ("carol", "caroline"),
+                ("y", "carol"),
+                ("usr_old", "usr_old"),
+                ("bootstrap", "bootstrap"),
+            ],
+        );
+        let store = SqliteWorkflowStore::open(&path).expect("open");
+        assert!(store.username_clashes().is_empty());
+        // Nothing is renamed.
+        assert_eq!(store.get_user("usr_old").expect("row").username, "usr_old");
+        assert_eq!(
+            store.get_user("bootstrap").expect("row").username,
+            "bootstrap"
+        );
+        // One note per legacy cross-match: `usr_old`, `bootstrap` (both as user and name).
+        let notes = store.legacy_identity_notes().expect("notes");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("'usr_old'") && n.contains("reserved for generated ids")),
+            "{notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("'bootstrap'") && n.contains("its own key")),
+            "{notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("username 'carol' (user id y) is the id of user 'carol'")),
+            "{notes:?}"
+        );
+        drop(store);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn the_id_wins_over_a_legacy_username_equal_to_it() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        // User `x` is named `carol`, and user `carol` exists under another name.
+        store.create_user("x", "carol").expect("x");
+        {
+            let connection = store.connection.lock().expect("lock");
+            // A legacy row the new rules would refuse: its username `dave` equals no id, but the
+            // id `carol` below equals user `x`'s username.
+            connection
+                .execute(
+                    "INSERT INTO users (user_id, username, tenant_id, created_at)
+                     VALUES ('carol', 'caroline', 'carol', 1)",
+                    [],
+                )
+                .expect("legacy row");
+        }
+        assert_eq!(
+            store.resolve_user("carol").expect("id first").user_id,
+            "carol"
+        );
+        // The name still reaches `x` in another letter case, which is not an id.
+        assert_eq!(store.resolve_user("CAROL").expect("name").user_id, "x");
+        assert_eq!(
+            store.resolve_user("caroline").expect("name").user_id,
+            "carol"
+        );
+        let notes = store.legacy_identity_notes().expect("notes");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("username 'carol' (user id x) is the id of user 'carol'")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn resolution_is_id_first_then_name_ignoring_case() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        let ada = store
+            .create_managed_user_generated("Ada+tag@Example.Test", "pw-ada", UserRole::Member)
+            .expect("ada");
+        for input in [
+            ada.user_id.as_str(),
+            "Ada+tag@Example.Test",
+            "ada+tag@example.test",
+            "ADA+TAG@EXAMPLE.TEST",
+        ] {
+            let user = store.resolve_user(input).expect(input);
+            assert_eq!(user.user_id, ada.user_id, "{input}");
+            // The stored name is returned as it was typed at creation.
+            assert_eq!(user.username, "Ada+tag@Example.Test");
+        }
+        assert!(matches!(
+            store.resolve_user("nobody"),
+            Err(OrchestratorError::NotFound(_))
+        ));
+        // The id is case-sensitive: the upper-cased id is no user.
+        assert!(store.resolve_user(&ada.user_id.to_uppercase()).is_err());
+        assert!(store
+            .verify_user_password("ADA+TAG@example.test", "pw-ada")
+            .expect("verify"));
+    }
+
+    #[test]
+    fn a_name_that_matches_several_rows_only_by_case_is_ambiguous() {
+        let path = old_schema_db("ambiguous", &[("bob", "bob"), ("bob-2", "Bob")]);
+        let store = SqliteWorkflowStore::open(&path).expect("open");
+        // An exact-case match wins; the offline tools can still reach each.
+        assert_eq!(store.resolve_user("bob").expect("exact").user_id, "bob");
+        assert_eq!(store.resolve_user("Bob").expect("exact").user_id, "bob-2");
+        assert!(matches!(
+            store.resolve_user("BOB"),
+            Err(OrchestratorError::Conflict(_))
+        ));
+        drop(store);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn the_operator_guard_on_the_resolved_id_catches_any_letter_case() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        for raw in ["operator", "OPERATOR", "Operator", "oPeRaToR"] {
+            let user = store.resolve_user(raw).expect(raw);
+            assert!(
+                matches!(
+                    reject_operator_user_admin_target(&user.user_id),
+                    Err(OrchestratorError::PermissionDenied(_))
+                ),
+                "{raw}"
+            );
+        }
+        let other = store
+            .create_managed_user_generated("ordinary", "pw", UserRole::Member)
+            .expect("user");
+        assert!(reject_operator_user_admin_target(
+            &store.resolve_user("ORDINARY").expect("r").user_id
+        )
+        .is_ok());
+        assert_eq!(other.username, "ordinary");
+    }
+
+    #[test]
+    fn bootstrap_refuses_reserved_names_and_mints_a_generated_id() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        for reserved in ["bootstrap", "usr_boss"] {
+            assert!(
+                matches!(
+                    store.bootstrap_first_admin(reserved, "secret"),
+                    Err(OrchestratorError::InvalidContract(_))
+                ),
+                "{reserved}"
+            );
+        }
+        let admin = store
+            .bootstrap_first_admin("Boss@Example.Test", "secret")
+            .expect("email admin");
+        assert!(is_generated_user_id(&admin.user_id));
+        assert_eq!(admin.username, "Boss@Example.Test");
+        assert!(store
+            .verify_user_password("boss@example.test", "secret")
+            .expect("verify"));
     }
 }
