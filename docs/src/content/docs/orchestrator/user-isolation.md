@@ -3,6 +3,10 @@ title: Users, keys and ownership
 description: Users and roles, login, API keys, owner stamps on every row, and what one user cannot see of another's.
 status: shipped
 proves:
+  - promotion-widens-a-default-key-but-not-a-narrowed-one
+  - demotion-takes-catalog-writes-from-a-publisher-key
+  - member-key-minted-with-catalog-write-cannot-write-the-catalog
+  - crates/vam-orchestrator/src/inbox.rs::queued_publisher_key_starts_with_member_scopes_after_demotion
   - member-chats-with-a-released-agent
   - crates/vam-orchestrator/tests/api_tests.rs
   - crates/vam-orchestrator/src/secrets.rs::import_env_secrets_are_org_scope_and_ignore_user_rows
@@ -20,7 +24,10 @@ the owner filter covers.
 
 The database starts with two users: `operator` (the bootstrap key) and `local` (the implicit
 owner when there is one user). Each user has one role: `operator`, `org_admin`, `publisher` or
-`member`; member is the default. A role sets the scopes of the user's sessions and default keys.
+`member`; member is the default. A role sets the scopes of the user's sessions and keys, and a key follows the user's live
+role: a key minted with no scope list follows it up and down, a key minted with a list is capped
+by it (and never widened past the list), and the bootstrap key keeps its scopes. A queued
+message starts with the live scopes of its sender, not the ones at queue time.
 The first admin is created from the command line, with `vamd --bootstrap-admin` or
 `VAMD_BOOTSTRAP_ADMIN_PASSWORD`; there is no sign-up route and no OIDC. For the steps, read
 [Users and roles](/getting-started/users-and-roles/).
@@ -31,7 +38,7 @@ The first admin is created from the command line, with `vamd --bootstrap-admin` 
 |---|---|---|
 | Login | `POST /v1/login`, `/v1/login/refresh`, `/v1/logout` | Username and password give a short session token and a refresh token (`api/mod.rs:98-100`). |
 | Who am I | `GET /v1/me` | Any authenticated caller gets `userId`, `username`, `role` and the bearer's scopes. A deactivated user or revoked key is a 401 (`api/me.rs`). |
-| API keys | `POST`, `GET /v1/keys`, `DELETE /v1/keys/{id}` | Keys bind to a user when minted. List and revoke are per user; `keys:admin` sees every `http` key. A grant issued to a broker (`?holder=broker\|all`) is listed and revoked by its owner only, and an HTTP bearer never accepts one (401). |
+| API keys | `POST`, `GET /v1/keys`, `DELETE /v1/keys/{id}` | Keys bind to a user when minted. A key's scopes follow the user's live role (see Users and roles); the listing shows the list the key was minted with and `GET /v1/me` the effective one. Release needs `publish:grant` on the key. List and revoke are per user; `keys:admin` sees every `http` key. A grant issued to a broker (`?holder=broker\|all`) is listed and revoked by its owner only, and an HTTP bearer never accepts one (401). |
 | Users | `POST`, `GET /v1/users`, `deactivate`, `password`, `keys` under `/v1/users/{id}` | Scope `users:admin`. A password reset revokes session tokens and keeps API keys; deactivate revokes both. |
 | Publish grant | `DELETE /v1/users/{id}/publish-grant` | Moves a publisher back to member. |
 | Reassign | `POST /v1/catalog/reassign-owner` | Moves catalog ownership; released versions stay released. |
