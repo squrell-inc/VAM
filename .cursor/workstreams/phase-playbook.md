@@ -169,10 +169,12 @@ in the tracker. Never a third cycle at the same model.
 - **Tests.** vam: GitHub Actions is the gate (working-agreement.md,
   2026-11-17). The orchestrator subscribes to the PR and waits for the CI
   event; every required check on the PR head must be green. A build wave is
-  done when the scenarios it names pass in that run. The PR smoke run covers
-  only process scenarios not tagged `slow` (`scripts/e2e/smoke-ids.sh`); for a
-  named `slow` scenario, record a `scripts/ci/local.sh --scenarios <id>` run at
-  the PR head in the PR body until a PR workflow runs it. To reproduce a failure,
+  done when every scenario it names passes: in that Actions run for the
+  scenarios the PR smoke run covers (process scenarios not tagged `slow`,
+  `scripts/e2e/smoke-ids.sh`). The one exception is a named `slow` scenario,
+  which no PR workflow runs yet: the orchestrator itself runs
+  `scripts/ci/local.sh --scenarios <id>` in a worktree detached at the PR head
+  and merges only if it passes; a PR-body claim is not enough. To reproduce a failure,
   run `scripts/ci/local.sh --full` (or `--scenarios a,b`) in a worktree
   detached at the PR head; "Local CI" in a PR body is a claim, not evidence. The app repo (no CI, the local run is the gate): in a
   worktree detached at the PR head, `CI=1 pnpm test`, `pnpm exec tsc --noEmit`,
