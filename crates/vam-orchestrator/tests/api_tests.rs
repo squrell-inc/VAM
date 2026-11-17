@@ -12,8 +12,8 @@ use vam_network::NetResourcePool;
 use vam_orchestrator::api::auth::ControlPlanePdp;
 use vam_orchestrator::api::{self, AppState};
 use vam_orchestrator::keys::{
-    hash_api_key_secret, mint_api_key_secret, BOOTSTRAP_SCOPES, MEMBER_SCOPES, ORG_ADMIN_SCOPES,
-    PUBLISHER_SCOPES,
+    hash_api_key_secret, mint_api_key_secret, ScopeMode, BOOTSTRAP_SCOPES, MEMBER_SCOPES,
+    ORG_ADMIN_SCOPES, PUBLISHER_SCOPES,
 };
 use vam_orchestrator::manager::{drive9_runtime, run_manager_loop, SessionManager};
 use vam_orchestrator::secrets::SecretsVault;
@@ -85,6 +85,11 @@ fn bootstrap_store() -> (Arc<SqliteWorkflowStore>, String) {
     store.initialize_catalog_schema().unwrap();
     let secret = mint_api_key_secret();
     let scopes: Vec<String> = BOOTSTRAP_SCOPES.iter().map(|s| s.to_string()).collect();
+    // This key carries every scope for the implicit `local` owner. Scopes follow the owner's
+    // live role, so `local` is an Operator here (an Operator's key keeps its stored scopes).
+    store
+        .set_user_role(vam_orchestrator::users::LOCAL_USER_ID, UserRole::Operator)
+        .unwrap();
     store
         .create_api_key("test-key", "test", &secret, "User::\"tester\"", &scopes)
         .unwrap();
@@ -411,6 +416,11 @@ async fn owner_stamped_on_http_put_secret_and_catalog() {
         .iter()
         .map(|s| (*s).to_string())
         .collect();
+    // The implicit `local` owner writes the catalog here, so it is a publisher: its key's
+    // scopes follow its live role.
+    store
+        .set_user_role(vam_orchestrator::users::LOCAL_USER_ID, UserRole::Publisher)
+        .unwrap();
     store
         .create_api_key(
             "other-key",
@@ -5073,8 +5083,12 @@ mod skill_package_api {
         let _drive9 = drive9_temp();
         let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
         store.initialize_catalog_schema().unwrap();
-        store.create_user("alice", "alice").unwrap();
-        store.create_user("bob", "bob").unwrap();
+        store
+            .create_user_with_role("alice", "alice", UserRole::Publisher)
+            .unwrap();
+        store
+            .create_user_with_role("bob", "bob", UserRole::Publisher)
+            .unwrap();
         let scopes: Vec<String> = PUBLISHER_SCOPES.iter().map(|s| s.to_string()).collect();
         let alice_secret = mint_api_key_secret();
         let bob_secret = mint_api_key_secret();
@@ -5572,7 +5586,7 @@ mod skill_package_api {
         let bob = mint_user_key(
             &store,
             "bob",
-            UserRole::Member,
+            UserRole::Publisher,
             &["catalog:write", "sessions:write"],
         );
         let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
@@ -5880,12 +5894,13 @@ mod hosted_brokers {
         store.initialize_catalog_schema().unwrap();
         let secret = mint_api_key_secret();
         store
-            .create_api_key(
+            .create_api_key_owned(
                 "broker-admin",
                 "broker-admin",
                 &secret,
                 "User::\"operator\"",
                 &[vam_orchestrator::keys::BROKERS_ADMIN_SCOPE.to_string()],
+                OPERATOR_USER_ID,
             )
             .unwrap();
         let app = test_app(app_state_http_only(store));
@@ -6447,7 +6462,7 @@ async fn non_owner_cannot_release_catalog_agent() {
     let alice = mint_user_key(
         &store,
         "alice",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let bob = mint_user_key(&store, "bob", UserRole::Publisher, PUBLISHER_SCOPES);
@@ -6739,7 +6754,7 @@ async fn agent_versions_list_draft_then_releases_with_notes_and_releasers() {
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let app = test_app(app_state_http_only(store));
@@ -6824,18 +6839,30 @@ async fn owner_without_grant_cannot_release_until_org_admin_grants() {
     let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = isolate_state();
     let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
-    let alice = mint_user_key(
-        &store,
-        "alice",
-        UserRole::Member,
-        &["catalog:write", "sessions:write"],
-    );
+    // A default key follows the live role: the grant gives it catalog writes and release,
+    // the revoke takes them away again.
+    let _ = store.create_user_with_role("alice", "alice", UserRole::Member);
+    let alice = mint_api_key_secret();
+    store
+        .create_api_key_owned_with_mode(
+            "key-alice",
+            "alice",
+            &alice,
+            "User::\"alice\"",
+            &MEMBER_SCOPES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<Vec<_>>(),
+            "alice",
+            ScopeMode::Role,
+        )
+        .expect("mint alice role key");
     let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
     let app = test_app(app_state_http_only(store.clone()));
     let urn = "urn:vam:agent:local.vam.dev/acme/grant-me";
     assert_eq!(
         put_agent_as(&app, &alice, urn, "draft").await,
-        StatusCode::OK
+        StatusCode::FORBIDDEN
     );
     assert_eq!(
         release_agent_as(&app, &alice, urn, "alice-no-grant").await,
@@ -6862,6 +6889,10 @@ async fn owner_without_grant_cannot_release_until_org_admin_grants() {
         response_body(grant).await
     );
     assert_eq!(store.get_user("alice").unwrap().role, UserRole::Publisher);
+    assert_eq!(
+        put_agent_as(&app, &alice, urn, "draft").await,
+        StatusCode::OK
+    );
     assert_eq!(
         release_agent_as(&app, &alice, urn, "alice-granted").await,
         StatusCode::OK
@@ -6992,7 +7023,7 @@ async fn member_cannot_reassign_catalog_owner() {
     let mallory = mint_user_key(
         &store,
         "mallory",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let _ = mint_user_key(&store, "bob", UserRole::Publisher, PUBLISHER_SCOPES);
@@ -7378,7 +7409,7 @@ async fn deactivated_owner_published_catalog_still_resolves() {
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
@@ -7804,7 +7835,7 @@ async fn catalog_visibility_http_own_drafts_and_tenant_published() {
     let alice = mint_user_key(
         &store,
         "alice",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let bob = mint_user_key(&store, "bob", UserRole::Publisher, PUBLISHER_SCOPES);
@@ -7923,13 +7954,13 @@ async fn catalog_visibility_admin_lists_foreign_agent_draft_with_owner() {
     let alice = mint_user_key(
         &store,
         "alice",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
@@ -9804,7 +9835,7 @@ async fn agent_outcomes_follow_the_versions_auth_and_hide_a_foreign_draft() {
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let app = test_app(app_state_http_only(store));
@@ -9853,7 +9884,7 @@ async fn agent_outcomes_listing_is_404_for_a_foreign_draft_only_or_unknown_agent
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let app = test_app(app_state_http_only(store));
@@ -9876,7 +9907,7 @@ async fn agent_outcomes_diff_names_the_base_and_is_404_for_a_foreign_agent() {
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let app = test_app(app_state_http_only(store));
