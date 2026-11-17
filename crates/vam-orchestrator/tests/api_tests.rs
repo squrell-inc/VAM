@@ -12,8 +12,8 @@ use vam_network::NetResourcePool;
 use vam_orchestrator::api::auth::ControlPlanePdp;
 use vam_orchestrator::api::{self, AppState};
 use vam_orchestrator::keys::{
-    hash_api_key_secret, mint_api_key_secret, BOOTSTRAP_SCOPES, MEMBER_SCOPES, ORG_ADMIN_SCOPES,
-    PUBLISHER_SCOPES,
+    hash_api_key_secret, mint_api_key_secret, ScopeMode, BOOTSTRAP_SCOPES, MEMBER_SCOPES,
+    ORG_ADMIN_SCOPES, PUBLISHER_SCOPES,
 };
 use vam_orchestrator::manager::{drive9_runtime, run_manager_loop, SessionManager};
 use vam_orchestrator::secrets::SecretsVault;
@@ -6839,18 +6839,30 @@ async fn owner_without_grant_cannot_release_until_org_admin_grants() {
     let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = isolate_state();
     let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
-    let alice = mint_user_key(
-        &store,
-        "alice",
-        UserRole::Member,
-        &["catalog:write", "sessions:write"],
-    );
+    // A default key follows the live role: the grant gives it catalog writes and release,
+    // the revoke takes them away again.
+    let _ = store.create_user_with_role("alice", "alice", UserRole::Member);
+    let alice = mint_api_key_secret();
+    store
+        .create_api_key_owned_with_mode(
+            "key-alice",
+            "alice",
+            &alice,
+            "User::\"alice\"",
+            &MEMBER_SCOPES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<Vec<_>>(),
+            "alice",
+            ScopeMode::Role,
+        )
+        .expect("mint alice role key");
     let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
     let app = test_app(app_state_http_only(store.clone()));
     let urn = "urn:vam:agent:local.vam.dev/acme/grant-me";
     assert_eq!(
         put_agent_as(&app, &alice, urn, "draft").await,
-        StatusCode::OK
+        StatusCode::FORBIDDEN
     );
     assert_eq!(
         release_agent_as(&app, &alice, urn, "alice-no-grant").await,
@@ -6877,6 +6889,10 @@ async fn owner_without_grant_cannot_release_until_org_admin_grants() {
         response_body(grant).await
     );
     assert_eq!(store.get_user("alice").unwrap().role, UserRole::Publisher);
+    assert_eq!(
+        put_agent_as(&app, &alice, urn, "draft").await,
+        StatusCode::OK
+    );
     assert_eq!(
         release_agent_as(&app, &alice, urn, "alice-granted").await,
         StatusCode::OK
