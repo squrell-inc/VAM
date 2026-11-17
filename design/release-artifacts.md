@@ -14,12 +14,14 @@ A person who wants VAM downloads a published release, verifies it, and runs it w
 toolchain. Each release is one version for the whole machine (`vamd`, `vam`, the brokers, the
 guest init, the proto descriptor), built by one workflow from one commit on `main`, and published
 under a tag that can never move. The owner starts every release by hand and approves it before
-anything is public.
+anything is public. A user puts `vam` on their `PATH` with one command and later upgrades it with
+another (Phase 5). §11 walks through the whole thing from the developer's side and the user's side,
+per platform.
 
 Out of scope for the workstream: publishing crates to crates.io, package managers (Homebrew,
-winget, apt), a `vam self-update` command, hosting the docs site, a container image for `vamd`
-(see §6.6), and versioning catalog items (agents, skills, playbooks), which have their own semver
-(`docs/src/content/docs/orchestrator/catalog.md`).
+winget, apt), upgrading a running node in place (`vam node upgrade`), hosting the docs site, a
+container image for `vamd` (see §5.2), and versioning catalog items (agents, skills, playbooks),
+which have their own semver (`docs/src/content/docs/orchestrator/catalog.md`).
 
 ## 2. What exists today (evidence)
 
@@ -77,29 +79,48 @@ Rejected: per-crate versions (release-plz style). More bookkeeping, no consumer,
 
 ### 3.3 Where the version lives and how dev builds differ
 
-- `Cargo.toml` on `main` carries the **next** release's version (after `v0.2.0` ships, the first
-  post-release PR sets `0.3.0`). The release workflow refuses to tag a commit whose `Cargo.toml`
-  version differs from the version asked for.
-- A build is a **release build** only when the release workflow sets `VAM_BUILD_CHANNEL=release`.
-  Every other build (local, CI, `cargo install --git`) reports a dev version, so a binary built
-  from `main` between releases never claims to be a release:
+**The next version is chosen when releasing, never guessed in advance.** Nobody knows after
+`v0.2.0` whether the next release is `0.2.1` or `0.3.0`; that is decided by what merged, at the
+moment the owner decides to release.
+
+- **Prepare PR, at release time.** The owner (or a session) runs `scripts/release/prepare.sh
+  0.3.0`, which sets `[workspace.package] version` and refreshes the workspace entries in
+  `Cargo.lock`, and opens a one-line PR `release: prepare v0.3.0`. Its merge into `main` is the
+  commit that gets tagged (its `rust.yml` push run is the CI-green proof, guard 3). So the tagged
+  source says `0.3.0` inside, and a build from the tag's source archive reports `0.3.0`. For an rc,
+  the prepare PR sets `0.3.0-rc.1`; the final needs its own prepare PR.
+- **No post-release PR.** Between releases `Cargo.toml` simply still names the last release.
+- **Release build**: only the release workflow sets `VAM_BUILD_CHANNEL=release`, and it refuses
+  unless `Cargo.toml` at the commit equals the version asked for.
+- **Dev build** (local, CI, `cargo install --git`, any build between releases): the version is the
+  nearest `v*` tag plus semver *build metadata* saying how far past it the build is
+  (`git describe`), so it never claims to be a release and never names a future version:
 
   | Build | `vam --version` / `vamd --version` |
   |---|---|
-  | release workflow | `vam 0.2.0 (3f9c2ab 2026-11-20)` |
-  | any other build in a checkout | `vam 0.2.0-dev (3f9c2ab)` or `(3f9c2ab+dirty)` |
-  | outside a checkout, no override | `vam 0.2.0-dev (unknown)` |
+  | release workflow at `v0.3.0` | `vam 0.3.0 (3f9c2ab 2026-11-20)` |
+  | dev build, 14 merges after `v0.3.0` | `vam 0.3.0+dev.14 (9be41d0)` or `(9be41d0+dirty)` |
+  | dev build before any tag exists | `vam 0.1.0+dev (9be41d0)` (the `Cargo.toml` version) |
+  | outside a checkout, no override | `vam 0.3.0+dev (unknown)` |
 
+  Build metadata (`+…`) is ignored by semver ordering, so a dev build compares equal to the
+  release it grew from: the marketplace `requires_node` check treats `0.3.0+dev.14` as `0.3.0`.
 - One source of build info: `crates/vam-spec/build.rs` (every binary already depends on
   `vam-spec`) exports `VAM_VERSION`, `VAM_GIT_SHA`, `VAM_COMMIT_DATE`, `VAM_BUILD_CHANNEL`;
   `vam_spec::build_info()` returns them. Environment overrides `VAM_GIT_SHA` and
   `VAM_COMMIT_DATE` make a tarball build honest. `crates/vam-cli/build.rs` is folded into it.
   The commit date (not the build time) keeps the string reproducible (`SOURCE_DATE_EPOCH`).
-- Reported by: `vam --version`, `vamd --version` (new; prints and exits without reading config),
-  `--version` on each broker, `GET /v1/node` (new `build: { version, commit, channel }`, read by
-  any signed-in user), `vam node status`. The hard-coded `broker_version: "0.1.0"`
-  (`hsp.rs:489`) and `vam_core::VERSION` use the same source. The marketplace `node_version`
-  keeps the plain semver (without `-dev`) so `requires_node` ranges still match on dev builds.
+- Reported by: `vam --version` (the CLI's own version), `vamd --version` (new; the daemon's
+  version, prints and exits without reading config), `--version` on each broker,
+  `GET /v1/node` (new `build: { version, commit, channel }`, read by any signed-in user), and
+  `vam node status`, which prints the node's version beside the CLI's and warns when their
+  minor versions differ. The hard-coded `broker_version: "0.1.0"` (`hsp.rs:489`),
+  `vam_core::VERSION` and the marketplace `node_version` use the same source.
+
+Rejected: (a) `main` carries the *next* version with a post-release bump PR: it guesses minor vs
+patch before anything merged. (b) The workflow stamps the version only inside its build without
+committing it: no extra PR, but the tagged source still says the old version, so a build from the
+tag's source archive reports the wrong number.
 
 ### 3.4 Changelog and release notes
 
@@ -114,7 +135,7 @@ git log --first-parent --merges --format='%s' v0.1.0..<sha>   # "release: ... (#
 
 grouped as **Releases** (the `release:` titles, each linking its PR), **Upgrade notes** (the
 "Deploy note" sections of those PR bodies, verbatim), and **Artifacts and verification** (the
-asset table and the verify commands, §6.4). The notes are part of the draft the owner reviews at
+asset table and the verify commands, §5.4). The notes are part of the draft the owner reviews at
 the approval gate. The docs page `getting-started/project-status.md` links the releases page.
 
 ## 4. Release trigger
@@ -156,10 +177,10 @@ owner approves the exact artifacts.
 3. CI is green on that exact SHA: the `rust.yml` run for the `push` to `main` at `commit`
    concluded `success` (Actions API, `head_sha` filter). If it is missing or red, the release
    fails and names the run; the owner re-runs `rust.yml` for that SHA, never the release.
-4. `Cargo.toml` at `commit` has `version == inputs.version` (plain part; `-rc.N` allowed only as
-   an input suffix over the same `Cargo.toml` version).
+4. `Cargo.toml` at `commit` has `version == inputs.version` exactly (the prepare PR, §3.3, is
+   merged at or before `commit`).
 5. Tag `v<version>` does not exist locally or on the remote, and no release (draft included)
-   uses it. An immutable release burns its tag name for good (§6.5), so a failed publish means the
+   uses it. An immutable release burns its tag name for good (§4.3), so a failed publish means the
    next number.
 6. `version` is greater, by semver, than every existing `v*` tag (a final may follow its own rc).
 7. The release gate passes at `commit` (`scripts/e2e/check-release-gate.sh`; cheap, no KVM).
@@ -188,7 +209,9 @@ owner approves the exact artifacts.
 
 | Asset | Contents | Target | Runner |
 |---|---|---|---|
-| `vam-node-<v>-x86_64-unknown-linux-gnu.tar.gz` | `vamd`, `vam`, `vam-web-broker`, `vam-schedule-broker`, `vam-notify-broker`, `vam-runtime` (guest init), `share/vam/base/` (the base build kit, §5.3), `scripts/assets.pins`, `LICENSE-*`, `NOTICE`, `README` | x86_64 gnu, glibc ≥ 2.34 | `ubuntu-24.04` |
+| `vam-node-<v>-x86_64-unknown-linux-gnu.tar.gz` | `vamd`, `vam`, `vam-web-broker`, `vam-schedule-broker`, `vam-notify-broker`, `vam-runtime` (guest init), `share/vam/base/` (the standard base recipe, §5.3), `scripts/assets.pins`, `LICENSE-*`, `NOTICE`, `README` | x86_64 gnu, glibc ≥ 2.34 | `ubuntu-24.04` |
+| `vam-node-<v>-aarch64-unknown-linux-gnu.tar.gz` | the same set for arm64 Linux, incl. an aarch64 `vam-runtime` (Phase 4: Lima on Apple Silicon, arm64 servers) | aarch64 gnu | `ubuntu-24.04-arm` |
+| `install.sh`, `install.ps1` | download the right `vam` for the machine, check it against `SHA256SUMS`, run `vam self install` (Phase 5) | — | assemble |
 | `vam-<v>-x86_64-unknown-linux-gnu.tar.gz` | `vam` | x86_64 gnu | `ubuntu-24.04` |
 | `vam-<v>-aarch64-unknown-linux-gnu.tar.gz` | `vam` | aarch64 gnu | `ubuntu-24.04-arm` |
 | `vam-<v>-aarch64-apple-darwin.tar.gz` | `vam` | macOS arm64 | `macos-15` |
@@ -200,9 +223,11 @@ owner approves the exact artifacts.
 | `*.cdx.json` | CycloneDX SBOM per archive | — | build jobs |
 | `RELEASE_NOTES.md` | the notes (§3.4) | — | assemble |
 
-- **`vamd` and the brokers: x86_64 Linux only** for now. Nodes need x86_64 KVM, and the pinned
-  Firecracker and kernel are x86_64 (`node_init.rs:228`, `assets.pins`). An aarch64 node bundle
-  (for the Lima path) waits for an aarch64 standard base, kernel and Firecracker pins (§8, later).
+- **`vamd` and the brokers: x86_64 Linux first, aarch64 Linux in Phase 4.** Today nodes are
+  x86_64 only (`node_init.rs:228`) and the pinned Firecracker and kernel are x86_64
+  (`assets.pins`). The Mac path is a Lima VM, which on Apple Silicon is aarch64 Linux, so Phase 4
+  adds an aarch64 node bundle with an aarch64 standard base (aarch64 Debian digest and Bun pin),
+  aarch64 Firecracker and kernel pins, and `check_platform` accepting aarch64 Linux.
 - **gnu, not musl, for host binaries**, built for glibc 2.34 (the oldest documented host,
   Amazon Linux 2023; Ubuntu 22.04 has 2.35) with `cargo-zigbuild --target
   x86_64-unknown-linux-gnu.2.34`. The assemble job checks the highest `GLIBC_` symbol version
@@ -226,7 +251,7 @@ owner approves the exact artifacts.
   bash, coreutils, glibc), so a published image needs the corresponding source alongside or a
   three-year written offer (Debian's guidance for image vendors), plus licence texts. Debian makes
   no offer we can pass on, and pointing at mirrors is contested. Instead the node bundle carries
-  the **base build kit** and the released `vam-runtime`, and `vam node init` builds the base on
+  the **standard base recipe** and the released `vam-runtime`, and `vam node init` builds the base on
   the host from pinned inputs (digest-pinned Debian image, snapshot apt, sha256-pinned Bun). A
   published image with a source archive is a later phase after a licence review (§8).
 - **No Firecracker, jailer or guest kernel.** `vam node init` already fetches them from upstream
@@ -237,15 +262,40 @@ owner approves the exact artifacts.
   path to test, for no isolation gain. Revisit if a hosted control plane without local VMs appears.
 - **No docs-site bundle.** The docs site is built by `docs.yml`; hosting is separate.
 
-### 5.3 The base build kit
+### 5.3 The standard base recipe and runtime injection
 
-`share/vam/base/` in the node bundle: `scripts/base/` (Dockerfile, pins, resolve-pins),
-`build-rootfs.sh`, and a `manifest.json` naming the version and the sha256 of each file.
-`vam node init` gains `--kit DIR` (default: the `share/vam/base/` beside the running `vam`), so a
-node installs from an extracted bundle with Docker but **without a Rust toolchain or a git
-checkout**: `build-rootfs.sh --runtime <path>` takes the released `vam-runtime` instead of
-compiling one. `--checkout DIR` stays for source installs. The base built this way must report the
-same `.packages.txt` as the lane's base at the same commit (same pins).
+No image is shipped; a **recipe** and the **guest init** are, and the node builds the image:
+
+```text
+ node bundle                               on the node (vam node init)
+ share/vam/base/
+   Dockerfile + pins  ──── recipe ───────► docker build (pinned Debian, snapshot apt, pinned Bun)
+   build-rootfs.sh                         export → staging tree
+   manifest.json                           copy vam-runtime → /sbin/init (last, so nothing in
+ vam-runtime (musl, ─────── binary ──────►   the image can replace PID 1)
+   built and attested in CI)               mkfs.ext4 → /var/lib/vam/rootfs.ext4 + .base.json
+```
+
+- `share/vam/base/` holds `scripts/base/` (Dockerfile, pins, resolve-pins), `build-rootfs.sh`,
+  and a `manifest.json` naming the version and the sha256 of each file.
+- **Runtime injection without compiling.** `build-rootfs.sh` already injects `vam-runtime` as
+  `/sbin/init` (`build-rootfs.sh:222-227`), but compiles it first (Rust plus `musl-gcc`). It
+  gains `--runtime PATH`: inject this binary instead of building one. From a release, the node
+  injects the `vam-runtime` that CI built and attested, so a node needs Docker but **no Rust and
+  no `musl-gcc`**.
+- `vam node init` gains `--kit DIR` (default: the `share/vam/base/` beside the running `vam`) and
+  passes `--runtime` the bundle's `vam-runtime`. `--checkout DIR` stays for source installs.
+  The base built this way reports the same `.packages.txt` as the lane's base at the same commit.
+- **The recipe is the first standard Vamfile.** The planned Vamfile (`design/agent-experience.md`
+  Part III, E7 Phase 3; `docs/src/content/docs/build/vamfile.md`, `status: planned`) uses
+  Docker's grammar plus VAM directives (`RUNTIME`, `PACKAGES`, `TEST`), with runtime injection
+  done by the builder. The shipped `Dockerfile` is written to stay inside that grammar (no
+  instruction the Vamfile v1 parser will refuse), and the manifest names it `vam/base:2`. When
+  E7 Phase 3 lands, the file is renamed `Vamfile`, `vam node init` calls `vam image build` on it
+  instead of `build-rootfs.sh`, and the bundle layout (recipe + runtime) does not change. The
+  release workflow never needs to know which builder the node uses.
+- `vam` (the CLI) does not go into the image. It drives the build: `vam node init` today,
+  `vam image build` once the Vamfile builder exists.
 
 ### 5.4 Checksums, SBOM and provenance
 
@@ -261,8 +311,13 @@ same `.packages.txt` as the lane's base at the same commit (same pins).
 - **No long-lived signing key.** Keyless signing has no key to protect or rotate; the public
   repository means the Sigstore identity (repo, workflow, ref) in the public log reveals nothing.
   A `cosign` bundle for `SHA256SUMS` (for people without `gh`) is a later addition.
-- **SBOM**: binaries built with `cargo auditable` (dependency list embedded, readable by
-  `cargo audit bin`, Grype, Trivy); one CycloneDX file per archive from `cargo cyclonedx`.
+- **SBOM** (software bill of materials): the parts list of a binary, every crate and its
+  version, licence and source hash, so a question such as "does `v0.3.0` contain the vulnerable
+  version of crate X?" is answered by reading a file instead of rebuilding. Two forms: binaries
+  built with `cargo auditable` carry the list inside the binary (a few KB, read by
+  `cargo audit bin`, Grype, Trivy, so a binary found on a server can be scanned on its own), and
+  one CycloneDX JSON file per archive (`*.cdx.json`, from `cargo cyclonedx`), attested so it
+  cannot be swapped.
 - **Release gate additions**: `deny.toml` gains `[advisories]` and `[bans]`; the release runs
   `cargo deny check` (advisories, bans, licenses, sources) at the commit and `cargo audit bin` on
   the built binaries.
@@ -274,6 +329,64 @@ machine, download, verify (`sha256sum -c SHA256SUMS --ignore-missing`, `gh attes
 install (`vam` on `PATH`; on a node, extract the node bundle and run `sudo ./vam node init`). The
 pages that today say "build from source" (`installation.md`, `macos-lima.md`, `windows-wsl.md`,
 `cli.md`, `project-status.md`) lead with the release and keep the source build as the second path.
+
+### 5.6 Brokers on a node
+
+Every first-party broker ships as its own binary in the node bundle: `vam-web-broker`,
+`vam-schedule-broker`, `vam-notify-broker`. `hsp-echo-broker` (a test fixture in
+`vam-orchestrator`), `vam-e2e` and `verify_chain` are not shipped.
+
+A broker is a separate process that `vamd` dials on a Unix socket, registered with
+`PUT /v1/hosted/brokers` (`docs/src/content/docs/hosted/overview.md`). Today a script starts and
+registers each one (`scripts/run-web-broker.sh`, `scripts/run-schedule-broker.sh`), and
+`vam node init` installs none, so a release user would get binaries nothing runs. Phase 3 adds:
+
+- `vam node init --broker web,schedule,notify` (default: none, so a plain install changes nothing
+  it does not today): one systemd unit per broker (`vam-broker@<name>.service`, the same user as
+  `vamd`, socket mode 0600 under the state directory), started after `vamd`, then registered with
+  the broker's manifest. A broker's credentials (for example the Brave key for `vam.web`) go into
+  the vault with `vam secrets set`, never into the unit or its environment, as today.
+- `vam node status` lists the registered brokers with their versions (each broker reports
+  `build_info()` in `Register`).
+- `--check` lists a requested broker binary that is missing beside `vam`.
+
+### 5.7 `vam` on the `PATH`, and upgrading it (Phase 5)
+
+Today a user copies `vam` somewhere by hand. Phase 5 adds two CLI commands and two install
+scripts:
+
+- **`vam self install`**: copies the running binary to a per-user directory and puts that
+  directory on the user's `PATH`, idempotently (a second run prints `unchanged`):
+
+  | OS | Directory | How it reaches `PATH` |
+  |---|---|---|
+  | Linux | `~/.local/bin` | already on `PATH` on most distributions; otherwise one marked line in `~/.profile` (and `~/.bashrc` / `~/.zshrc` if present) |
+  | macOS | `~/.local/bin` | one marked line in `~/.zprofile` (zsh is the default shell) and `~/.bash_profile` if present |
+  | Windows | `%LOCALAPPDATA%\Programs\vam\bin` | the user `Path` in `HKCU\Environment`, then a settings-changed broadcast so new terminals see it |
+
+  No `sudo` or administrator rights. `--dir DIR` picks another directory; `vam self uninstall`
+  removes the binary and the marked lines. A node install (`sudo ./vam node init`) still runs
+  `vamd` from the bundle directory it was extracted to.
+- **`install.sh` / `install.ps1`** (release assets): pick the right archive for the OS and CPU,
+  download it with `SHA256SUMS`, check the hash, run `vam self install`. One line on the releases
+  page: `curl -fsSL https://github.com/squrell-inc/VAM/releases/latest/download/install.sh | sh`
+  (and the PowerShell equivalent). The scripts print what they will do and accept
+  `--version v0.3.0`.
+- **`vam self update`** (`--check` only reports; `--version vX` pins; `--pre` allows an rc):
+  reads the latest published release from the GitHub API, downloads the archive for this
+  platform and `SHA256SUMS`, checks the hash, verifies the release's GitHub attestation (in
+  process with a Sigstore verifier, or by calling `gh attestation verify` when `gh` is present;
+  decided at the Phase 5 breakdown, open question 13), then replaces itself (on Windows a running
+  `.exe` cannot be overwritten, so it is renamed aside first). It never touches `vamd`.
+  It refuses a downgrade without `--version`.
+- `vam --version` and `vam node status` mention when a newer release exists only if
+  `vam self update --check` was run; the CLI never calls the network unasked.
+- **Upgrading a node** (`vamd`, brokers, base image, state migrations, restart) is a different and
+  riskier job: out of scope here (§8). Until then the node upgrade is: read the release's upgrade
+  notes, extract the new node bundle, and run `sudo ./vam node init` from it. The unit's
+  `ExecStart` points at the `vamd` beside the running `vam` (`node_install.rs:139,160`), so the
+  re-run points the unit at the new bundle and keeps `/var/lib/vam`. Phase 3 proves that re-run
+  from a newer bundle with a scenario.
 
 ## 6. Build infrastructure
 
@@ -321,26 +434,38 @@ recorded run, plus product scenarios where the behaviour is visible through the 
 
 | Phase | Name | Exit |
 |---|---|---|
-| 0 | Version identity | `vam`, `vamd` and each broker print the same version line; `GET /v1/node` reports `build`; dev builds say `-dev`; `vam-firecracker` inherits the workspace version; `deny.toml` checks advisories and bans; scenarios green |
+| 0 | Version identity | `vam`, `vamd` and each broker print the same version line; `GET /v1/node` reports `build`; dev builds say `+dev`; `scripts/release/prepare.sh` sets the version; `vam-firecracker` inherits the workspace version; `deny.toml` checks advisories and bans; scenarios green |
 | 1 | Release workflow, dry run | `release.yml` validates, builds the Linux, macOS and guest assets, writes `SHA256SUMS`, SBOMs and notes, scans, and uploads workflow artifacts; a dry run on `main` is green; guards refuse each bad input in a test |
 | 2 | Publish | `release` environment, immutable releases and the `v*` ruleset set by the owner; publish job creates the draft, attests, verifies and publishes; `v0.1.0-rc.1` published and verified, then `v0.1.0` |
-| 3 | Install from a release | `vam` builds for Windows; `vam node init` installs from an extracted node bundle without Rust or a checkout; docs lead with the release; the next minor ships with these |
+| 3 | Install a node from a release | `vam` builds for Windows; `build-rootfs.sh --runtime`; `vam node init` installs from an extracted x86_64 node bundle without Rust or a checkout, and installs and registers the brokers asked for; docs lead with the release; the next minor ships with these |
+| 4 | aarch64 node (Lima on Apple Silicon) | aarch64 standard base recipe and pins, aarch64 Firecracker and kernel pins, `vam node init` accepts aarch64 Linux, `vam-node-…-aarch64` bundle; the Mac page installs the node in Lima from the release with no compile; lane or Lima proof once |
+| 5 | `vam` on the `PATH` and `vam self update` | `vam self install` / `uninstall` on Linux, macOS, Windows; `install.sh` / `install.ps1` assets; `vam self update` verifies hash and attestation and replaces itself; scenarios green |
 | later | see §8 | — |
+
+Phase 4 depends on Phase 3; Phase 5 depends on Phase 2 only and can run beside 3 and 4.
 
 Scenarios the phases are expected to add (names final at the phase breakdown):
 
 - Phase 0: `cli-prints-its-version-and-commit`, `vamd-prints-its-version-without-starting`,
-  `node-reports-the-version-it-runs` (CLI and `vamd` agree), `dev-build-does-not-claim-a-release`.
+  `node-status-shows-the-node-and-cli-versions` (and warns on a minor mismatch),
+  `dev-build-does-not-claim-a-release`.
 - Phase 3: `node-init-from-a-release-bundle-needs-no-checkout` (process layer, `--root` seam,
-  `--kit` from a fixture bundle), and a change to `node-init-check-names-what-is-missing` if the
-  check lists the kit.
+  `--kit` from a fixture bundle, a fixture `vam-runtime` injected as `/sbin/init`),
+  `node-init-installs-and-registers-the-brokers-asked-for`,
+  `node-init-from-a-newer-bundle-keeps-the-state`, and a change to
+  `node-init-check-names-what-is-missing` if the check lists the recipe or a broker.
+- Phase 4: `node-reports-the-standard-base-it-boots` gains an aarch64 lane variant (or a Lima
+  proof recorded at the phase close if no arm64 KVM runner is available).
+- Phase 5: `self-install-puts-vam-on-the-path-once` (`--dir` and a fake home as the seam),
+  `self-update-refuses-a-download-whose-hash-does-not-match`,
+  `self-update-replaces-itself-with-the-newer-release` (fixture release server).
 
 ## 8. Explicitly later
 
-- aarch64 node bundle and Lima zip (needs an arm64 standard base, kernel and Firecracker pins).
 - A published `rootfs.ext4` with a source archive, after a licence review.
 - `cosign` bundle for `SHA256SUMS`; SLSA Build L3 via a reusable workflow; rebuild check.
-- `vam` verifying downloads itself (`vam node init --from-release v0.2.0`), self-update.
+- `vam node upgrade` (in-place node upgrade with state migration and rollback);
+  `vam node init --from-release v0.3.0` (download and verify the bundle itself).
 - Package managers (Homebrew tap, winget, apt repository).
 - Release branches for patching an older minor.
 
@@ -359,16 +484,18 @@ Scenarios the phases are expected to add (names final at the phase breakdown):
 
 ### Every release
 
-1. The release PR (or PRs) for the cycle are merged into `main`; `rust.yml` on that merge is green.
-2. `Cargo.toml` on `main` carries the version to release (bumped by the cycle's first PR).
+1. Decide the number from what merged since the last tag: only fixes → patch; anything else →
+   minor (pre-1.0); `-rc.1` first when unsure.
+2. `scripts/release/prepare.sh <version>` → PR `release: prepare v<version>` → merge into `main`;
+   `rust.yml` on that merge is green.
 3. Actions → `release` → Run workflow from `main`: `version`, `commit` (or blank for the head),
    `dry_run: true`. Read the summary: guards, asset table, notes.
 4. Run again with `dry_run: false`. Review the pending deployment: asset table, `SHA256SUMS`,
    notes. Approve.
 5. On the published release: `gh release verify v<v>`, and download one archive and run
    `gh attestation verify` on it. `vam --version` from it prints `<v> (<sha> <date>)`.
-6. Open the post-release PR: `Cargo.toml` to the next minor.
-7. If the publish failed after the tag was created: do not delete or reuse it; release the next
+6. Nothing to do on `main` afterwards: there is no post-release PR.
+7. If the publish failed after the tag was created: do not delete or reuse it; prepare the next
    patch (or `-rc.N+1`).
 
 ## 10. Open questions (each with a default)
@@ -389,7 +516,84 @@ Scenarios the phases are expected to add (names final at the phase breakdown):
 8. **Changelog file.** Default: none; GitHub release notes generated from `release:` merges.
 9. **Guest init profile.** Default: release builds the guest exactly as `build-rootfs.sh` does;
    moving both to `release-guest` is a separate lane-proven change.
-10. **Version bump.** Default: a manual post-release PR sets the next minor. The workflow does not
-    push to `main`.
+10. **Version bump.** Default: a prepare PR at release time (§3.3); no post-release PR; the
+    workflow never pushes to `main`.
 11. **Who dispatches.** Default: owner only (environment reviewer); anyone with write access can
     start a dry run.
+12. **Brokers installed by default.** Default: none; `--broker` names them. Alternative: all
+    three, since the binaries are in the bundle anyway.
+13. **How `vam self update` verifies the attestation.** Default: hash check always, plus
+    `gh attestation verify` when `gh` is installed, with a warning when it is not; an in-process
+    Sigstore verifier (`sigstore` crate, larger binary) is decided at the Phase 5 breakdown.
+14. **`PATH` edits on Linux and macOS.** Default: one marked line in the login profile files
+    listed in §5.7, never system files; `--no-modify-path` prints the line instead.
+
+## 11. Walkthrough
+
+### 11.1 Developer: merging is not releasing
+
+```text
+ feature branch ──waves──► release PR into main ──merge──► main      (Actions is the merge gate)
+                                                            │  nothing is published; main can
+                                                            │  take many release PRs per version
+                                                            ▼
+ Owner, when ready:  decide the number ► prepare PR "release: prepare v0.3.0" ► merge
+                     Actions ▸ release ▸ Run workflow (version 0.3.0, commit, dry_run=true)
+        ▼
+   validate   commit is a merge on main · rust.yml green on that SHA · Cargo.toml = 0.3.0
+              tag unused · 0.3.0 > every tag · release gate
+        ▼
+   build      (parallel, read-only, no secrets, no cache) node bundles · vam ×6 platforms ·
+              vam-runtime · proto
+        ▼
+   assemble   SHA256SUMS · SBOMs · notes from the release: merges · secret scans
+        ▼
+   dry_run=true  ──► stop; artifacts stay on the run for inspection
+   dry_run=false ──► waits in environment "release" ──► owner approves
+                     draft release + tag v0.3.0 at the commit ► upload ► attest ► verify ► publish
+                     the tag can never move or be deleted
+        ▼
+ main keeps building "0.3.0+dev.N" until the next prepare PR
+```
+
+### 11.2 User: run a node, connect from anywhere
+
+```text
+ server (x86_64 Linux + KVM; aarch64 from Phase 4)
+   download vam-node-<v>-<arch>.tar.gz ► sha256sum -c SHA256SUMS / gh attestation verify ► tar -x
+   sudo ./vam node init --check                  # what the host lacks, changes nothing
+   sudo ./vam node init --broker web,schedule    # host check · /var/lib/vam · Firecracker,
+                                                 # jailer, kernel (pinned) · base image from the
+                                                 # recipe + vam-runtime · vamd.env · systemd units
+                                                 # (vamd, brokers) · first admin key, shown once
+ laptop (Linux, macOS, Windows)
+   install.sh / install.ps1  (or download + vam self install)   # vam on PATH
+   vam config set-host https://my-node:<port> · vam login
+   vam node status     # node vamd 0.3.0 (3f9c2ab) release · brokers · cli vam 0.3.0
+   vam run …           # everything goes over the node's HTTP API
+   vam self update     # later releases of the CLI; the node is upgraded from its bundle
+```
+
+### 11.3 Platforms
+
+```text
+                       where vamd runs                                     vam CLI
+ Linux x86_64 server   native, x86_64 node bundle                (P3)      native
+ Linux arm64 server    native, aarch64 node bundle               (P4)      native
+ Windows 11 + WSL2     WSL Ubuntu (x86_64) with nested KVM:      (P3)      vam.exe (P3) or the
+                       the same x86_64 node bundle                         Linux vam inside WSL
+ Mac, M3 or newer      Lima VM (aarch64 Linux, nested KVM):      (P4)      macOS arm64 vam
+                       aarch64 node bundle inside Lima
+ Mac, M1/M2 or Intel   no node locally (no nested virtualization           macOS arm64 / x86_64
+                       for Lima); use a remote Linux node                  vam, pointed at it
+```
+
+- **Windows + WSL2:** inside the WSL Ubuntu distribution, extract the x86_64 node bundle and run
+  `sudo ./vam node init` (`/dev/kvm` comes from WSL2 nested virtualization;
+  `getting-started/windows-wsl.md`). On Windows, `vam.exe` points at `https://localhost:<port>`
+  (WSL2 forwards localhost), or the Linux `vam` is used inside WSL. `vam node init` on Windows
+  says it is Linux only.
+- **Mac + Lima** (Apple Silicon M3 or newer, `getting-started/macos-lima.md`): `limactl start` with `scripts/lima-macos.yaml`; inside the VM, extract the
+  aarch64 node bundle and run `sudo ./vam node init`; on the Mac, the macOS `vam` points at the
+  forwarded port. Until Phase 4 the Mac path stays as today (`start-vamd-lima.sh` compiles `vamd`
+  in Lima with the minimal image).
