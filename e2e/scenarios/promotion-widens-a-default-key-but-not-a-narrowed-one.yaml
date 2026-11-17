@@ -25,5 +25,4 @@ guards:
   - vam:crates/vam-orchestrator/src/api/auth.rs
   - vam:crates/vam-orchestrator/src/api/catalog_auth.rs
   - vam:crates/vam-orchestrator/src/api/users_keys_admin.rs
-status: pending
-expectFail: { step: then.0, class: product }
+status: active

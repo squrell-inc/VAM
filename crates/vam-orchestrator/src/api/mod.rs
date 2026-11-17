@@ -420,6 +420,8 @@ async fn create_key(
     };
     let owner = state.store.resolve_user(&owner_ref)?;
     crate::users::reject_deactivated_user(&owner)?;
+    // Mode is decided by what was asked for, before sanitizing: no list follows the live role.
+    let scope_mode = crate::keys::ScopeMode::for_requested(&req.scopes);
     let scopes = crate::keys::sanitize_scopes_for_role(owner.role, &req.scopes);
     if scopes.is_empty() {
         return Err(OrchestratorError::InvalidContract(
@@ -433,13 +435,14 @@ async fn create_key(
     } else {
         req.principal
     };
-    let record = state.store.create_api_key_owned(
+    let record = state.store.create_api_key_owned_with_mode(
         &key_id,
         &req.name,
         &secret,
         &principal,
         &scopes,
         &owner.user_id,
+        scope_mode,
     )?;
     let resp = CreateApiKeyResponse {
         key: Some(to_proto_key(&record)),

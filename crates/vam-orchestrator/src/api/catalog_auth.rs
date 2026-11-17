@@ -28,11 +28,19 @@ pub fn require_catalog_read(auth: &AuthContext) -> Result<(), OrchestratorError>
     }
 }
 
-/// Live role is the source of truth so org-admin revoke sticks even when an
-/// older token still lists `publish:grant`. `keys:admin` keeps the operator
-/// superuser bypass used by the bootstrap key.
+/// Release needs `publish:grant` in the caller's **effective** scopes (live role at
+/// authentication, further narrowed by an explicit key's list), or `keys:admin` (the
+/// operator superuser bypass). A key narrowed without `publish:grant` cannot release, and a
+/// revoked publisher's keys lose it with the role.
 pub fn require_publish_grant(auth: &AuthContext) -> Result<(), OrchestratorError> {
-    if auth.has_keys_admin() || auth.role().has_publish_grant() {
+    if auth.has_keys_admin()
+        || auth
+            .key
+            .record
+            .scopes
+            .iter()
+            .any(|s| s == PUBLISH_GRANT_SCOPE)
+    {
         Ok(())
     } else {
         Err(OrchestratorError::PermissionDenied(format!(
@@ -115,5 +123,30 @@ mod tests {
     #[test]
     fn keys_admin_may_read_catalog() {
         require_catalog_read(&auth_with_scopes(&["keys:admin"])).expect("operator bypass");
+    }
+
+    #[test]
+    fn release_requires_publish_grant_in_effective_scopes() {
+        let err = require_publish_grant(&auth_with_scopes(&["catalog:write", "runs:write"]))
+            .expect_err("catalog:write alone cannot release");
+        assert!(
+            matches!(err, OrchestratorError::PermissionDenied(ref msg) if msg.contains("publish:grant")),
+            "{err}"
+        );
+        require_publish_grant(&auth_with_scopes(&["catalog:write", "publish:grant"]))
+            .expect("publish:grant releases");
+    }
+
+    #[test]
+    fn publisher_key_narrowed_without_publish_grant_cannot_release() {
+        // The live role is Publisher, but the effective scopes (an explicit key's list) lack it.
+        let mut auth = auth_with_scopes(&["catalog:write", "runs:write"]);
+        auth.key.role = UserRole::Publisher;
+        assert!(require_publish_grant(&auth).is_err());
+    }
+
+    #[test]
+    fn keys_admin_may_release() {
+        require_publish_grant(&auth_with_scopes(&["keys:admin"])).expect("operator bypass");
     }
 }

@@ -145,6 +145,71 @@ pub fn sanitize_scopes_for_owner(owner_user_id: &str, requested: &[String]) -> V
     sanitize_scopes_for_role(role, requested)
 }
 
+/// How a key's scopes relate to its owner's live role (`api_keys.scope_mode`).
+///
+/// `Role`: minted with no scope list; the key follows the live role's defaults both ways.
+/// `Explicit`: minted with a list; the key never exceeds that list or the live role.
+/// The narrower `Explicit` is the default, for rows written by code that does not set it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScopeMode {
+    Role,
+    #[default]
+    Explicit,
+}
+
+impl ScopeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScopeMode::Role => "role",
+            ScopeMode::Explicit => "explicit",
+        }
+    }
+
+    /// Lenient read: anything but `role` is `explicit` (the narrower).
+    pub fn from_db(value: &str) -> Self {
+        if value == "role" {
+            ScopeMode::Role
+        } else {
+            ScopeMode::Explicit
+        }
+    }
+
+    /// Mint rule: no scope list requested is `role`, any list is `explicit`.
+    pub fn for_requested(requested: &[String]) -> Self {
+        if requested.is_empty() {
+            ScopeMode::Role
+        } else {
+            ScopeMode::Explicit
+        }
+    }
+}
+
+/// The scopes an `http` API key carries on a request, given its owner's live `role`
+/// (an unknown owner is passed as `Member`). The only place a stored scope list becomes an
+/// effective one; [`SqliteWorkflowStore::authenticate_api_key`] is its only caller.
+///
+/// - The bootstrap key and any key whose owner is an Operator keep their stored scopes.
+/// - `Role` mode: the live role's defaults.
+/// - `Explicit` mode: the stored list intersected with the live role's defaults.
+///
+/// A non-operator result is always inside `default_scopes_for_role(role)`, which holds no
+/// `keys:admin` or `brokers:admin`, so operator-only scopes never reach a tenant by any path.
+pub fn effective_scopes(record: &ApiKeyRecord, role: UserRole) -> Vec<String> {
+    if crate::owner::is_bootstrap_key(&record.key_id) || role == UserRole::Operator {
+        return record.scopes.clone();
+    }
+    let defaults = default_scopes_for_role(role);
+    match record.scope_mode {
+        ScopeMode::Role => defaults,
+        ScopeMode::Explicit => record
+            .scopes
+            .iter()
+            .filter(|s| defaults.contains(s))
+            .cloned()
+            .collect(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ApiKeyRecord {
     pub key_id: String,
@@ -167,6 +232,8 @@ pub struct ApiKeyRecord {
     pub expires_at: Option<i64>,
     pub source_run_id: Option<String>,
     pub tool_name: Option<String>,
+    /// `role` or `explicit`; see [`ScopeMode`]. Applied by [`effective_scopes`] at authentication.
+    pub scope_mode: ScopeMode,
 }
 
 impl ApiKeyRecord {
@@ -193,7 +260,7 @@ macro_rules! key_cols {
     () => {
         "key_id, name, sha256_secret, principal, scopes, created_at, last_used_at, revoked_at, \
          owner_user_id, holder, target_kind, target_id, constraints_json, issued_via, \
-         external_ref, expires_at, source_run_id, tool_name"
+         external_ref, expires_at, source_run_id, tool_name, scope_mode"
     };
 }
 pub(crate) use key_cols;
@@ -300,6 +367,18 @@ impl SqliteWorkflowStore {
                 connection.execute_batch(&format!("ALTER TABLE api_keys ADD COLUMN {col} {ty}"))?;
             }
         }
+        // `scope_mode`: added once, with its backfill, in one transaction. Gating on the
+        // column's absence makes the backfill run exactly once: a later start never
+        // reclassifies a key minted `explicit` whose list happens to equal a role's defaults.
+        if !have.contains("scope_mode") {
+            let tx = connection.unchecked_transaction()?;
+            tx.execute_batch(
+                "ALTER TABLE api_keys ADD COLUMN scope_mode TEXT NOT NULL DEFAULT 'explicit'
+                 CHECK (scope_mode IN ('role', 'explicit'))",
+            )?;
+            backfill_scope_mode(&tx, have.contains("owner_user_id"))?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -325,6 +404,8 @@ impl SqliteWorkflowStore {
         self.create_api_key_owned(key_id, name, secret, principal, scopes, owner)
     }
 
+    /// Mints an `explicit` key (the narrower mode). Mint routes use
+    /// [`Self::create_api_key_owned_with_mode`].
     pub fn create_api_key_owned(
         &self,
         key_id: &str,
@@ -333,6 +414,28 @@ impl SqliteWorkflowStore {
         principal: &str,
         scopes: &[String],
         owner_user_id: &str,
+    ) -> Result<ApiKeyRecord, OrchestratorError> {
+        self.create_api_key_owned_with_mode(
+            key_id,
+            name,
+            secret,
+            principal,
+            scopes,
+            owner_user_id,
+            ScopeMode::Explicit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // the mint fields plus the mode; a struct adds nothing
+    pub fn create_api_key_owned_with_mode(
+        &self,
+        key_id: &str,
+        name: &str,
+        secret: &str,
+        principal: &str,
+        scopes: &[String],
+        owner_user_id: &str,
+        scope_mode: ScopeMode,
     ) -> Result<ApiKeyRecord, OrchestratorError> {
         let connection = self
             .connection
@@ -344,9 +447,18 @@ impl SqliteWorkflowStore {
             serde_json::to_string(scopes).map_err(|e| OrchestratorError::Core(e.to_string()))?;
         let owner = crate::owner::resolved_owner(owner_user_id).to_string();
         connection.execute(
-            "INSERT INTO api_keys (key_id, name, sha256_secret, principal, scopes, created_at, owner_user_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![key_id, name, hash, principal, scopes_json, now, owner],
+            "INSERT INTO api_keys (key_id, name, sha256_secret, principal, scopes, created_at, owner_user_id, scope_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                key_id,
+                name,
+                hash,
+                principal,
+                scopes_json,
+                now,
+                owner,
+                scope_mode.as_str()
+            ],
         )?;
         Ok(ApiKeyRecord {
             key_id: key_id.to_string(),
@@ -358,6 +470,7 @@ impl SqliteWorkflowStore {
             last_used_at: None,
             revoked_at: None,
             owner_user_id: owner,
+            scope_mode,
             ..Default::default()
         })
     }
@@ -592,7 +705,7 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        let record = connection
+        let mut record = connection
             .query_row(
                 concat!(
                     "SELECT ",
@@ -634,12 +747,71 @@ impl SqliteWorkflowStore {
             Err(e) => return Err(e),
         };
 
+        // The one place a stored scope list becomes the caller's effective scopes.
+        record.scopes = effective_scopes(&record, role);
+
         Ok(AuthenticatedKey {
             record,
             source: AuthSource::ApiKey,
             role,
         })
     }
+}
+
+/// One-shot backfill of `api_keys.scope_mode` (locked decision 2): an `http` key is `role`
+/// when its stored list equals, as a set, the defaults of its owner's CURRENT role; every
+/// other row keeps the column default `explicit`. A missing owner column (a database older
+/// than owner stamps) reads as `local`, and `bootstrap` as the operator, like the stamps do.
+fn backfill_scope_mode(
+    connection: &rusqlite::Connection,
+    has_owner_column: bool,
+) -> Result<(), OrchestratorError> {
+    let owner_expr = if has_owner_column {
+        "owner_user_id"
+    } else {
+        "NULL"
+    };
+    let rows: Vec<(String, String, Option<String>)> = {
+        let mut stmt = connection.prepare(&format!(
+            "SELECT key_id, scopes, {owner_expr} FROM api_keys
+             WHERE holder IS NULL OR holder IN ('', 'http')"
+        ))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut roles = std::collections::HashMap::new();
+    {
+        let mut stmt = connection.prepare("SELECT user_id, role FROM users")?;
+        let users = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (user_id, role) in users {
+            roles.insert(user_id, UserRole::from_db(&role));
+        }
+    }
+    for (key_id, scopes_json, owner) in rows {
+        let Ok(stored) = serde_json::from_str::<Vec<String>>(&scopes_json) else {
+            continue;
+        };
+        let owner = match owner.as_deref() {
+            Some(o) if !o.is_empty() => o,
+            _ if crate::owner::is_bootstrap_key(&key_id) => crate::users::OPERATOR_USER_ID,
+            _ => crate::users::LOCAL_USER_ID,
+        };
+        let role = roles.get(owner).copied().unwrap_or(UserRole::Member);
+        let stored: std::collections::HashSet<String> = stored.into_iter().collect();
+        let defaults: std::collections::HashSet<String> =
+            default_scopes_for_role(role).into_iter().collect();
+        if stored == defaults {
+            connection.execute(
+                "UPDATE api_keys SET scope_mode = 'role' WHERE key_id = ?1",
+                [&key_id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn parse_api_key_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiKeyRecord> {
@@ -665,6 +837,7 @@ pub(crate) fn parse_api_key_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Api
         expires_at: row.get(15)?,
         source_run_id: row.get(16)?,
         tool_name: row.get(17)?,
+        scope_mode: ScopeMode::from_db(&row.get::<_, String>(18)?),
     })
 }
 
@@ -765,6 +938,17 @@ mod tests {
         let requested = sanitize_scopes_for_role(UserRole::Member, &["catalog:write".to_string()]);
         assert_eq!(requested, vec!["catalog:write".to_string()]);
         assert!(!requested.iter().any(|s| s == PUBLISH_GRANT_SCOPE));
+        // The stored list is kept on the row, but authentication caps it by the live role:
+        // a member's effective scopes never include `catalog:write`.
+        let stored = ApiKeyRecord {
+            key_id: "key-m".to_string(),
+            scopes: requested,
+            scope_mode: ScopeMode::Explicit,
+            ..Default::default()
+        };
+        let effective = effective_scopes(&stored, UserRole::Member);
+        assert!(!effective.iter().any(|s| s == "catalog:write"));
+        assert!(!effective.iter().any(|s| s == PUBLISH_GRANT_SCOPE));
     }
 
     #[test]
@@ -849,5 +1033,399 @@ mod tests {
             .expect("still visible to owner")
             .revoked_at
             .is_some());
+    }
+
+    // ---- scope_mode and effective scopes (member-draft-agents Phase 1) ----
+
+    fn strs(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn rec(key_id: &str, scopes: Vec<String>, mode: ScopeMode) -> ApiKeyRecord {
+        ApiKeyRecord {
+            key_id: key_id.to_string(),
+            scopes,
+            scope_mode: mode,
+            ..Default::default()
+        }
+    }
+
+    fn has(scopes: &[String], scope: &str) -> bool {
+        scopes.iter().any(|s| s == scope)
+    }
+
+    fn mint(
+        store: &SqliteWorkflowStore,
+        key_id: &str,
+        owner: &str,
+        scopes: &[String],
+        mode: ScopeMode,
+    ) -> String {
+        let secret = mint_api_key_secret();
+        store
+            .create_api_key_owned_with_mode(
+                key_id,
+                key_id,
+                &secret,
+                "User::\"t\"",
+                scopes,
+                owner,
+                mode,
+            )
+            .expect("mint");
+        secret
+    }
+
+    #[test]
+    fn effective_scopes_bootstrap_and_operator_keep_stored() {
+        let stored = strs(&["keys:admin", "catalog:write", "node:read"]);
+        for mode in [ScopeMode::Role, ScopeMode::Explicit] {
+            // The bootstrap key, whatever role the lookup yields (even an unknown owner).
+            let boot = rec(crate::owner::BOOTSTRAP_KEY_ID, stored.clone(), mode);
+            assert_eq!(effective_scopes(&boot, UserRole::Member), stored);
+            // Any key whose owner's live role is Operator.
+            let op = rec("key-op", stored.clone(), mode);
+            assert_eq!(effective_scopes(&op, UserRole::Operator), stored);
+        }
+    }
+
+    #[test]
+    fn effective_scopes_role_mode_follows_promotion_and_demotion() {
+        let stored = default_scopes_for_role(UserRole::Member);
+        let key = rec("key-a", stored, ScopeMode::Role);
+        let member = effective_scopes(&key, UserRole::Member);
+        assert!(!has(&member, "catalog:write"));
+        let publisher = effective_scopes(&key, UserRole::Publisher);
+        assert!(has(&publisher, "catalog:write") && has(&publisher, PUBLISH_GRANT_SCOPE));
+        assert_eq!(publisher, default_scopes_for_role(UserRole::Publisher));
+        let admin = effective_scopes(&key, UserRole::OrgAdmin);
+        assert!(has(&admin, USERS_ADMIN_SCOPE));
+        let demoted = effective_scopes(&key, UserRole::Member);
+        assert_eq!(demoted, default_scopes_for_role(UserRole::Member));
+    }
+
+    #[test]
+    fn effective_scopes_explicit_is_capped_and_never_widened() {
+        let narrow = rec(
+            "key-n",
+            strs(&["sessions:write", "runs:write"]),
+            ScopeMode::Explicit,
+        );
+        // Promotion never widens past the list.
+        for role in [UserRole::Member, UserRole::Publisher, UserRole::OrgAdmin] {
+            assert_eq!(
+                effective_scopes(&narrow, role),
+                strs(&["sessions:write", "runs:write"])
+            );
+        }
+        // A list above the live role is capped by it, and regained on promotion.
+        let above = rec(
+            "key-x",
+            strs(&["runs:write", "catalog:write"]),
+            ScopeMode::Explicit,
+        );
+        assert_eq!(
+            effective_scopes(&above, UserRole::Member),
+            strs(&["runs:write"])
+        );
+        assert_eq!(
+            effective_scopes(&above, UserRole::Publisher),
+            strs(&["runs:write", "catalog:write"])
+        );
+        // Demotion takes it away again.
+        assert_eq!(
+            effective_scopes(&above, UserRole::Member),
+            strs(&["runs:write"])
+        );
+    }
+
+    #[test]
+    fn effective_scopes_never_grant_operator_only_to_non_operator() {
+        let stored = strs(&["keys:admin", "brokers:admin", "node:read"]);
+        for role in [UserRole::Member, UserRole::Publisher, UserRole::OrgAdmin] {
+            for mode in [ScopeMode::Role, ScopeMode::Explicit] {
+                let got = effective_scopes(&rec("key-t", stored.clone(), mode), role);
+                assert!(
+                    !got.iter().any(|s| is_operator_only_scope(s)),
+                    "{role:?} {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scope_mode_follows_what_was_requested() {
+        assert_eq!(ScopeMode::for_requested(&[]), ScopeMode::Role);
+        assert_eq!(
+            ScopeMode::for_requested(&strs(&["node:read"])),
+            ScopeMode::Explicit
+        );
+        assert_eq!(ScopeMode::from_db("role"), ScopeMode::Role);
+        assert_eq!(ScopeMode::from_db("explicit"), ScopeMode::Explicit);
+        assert_eq!(ScopeMode::from_db("anything"), ScopeMode::Explicit);
+    }
+
+    #[test]
+    fn legacy_create_writes_explicit_and_mode_round_trips() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        let scopes = default_scopes_for_role(UserRole::Member);
+        let legacy = store
+            .create_api_key_owned(
+                "k-legacy",
+                "n",
+                &mint_api_key_secret(),
+                "p",
+                &scopes,
+                LOCAL_USER_ID,
+            )
+            .expect("legacy");
+        assert_eq!(legacy.scope_mode, ScopeMode::Explicit);
+        assert_eq!(
+            store.get_api_key("k-legacy").expect("get").scope_mode,
+            ScopeMode::Explicit
+        );
+        mint(&store, "k-role", LOCAL_USER_ID, &scopes, ScopeMode::Role);
+        assert_eq!(
+            store.get_api_key("k-role").expect("get").scope_mode,
+            ScopeMode::Role
+        );
+        // A raw insert by older code (no scope_mode column named) takes the narrow default.
+        {
+            let c = store.connection.lock().expect("lock");
+            c.execute(
+                "INSERT INTO api_keys (key_id, name, sha256_secret, principal, scopes, created_at)
+                 VALUES ('k-raw', 'n', 'h-raw', 'p', '[]', 1)",
+                [],
+            )
+            .expect("raw");
+        }
+        assert_eq!(
+            store.get_api_key("k-raw").expect("get").scope_mode,
+            ScopeMode::Explicit
+        );
+    }
+
+    #[test]
+    fn authenticate_applies_effective_scopes_and_keeps_stored_on_the_row() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store.create_user("alice", "alice").expect("alice");
+        let default_key = mint(
+            &store,
+            "alice-default",
+            "alice",
+            &default_scopes_for_role(UserRole::Member),
+            ScopeMode::Role,
+        );
+        let above = strs(&["runs:write", "catalog:write"]);
+        let above_key = mint(&store, "alice-above", "alice", &above, ScopeMode::Explicit);
+
+        let auth = store.authenticate_bearer(&default_key).expect("auth");
+        assert!(!has(&auth.record.scopes, "catalog:write"));
+        let auth = store.authenticate_bearer(&above_key).expect("auth");
+        assert_eq!(auth.record.scopes, strs(&["runs:write"]));
+        // The stored list stays on the row.
+        assert_eq!(store.get_api_key("alice-above").expect("row").scopes, above);
+
+        store
+            .set_user_role("alice", UserRole::Publisher)
+            .expect("promote");
+        let auth = store.authenticate_bearer(&default_key).expect("auth");
+        assert!(
+            has(&auth.record.scopes, "catalog:write")
+                && has(&auth.record.scopes, PUBLISH_GRANT_SCOPE)
+        );
+        let auth = store.authenticate_bearer(&above_key).expect("auth");
+        assert_eq!(auth.record.scopes, above);
+
+        store
+            .set_user_role("alice", UserRole::Member)
+            .expect("demote");
+        let auth = store.authenticate_bearer(&default_key).expect("auth");
+        assert!(!has(&auth.record.scopes, "catalog:write"));
+        let auth = store.authenticate_bearer(&above_key).expect("auth");
+        assert_eq!(auth.record.scopes, strs(&["runs:write"]));
+    }
+
+    #[test]
+    fn unknown_owner_gets_member_defaults() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        // No users row for "ghost": the lookup falls back to Member.
+        {
+            let c = store.connection.lock().expect("lock");
+            c.execute_batch("PRAGMA foreign_keys = OFF")
+                .expect("fk off");
+        }
+        let secret = mint(
+            &store,
+            "ghost-key",
+            "ghost",
+            &default_scopes_for_role(UserRole::Publisher),
+            ScopeMode::Role,
+        );
+        let auth = store.authenticate_bearer(&secret).expect("auth");
+        assert_eq!(auth.role, UserRole::Member);
+        assert_eq!(
+            auth.record.scopes,
+            default_scopes_for_role(UserRole::Member)
+        );
+    }
+
+    #[test]
+    fn deactivated_owner_is_refused_and_revoked_key_first() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store.create_user("alice", "alice").expect("alice");
+        let secret = mint(
+            &store,
+            "alice-k",
+            "alice",
+            &default_scopes_for_role(UserRole::Member),
+            ScopeMode::Role,
+        );
+        {
+            let c = store.connection.lock().expect("lock");
+            c.execute(
+                "UPDATE users SET deactivated_at = 1 WHERE user_id = 'alice'",
+                [],
+            )
+            .expect("deactivate");
+        }
+        assert!(store.authenticate_bearer(&secret).is_err());
+        {
+            let c = store.connection.lock().expect("lock");
+            c.execute(
+                "UPDATE users SET deactivated_at = NULL WHERE user_id = 'alice'",
+                [],
+            )
+            .expect("reactivate");
+        }
+        store.authenticate_bearer(&secret).expect("active again");
+        store.revoke_api_key("alice-k").expect("revoke");
+        let err = store.authenticate_bearer(&secret).expect_err("revoked");
+        assert!(
+            matches!(err, OrchestratorError::PermissionDenied(ref m) if m.contains("revoked")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn non_http_holder_secret_is_still_refused() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        let secret = mint_api_key_secret();
+        {
+            let c = store.connection.lock().expect("lock");
+            c.execute(
+                "INSERT INTO api_keys (key_id, name, sha256_secret, principal, scopes, created_at, owner_user_id, holder)
+                 VALUES ('rg_1', 'g', ?1, 'broker:x', '[\"runs:write\"]', 1, 'local', 'broker:x')",
+                [hash_api_key_secret(&secret)],
+            )
+            .expect("grant row");
+        }
+        assert!(matches!(
+            store.authenticate_bearer(&secret),
+            Err(OrchestratorError::Unauthenticated)
+        ));
+    }
+
+    /// An `api_keys` table as older code left it: no `scope_mode`, no owner stamps yet.
+    fn legacy_store_with_keys(rows: &[(&str, &str, &[&str])]) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("conn");
+        conn.execute_batch(
+            "CREATE TABLE api_keys (key_id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL,
+               sha256_secret TEXT NOT NULL UNIQUE, principal TEXT NOT NULL, scopes TEXT NOT NULL,
+               created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER,
+               owner_user_id TEXT);",
+        )
+        .expect("old table");
+        for (key_id, owner, scopes) in rows {
+            conn.execute(
+                "INSERT INTO api_keys (key_id, name, sha256_secret, principal, scopes, created_at, owner_user_id)
+                 VALUES (?1, ?1, ?1, 'p', ?2, 1, ?3)",
+                rusqlite::params![key_id, serde_json::to_string(scopes).expect("json"), owner],
+            )
+            .expect("old row");
+        }
+        conn
+    }
+
+    fn mode_of(store: &SqliteWorkflowStore, key_id: &str) -> ScopeMode {
+        store.get_api_key(key_id).expect("key").scope_mode
+    }
+
+    #[test]
+    fn backfill_follows_the_owners_current_role() {
+        let member_set: Vec<&str> = MEMBER_SCOPES.to_vec();
+        let mut member_plus = member_set.clone();
+        member_plus.push("catalog:write");
+        let publisher_set: Vec<&str> = PUBLISHER_SCOPES.to_vec();
+        let conn = legacy_store_with_keys(&[
+            ("member-default", "local", &member_set),
+            ("member-plus-extra", "local", &member_plus),
+            ("publisher-member-sized", "pubby", &member_set),
+            ("publisher-default", "pubby", &publisher_set),
+            (
+                "member-reordered",
+                "local",
+                &member_set.iter().rev().copied().collect::<Vec<_>>(),
+            ),
+        ]);
+        conn.execute_batch(
+            "CREATE TABLE users (user_id TEXT PRIMARY KEY NOT NULL, username TEXT NOT NULL UNIQUE,
+               tenant_id TEXT NOT NULL, created_at INTEGER NOT NULL, password_hash TEXT,
+               password_updated_at INTEGER, role TEXT NOT NULL DEFAULT 'member', deactivated_at INTEGER);
+             INSERT INTO users (user_id, username, tenant_id, created_at, role)
+               VALUES ('pubby', 'pubby', 'pubby', 1, 'publisher');",
+        )
+        .expect("users");
+        let store = SqliteWorkflowStore::initialize(conn).expect("migrate");
+        assert_eq!(mode_of(&store, "member-default"), ScopeMode::Role);
+        assert_eq!(mode_of(&store, "member-reordered"), ScopeMode::Role);
+        assert_eq!(mode_of(&store, "member-plus-extra"), ScopeMode::Explicit);
+        assert_eq!(
+            mode_of(&store, "publisher-member-sized"),
+            ScopeMode::Explicit
+        );
+        assert_eq!(mode_of(&store, "publisher-default"), ScopeMode::Role);
+    }
+
+    #[test]
+    fn backfill_runs_once_and_a_reopened_store_keeps_the_column() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("vamd.db");
+        let member_set: Vec<&str> = MEMBER_SCOPES.to_vec();
+        {
+            let conn = rusqlite::Connection::open(&path).expect("conn");
+            conn.execute_batch(
+                "CREATE TABLE api_keys (key_id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL,
+                   sha256_secret TEXT NOT NULL UNIQUE, principal TEXT NOT NULL, scopes TEXT NOT NULL,
+                   created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER);",
+            )
+            .expect("table without owner stamps");
+            conn.execute(
+                "INSERT INTO api_keys (key_id, name, sha256_secret, principal, scopes, created_at)
+                 VALUES ('old-member', 'n', 'h1', 'p', ?1, 1)",
+                [serde_json::to_string(&member_set).expect("json")],
+            )
+            .expect("row");
+        }
+        {
+            let store = SqliteWorkflowStore::open(&path).expect("first open migrates");
+            assert_eq!(mode_of(&store, "old-member"), ScopeMode::Role);
+            // An explicit key whose list equals the defaults must stay explicit on restart.
+            let scopes = default_scopes_for_role(UserRole::Member);
+            mint(
+                &store,
+                "explicit-same",
+                LOCAL_USER_ID,
+                &scopes,
+                ScopeMode::Explicit,
+            );
+            // And a role key stays role.
+            mint(&store, "role-same", LOCAL_USER_ID, &scopes, ScopeMode::Role);
+        }
+        let store = SqliteWorkflowStore::open(&path).expect("reopen");
+        store.initialize_api_keys_schema().expect("idempotent");
+        assert_eq!(mode_of(&store, "old-member"), ScopeMode::Role);
+        assert_eq!(mode_of(&store, "explicit-same"), ScopeMode::Explicit);
+        assert_eq!(mode_of(&store, "role-same"), ScopeMode::Role);
     }
 }
