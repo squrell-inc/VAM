@@ -119,7 +119,7 @@ write the catalog, and release honours a key narrowed without `publish:grant`.
 **Exit:** the three new scenarios are `active` and green; operator, grant and
 session behaviour unchanged (re-run list below green).
 
-- [x] Wave 0: scenarios and harness
+- [x] Wave 0: scenarios and harness (#22)
 - [ ] Wave 1: effective scopes, `scope_mode`, release on effective scopes
 - [ ] Wave 2: queued start re-derives scopes; docs lines
 
@@ -266,7 +266,7 @@ harness additions in `crates/vam-e2e` (documented in `e2e/README.md`):
 
 | Wave | Items | Turns green | Repo | Model | Budget | Depends on | Actions | Status | PR |
 |---|---|---|---|---|---|---|---|---|---|
-| 0 | `MD-1.0` (3 scenarios, 4 world pieces, `put-draft`, `set-role`, `identity-request` `contains`/`lacks`, `org` `scopes`, README) | — (3 red, right reason, class `product`) | vam | Sonnet low: test harness following the `identity.rs` pattern | 90 min | — | fast (`vam-e2e`, `e2e/`: `skip-vm-lane`) | [ ] | |
+| 0 | `MD-1.0` (3 scenarios, 4 world pieces, `put-draft`, `set-role`, `identity-request` `contains`/`lacks`, `org` `scopes`, README) | — (3 red, right reason, class `product`) | vam | Sonnet low: test harness following the `identity.rs` pattern | 90 min | — | fast (`vam-e2e`, `e2e/`: `skip-vm-lane`) | [x] | #22 |
 | 1 | `MD-1.1`, `MD-1.2`, `MD-1.3` | `promotion-widens-a-default-key-but-not-a-narrowed-one`, `demotion-takes-catalog-writes-from-a-publisher-key`, `member-key-minted-with-catalog-write-cannot-write-the-catalog` (and the re-run list stays green) | vam | Sonnet high: the authentication path of every API request plus a schema migration, a security boundary; the orchestrator reads `authenticate_api_key`, `effective_scopes` and `require_publish_grant` before merging | 150 min | 0 | fast (`vam-orchestrator`: `skip-vm-lane`) | [ ] | |
 | 2 | `MD-1.4`, `MD-1.5` | — (unit; the three stay green) | vam | Sonnet medium: the queued-start re-check crosses `inbox.rs` and the run-start caller, plus docs | 75 min | 1 | fast (`skip-vm-lane`) | [ ] | |
 
@@ -421,3 +421,4 @@ team has the handoff (`design/member-draft-agents.md` §9) on the docs site.
 |---|---|---|
 | 2026-11-17 | — | Tracker opened from the owner's member-authoring brief; design `design/member-draft-agents.md`; Phase 1 breakdown drafted |
 | 2026-11-17 | 1 W0 | Owner approved the plan (defaults as proposed; phase order keys, run route, member drafts, docs). Wave 0 on `feat/member-draft-agents-scenarios-keys`: 3 scenarios `pending`, 4 world pieces, harness steps `put-draft`, `set-role`, `identity-request` `contains`/`lacks`, `org` `scopes`; guards on `trigger-starts-a-run-as-the-grant-owner`. Scoreboard: 0 green, 3 red (right reason, class `product`, at `then.0`, `then.0`, `when.0`), 2 fix cycles (lint tag, container bun link), ~25 min. |
+| 2026-11-17 | 1 W0 | **Merged** #22 into `feat/member-draft-agents` (squash `2b0e5e1`); Actions green on all 9 checks (fmt/checks, clippy, workspace tests, smoke, docs, dco, firecracker advisory, release lane). Owner rule from #21: fast local checks, PR ready, Actions is the gate. |
