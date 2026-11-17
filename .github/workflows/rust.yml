@@ -48,7 +48,7 @@ permissions:
   contents: read
 
 jobs:
-  # Decides whether the paid microVM lane is worth running. Plain git diff, no
+  # Decides whether the microVM lane needs to run. Plain git diff, no
   # third-party action. Push and workflow_dispatch always run the lane.
   changes:
     name: changes
@@ -63,8 +63,8 @@ jobs:
       - name: VM path filter
         id: filter
         env:
-          # A PR carrying `skip-vm-lane` never runs the paid lane. Push, workflow_dispatch and
-          # release PRs ignore it. Open such a PR as a draft, add the label, then mark it ready.
+          # A PR carrying `skip-vm-lane` skips the microVM lane (a time saver; Actions is free on
+          # this public repository). Push, workflow_dispatch and release PRs ignore it.
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           # A release PR: into main from an epic base (feat/*), or labelled `release`.
           RELEASE: ${{ github.base_ref == 'main' && (startsWith(github.head_ref, 'feat/') || contains(github.event.pull_request.labels.*.name, 'release')) }}
