@@ -487,12 +487,15 @@ impl SqliteWorkflowStore {
         username: &str,
         password: &str,
     ) -> Result<UserRecord, OrchestratorError> {
-        let username = validate_username(username)?.to_string();
-        if let Ok(existing) = self.resolve_user(&username) {
+        // An account that already has a password is returned as is, even one whose name
+        // is now reserved: a restart must not fail for a first admin created earlier.
+        // Only creating or promoting a reserved name is refused (by the check below).
+        if let Ok(existing) = self.resolve_user(username.trim()) {
             if existing.has_password {
                 return Ok(existing);
             }
         }
+        let username = validate_username(username)?.to_string();
         if self.count_users_with_password()? > 0 {
             return Err(OrchestratorError::Conflict(
                 "first admin already exists; use --reset-password to change a password".to_string(),
@@ -1481,6 +1484,81 @@ mod tests {
             .expect_err("second admin");
         assert!(matches!(conflict, OrchestratorError::Conflict(_)));
         assert_eq!(store.user_count().expect("users"), 3);
+    }
+
+    #[test]
+    fn bootstrap_first_admin_already_named_bootstrap_survives_restart() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        {
+            // A first admin created before the name was reserved.
+            let connection = store.connection.lock().expect("lock");
+            connection
+                .execute(
+                    "INSERT INTO users (user_id, username, tenant_id, created_at, role)
+                     VALUES ('bootstrap', 'bootstrap', 'bootstrap', 1, 'org_admin')",
+                    [],
+                )
+                .expect("legacy admin");
+        }
+        store
+            .reset_user_password("bootstrap", "legacy-admin-secret")
+            .expect("password");
+        // Every restart applies the configured first admin again: it returns the
+        // existing account and changes nothing.
+        for name in ["bootstrap", " bootstrap "] {
+            let again = store
+                .bootstrap_first_admin(name, "ignored-on-repeat")
+                .expect("existing admin is returned");
+            assert_eq!(again.user_id, "bootstrap");
+            assert!(store
+                .verify_user_password("bootstrap", "legacy-admin-secret")
+                .expect("original password kept"));
+        }
+        assert_eq!(store.count_users_with_password().expect("count"), 1);
+
+        // Creating a new reserved account is still refused.
+        let fresh = SqliteWorkflowStore::in_memory().expect("fresh store");
+        for name in ["bootstrap", "Bootstrap"] {
+            assert!(matches!(
+                fresh.bootstrap_first_admin(name, "some-secret-1234"),
+                Err(OrchestratorError::InvalidContract(_))
+            ));
+        }
+        assert_eq!(fresh.count_users_with_password().expect("count"), 0);
+    }
+
+    /// The other names the login-name rules now refuse (a `usr_` prefix, another user's id)
+    /// must not stop a first admin created earlier from restarting either.
+    #[test]
+    fn bootstrap_first_admin_with_a_legacy_refused_name_survives_restart() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        {
+            let connection = store.connection.lock().expect("lock");
+            connection
+                .execute(
+                    "INSERT INTO users (user_id, username, tenant_id, created_at, role)
+                     VALUES ('admin-1', 'usr_admin', 'admin-1', 1, 'org_admin')",
+                    [],
+                )
+                .expect("legacy admin");
+        }
+        store
+            .reset_user_password("admin-1", "legacy-admin-secret")
+            .expect("password");
+        for name in ["usr_admin", "USR_ADMIN", "admin-1"] {
+            let again = store
+                .bootstrap_first_admin(name, "ignored-on-repeat")
+                .expect("existing admin is returned");
+            assert_eq!(again.user_id, "admin-1");
+        }
+        assert!(store
+            .verify_user_password("admin-1", "legacy-admin-secret")
+            .expect("original password kept"));
+        let fresh = SqliteWorkflowStore::in_memory().expect("fresh store");
+        assert!(matches!(
+            fresh.bootstrap_first_admin("usr_admin", "some-secret-1234"),
+            Err(OrchestratorError::InvalidContract(_))
+        ));
     }
 
     #[test]

@@ -171,7 +171,7 @@ impl QueuedCaller {
         } else {
             self.scopes.clone()
         };
-        let run_owner = if crate::owner::is_bootstrap_key(&self.key_id, &self.principal) {
+        let run_owner = if crate::owner::is_bootstrap_key(&self.key_id) {
             crate::users::OPERATOR_USER_ID.to_string()
         } else if !self.owner_user_id.is_empty() {
             self.owner_user_id.clone()
@@ -876,5 +876,31 @@ mod queued_caller_tests {
         };
         assert_eq!(trigger.record().as_deref(), Some("broker:b9"));
         assert!(trigger.is_trigger() && !person.is_trigger());
+    }
+
+    #[test]
+    fn queued_caller_owner_ignores_the_principal() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        store.create_user("alice", "alice").unwrap();
+        let queued = |key_id: &str, owner: &str| QueuedCaller {
+            key_id: key_id.into(),
+            name: "k".into(),
+            principal: "User::\"bootstrap\"".into(),
+            scopes: vec!["sessions:write".into()],
+            owner_user_id: owner.into(),
+            role: "member".into(),
+            session_token: true,
+            source: None,
+            credential_id: None,
+            not_after: None,
+        };
+        let member = queued("key-1", "alice").to_caller(&store).unwrap();
+        assert_eq!(member.owner_user_id, "alice");
+        let ownerless = queued("key-1", "").to_caller(&store).unwrap();
+        assert_eq!(ownerless.owner_user_id, crate::users::LOCAL_USER_ID);
+        let genuine = queued(crate::owner::BOOTSTRAP_KEY_ID, "")
+            .to_caller(&store)
+            .unwrap();
+        assert_eq!(genuine.owner_user_id, crate::users::OPERATOR_USER_ID);
     }
 }
