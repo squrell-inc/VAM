@@ -38,6 +38,8 @@ guards:
   - vam:crates/vam-orchestrator/src/host_tools.rs
   - vam:crates/vam-orchestrator/src/api/mod.rs
   - vam:crates/vam-orchestrator/src/receipt.rs
+  - vam:crates/vam-orchestrator/src/keys.rs
+  - vam:crates/vam-orchestrator/src/inbox.rs
 mock:
   - when: { afterTool: echo_arm_trigger }
     reply: { text: Armed. }

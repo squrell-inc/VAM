@@ -62,6 +62,23 @@ pub fn check(root: &Path) -> Vec<CheckError> {
                 format!("duplicate piece `{}`", w.piece),
             ));
         }
+        if w.scopes.is_some() && w.kind != PieceKind::Org {
+            errors.push(CheckError::new(
+                &p,
+                "piece-body",
+                "`scopes` belongs only to an `org` piece".to_string(),
+            ));
+        }
+        if w.scopes
+            .as_ref()
+            .is_some_and(|l| l.is_empty() || l.iter().any(|s| s.trim().is_empty()))
+        {
+            errors.push(CheckError::new(
+                &p,
+                "piece-body",
+                "`scopes` needs at least one non-empty entry".to_string(),
+            ));
+        }
         if w.egress.is_some() && w.kind != PieceKind::Secret {
             errors.push(CheckError::new(
                 &p,
@@ -701,6 +718,13 @@ fn check_scenario(
             }
             Step::IdentityRequest(x) => {
                 refer_org(errors, p, &pos, &org_aliases, Some(&x.as_));
+                if x.contains.as_deref() == Some("") || x.lacks.as_deref() == Some("") {
+                    errors.push(CheckError::new(
+                        p,
+                        "identity-request",
+                        format!("{pos}: `contains` and `lacks` are not empty"),
+                    ));
+                }
                 if !x.path.starts_with('/')
                     || !["get", "post", "put", "patch", "delete"]
                         .contains(&x.method.to_lowercase().as_str())
@@ -713,6 +737,18 @@ fn check_scenario(
                     ));
                 }
             }
+            Step::PutDraft(x) => {
+                refer(errors, p, &pos, &aliases, Some(&x.piece));
+                refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
+                if !(100..600).contains(&x.status) {
+                    errors.push(CheckError::new(
+                        p,
+                        "put-draft",
+                        format!("{pos}: `status` must be an HTTP status"),
+                    ));
+                }
+            }
+            Step::SetRole(x) => refer_org(errors, p, &pos, &org_aliases, Some(&x.as_)),
             Step::CatalogWrite(x) => {
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
                 if !matches!(x.kind.as_str(), "agent" | "playbook" | "skill") {

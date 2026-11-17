@@ -7,6 +7,7 @@
 
 use super::{conn, secret_hex, Engine, Fail, Secret};
 use crate::scenario::Class;
+use crate::world::PieceKind;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -107,6 +108,43 @@ pub struct IdentityRequest {
     pub path: String,
     /// The exact status vamd must answer.
     pub status: u16,
+    /// A substring the response body must contain (judged after the status).
+    pub contains: Option<String>,
+    /// A substring the response body must not contain (judged after the status).
+    pub lacks: Option<String>,
+}
+
+/// `put-draft: { piece, as, status, contains }`
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutDraft {
+    /// Alias of a `playbook` or `agent` world piece in `given` (usually `deferred`).
+    pub piece: String,
+    /// The identity that writes it; omitted means the bootstrap key.
+    #[serde(rename = "as")]
+    pub as_: Option<String>,
+    /// The exact status vamd must answer.
+    pub status: u16,
+    /// A substring the response body must contain.
+    pub contains: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoleChange {
+    /// `POST /v1/users/{id}/publish-grant`.
+    Publisher,
+    /// `DELETE /v1/users/{id}/publish-grant`.
+    Member,
+}
+
+/// `set-role: { as, role }`
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetRole {
+    #[serde(rename = "as")]
+    pub as_: String,
+    pub role: RoleChange,
 }
 
 fn get() -> String {
@@ -370,10 +408,111 @@ impl Engine {
             .api
             .call(method, &x.path, body.as_ref(), Some(&bearer), write)
             .map_err(conn)?;
+        let seen = scrub(&format!("{} {}", r.status, r.body), &[&bearer]);
         if r.status != x.status {
-            return Err(product(
-                want,
-                scrub(&format!("{} {}", r.status, r.body), &[&bearer]),
+            return Err(product(want, seen));
+        }
+        if let Some(sub) = &x.contains {
+            if !r.body.contains(sub.as_str()) {
+                return Err(product(format!("{want} with `{sub}`"), seen));
+            }
+        }
+        if let Some(sub) = &x.lacks {
+            if r.body.contains(sub.as_str()) {
+                return Err(product(format!("{want} without `{sub}`"), seen));
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes a draft of the piece as `as`. The URN's `{{name}}` becomes
+    /// `<piece>-<as>-<scenario>-<runTag>`, so each identity writes a row of its own and an owner
+    /// check never decides the answer.
+    pub(super) fn put_draft(&mut self, p: &PutDraft, scenario_id: &str) -> Result<(), Fail> {
+        let key = self.key_of(p.as_.as_deref())?;
+        let rec = self.ctx.pieces.get(&p.piece).cloned().ok_or_else(|| {
+            scenario(
+                format!("world piece `{}` in `given`", p.piece),
+                "not in `given`",
+            )
+        })?;
+        let wp = self.pieces.get(&rec.piece).cloned().ok_or_else(|| {
+            Fail::new(
+                Class::Harness,
+                format!("world piece `{}`", rec.piece),
+                "unknown piece",
+            )
+        })?;
+        let coll = match wp.kind {
+            PieceKind::Playbook => "playbooks",
+            PieceKind::Agent => "agents",
+            _ => {
+                return Err(scenario(
+                    format!("`{}` is a playbook or agent piece", p.piece),
+                    format!("kind {:?}", wp.kind),
+                ))
+            }
+        };
+        let body = wp
+            .body
+            .as_ref()
+            .ok_or_else(|| scenario(format!("piece `{}` has a body", p.piece), "no body"))?;
+        let who = p.as_.as_deref().unwrap_or("bootstrap");
+        let name = format!("{}-{who}-{scenario_id}-{}", p.piece, self.eff_tag().0);
+        let text = self.subst(body.to_string(), &name);
+        let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            Fail::new(
+                Class::Harness,
+                "a JSON body after substitution",
+                e.to_string(),
+            )
+        })?;
+        let path = format!("/v1/{coll}");
+        let want = format!(
+            "PUT {path} as {} answers {}{}",
+            p.as_
+                .as_deref()
+                .map(|a| format!("`{a}`"))
+                .unwrap_or_else(|| "the bootstrap key".into()),
+            p.status,
+            p.contains
+                .as_deref()
+                .map(|s| format!(" with `{s}`"))
+                .unwrap_or_default()
+        );
+        let r = self
+            .api
+            .put_as(key.as_deref(), &path, &body)
+            .map_err(conn)?;
+        let seen = match &key {
+            Some(k) => scrub(&format!("{} {}", r.status, r.body), &[k]),
+            None => format!("{} {}", r.status, r.body),
+        };
+        if r.status != p.status {
+            return Err(product(want, seen));
+        }
+        if let Some(sub) = &p.contains {
+            if !r.body.contains(sub.as_str()) {
+                return Err(product(want, seen));
+            }
+        }
+        Ok(())
+    }
+
+    /// Promotes or demotes an `org` identity as the bootstrap key. A refusal is the harness's
+    /// failure, not the product's: the role change is arrangement, not the thing under test.
+    pub(super) fn set_role(&mut self, s: &SetRole) -> Result<(), Fail> {
+        let user_id = self.account(&s.as_)?.user_id.clone();
+        let path = format!("/v1/users/{}/publish-grant", crate::api::seg(&user_id));
+        let (verb, r) = match s.role {
+            RoleChange::Publisher => ("POST", self.api.post(&path, &json!({})).map_err(conn)?),
+            RoleChange::Member => ("DELETE", self.api.delete(&path).map_err(conn)?),
+        };
+        if !r.ok() {
+            return Err(Fail::new(
+                Class::Harness,
+                format!("{verb} {path} for `{}` is accepted", s.as_),
+                format!("{} {}", r.status, r.body),
             ));
         }
         Ok(())
@@ -427,6 +566,36 @@ mod tests {
         assert!(
             serde_yaml::from_str::<IdentityRequest>("{ as: m, path: /v1/me, status: 1 }").is_err()
         );
+        assert_eq!((x.contains, x.lacks), (None, None));
+        let x: IdentityRequest = serde_yaml::from_str(
+            "{ as: m, credential: key, path: /v1/me, status: 200, contains: a, lacks: b }",
+        )
+        .unwrap();
+        assert_eq!(
+            (x.contains.as_deref(), x.lacks.as_deref()),
+            (Some("a"), Some("b"))
+        );
+    }
+
+    #[test]
+    fn put_draft_and_set_role_parse_and_reject_unknown_keys() {
+        let p: PutDraft = serde_yaml::from_str("{ piece: probe, status: 403 }").unwrap();
+        assert_eq!((p.as_.as_deref(), p.contains.as_deref()), (None, None));
+        let p: PutDraft =
+            serde_yaml::from_str("{ piece: probe, as: m, status: 403, contains: x }").unwrap();
+        assert_eq!(
+            (p.as_.as_deref(), p.contains.as_deref()),
+            (Some("m"), Some("x"))
+        );
+        assert!(serde_yaml::from_str::<PutDraft>("{ as: m, status: 200 }").is_err());
+        assert!(serde_yaml::from_str::<PutDraft>("{ piece: p, status: 200, lacks: x }").is_err());
+
+        let r: SetRole = serde_yaml::from_str("{ as: m, role: publisher }").unwrap();
+        assert_eq!(r.role, RoleChange::Publisher);
+        let r: SetRole = serde_yaml::from_str("{ as: m, role: member }").unwrap();
+        assert_eq!(r.role, RoleChange::Member);
+        assert!(serde_yaml::from_str::<SetRole>("{ as: m, role: owner }").is_err());
+        assert!(serde_yaml::from_str::<SetRole>("{ role: member }").is_err());
     }
 
     #[test]

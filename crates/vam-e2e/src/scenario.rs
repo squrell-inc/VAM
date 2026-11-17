@@ -256,6 +256,12 @@ pub enum Step {
     /// `identity-request: { as, credential, method, path, status }`: one request with one of the
     /// identity's credentials, judged by status.
     IdentityRequest(crate::engine::identity::IdentityRequest),
+    /// `put-draft: { piece, as, status, contains }`: PUTs a `playbook` or `agent` piece's body as an
+    /// identity, under a name unique to that identity, judged by status.
+    PutDraft(crate::engine::identity::PutDraft),
+    /// `set-role: { as, role }`: promotes (`publisher`) or demotes (`member`) an `org` identity as the
+    /// bootstrap key, through `/v1/users/{id}/publish-grant`.
+    SetRole(crate::engine::identity::SetRole),
 }
 
 /// A `cli` step. `{{root}}` (the scratch tree) and `{{vamd}}` (the built `vamd`) are replaced in
@@ -412,6 +418,8 @@ impl<'de> Deserialize<'de> for Step {
             "login" => Step::Login(val(v)?),
             "change-password" => Step::ChangePassword(val(v)?),
             "identity-request" => Step::IdentityRequest(val(v)?),
+            "put-draft" => Step::PutDraft(val(v)?),
+            "set-role" => Step::SetRole(val(v)?),
             other => return Err(D::Error::custom(format!("unknown step `{other}`"))),
         })
     }

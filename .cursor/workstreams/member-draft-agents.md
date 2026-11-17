@@ -115,11 +115,11 @@ Done phase sections are deleted; git history keeps them.
 key never widens past its list, a member key minted with `catalog:write` cannot
 write the catalog, and release honours a key narrowed without `publish:grant`.  
 **Depends on:** none  
-**Plan:** drafted 2026-11-17, waiting for owner approval  
+**Plan:** approved by the owner 2026-11-17  
 **Exit:** the three new scenarios are `active` and green; operator, grant and
 session behaviour unchanged (re-run list below green).
 
-- [ ] Wave 0: scenarios and harness
+- [x] Wave 0: scenarios and harness
 - [ ] Wave 1: effective scopes, `scope_mode`, release on effective scopes
 - [ ] Wave 2: queued start re-derives scopes; docs lines
 
@@ -196,7 +196,7 @@ harness additions in `crates/vam-e2e` (documented in `e2e/README.md`):
 
 **Items** (each names the pending scenarios it turns green)
 
-- [ ] `MD-1.0` — Wave 0 above. Files: `e2e/scenarios/` (3 new, 1 guards edit),
+- [x] `MD-1.0` — Wave 0 above. Files: `e2e/scenarios/` (3 new, 1 guards edit),
   `e2e/world/` (4 new pieces), `crates/vam-e2e/src/{world.rs,engine.rs,identity.rs,scenario.rs}`
   (or a new `roles.rs`), `crates/vam-e2e/src/check.rs` if the linter must
   know the new fields, `e2e/README.md`. **Accept:** `cargo run -p vam-e2e --
@@ -420,3 +420,4 @@ team has the handoff (`design/member-draft-agents.md` §9) on the docs site.
 | Date | Phase | What landed (end with the scoreboard: scenarios green, red, fix cycles, wall time) |
 |---|---|---|
 | 2026-11-17 | — | Tracker opened from the owner's member-authoring brief; design `design/member-draft-agents.md`; Phase 1 breakdown drafted |
+| 2026-11-17 | 1 W0 | Owner approved the plan (defaults as proposed; phase order keys, run route, member drafts, docs). Wave 0 on `feat/member-draft-agents-scenarios-keys`: 3 scenarios `pending`, 4 world pieces, harness steps `put-draft`, `set-role`, `identity-request` `contains`/`lacks`, `org` `scopes`; guards on `trigger-starts-a-run-as-the-grant-owner`. Scoreboard: 0 green, 3 red (right reason, class `product`, at `then.0`, `then.0`, `when.0`), 2 fix cycles (lint tag, container bun link), ~25 min. |

@@ -1,0 +1,25 @@
+id: member-key-minted-with-catalog-write-cannot-write-the-catalog
+title: A member's key minted with catalog:write cannot write the catalog until the user is promoted
+description: >
+  A key minted for a member with catalog:write in its list is still capped by the member's live role: the
+  catalog write is refused and GET /v1/me lacks the scope. After promotion to publisher the same key,
+  minted with the scope, can write.
+tags: [members, permissions]
+needs: process
+given:
+  - org-admin
+  - { piece: org-member-with-a-catalog-key, as: member }
+  - playbook-draft-probe
+when:
+  - put-draft: { piece: playbook-draft-probe, as: member, status: 403, contains: "catalog:write" }
+then:
+  - identity-request: { as: member, credential: key, path: /v1/me, status: 200, lacks: "catalog:write" }
+  - set-role: { as: member, role: publisher }
+  - put-draft: { piece: playbook-draft-probe, as: member, status: 200 }
+guards:
+  - vam:crates/vam-orchestrator/src/keys.rs
+  - vam:crates/vam-orchestrator/src/api/auth.rs
+  - vam:crates/vam-orchestrator/src/api/catalog_auth.rs
+  - vam:crates/vam-orchestrator/src/api/users_keys_admin.rs
+status: pending
+expectFail: { step: when.0, class: product }
