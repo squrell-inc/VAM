@@ -120,7 +120,7 @@ write the catalog, and release honours a key narrowed without `publish:grant`.
 session behaviour unchanged (re-run list below green).
 
 - [x] Wave 0: scenarios and harness (#22)
-- [ ] Wave 1: effective scopes, `scope_mode`, release on effective scopes
+- [x] Wave 1: effective scopes, `scope_mode`, release on effective scopes (#24)
 - [ ] Wave 2: queued start re-derives scopes; docs lines
 
 **Benchmark delta:** none. Access control moves no line in
@@ -204,7 +204,7 @@ harness additions in `crates/vam-e2e` (documented in `e2e/README.md`):
   promotion-widens-a-default-key-but-not-a-narrowed-one,demotion-takes-catalog-writes-from-a-publisher-key,member-key-minted-with-catalog-write-cannot-write-the-catalog`
   reports each red at its `expectFail` step, class `product`; `--smoke` green.
   `Decide: NOW — proof 3 (security floor R2, R3), cost 1, line launch proof "a member builds their own agent".`
-- [ ] `MD-1.1` — **`scope_mode` on keys.** Column, migration with the backfill
+- [x] `MD-1.1` — **`scope_mode` on keys.** Column, migration with the backfill
   rule (decision 2), `create_api_key_owned` (or a sibling) takes the mode, both
   mint routes set `role` for an empty request and `explicit` otherwise. Files:
   `crates/vam-orchestrator/src/keys.rs` (`initialize_api_keys_schema` :269,
@@ -218,7 +218,7 @@ harness additions in `crates/vam-e2e` (documented in `e2e/README.md`):
   `explicit`, a key with an extra scope `explicit`; a reopened store keeps the
   column. `cargo test -p vam-orchestrator keys`.
   `Decide: NOW — proof 3 (security floor), cost 2 (schema), line launch proof.`
-- [ ] `MD-1.2` — **Effective scopes at authentication; release on effective
+- [x] `MD-1.2` — **Effective scopes at authentication; release on effective
   scopes.** `effective_scopes(record, role)` per decision 1, applied in
   `authenticate_api_key` (`keys.rs:589-643`) before the `AuthenticatedKey` is
   built (the only place a key row becomes an `AuthenticatedKey`).
@@ -232,7 +232,7 @@ harness additions in `crates/vam-e2e` (documented in `e2e/README.md`):
   403 on release; `GET /v1/me` with a key shows effective scopes
   (`tests/me_tests.rs`). Turns green the three new scenarios.
   `Decide: NOW — proof 3, cost 1, line launch proof.`
-- [ ] `MD-1.3` — **Test fallout.** `tests/isolation_coverage_map_tests.rs:48-52`
+- [x] `MD-1.3` — **Test fallout.** `tests/isolation_coverage_map_tests.rs:48-52`
   mints members with `catalog:write`: mint Alice and Bob as publishers (the
   walk's intent is owner isolation, not role); `keys.rs:762-768`
   (`catalog_write_does_not_imply_publish_grant_on_role_defaults`): keep the
@@ -422,3 +422,4 @@ team has the handoff (`design/member-draft-agents.md` §9) on the docs site.
 | 2026-11-17 | — | Tracker opened from the owner's member-authoring brief; design `design/member-draft-agents.md`; Phase 1 breakdown drafted |
 | 2026-11-17 | 1 W0 | Owner approved the plan (defaults as proposed; phase order keys, run route, member drafts, docs). Wave 0 on `feat/member-draft-agents-scenarios-keys`: 3 scenarios `pending`, 4 world pieces, harness steps `put-draft`, `set-role`, `identity-request` `contains`/`lacks`, `org` `scopes`; guards on `trigger-starts-a-run-as-the-grant-owner`. Scoreboard: 0 green, 3 red (right reason, class `product`, at `then.0`, `then.0`, `when.0`), 2 fix cycles (lint tag, container bun link), ~25 min. |
 | 2026-11-17 | 1 W0 | **Merged** #22 into `feat/member-draft-agents` (squash `2b0e5e1`); Actions green on all 9 checks (fmt/checks, clippy, workspace tests, smoke, docs, dco, firecracker advisory, release lane). Owner rule from #21: fast local checks, PR ready, Actions is the gate. |
+| 2026-11-17 | 1 W1 | **Merged** #24 (squash `19e54c5`): `scope_mode` + backfill, effective scopes at authentication, release on effective `publish:grant`. Scoreboard: 3 green (the three key scenarios, now `active`), 0 red; re-run list green; 0 scenario fix cycles, ~4 unit fixture cycles; ~3h (2h disk-full rebuilds). Fixture-only test edits listed in #24; `owner_without_grant_cannot_release_until_org_admin_grants` restated with a role-mode key. Actions green on all 9 checks. |

@@ -3,6 +3,9 @@ title: Users and roles
 description: Create the first admin, use the operator bootstrap key, pick org admin, publisher, or member, and change a password.
 status: shipped
 proves:
+  - promotion-widens-a-default-key-but-not-a-narrowed-one
+  - demotion-takes-catalog-writes-from-a-publisher-key
+  - member-key-minted-with-catalog-write-cannot-write-the-catalog
   - crates/vam-orchestrator/tests/login_tests.rs
   - member-chats-with-a-released-agent
   - member-changes-own-password-and-signs-in-with-the-new-one
@@ -61,6 +64,10 @@ Exactly one role per user.
 | `org_admin` | First `VAMD_BOOTSTRAP_ADMIN` user, later tenant admins | Create users, reset passwords, grant publish, org secrets, reassign catalog. Org settings in the VAM app. |
 | `publisher` | Member who received `publish:grant` | Write catalog and **release**. Draft + released workspaces. |
 | `member` | Default, including seeded `local` | Run **released** agents. Own sessions, runs, user-scope secrets. No catalog write. |
+
+A key's scopes follow the live role of its user. A key minted with no scope list gets the role's scopes, so promoting the user widens it and demoting the user narrows it. A key minted with a list is capped by the role and never widened past that list. The bootstrap key keeps its scopes. The key listing shows the list the key was minted with; `GET /v1/me` shows the scopes it has now. Releasing an agent needs `publish:grant` on the key. A queued message starts with the live scopes of its sender.
+
+Proved by `promotion-widens-a-default-key-but-not-a-narrowed-one`, `demotion-takes-catalog-writes-from-a-publisher-key` and `member-key-minted-with-catalog-write-cannot-write-the-catalog`.
 
 ## Who can change a password
 
