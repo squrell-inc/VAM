@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the GitHub `Rust` workflow's jobs in this session, with the same build
-# settings CI uses, so a PR does not need GitHub Actions minutes unless it
-# touches the microVM path or is a release into `main`.
+# settings CI uses. GitHub Actions is the merge gate for every PR; use --fast
+# before pushing and --full to reproduce a CI failure locally.
 #
 #   scripts/ci/local.sh --fast            fmt, example protos, manifests, cargo check,
 #                                         the smoke scenarios            (a wave's own check)
