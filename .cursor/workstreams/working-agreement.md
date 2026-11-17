@@ -174,8 +174,9 @@ Never delete build caches to free disk (`target/`, `src-tauri/target`); trim
     smoke 56/56, exit 0, 15 GB free before and after)
     sets these variables itself and runs the CI jobs in a fixed order, so
     every wave and every worktree hits the same cached artifacts instead of
-    adding a feature variant. `--fast` during a wave; `--full` (the whole
-    workspace suite) once, before the PR is marked ready. Ad-hoc `cargo test`
+    adding a feature variant. `--fast` before pushing; `--full` (the whole
+    workspace suite) only to reproduce a CI failure (GitHub Actions runs it
+    on every PR). Ad-hoc `cargo test`
     with other flags is what multiplies `target/`; avoid it.
   - **Worktrees share the one target dir and are removed after merge.** A
     wave agent's worktree (`isolation: worktree`, under `.claude/worktrees/`)

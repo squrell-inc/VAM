@@ -7,8 +7,9 @@
 #                                         the smoke scenarios            (a wave's own check)
 #   scripts/ci/local.sh --full            --fast plus the clippy gate (default and process-guest
 #                                         features, -D warnings, pinned toolchain) and
-#                                         `cargo test --workspace --no-fail-fast`. Every wave
-#                                         runs --full before its PR.
+#                                         `cargo test --workspace --no-fail-fast`. GitHub
+#                                         Actions runs this on every PR; use it locally
+#                                         to reproduce a CI failure.
 #   scripts/ci/local.sh --full --release  --full plus the release gate (PRs into `main`)
 #   scripts/ci/local.sh --scenarios a,b   runs the named scenarios instead of the smoke set
 #   SMOKE_CHUNK=25 (default)              smoke runs in chunks of this many scenarios, one vamd

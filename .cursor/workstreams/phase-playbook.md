@@ -169,7 +169,10 @@ in the tracker. Never a third cycle at the same model.
 - **Tests.** vam: GitHub Actions is the gate (working-agreement.md,
   2026-11-17). The orchestrator subscribes to the PR and waits for the CI
   event; every required check on the PR head must be green. A build wave is
-  done when the scenarios it names pass in that run. To reproduce a failure,
+  done when the scenarios it names pass in that run. The PR smoke run covers
+  only process scenarios not tagged `slow` (`scripts/e2e/smoke-ids.sh`); for a
+  named `slow` scenario, record a `scripts/ci/local.sh --scenarios <id>` run at
+  the PR head in the PR body until a PR workflow runs it. To reproduce a failure,
   run `scripts/ci/local.sh --full` (or `--scenarios a,b`) in a worktree
   detached at the PR head; "Local CI" in a PR body is a claim, not evidence. The app repo (no CI, the local run is the gate): in a
   worktree detached at the PR head, `CI=1 pnpm test`, `pnpm exec tsc --noEmit`,
@@ -184,8 +187,9 @@ in the tracker. Never a third cycle at the same model.
   tests, smoke, docs, DCO, and the microVM lane when a VM path changed. Wait
   for the event; do not poll. The advisory lane never blocks a merge. A docs-only PR runs only the `docs` check
   (`.github/workflows/docs.yml`: `vam-e2e check` and `pnpm build`).
-- **Merge.** `gh pr merge <N> --squash --match-head-commit <sha>` with the SHA
-  you verified. No auto-merge. Never into `main`. If a permission check blocks
+- **Merge.** A merge commit, never a squash (as in working-agreement.md):
+  `gh pr merge <N> --merge --match-head-commit <sha>` with the SHA you
+  verified. No auto-merge. Never into `main`. If a permission check blocks
   the merge, report it and wait.
 
 ## 5. After every merge: cleanup
