@@ -31,7 +31,7 @@ which have their own semver (`docs/src/content/docs/orchestrator/catalog.md`).
 | No git tags, no release workflow, no `CHANGELOG`. Releases are PRs from a feature branch into `main`, merged with a merge commit and titled `release: <epic> <phases> (#N)` | `git tag` (empty); `git log --merges origin/main`; `phase-playbook.md` §8; `working-agreement.md` "Standing approvals" |
 | `vam --version` prints `CARGO_PKG_VERSION (VAM_GIT_SHA)`; `VAM_GIT_SHA` comes from `git rev-parse --short HEAD` (+`+dirty`) and is `unknown` outside a checkout, with no environment override | `crates/vam-cli/src/main.rs:9`, `crates/vam-cli/build.rs` |
 | `vamd` has no `--version`; `/v1/health` returns only a serving status; `GET /v1/node` has no version | `crates/vam-orchestrator/src/bin/vamd.rs`; `crates/vam-orchestrator/src/api/mod.rs:121,162` |
-| Version strings elsewhere: `vam_core::VERSION`, the marketplace `node_version`, MCP `clientInfo`, OCSF (all `CARGO_PKG_VERSION`); a hard-coded `broker_version: "0.1.0"` | `crates/vam-core/src/lib.rs:32`, `crates/vam-orchestrator/src/marketplace/mod.rs:106`, `mcp_client.rs:372`, `crates/vam-telemetry/src/ocsf.rs:30`, `crates/vam-orchestrator/src/hsp.rs:489` |
+| Version strings elsewhere: `vam_core::VERSION`, the marketplace `node_version`, MCP `clientInfo`, OCSF (all `CARGO_PKG_VERSION`); `broker_version` is empty in production (`vamd` sends `String::new()` in `Register`, `api/mod.rs:1902`; the `"0.1.0"` at `hsp.rs:489` is a test) | `crates/vam-core/src/lib.rs:32`, `crates/vam-orchestrator/src/marketplace/mod.rs:106`, `mcp_client.rs:372`, `crates/vam-telemetry/src/ocsf.rs:30`, `crates/vam-orchestrator/src/hsp.rs:489` |
 | Binaries: `vam`, `vamd`, `hsp-echo-broker` (test broker), `vam-runtime`, `vam-web-broker`, `vam-schedule-broker`, `vam-notify-broker`, `vam-e2e`, `verify_chain` | `[[bin]]` sections of each crate |
 | Every binary crate depends on `vam-spec`, which already has a `build.rs` (proto compile, descriptor set to `$OUT_DIR/vam_descriptor.bin`) | `crates/vam-spec/build.rs:40-45`; `crates/vam-cli/Cargo.toml:35`, `brokers/*/Cargo.toml` |
 | CI: `rust.yml` (fmt, clippy pinned to 1.97.0, workspace tests, smoke scenarios, microVM lane, release gate, `release lane (microVM)` required on release PRs), `docs.yml`, `dco.yml`, `bench.yml`. All `ubuntu-latest`, `permissions: contents: read`, no `environment:`, actions pinned by tag, not SHA | `.github/workflows/rust.yml:578`; `scripts/e2e/check-release-gate.sh` |
@@ -114,7 +114,7 @@ moment the owner decides to release.
   version, prints and exits without reading config), `--version` on each broker,
   `GET /v1/node` (new `build: { version, commit, channel }`, read by any signed-in user), and
   `vam node status`, which prints the node's version beside the CLI's and warns when their
-  minor versions differ. The hard-coded `broker_version: "0.1.0"` (`hsp.rs:489`),
+  minor versions differ. The `broker_version` `vamd` sends in `Register` (empty today, `api/mod.rs:1902`),
   `vam_core::VERSION` and the marketplace `node_version` use the same source.
 
 Rejected: (a) `main` carries the *next* version with a post-release bump PR: it guesses minor vs
@@ -157,7 +157,7 @@ validate (read-only) ──► build matrix (read-only, no secrets, no caches) �
                                                                                    │ dry_run=true: stop here
                                                                                    ▼
                                      publish (environment: release; owner approves) ──► draft release + tag at <commit>
-                                                                                         ► upload assets ► attest ► verify ► publish
+                                                                                         ► upload assets ► attest ► verify assets ► publish ► gh release verify
 ```
 
 Rejected: **tag-on-merge** (tag every `release:` merge into `main`, or push a tag to trigger the
@@ -226,7 +226,7 @@ owner approves the exact artifacts.
 - **`vamd` and the brokers: x86_64 Linux first, aarch64 Linux in Phase 4.** Today nodes are
   x86_64 only (`node_init.rs:228`) and the pinned Firecracker and kernel are x86_64
   (`assets.pins`). The Mac path is a Lima VM, which on Apple Silicon is aarch64 Linux, so Phase 4
-  adds an aarch64 node bundle with an aarch64 standard base (aarch64 Debian digest and Bun pin),
+  adds an aarch64 node bundle with an aarch64 standard base (the Debian pin is already a multi-arch index digest, `scripts/base/pins:8-11`; Bun needs an aarch64 pin, and the Dockerfile's hard-coded x64 zip becomes per-architecture),
   aarch64 Firecracker and kernel pins, and `check_platform` accepting aarch64 Linux.
 - **gnu, not musl, for host binaries**, built for glibc 2.34 (the oldest documented host,
   Amazon Linux 2023; Ubuntu 22.04 has 2.35) with `cargo-zigbuild --target
@@ -344,10 +344,12 @@ registers each one (`scripts/run-web-broker.sh`, `scripts/run-schedule-broker.sh
 - `vam node init --broker web,schedule,notify` (default: none, so a plain install changes nothing
   it does not today): one systemd unit per broker (`vam-broker@<name>.service`, the same user as
   `vamd`, socket mode 0600 under the state directory), started after `vamd`, then registered with
-  the broker's manifest. A broker's credentials (for example the Brave key for `vam.web`) go into
+  the broker's manifest. Registration cannot go through the API on a re-run, because
+  `vam node init` holds the admin key only on its first run; it calls a root-only one-shot
+  `vamd --register-broker <manifest>` instead (tracker RA-3.6). A broker's credentials (for example the Brave key for `vam.web`) go into
   the vault with `vam secrets set`, never into the unit or its environment, as today.
 - `vam node status` lists the registered brokers with their versions (each broker reports
-  `build_info()` in `Register`).
+  `build_info()` in a new field of `RegisterResponse`, since `Register` goes from `vamd` to the broker).
 - `--check` lists a requested broker binary that is missing beside `vam`.
 
 ### 5.7 `vam` on the `PATH`, and upgrading it (Phase 5)
@@ -373,6 +375,8 @@ scripts:
 - **`install.sh` / `install.ps1`** (release assets): pick the right archive for the OS and CPU,
   download it with `SHA256SUMS`, check the hash, run `vam dock`. One line on the releases
   page: `curl -fsSL https://github.com/squrell-inc/VAM/releases/latest/download/install.sh | sh`
+  once a final exists. GitHub's `releases/latest` ignores pre-releases, so during the rc period the
+  page names the rc's own URL and `vam upgrade` needs `--pre`
   (and the PowerShell equivalent). The scripts print what they will do and accept
   `--version v0.3.0`.
 - **`vam upgrade`** (`--check` only reports; `--version vX` pins; `--pre` allows an rc):
@@ -413,7 +417,7 @@ Builds are cold; on free standard runners that costs wall time only.
 
 Standard GitHub-hosted runners, macOS and arm64 included, are free for this public repository
 (owner, 2026-11-17), so Actions minutes are not a constraint. A release is about 70 runner-minutes
-of cold builds spread over six parallel jobs, about **20 minutes wall time** (longest leg: the
+of cold builds spread over six parallel jobs, about **35–45 minutes wall time** (the guards compile `vamd`, the guest and the notify broker in the release gate before any build) (longest leg: the
 node bundle with zigbuild, or the Windows CLI). The owner's approval wait is extra. Only a larger
 or self-hosted runner would cost money; this plan uses none. For reference, the same release on
 private-repository pricing would be about US$1.35 (US$0.79 without the macOS Intel CLI).
@@ -559,7 +563,7 @@ Scenarios the phases are expected to add (names final at the phase breakdown):
         ▼
    dry_run=true  ──► stop; artifacts stay on the run for inspection
    dry_run=false ──► waits in environment "release" ──► owner approves
-                     draft release + tag v0.3.0 at the commit ► upload ► attest ► verify ► publish
+                     draft release + tag v0.3.0 at the commit ► upload ► attest ► verify assets ► publish ► gh release verify
                      the tag can never move or be deleted
         ▼
  main keeps building "0.3.0+dev.N" until the next prepare PR
