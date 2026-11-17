@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: release-artifacts
-current_phase: 0 (plan proposed 2026-11-17, revised the same day; waiting for the owner's approval)
+current_phase: 0 (plan approved 2026-11-17; phase breakdowns next)
 base_branch: main (cross-cutting; one release PR per phase)
 design_docs:
   - design/release-artifacts.md
@@ -32,8 +32,7 @@ git checkout, brokers included.
 
 ## Locked decisions
 
-Do not re-litigate without editing this list. **Proposed 2026-11-17; locked when the owner
-approves the plan.**
+Do not re-litigate without editing this list. **Locked 2026-11-17 (owner approved the plan).**
 
 1. One semver version for the workspace in `[workspace.package]`; every crate inherits it
    (`vam-firecracker` included). Tags are `v<version>`. Pre-release label `-rc.N` only.
@@ -77,8 +76,8 @@ approves the plan.**
 14. Brokers run as their own systemd units, installed and registered by
     `vam node init --broker <names>`; their credentials stay in the vault, never in a unit or its
     environment.
-15. `vam self install` puts `vam` on the user's `PATH` without admin rights (per-user directory,
-    marked profile lines on Linux/macOS, the user `Path` on Windows); `vam self update` checks the
+15. `vam dock` puts `vam` on the user's `PATH` without admin rights (per-user directory,
+    marked profile lines on Linux/macOS, the user `Path` on Windows); `vam upgrade` checks the
     hash and the attestation before replacing itself and never touches `vamd`. The CLI never calls
     the network unasked.
 
@@ -150,10 +149,10 @@ No product scenario: the proof is the guard tests and the recorded dry run (desi
 
 ### Phase 2 — Publish
 
-**Goal:** the first immutable, attested release, `v0.1.0-rc.1`, then `v0.1.0`.  
+**Goal:** the first immutable, attested release, `v0.1.0-rc.1`.  
 **Depends on:** Phase 1; the owner's one-time setup (design §9)  
 **Plan:** not drafted  
-**Exit:** `gh release verify v0.1.0` and `gh attestation verify` on every asset pass; the tag
+**Exit:** `gh release verify v0.1.0-rc.1` and `gh attestation verify` on every asset pass; the tag
 points at the dispatched commit; deleting or moving the tag is refused by the ruleset; a second
 dispatch with the same version fails at the guard.
 
@@ -162,7 +161,7 @@ dispatch with the same version fails at the guard.
 - [ ] `publish` job in environment `release`: draft release at the commit, upload, `actions/attest`
       (provenance and SBOM), `gh release verify-asset` per asset, publish (pre-release for `-rc`)
 - [ ] Job summary: asset table, guards, notes; the approval page shows them
-- [ ] `v0.1.0-rc.1` published and verified; `v0.1.0` published and verified
+- [ ] `v0.1.0-rc.1` published and verified
 - [ ] Owner checklist run end to end and amended where it was wrong
 
 ### Phase 3 — Install a node from a release
@@ -212,31 +211,47 @@ variant if an arm64 KVM runner exists, else a recorded Lima run).
 - [ ] aarch64 node bundle job on `ubuntu-24.04-arm` (and aarch64 `vam-runtime` musl)
 - [ ] Docs: `macos-lima.md`; retire `build-rootfs-lima.sh`'s minimal image as the default
 
-### Phase 5 — `vam` on the `PATH` and `vam self update`
+### Phase 5 — `vam` on the `PATH` and `vam upgrade`
 
 **Goal:** one command installs `vam` on the user's `PATH` on Linux, macOS and Windows, and one
 command upgrades it to a newer release after verifying it.  
 **Depends on:** Phase 2 (can run beside Phases 3 and 4)  
 **Plan:** not drafted  
 **Exit:** scenarios green; `install.sh` and `install.ps1` are release assets and work on the
-three OSes from a clean user account; `vam self update` from the previous release reaches the
+three OSes from a clean user account; `vam upgrade` from the previous release reaches the
 newest one and refuses a tampered download.
 
-- [ ] `vam self install` / `vam self uninstall` (`--dir`, `--no-modify-path`), per OS (design §5.7)
-- [ ] `install.sh` / `install.ps1` assets (pick archive, check `SHA256SUMS`, run `self install`)
-- [ ] `vam self update` (`--check`, `--version`, `--pre`): GitHub API, hash and attestation check,
+- [ ] `vam dock` / `vam undock` (`--dir`, `--no-modify-path`), per OS (design §5.7)
+- [ ] `install.sh` / `install.ps1` assets (pick archive, check `SHA256SUMS`, run `vam dock`)
+- [ ] `vam upgrade` (`--check`, `--version`, `--pre`): GitHub API, hash and attestation check,
       self-replace (rename aside on Windows), refuses a downgrade without `--version`
 - [ ] Docs: `getting-started/releases.md`, `getting-started/cli.md`
 
-Expected scenarios: `self-install-puts-vam-on-the-path-once`,
-`self-update-refuses-a-download-whose-hash-does-not-match`,
-`self-update-replaces-itself-with-the-newer-release`.
+Expected scenarios: `dock-puts-vam-on-the-path-once`,
+`upgrade-refuses-a-download-whose-hash-does-not-match`,
+`upgrade-replaces-vam-with-the-newer-release`.
+
+### Phase 6 — Final `v0.1.0`
+
+**Goal:** the first final release, once the release candidates have settled.  
+**Depends on:** Phases 2–5 closed, each with its rc; the owner's word that the rcs have settled  
+**Plan:** not drafted  
+**Exit:** prepare PR `0.1.0` merged; `v0.1.0` published (not a pre-release) and verified with
+`gh release verify` and `gh attestation verify`; `vam upgrade` from the last rc reaches `v0.1.0`;
+the docs' releases page names `v0.1.0`.
+
+- [ ] Owner's rc check: a server, WSL2, Lima (M3+), a laptop CLI on each OS, all on the last rc
+- [ ] Prepare PR, dispatch, approve, verify; release notes cover every rc since nothing
+- [ ] Docs: releases page and `project-status.md`
+
+**Release candidates first** (owner, 2026-11-17): every phase close from Phase 2 on publishes the
+next `v0.1.0-rc.N`; no final until Phase 6.
 
 ## Open questions
 
 Each has a default; see design §10 for the reasoning.
 
-1. First release number — `v0.1.0-rc.1`, then `v0.1.0`.
+1. First release number — decided: `v0.1.0-rc.N` per phase close from Phase 2; `v0.1.0` in Phase 6.
 2. Pre-1.0 policy — minor may break; notes carry "Upgrade notes".
 3. Restrict `v*` tag creation — no; updates and deletions restricted; Phase 2 tests the token.
 4. glibc floor — 2.34 via `cargo-zigbuild`.
@@ -248,7 +263,7 @@ Each has a default; see design §10 for the reasoning.
 10. Version bump — a prepare PR at release time; no post-release PR.
 11. Who dispatches — owner approves every publish; any writer may dry-run.
 12. Brokers installed by default — none; `--broker` names them.
-13. `vam self update` attestation check — hash always, `gh attestation verify` when `gh` exists;
+13. `vam upgrade` attestation check — hash always, `gh attestation verify` when `gh` exists;
     in-process Sigstore decided at the Phase 5 breakdown.
 14. `PATH` edits — marked lines in the user's login profiles only; `--no-modify-path` opts out.
 
@@ -263,4 +278,4 @@ Each has a default; see design §10 for the reasoning.
 | Date | Phase | What landed (end with the scoreboard: scenarios green, red, fix cycles, wall time) |
 |---|---|---|
 | 2026-11-17 | — | Tracker opened with design `design/release-artifacts.md`; plan proposed, waiting for the owner's approval. Scoreboard: no scenarios yet, 0 fix cycles |
-| 2026-11-17 | — | Owner review: version chosen at release time by a prepare PR (no post-release bump, dev builds `+dev.N`); Phase 3 gains broker install and `build-rootfs.sh --runtime`; recipe kept inside the Vamfile grammar (decision 13); new Phase 4 (aarch64 node for Lima) and Phase 5 (`vam self install`, `vam self update`); walkthrough in design §11. Still waiting for approval |
+| 2026-11-17 | — | Owner review: version chosen at release time by a prepare PR (no post-release bump, dev builds `+dev.N`); Phase 3 gains broker install and `build-rootfs.sh --runtime`; recipe kept inside the Vamfile grammar (decision 13); new Phase 4 (aarch64 node for Lima) and Phase 5 (`vam dock`, `vam upgrade`); walkthrough in design §11. Still waiting for approval |

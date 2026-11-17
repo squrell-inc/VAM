@@ -1,6 +1,6 @@
 # Release artifacts: version, tag, build and publish VAM
 
-Status: **proposal, 2026-11-17**, waiting for the owner's approval. Nothing here is built.
+Status: **plan of record, approved by the owner 2026-11-17.** Nothing here is built yet.
 Tracker: `.cursor/workstreams/release-artifacts.md`. Base branch: `main` (cross-cutting;
 each phase lands as its own release PR).
 
@@ -211,7 +211,7 @@ owner approves the exact artifacts.
 |---|---|---|---|
 | `vam-node-<v>-x86_64-unknown-linux-gnu.tar.gz` | `vamd`, `vam`, `vam-web-broker`, `vam-schedule-broker`, `vam-notify-broker`, `vam-runtime` (guest init), `share/vam/base/` (the standard base recipe, §5.3), `scripts/assets.pins`, `LICENSE-*`, `NOTICE`, `README` | x86_64 gnu, glibc ≥ 2.34 | `ubuntu-24.04` |
 | `vam-node-<v>-aarch64-unknown-linux-gnu.tar.gz` | the same set for arm64 Linux, incl. an aarch64 `vam-runtime` (Phase 4: Lima on Apple Silicon, arm64 servers) | aarch64 gnu | `ubuntu-24.04-arm` |
-| `install.sh`, `install.ps1` | download the right `vam` for the machine, check it against `SHA256SUMS`, run `vam self install` (Phase 5) | — | assemble |
+| `install.sh`, `install.ps1` | download the right `vam` for the machine, check it against `SHA256SUMS`, run `vam dock` (Phase 5) | — | assemble |
 | `vam-<v>-x86_64-unknown-linux-gnu.tar.gz` | `vam` | x86_64 gnu | `ubuntu-24.04` |
 | `vam-<v>-aarch64-unknown-linux-gnu.tar.gz` | `vam` | aarch64 gnu | `ubuntu-24.04-arm` |
 | `vam-<v>-aarch64-apple-darwin.tar.gz` | `vam` | macOS arm64 | `macos-15` |
@@ -352,10 +352,13 @@ registers each one (`scripts/run-web-broker.sh`, `scripts/run-schedule-broker.sh
 
 ### 5.7 `vam` on the `PATH`, and upgrading it (Phase 5)
 
+Names: `vam dock` (the CLI docks on this machine: on the `PATH`, ready), `vam undock` (it leaves,
+nothing behind), `vam upgrade` (pairs with the later `vam node upgrade`). Owner, 2026-11-17.
+
 Today a user copies `vam` somewhere by hand. Phase 5 adds two CLI commands and two install
 scripts:
 
-- **`vam self install`**: copies the running binary to a per-user directory and puts that
+- **`vam dock`**: copies the running binary to a per-user directory and puts that
   directory on the user's `PATH`, idempotently (a second run prints `unchanged`):
 
   | OS | Directory | How it reaches `PATH` |
@@ -364,15 +367,15 @@ scripts:
   | macOS | `~/.local/bin` | one marked line in `~/.zprofile` (zsh is the default shell) and `~/.bash_profile` if present |
   | Windows | `%LOCALAPPDATA%\Programs\vam\bin` | the user `Path` in `HKCU\Environment`, then a settings-changed broadcast so new terminals see it |
 
-  No `sudo` or administrator rights. `--dir DIR` picks another directory; `vam self uninstall`
+  No `sudo` or administrator rights. `--dir DIR` picks another directory; `vam undock`
   removes the binary and the marked lines. A node install (`sudo ./vam node init`) still runs
   `vamd` from the bundle directory it was extracted to.
 - **`install.sh` / `install.ps1`** (release assets): pick the right archive for the OS and CPU,
-  download it with `SHA256SUMS`, check the hash, run `vam self install`. One line on the releases
+  download it with `SHA256SUMS`, check the hash, run `vam dock`. One line on the releases
   page: `curl -fsSL https://github.com/squrell-inc/VAM/releases/latest/download/install.sh | sh`
   (and the PowerShell equivalent). The scripts print what they will do and accept
   `--version v0.3.0`.
-- **`vam self update`** (`--check` only reports; `--version vX` pins; `--pre` allows an rc):
+- **`vam upgrade`** (`--check` only reports; `--version vX` pins; `--pre` allows an rc):
   reads the latest published release from the GitHub API, downloads the archive for this
   platform and `SHA256SUMS`, checks the hash, verifies the release's GitHub attestation (in
   process with a Sigstore verifier, or by calling `gh attestation verify` when `gh` is present;
@@ -380,7 +383,7 @@ scripts:
   `.exe` cannot be overwritten, so it is renamed aside first). It never touches `vamd`.
   It refuses a downgrade without `--version`.
 - `vam --version` and `vam node status` mention when a newer release exists only if
-  `vam self update --check` was run; the CLI never calls the network unasked.
+  `vam upgrade --check` was run; the CLI never calls the network unasked.
 - **Upgrading a node** (`vamd`, brokers, base image, state migrations, restart) is a different and
   riskier job: out of scope here (§8). Until then the node upgrade is: read the release's upgrade
   notes, extract the new node bundle, and run `sudo ./vam node init` from it. The unit's
@@ -436,13 +439,19 @@ recorded run, plus product scenarios where the behaviour is visible through the 
 |---|---|---|
 | 0 | Version identity | `vam`, `vamd` and each broker print the same version line; `GET /v1/node` reports `build`; dev builds say `+dev`; `scripts/release/prepare.sh` sets the version; `vam-firecracker` inherits the workspace version; `deny.toml` checks advisories and bans; scenarios green |
 | 1 | Release workflow, dry run | `release.yml` validates, builds the Linux, macOS and guest assets, writes `SHA256SUMS`, SBOMs and notes, scans, and uploads workflow artifacts; a dry run on `main` is green; guards refuse each bad input in a test |
-| 2 | Publish | `release` environment, immutable releases and the `v*` ruleset set by the owner; publish job creates the draft, attests, verifies and publishes; `v0.1.0-rc.1` published and verified, then `v0.1.0` |
+| 2 | Publish | `release` environment, immutable releases and the `v*` ruleset set by the owner; publish job creates the draft, attests, verifies and publishes; `v0.1.0-rc.1` published and verified |
 | 3 | Install a node from a release | `vam` builds for Windows; `build-rootfs.sh --runtime`; `vam node init` installs from an extracted x86_64 node bundle without Rust or a checkout, and installs and registers the brokers asked for; docs lead with the release; the next minor ships with these |
 | 4 | aarch64 node (Lima on Apple Silicon) | aarch64 standard base recipe and pins, aarch64 Firecracker and kernel pins, `vam node init` accepts aarch64 Linux, `vam-node-…-aarch64` bundle; the Mac page installs the node in Lima from the release with no compile; lane or Lima proof once |
-| 5 | `vam` on the `PATH` and `vam self update` | `vam self install` / `uninstall` on Linux, macOS, Windows; `install.sh` / `install.ps1` assets; `vam self update` verifies hash and attestation and replaces itself; scenarios green |
+| 5 | `vam` on the `PATH` and `vam upgrade` | `vam dock` / `vam undock` on Linux, macOS, Windows; `install.sh` / `install.ps1` assets; `vam upgrade` verifies hash and attestation and replaces itself; scenarios green |
+| 6 | Final `v0.1.0` | every earlier phase closed, each with its own `-rc.N`; the owner has used the last rc on a server, under WSL, under Lima and as a laptop CLI; prepare PR `0.1.0`, dispatch, publish, verify; `vam upgrade` from the last rc reaches `v0.1.0` |
 | later | see §8 | — |
 
 Phase 4 depends on Phase 3; Phase 5 depends on Phase 2 only and can run beside 3 and 4.
+
+**Release candidates first.** From Phase 2 on, every phase close publishes the next release
+candidate (`v0.1.0-rc.1` after Phase 2, then `-rc.2`, `-rc.3`, … as Phases 3, 4 and 5 close, in
+whatever order they close). No final version is published until Phase 6, once the owner says the
+rcs have settled. Each rc is immutable like a final: a broken rc is followed by the next rc.
 
 Scenarios the phases are expected to add (names final at the phase breakdown):
 
@@ -456,9 +465,9 @@ Scenarios the phases are expected to add (names final at the phase breakdown):
   `node-init-check-names-what-is-missing` if the check lists the recipe or a broker.
 - Phase 4: `node-reports-the-standard-base-it-boots` gains an aarch64 lane variant (or a Lima
   proof recorded at the phase close if no arm64 KVM runner is available).
-- Phase 5: `self-install-puts-vam-on-the-path-once` (`--dir` and a fake home as the seam),
-  `self-update-refuses-a-download-whose-hash-does-not-match`,
-  `self-update-replaces-itself-with-the-newer-release` (fixture release server).
+- Phase 5: `dock-puts-vam-on-the-path-once` (`--dir` and a fake home as the seam),
+  `upgrade-refuses-a-download-whose-hash-does-not-match`,
+  `upgrade-replaces-vam-with-the-newer-release` (fixture release server).
 
 ## 8. Explicitly later
 
@@ -500,8 +509,8 @@ Scenarios the phases are expected to add (names final at the phase breakdown):
 
 ## 10. Open questions (each with a default)
 
-1. **First release number.** Default: `v0.1.0-rc.1` to prove the publish path (a mistake burns
-   only an rc), then `v0.1.0` from the same commit.
+1. **First release number.** Decided (owner, 2026-11-17): `v0.1.0-rc.N` releases from Phase 2
+   on, one per phase close; `v0.1.0` only in Phase 6, once the rcs have settled.
 2. **Pre-1.0 policy.** Default: minor may break; every release note has "Upgrade notes".
 3. **Restrict `v*` tag creation.** Default: no creation restriction; updates and deletions
    restricted with no bypass. Phase 2 tests in a scratch repository whether the workflow token can
@@ -522,7 +531,7 @@ Scenarios the phases are expected to add (names final at the phase breakdown):
     start a dry run.
 12. **Brokers installed by default.** Default: none; `--broker` names them. Alternative: all
     three, since the binaries are in the bundle anyway.
-13. **How `vam self update` verifies the attestation.** Default: hash check always, plus
+13. **How `vam upgrade` verifies the attestation.** Default: hash check always, plus
     `gh attestation verify` when `gh` is installed, with a warning when it is not; an in-process
     Sigstore verifier (`sigstore` crate, larger binary) is decided at the Phase 5 breakdown.
 14. **`PATH` edits on Linux and macOS.** Default: one marked line in the login profile files
@@ -567,11 +576,11 @@ Scenarios the phases are expected to add (names final at the phase breakdown):
                                                  # recipe + vam-runtime · vamd.env · systemd units
                                                  # (vamd, brokers) · first admin key, shown once
  laptop (Linux, macOS, Windows)
-   install.sh / install.ps1  (or download + vam self install)   # vam on PATH
+   install.sh / install.ps1  (or download + vam dock)   # vam on PATH
    vam config set-host https://my-node:<port> · vam login
    vam node status     # node vamd 0.3.0 (3f9c2ab) release · brokers · cli vam 0.3.0
    vam run …           # everything goes over the node's HTTP API
-   vam self update     # later releases of the CLI; the node is upgraded from its bundle
+   vam upgrade     # later releases of the CLI; the node is upgraded from its bundle
 ```
 
 ### 11.3 Platforms
