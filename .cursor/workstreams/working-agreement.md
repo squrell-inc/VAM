@@ -199,38 +199,39 @@ Never delete build caches to free disk (`target/`, `src-tauri/target`); trim
 - CI (2026-10-25): a job-level `env` cannot read the `runner` context. GitHub then
   rejects the whole workflow: the PR shows no checks at all and the branch gets a
   zero-job failed push run. Set runner paths in a step (`>> "$GITHUB_ENV"`).
-- **CI runs in the session; GitHub Actions is for the microVM lane and
-  releases (owner, 2026-10-30; replaces the 2026-10-25 "CI and merging"
-  rule).** Actions minutes are a shared, finite budget. So:
-  - Every wave PR opens as a **draft** (drafts run no CI) and stays a draft
-    while it is built. The wave session and then the orchestrator run
-    `scripts/ci/local.sh` in the session: `--fast` while building (fmt,
-    protos, manifests, `cargo check`, the smoke set or the wave's scenarios)
-    and `--full` before the PR is marked ready (adds the clippy gate, the same
-    `clippy` job `rust.yml` runs, and the whole workspace suite, the same
-    command CI runs). The output of that run is pasted into
-    the PR body under "Local CI".
-  - **Marking ready without Actions.** When the PR touches no VM path (the
-    `changes` job's filter in `.github/workflows/rust.yml`: vam-core,
-    vam-firecracker, vam-runtime, vam-orchestrator, vam-vsock, vam-storage,
-    vam-e2e, `scripts/e2e/`, `build-rootfs.sh`, `e2e/scenarios|world`,
-    `proto/`, `Cargo.lock`, the workflow itself), the last commit before
-    marking ready carries `[skip ci]` in its message, so the
-    `ready_for_review` event runs nothing. The orchestrator merges on the
-    local proof (merge commit into the base).
-  - **When the PR touches a VM path** but needs no microVM (most
-    vam-orchestrator and vam-runtime changes), add the `skip-vm-lane` label
-    before marking ready; the fast jobs run on Actions once, the lane does
-    not. If the orchestrator judges even that unnecessary (the same code
-    already proven locally with `--full`), `[skip ci]` applies here too.
-  - **Actions runs in full** only for: a change to the microVM path that the
-    lane must prove (boot, snapshot, jailer, vsock, guest init, `needs:
-    firecracker` scenarios); the **release PR into `main`** (release gate
-    plus the lane, once per phase); and a security-sensitive change the
-    orchestrator wants a second machine to confirm.
+- **GitHub Actions is the CI gate (owner, 2026-11-17; replaces the
+  2026-10-30 "CI runs in the session" rule).** The repository is public, and
+  Actions on standard GitHub-hosted runners (`ubuntu-latest`, every job in
+  `rust.yml`, the microVM lane included) is free for public repositories.
+  Running the full suite in a cloud session costs session time and disk for
+  nothing. So:
+  - Before pushing, the wave session runs only the fast local checks:
+    `scripts/ci/local.sh --fast` (fmt, protos, manifests, `cargo check`,
+    smoke) or `--scenarios a,b` for the wave's own scenarios, plus the unit
+    tests of the crates it changed. This catches the obvious breaks without
+    a 15-minute round trip.
+  - The wave PR opens **ready for review** (not a draft) once those pass, so
+    the full suite runs on Actions: fmt, clippy on both feature sets, the
+    workspace tests, smoke, docs, DCO, and the microVM lane when a VM path
+    changed. A draft is only for work still in progress (drafts run no CI).
+  - The orchestrator subscribes to the PR and waits for the CI event instead
+    of polling or re-running `--full` itself. It merges (merge commit into
+    the base) only when every required check on the PR head is green and it
+    has reviewed the diff. "Local CI" in a PR body is optional and is a claim,
+    not evidence; the Actions run is the evidence.
+  - `scripts/ci/local.sh --full` is for reproducing a CI failure locally, not
+    a routine step. No `[skip ci]` commits; the `skip-vm-lane` label is only
+    a time saver when a VM-path change cannot affect the lane.
+  - The release PR into `main` runs the same suite plus the release gate and
+    the lane, as before.
   - A red result on `main` after a release is fixed forward at once. After
     every release, keep `main` and the epic base branches in sync
     (fast-forward the base to `main` when it is an ancestor, else merge
     `main` in).
-  - **Never** push an empty commit to re-run CI, never re-run the lane by
-    hand to "see", never mark a PR ready before `--full` has passed.
+  - **Never** push an empty commit or close and reopen a PR to re-run CI; a
+    failing job gets at most one re-run, and only when the failure is clearly
+    infrastructure (runner lost, network), never to "see". Never merge on red.
+  - Limits that still apply: larger or self-hosted runners are not free; a
+    first-time contributor's fork PR needs a maintainer's approval to run;
+    fork PRs get no secrets; never use `pull_request_target` for untrusted
+    code.

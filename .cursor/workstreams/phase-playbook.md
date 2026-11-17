@@ -102,11 +102,11 @@ in the tracker. Never a third cycle at the same model.
      when unset). Do not make the session rediscover them.
    - **Known local failures** it should not chase: the vam-orchestrator VM and
      session tests that fail on macOS without KVM (CI is the gate for those).
-   - **CI runs in the session** (working-agreement.md, 2026-10-30): the PR
-     is a draft until `scripts/ci/local.sh --full` passes in the session
-     (fmt, protos, manifests, check, the clippy gate at `-D warnings` on both
-     feature sets, the workspace suite, smoke); `--fast` while building
-     (no clippy). Build settings come from the script; never
+   - **Actions is the CI gate** (working-agreement.md, 2026-11-17): before
+     pushing, the agent runs `scripts/ci/local.sh --fast` (or
+     `--scenarios a,b`) and the unit tests of the crates it changed, then
+     opens the PR ready for review so the full suite runs on GitHub Actions
+     (free on this public repository). Build settings come from the script; never
      another `target` dir. The agent pastes the script's summary into the PR
      body under "Local CI".
    - **Before the final report, stop any monitors or wakeups it started**, so the
@@ -166,13 +166,12 @@ in the tracker. Never a third cycle at the same model.
 - **Diff.** Read it against the acceptance checks. For security-relevant code
   (egress, auth, secrets, vsock) read the code, not the summary. Review in a
   worktree detached at the PR head, with `git diff origin/<base>...HEAD -- <paths>`.
-- **Tests.** vam: the session is the gate (working-agreement.md, 2026-10-30):
-  the orchestrator re-runs `scripts/ci/local.sh --full` (add `--release` on
-  a release PR) in a worktree detached at the PR head, with the shared
-  target dir, and reads the summary; "Local CI" in the PR body is a claim,
-  not evidence. A build wave is done when the scenarios it names pass there
-  and the full suite is green there; re-run named scenarios with
-  `scripts/ci/local.sh --scenarios a,b`. The app repo (no CI, the local run is the gate): in a
+- **Tests.** vam: GitHub Actions is the gate (working-agreement.md,
+  2026-11-17). The orchestrator subscribes to the PR and waits for the CI
+  event; every required check on the PR head must be green. A build wave is
+  done when the scenarios it names pass in that run. To reproduce a failure,
+  run `scripts/ci/local.sh --full` (or `--scenarios a,b`) in a worktree
+  detached at the PR head; "Local CI" in a PR body is a claim, not evidence. The app repo (no CI, the local run is the gate): in a
   worktree detached at the PR head, `CI=1 pnpm test`, `pnpm exec tsc --noEmit`,
   `cargo test --manifest-path src-tauri/Cargo.toml`, and `pnpm e2e:typecheck`
   when e2e files change. To test a merged state, use `git merge --no-commit`;
@@ -180,13 +179,10 @@ in the tracker. Never a third cycle at the same model.
 - **Contracts.** New Tauri commands are registered in `lib.rs`
   (`generate_handler!`). Endpoint names match what the CLI and the app call.
 - **Session claims are not evidence.** "Tests pass" is re-run, not trusted.
-- **Actions (vam code PRs).** Normally none: the PR was proven in the session
-  and is marked ready with `[skip ci]` on its last commit (or the
-  `skip-vm-lane` label when it touches a VM path but needs no microVM).
-  Actions runs only for a microVM-path change the lane must prove, a release
-  PR into `main`, or a security-sensitive change the orchestrator wants
-  confirmed on a second machine; then check once, about 5 minutes for the
-  fast jobs, and never wait on the advisory lane. A docs-only PR runs only the `docs` check
+- **Actions (vam code PRs).** Every non-draft PR runs the full suite on
+  GitHub Actions (free on this public repository): fmt, clippy, workspace
+  tests, smoke, docs, DCO, and the microVM lane when a VM path changed. Wait
+  for the event; do not poll. The advisory lane never blocks a merge. A docs-only PR runs only the `docs` check
   (`.github/workflows/docs.yml`: `vam-e2e check` and `pnpm build`).
 - **Merge.** `gh pr merge <N> --squash --match-head-commit <sha>` with the SHA
   you verified. No auto-merge. Never into `main`. If a permission check blocks
@@ -212,7 +208,7 @@ any session with `scripts/e2e/run.sh`. A KVM host is only for scenarios marked
 | When | What |
 |---|---|
 | Every wave | Unit and integration tests of the crates and app areas it changes, `cargo check --workspace`, `tsc`, and the scenarios the wave names (`scripts/e2e/run.sh --scenarios a,b`; `--smoke` for the smoke set). New behaviour comes with tests at the cheapest layer that covers it |
-| Every PR | In the session, `scripts/ci/local.sh --full` on the PR head (fmt, protos, manifests, check, workspace tests, smoke); `--release` adds the release gate. GitHub Actions only for microVM-path changes the lane must prove and for release PRs into `main` (§12) |
+| Every PR | Before pushing, in the session: `scripts/ci/local.sh --fast` (or the wave's scenarios) and the changed crates' unit tests. Then GitHub Actions runs the full suite on the PR and is the merge gate; release PRs into `main` add the release gate and the lane (§12) |
 | Phase close | All of the phase's scenarios are `active` and green in CI. Scenarios marked `needs: firecracker` run once on a KVM host if the phase touched them. The app: the unit suites on the merged base, once. Then release (§8) and hand the **team checklist** (below) to the team. The next phase starts right away |
 | Lima or live journey runs | Only when the owner asks: one run, at most 15 minutes, at most two fix cycles, then record what is open |
 
@@ -370,22 +366,19 @@ Two lanes never build in the same file at the same time. If a pair appears
 in a breakdown, the later lane holds its build waves and does breakdown and
 scenarios meanwhile.
 
-## 12. CI minutes and disk in cloud sessions (owner, 2026-10-30)
+## 12. CI and disk in cloud sessions (owner, 2026-11-17; replaces 2026-10-30)
 
-The rule in one line: **prove in the session, spend Actions only on the
-microVM lane and on releases.** Details in `working-agreement.md` ("CI runs
-in the session" and "Disk in cloud sessions"). What every orchestrator and
-wave brief carries:
+The rule in one line: **fast checks in the session, the full suite on GitHub
+Actions** (free for this public repository). Details in `working-agreement.md`
+("GitHub Actions is the CI gate" and "Disk in cloud sessions"). What every
+orchestrator and wave brief carries:
 
-- **Draft first.** A wave PR opens as a draft and stays one until
-  `scripts/ci/local.sh --full` passes in the session (`--fast` while
-  building; `--scenarios a,b` for the wave's own). The summary goes into the
-  PR body under "Local CI"; the orchestrator re-runs it at the PR head before
-  merging.
-- **Ready without Actions.** No VM-path change: the last commit says
-  `[skip ci]`, then mark ready and merge. VM-path change but no microVM
-  needed: label `skip-vm-lane`, mark ready, the fast jobs run once. MicroVM
-  path the lane must prove, or the release PR into `main`: full Actions, once.
+- **Fast checks, then a ready PR.** Before pushing: `scripts/ci/local.sh
+  --fast` (or `--scenarios a,b` for the wave's own) and the changed crates'
+  unit tests. Then open the PR ready for review; a draft runs no CI.
+- **Actions is the gate.** The orchestrator subscribes to the PR, waits for
+  the CI event, reviews the diff and merges only on green. `--full` locally
+  is only for reproducing a failure. No `[skip ci]`.
 - **One target dir, one command.** `CARGO_TARGET_DIR=/home/user/vam/target`
   for every build in every worktree; the script sets the rest
   (`CARGO_INCREMENTAL=0`, debug info off). No ad-hoc `cargo test` with other
@@ -396,7 +389,7 @@ wave brief carries:
   `git worktree prune`, delete the local wave branch. `git worktree list`
   shows only the main checkout between waves. Under 3 GB free: stop and
   report; the ladder in the working agreement decides what goes.
-- **The breakdown says which waves need Actions.** The phase-breakdown agent
-  marks each wave `actions: none | fast | lane` from the files it touches,
-  so the orchestrator knows before the wave starts whether a run on GitHub
-  is coming and can batch VM-path waves.
+- **The breakdown says which waves touch a VM path.** The phase-breakdown
+  agent marks each wave `lane: yes | no` from the files it touches, so the
+  orchestrator knows which PRs will also run the microVM lane (about 10
+  more minutes).
