@@ -45,6 +45,9 @@ pub struct WorldPiece {
     pub requires: Vec<String>,
     /// `org` only: the role the signed-in profile has.
     pub role: Option<String>,
+    /// `org` only: the scope list sent to `POST /v1/users/{id}/keys` when the identity's key is
+    /// minted. Absent: the role's default scopes.
+    pub scopes: Option<Vec<String>>,
     /// `agent` and `playbook`: release it after the put.
     #[serde(default)]
     pub release: bool,
@@ -90,7 +93,8 @@ pub struct WorldPiece {
     #[serde(default)]
     pub files: std::collections::BTreeMap<String, String>,
     /// `skill` only: arrange the piece's name and URN but do not publish it; a `publish-skill`
-    /// step does, so a refusal is a step result (product) and not a harness failure.
+    /// step does, so a refusal is a step result (product) and not a harness failure. A `playbook`
+    /// piece with `deferred` is not written at `given` either (a `put-draft` step writes it).
     #[serde(default)]
     pub deferred: bool,
     /// `git-marketplace` only: the https URL the node is told about (the seam maps it to the repo).

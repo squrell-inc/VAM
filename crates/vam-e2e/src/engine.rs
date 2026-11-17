@@ -586,7 +586,9 @@ impl Engine {
                 | PieceKind::MockProvider
                 | PieceKind::GitMarketplace => "",
             };
-            if !coll.is_empty() {
+            // A deferred playbook is written by a `put-draft` step, as an identity.
+            let skip_put = wp.deferred && wp.kind == PieceKind::Playbook;
+            if !coll.is_empty() && !skip_put {
                 let r = self.api.put(&format!("/v1/{coll}"), &body).map_err(conn)?;
                 if !r.ok() {
                     return Err(Fail::new(
@@ -614,7 +616,12 @@ impl Engine {
             }
         }
         if wp.kind == PieceKind::Org {
-            self.make_identity(alias, wp.role.as_deref().unwrap_or("Owner"), &name)?;
+            self.make_identity(
+                alias,
+                wp.role.as_deref().unwrap_or("Owner"),
+                wp.scopes.as_deref(),
+                &name,
+            )?;
         }
         if wp.kind == PieceKind::Secret {
             self.put_secret_piece(alias, &name, &wp)?;
@@ -652,7 +659,13 @@ impl Engine {
 
     /// An `org` piece with a role other than Owner is a second identity: a user with a random
     /// password and one minted key. The bootstrap key stays the Owner.
-    fn make_identity(&mut self, alias: &str, role: &str, name: &str) -> Result<(), Fail> {
+    fn make_identity(
+        &mut self,
+        alias: &str,
+        role: &str,
+        scopes: Option<&[String]>,
+        name: &str,
+    ) -> Result<(), Fail> {
         let norm: String = role
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
@@ -692,12 +705,13 @@ impl Engine {
             .filter(|u| !u.is_empty())
             .unwrap_or(&username)
             .to_string();
+        let mut key_body = json!({ "name": "e2e" });
+        if let Some(list) = scopes {
+            key_body["scopes"] = json!(list);
+        }
         let r = self
             .api
-            .post(
-                &format!("/v1/users/{}/keys", seg(&user_id)),
-                &json!({ "name": "e2e" }),
-            )
+            .post(&format!("/v1/users/{}/keys", seg(&user_id)), &key_body)
             .map_err(conn)?;
         // The success body carries the secret: it is never printed.
         let secret = r.json()["secret"].as_str().unwrap_or_default().to_string();
@@ -2245,6 +2259,8 @@ impl Engine {
             Step::Login(x) => self.login(x),
             Step::ChangePassword(x) => self.change_password(x),
             Step::IdentityRequest(x) => self.identity_request(x),
+            Step::PutDraft(x) => self.put_draft(x, &s.id),
+            Step::SetRole(x) => self.set_role(x),
         }
     }
 }

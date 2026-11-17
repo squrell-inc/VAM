@@ -370,8 +370,27 @@ status is class `product`.
   substring the body must hold. A 200 with `current: right` and `new: fresh` moves the current password to
   `previous` and the new one becomes current. The identity's session is not replaced: it stays whatever
   `login` last stored, so after a change it is the token the change used.
-- `identity-request: { as, credential: session | previous-session | key, method, path, status }`: one
-  request (`method` defaults to `get`) with that credential as bearer, judged by exact status.
+- `identity-request: { as, credential: session | previous-session | key, method, path, status, contains, lacks }`: one
+  request (`method` defaults to `get`) with that credential as bearer, judged by exact status. `contains` and
+  `lacks` are body substrings (the body must hold the first and not the second), judged after the status; a
+  miss is class `product`.
+
+### Roles and drafts (`crates/vam-e2e/src/identity.rs`)
+
+- `org` pieces take `scopes: [..]`: the scope list sent to `POST /v1/users/{id}/keys` when the identity's key is
+  minted. Absent, the key gets the role's default scopes (as before). Pieces: `org-publisher` (role Publisher),
+  `org-member-with-a-narrow-key` (Member, the member set), `org-member-with-a-catalog-key` (Member, the member set
+  plus `catalog:write`).
+- A `playbook` piece with `deferred: true` is not written at `given` (its name and URN are still worked out);
+  `playbook-draft-probe` is one, with the body of `playbook-one-step`. A `put-draft` step writes it.
+- `put-draft: { piece, as, status, contains }`: `PUT /v1/playbooks` (or `/v1/agents`, by the piece's kind) with the
+  piece's body and an `Idempotency-Key`, as the identity (the bootstrap key when `as` is omitted). The URN's
+  `{{name}}` becomes `<piece>-<as>-<scenario>-<runTag>`, so every identity writes a row of its own and the owner
+  check never decides the answer; nothing needs cleanup. `status` is exact and required; `contains` is a body
+  substring. The probe writes a playbook because that route stays on `catalog:write` for good.
+- `set-role: { as, role: publisher | member }`: as the bootstrap key, `POST` (publisher) or `DELETE` (member)
+  `/v1/users/{id}/publish-grant` for the identity. A non-2xx answer is class `harness`, because the role change is
+  arrangement, not the behaviour under test.
 
 ## Receipt expectations and offline verify
 
