@@ -554,13 +554,14 @@ async fn owner_filters_sessions_and_runs_over_http() {
         .create_session_with_owner("sess-loc", None, "vm-loc", "ws", "default", LOCAL_USER_ID)
         .unwrap();
     store
-        .persist_run_spec(
+        .persist_run_spec_with_owner(
             "urn:vam:run:local.vam.dev/acme/run-op",
             "{}",
             Some("sess-op"),
             "urn:vam:agent:op",
             Some("http-owner-op"),
             BOOTSTRAP_PRINCIPAL,
+            OPERATOR_USER_ID,
         )
         .unwrap();
     store

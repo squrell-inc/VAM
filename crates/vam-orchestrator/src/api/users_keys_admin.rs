@@ -79,6 +79,8 @@ async fn mint_user_key(
     if req.name.trim().is_empty() {
         return Err(OrchestratorError::InvalidContract("name is required".into()).into());
     }
+    crate::owner::reject_reserved_bootstrap_name("key name", &req.name)?;
+    crate::owner::reject_reserved_bootstrap_name("principal", &req.principal)?;
     let key_id = format!("key-{}", uuid_like());
     let secret = mint_api_key_secret();
     let scopes = crate::keys::sanitize_scopes_for_role(user.role, &req.scopes);
