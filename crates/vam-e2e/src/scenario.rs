@@ -101,7 +101,8 @@ pub enum Class {
     Env,
 }
 
-/// Where a `pending` scenario is expected to fail: `when.N` or `then.N` (0-based).
+/// Where a `pending` scenario is expected to fail: `when.N` or `then.N` (0-based), or `given`
+/// (building the world: an `org` piece's user is refused).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExpectFail {
@@ -112,6 +113,9 @@ pub struct ExpectFail {
 impl ExpectFail {
     /// `(section, index)` of the step, `None` when malformed.
     pub fn position(&self) -> Option<(&str, usize)> {
+        if self.step == "given" {
+            return Some(("given", 0));
+        }
         let (sec, idx) = self.step.split_once('.')?;
         if sec != "when" && sec != "then" {
             return None;
@@ -253,9 +257,12 @@ pub enum Step {
     /// `change-password: { as, via, current, new, idempotencyKey, status, contains }`:
     /// `POST /v1/me/password` with the identity's session or key.
     ChangePassword(crate::engine::identity::ChangePassword),
-    /// `identity-request: { as, credential, method, path, status }`: one request with one of the
-    /// identity's credentials, judged by status.
+    /// `identity-request: { as, credential, method, path, status, fields }`: one request with one
+    /// of the identity's credentials, judged by status and, when given, body fields.
     IdentityRequest(crate::engine::identity::IdentityRequest),
+    /// `create-user: { as, username, userId, status, contains }`: `POST /v1/users` with a fresh
+    /// password, as an `org` identity or the bootstrap key.
+    CreateUser(crate::engine::identity::CreateUser),
 }
 
 /// A `cli` step. `{{root}}` (the scratch tree) and `{{vamd}}` (the built `vamd`) are replaced in
@@ -412,6 +419,7 @@ impl<'de> Deserialize<'de> for Step {
             "login" => Step::Login(val(v)?),
             "change-password" => Step::ChangePassword(val(v)?),
             "identity-request" => Step::IdentityRequest(val(v)?),
+            "create-user" => Step::CreateUser(val(v)?),
             other => return Err(D::Error::custom(format!("unknown step `{other}`"))),
         })
     }

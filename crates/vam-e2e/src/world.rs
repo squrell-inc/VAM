@@ -45,6 +45,10 @@ pub struct WorldPiece {
     pub requires: Vec<String>,
     /// `org` only: the role the signed-in profile has.
     pub role: Option<String>,
+    /// `org` of a member role only: the login name to create the user under, instead of the
+    /// run-unique default. `{tag}` is replaced by a short token unique to the piece, scenario and
+    /// run (eight lowercase hex digits), so two scenarios on one node never clash.
+    pub username: Option<String>,
     /// `agent` and `playbook`: release it after the put.
     #[serde(default)]
     pub release: bool,

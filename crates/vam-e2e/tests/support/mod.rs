@@ -109,6 +109,28 @@ impl Fake {
     }
 }
 
+/// A generated-style user id (`usr_` and 26 characters of `[a-z2-7]`) derived from the name, as
+/// the node answers for a new user: never the name itself.
+pub fn stub_user_id(name: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let alphabet = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut id = String::from("usr_");
+    let mut n = 0u32;
+    while id.len() < 4 + 26 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (name, n).hash(&mut h);
+        let mut v = h.finish();
+        for _ in 0..8 {
+            if id.len() < 4 + 26 {
+                id.push(alphabet[(v & 31) as usize] as char);
+            }
+            v >>= 5;
+        }
+        n += 1;
+    }
+    id
+}
+
 fn unseg(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::new();
@@ -333,14 +355,26 @@ async fn handle_core(
     }
     if path == "/v1/users" && m == "POST" {
         let req: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-        return ok(json!({"user": {"userId": req["username"], "role": req["role"]}}));
+        let name = req["username"].as_str().unwrap_or_default();
+        return ok(json!({"user": {"userId": stub_user_id(name), "role": req["role"]}}));
     }
     if path.starts_with("/v1/users/") && path.ends_with("/keys") && m == "POST" {
         let id = unseg(
             path.trim_start_matches("/v1/users/")
                 .trim_end_matches("/keys"),
         );
-        return ok(json!({"key": {"keyId": "k1"}, "secret": format!("secret-of-{id}")}));
+        // The key's secret is named after the login name of the user the id was answered for.
+        let name = f
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, p, _)| m == "POST" && p == "/v1/users")
+            .filter_map(|(_, _, b)| serde_json::from_str::<Value>(b).ok())
+            .filter_map(|b| b["username"].as_str().map(str::to_string))
+            .find(|n| stub_user_id(n) == id)
+            .unwrap_or(id);
+        return ok(json!({"key": {"keyId": "k1"}, "secret": format!("secret-of-{name}")}));
     }
     if path.ends_with("/release") {
         return ok(json!({}));

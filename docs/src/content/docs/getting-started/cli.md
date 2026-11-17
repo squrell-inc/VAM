@@ -106,7 +106,7 @@ export NEW_USER_PASSWORD='…'   # set it in your shell; never commit it
 vam users create --username ops-bot --role publisher --password-from-env NEW_USER_PASSWORD
 ```
 
-`--role` is `member`, `publisher`, or `org_admin`. `operator` is not offered here. The command sends an `Idempotency-Key` and prints the created account as JSON (`user`, which has no password). A username that already exists is refused.
+`--role` is `member`, `publisher`, or `org_admin`. `operator` is not offered here. The command sends an `Idempotency-Key` and prints the created account as JSON (`user`, which has no password). The node generates the user id. A username that already exists, ignoring letter case, is refused (409); see the name rules in [Users and roles](/getting-started/users-and-roles/).
 
 ### Change your password (`vam passwd`)
 
@@ -423,14 +423,14 @@ For a full publish → run walkthrough on Mac + Lima, see [Publish a Skill Packa
 
 ## 6. API Keys & Authorization (`vam keys`)
 
-Manage long-lived API keys. Minted keys bind to a `user_id`. The first-start **bootstrap key is operator-only** (`keys:admin`, `brokers:admin`, plus `users:admin` and `publish:grant`); tenant keys never receive `keys:admin` or `brokers:admin`. Empty scope lists use the owner's role defaults (`member` / `publisher` / `org_admin` / `operator`). CI should keep using `VAM_API_KEY` (the bootstrap or another operator key). Org-admin `publish:grant` grant/revoke is `POST`/`DELETE /v1/users/{id}/publish-grant`. Catalog ownership reassignment is `POST /v1/catalog/reassign-owner`. User create/list/deactivate is `POST`/`GET /v1/users` and `POST /v1/users/{id}/deactivate`. Deactivate does not unpublish.
+Manage long-lived API keys. Minted keys bind to a user. `--user-id` takes a user id or a login name (any letter case; an id wins if both match). The first-start **bootstrap key is operator-only** (`keys:admin`, `brokers:admin`, plus `users:admin` and `publish:grant`); tenant keys never receive `keys:admin` or `brokers:admin`. Empty scope lists use the owner's role defaults (`member` / `publisher` / `org_admin` / `operator`). CI should keep using `VAM_API_KEY` (the bootstrap or another operator key). Org-admin `publish:grant` grant/revoke is `POST`/`DELETE /v1/users/{id}/publish-grant`. Catalog ownership reassignment is `POST /v1/catalog/reassign-owner`. User create/list/deactivate is `POST`/`GET /v1/users` and `POST /v1/users/{id}/deactivate`. Deactivate does not unpublish.
 
 ```bash
 # Create a new API key with a descriptive label (bound to the caller)
 vam keys create --name "ci-github-actions"
 
-# Bind the key to a specific user
-vam keys create --name "alice-laptop" --user-id alice --scope node:read --scope runs:write
+# Bind the key to a specific user: a user id (usr_…) or a login name in any letter case
+vam keys create --name "alice-laptop" --user-id Alice --scope node:read --scope runs:write
 
 # List all issued keys
 vam keys list

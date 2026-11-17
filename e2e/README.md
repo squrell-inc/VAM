@@ -323,7 +323,8 @@ are in `e2e/world/`. Copy `agent-workspaces-are-isolated.yaml`.
   non-system message, so a follow-up can depend on an earlier tool result.
 - Assert what a user sees (CLI, API, events), not internals.
 - New scenarios land `status: pending` and must fail at the step the phase adds
-  (class `product`). Flip to `active` when the code makes them pass.
+  (class `product`; `expectFail.step` is `when.N`, `then.N` or `given` when an `org` piece's create is
+  what the node refuses). Flip to `active` when the code makes them pass.
 - Never edit a `then` to make a scenario pass: that is a spec change, listed in
   the PR and approved by the orchestrator or owner.
 - Release builds never contain process mode: `scripts/e2e/check-release-gate.sh`.
@@ -354,13 +355,25 @@ are in `e2e/world/`. Copy `agent-workspaces-are-isolated.yaml`.
 
 An `org` piece of a member role keeps its username, user id and generated password in memory for the
 scenario (never printed, logged or briefed; a failure shows the status and the body with every secret
-hidden). Three steps act as that identity. A missing session or credential is class `scenario`; a wrong
+hidden). The steps below act as that identity. A missing session or credential is class `scenario`; a wrong
 status is class `product`.
 
-- `login: { as, password: current | previous, refused }`: `POST /v1/login` with the identity's username and
-  its current (default) or previous password. On 200 the returned `token` becomes the identity's current
-  session; the session it replaces is kept as `previous-session`. `refused: true` passes only on 401 and
-  stores nothing.
+The user id is the one `POST /v1/users` answers (`user.userId`). A create that answers no id is class
+`product`: the harness never falls back to the username.
+
+By default the piece's username is `<piece>-<scenario>-<runTag>`. A piece may set its own with
+`username: "Ada.Lovelace+e2e-{tag}@Example.Test"` (`org` of a member role only; letters, digits,
+`. _ + - @`, at most one `@`, and `{tag}`). `{tag}` is replaced by eight lowercase hex digits that are
+unique to the piece alias, the scenario and the run, so two scenarios on one node never clash. A piece
+with a `username` tests what the node accepts: if the node refuses the create, the failure is class
+`product` at `given` (a pending scenario names it with `expectFail: { step: given, class: product }`);
+without a `username` a refused create is class `harness`. `world/org-member-email.yaml` is such a piece.
+
+- `login: { as, password: current | previous, case: as-created | lower | upper, refused }`: `POST /v1/login`
+  with the identity's username and its current (default) or previous password. `case` is the letter case the
+  username is sent in: as created (default), lower or upper. On 200 the returned `token` becomes the
+  identity's current session; the session it replaces is kept as `previous-session`. `refused: true` passes
+  only on 401 and stores nothing.
 - `change-password: { as, via: session | key, current: right | wrong, new: fresh | same, idempotencyKey,
   status, contains }`: `POST /v1/me/password` with `{ currentPassword, newPassword }`, bearer the identity's
   current session (`via: session`, default) or its API key (`via: key`). `as` may be omitted with `via: key`
@@ -370,8 +383,22 @@ status is class `product`.
   substring the body must hold. A 200 with `current: right` and `new: fresh` moves the current password to
   `previous` and the new one becomes current. The identity's session is not replaced: it stays whatever
   `login` last stored, so after a change it is the token the change used.
-- `identity-request: { as, credential: session | previous-session | key, method, path, status }`: one
-  request (`method` defaults to `get`) with that credential as bearer, judged by exact status.
+- `identity-request: { as, credential: session | previous-session | key, method, path, status, fields }`: one
+  request (`method` defaults to `get`) with that credential as bearer, judged by exact status. `fields`
+  (optional) matches dotted camelCase paths over the JSON body with the usual matchers (exact value,
+  `{ contains }`, `{ matches: <regex> }`, `{ present }`, `{ absent }`; an array element is picked with
+  `key=value`, e.g. `keys.name=e2e.userId`). In `path` and in the string values of `fields`,
+  `{<alias>.userId}`, `{<alias>.username}` and `{<alias>.USERNAME}` (the username upper-cased) are replaced
+  by that `org` identity's values; in `path` each value is percent-encoded. `<alias>` may be any `org`
+  piece of `given`, not only `as`.
+- `create-user: { as, username, userId, status, contains }`: `POST /v1/users` (`role: member`, a fresh
+  random password the runner keeps to itself, an `Idempotency-Key`) with the key of `as` (an `org` piece of
+  `given`; omitted is the bootstrap key). `username` takes `{tag}` (unique to the scenario and run) and the
+  placeholders above. `userId`, when given, is sent as `userId` (a client-chosen id). `status` is required
+  and exact; `contains` is a substring the body must hold. The user is not kept as an identity: it has no
+  session or key in later steps.
+- `{ matches: <regex> }` is a matcher of the shared `fields` matcher (events, `identity-request` and the rest): the string value must match the regular
+  expression (anchor it with `^` and `$`).
 
 ## Receipt expectations and offline verify
 

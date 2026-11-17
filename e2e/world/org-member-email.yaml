@@ -1,0 +1,6 @@
+piece: org-member-email
+kind: org
+role: Member
+# A member whose login name is an email address with a `+tag` and capital letters, as an admin
+# would type it. `{tag}` makes it unique to the scenario and run.
+username: "Ada.Lovelace+e2e-{tag}@Example.Test"

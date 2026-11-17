@@ -4,6 +4,8 @@ description: What vamd does at start, which settings change it, and what it does
 status: shipped
 proves:
   - vamd-refuses-plain-http-by-default
+  - generated-id-and-email-login-survive-a-restart
+  - crates/vam-orchestrator/tests/vamd_username_clash.rs
   - plain-chat-gets-a-reply
   - follow-up-continues-after-vamd-restart
   - work-survives-vamd-restart-mid-task
@@ -60,6 +62,13 @@ reconciliation matches the stored sessions to the processes found on the host (`
 A follow-up on a thread continues after a restart, and a task that was running when `vamd`
 restarted survives: scenarios `follow-up-continues-after-vamd-restart` and
 `work-survives-vamd-restart-mid-task`.
+
+## Offline user commands
+
+Two flags change a user from the host. Run them with `vamd` stopped:
+
+- `vamd --reset-password <username>` sets a password (the new one comes from `VAMD_RESET_PASSWORD`; it is never logged). It takes a user id or a login name in any case.
+- `vamd --rename-user <user_id> <new_username>` renames a user, checks the new name by the login-name rules, prints the old and new name and exits. It is the fix when two usernames differ only in letter case: until then `vamd` refuses to serve or `--init`, lists the clashing users with their ids, and exits 1. It works on a database that has clashes. See [Users and roles](/getting-started/users-and-roles/).
 
 ## Idle sessions
 
