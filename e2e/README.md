@@ -720,8 +720,8 @@ broker started). Tag `notifications`; a scenario that waits for the wall clock a
 
 ## Connectors (`crates/vam-e2e/src/connectors.rs`)
 
-Connector scenarios use two runner-hosted loopback providers (std-only HTTP, started once per run when a
-scenario `given`s a `mock-provider` piece). Tag `connectors`. Token values are made by the runner, kept in memory,
+Connector scenarios use four runner-hosted loopback listeners (Microsoft login, Microsoft Graph, Linear and the
+filebox service; std-only HTTP, started once per run when a scenario `given`s a `mock-provider` piece). Tag `connectors`. Token values are made by the runner, kept in memory,
 added to the scrub list and never printed or logged; a listing that holds one fails the `connectors` expect.
 
 - World piece `kind: mock-provider`, `provider: microsoft-login | microsoft-graph | linear-server | filebox`. `microsoft-login` serves
@@ -760,7 +760,7 @@ added to the scrub list and never printed or logged; a listing that holds one fa
 
 For connectors whose OAuth client the org's admin registered with the provider (`client: org`, `clientSecret:
 org_vault`). `mock-provider` with `provider: filebox` is a fictional Box-like service on one loopback listener, for
-three hosts: the MCP server `https://mcp.filebox.example/mcp` (`search_files`, `read_file`; bearer required), RFC 9728
+three hosts: the MCP server `https://mcp.filebox.example/mcp` (`search_files`, `get_file_content`; bearer required), RFC 9728
 metadata (`/.well-known/oauth-protected-resource[/mcp]`, naming `https://auth.filebox.example`) and RFC 8414 metadata
 (`/.well-known/oauth-authorization-server`: authorize, token, revocation, S256, `client_secret_post`, **no**
 registration endpoint). `GET /authorize` mints a code for a client id starting `e2e-filebox-client`, the redirect URI

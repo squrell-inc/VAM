@@ -898,15 +898,15 @@ fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     let form = form_pairs(&req.body);
     let grant = form.get("grant_type").cloned().unwrap_or_default();
     let client_id = form.get("client_id").cloned().unwrap_or_default();
-    let secret_label = {
-        let st = state.lock().unwrap();
-        match form.get("client_secret") {
-            None => "none",
-            Some(s) if *s == st.fb.secret => "current",
-            Some(s) if st.fb.old.contains(s) => "old",
-            Some(_) => "wrong",
-        }
+    let label_of = |st: &State| match form.get("client_secret") {
+        None => "none",
+        Some(s) if *s == st.fb.secret => "current",
+        Some(s) if st.fb.old.contains(s) => "old",
+        Some(_) => "wrong",
     };
+    // What the request arrived with, for the log. The grant is decided on what is current when it
+    // is consumed, after a hold.
+    let secret_label = label_of(&state.lock().unwrap());
     let mut fields: BTreeSet<String> = form.keys().cloned().collect();
     for k in FILEBOX_LOGGED_VALUES {
         if let Some(v) = form.get(*k) {
@@ -927,8 +927,12 @@ fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     let mut note = None;
     let result: Result<Value, (u16, &str)> = {
         let mut st = state.lock().unwrap();
-        if secret_label != "current" || !client_id.starts_with(FILEBOX_CLIENT_PREFIX) {
+        if label_of(&st) != "current" || !client_id.starts_with(FILEBOX_CLIENT_PREFIX) {
             Err((401, "invalid_client"))
+        } else if st.revoked && grant == "refresh_token" {
+            // A revoked grant is refused before it is consumed.
+            note = Some("refresh=revoked");
+            Err((400, "invalid_grant"))
         } else if grant == "authorization_code" {
             let code = form.get("code").map(String::as_str).unwrap_or_default();
             match st.fb.codes.remove(code) {
@@ -1185,6 +1189,22 @@ impl Engine {
         wp: &crate::world::WorldPiece,
     ) -> Result<(), Fail> {
         let mocks = self.mocks()?;
+        if wp.provider.as_deref() == Some("filebox")
+            && self
+                .ctx
+                .conn
+                .filebox_alias
+                .as_deref()
+                .is_some_and(|first| first != alias)
+        {
+            // One listener, one provider state: a second piece would reset it and take over the
+            // token bookkeeping of the first.
+            return Err(Fail::new(
+                Class::Scenario,
+                "one filebox mock-provider piece per scenario",
+                format!("`{alias}` is a second one"),
+            ));
+        }
         let kind = match wp.provider.as_deref() {
             Some("microsoft-login") => Kind::Login,
             Some("linear-server") => Kind::Linear,
@@ -1252,6 +1272,17 @@ impl Engine {
                 format!("piece `{}`", m.piece),
             ));
         }
+        if filebox_only && m.revoke {
+            // `revoke` is a standalone control: combined with the others it would be dropped.
+            return Err(Fail::new(
+                Class::Scenario,
+                "`revoke` alone on a mock-provider step",
+                format!(
+                    "piece `{}`: `revoke` is not combined with `expire`, `holdToken` or `rotateSecret`",
+                    m.piece
+                ),
+            ));
+        }
         let mut st = mocks.state(kind).lock().unwrap();
         if filebox_only {
             if m.expire {
@@ -1268,9 +1299,21 @@ impl Engine {
                 st.fb.old.insert(old);
                 let new = st.fb.secret.clone();
                 drop(st);
-                self.ctx
-                    .secrets
-                    .insert(format!("{}#rotated", m.piece), Secret(new));
+                // Every rotated secret stays in the leak-check set: the one before this rotation
+                // moves to `<alias>#rotated-<n>`, and `<alias>#rotated` is always the latest.
+                let latest = format!("{}#rotated", m.piece);
+                if let Some(prev) = self.ctx.secrets.remove(&latest) {
+                    let earlier = self
+                        .ctx
+                        .secrets
+                        .keys()
+                        .filter(|k| k.starts_with(&format!("{latest}-")))
+                        .count();
+                    self.ctx
+                        .secrets
+                        .insert(format!("{latest}-{}", earlier + 1), prev);
+                }
+                self.ctx.secrets.insert(latest, Secret(new));
             }
             return Ok(());
         }
@@ -1330,9 +1373,23 @@ impl Engine {
             if client_nodes.contains(&id) {
                 // An org client (and its vault secret) outlives a scenario on one vamd: clear it too.
                 let body = json!({ "enabled": false, "consent": null, "client": null });
-                if self.api.put_as(None, &path, &body).is_ok_and(|r| r.ok()) {
+                let answer = self.api.put_as(None, &path, &body);
+                if answer.as_ref().is_ok_and(|r| r.ok()) {
                     continue;
                 }
+                // The client (and its vault secret) stays on this vamd: say so, as the marketplace
+                // cleanup does, so a later scenario that finds it is not a mystery.
+                let why = match &answer {
+                    Ok(r) => format!(
+                        "{} {}",
+                        r.status,
+                        self.scrub(&r.body.chars().take(200).collect::<String>())
+                    ),
+                    Err(_) => "no answer".to_string(),
+                };
+                eprintln!(
+                    "vam-e2e: connector cleanup: the client of `{id}` could not be cleared ({why})"
+                );
             }
             let _ = self
                 .api
@@ -1390,7 +1447,6 @@ impl Engine {
                 client["clientSecret"] = json!(self.client_secret_value(s)?);
             }
             body["client"] = client;
-            self.ctx.conn.client_nodes.insert(n.id.clone());
         }
         let path = format!("/v1/connectors/{}/node", seg(&n.id));
         self.ctx.conn.nodes.insert(n.id.clone());
@@ -1398,6 +1454,10 @@ impl Engine {
             .api
             .put_as(key.as_deref(), &path, &body)
             .map_err(conn)?;
+        // Only a save the node accepted leaves a client (and its secret) to clear afterwards.
+        if n.client.is_some() && r.ok() {
+            self.ctx.conn.client_nodes.insert(n.id.clone());
+        }
         self.judge_with(&format!("PUT {path}"), n.refused, n.contains.as_deref(), &r)
     }
 
@@ -1706,7 +1766,12 @@ impl Engine {
         if r.ok() {
             self.ctx.conn.mcp.push((c.id.clone(), key.clone()));
         }
-        self.judge("PUT /v1/mcp/connections", c.refused, &r)?;
+        self.judge_with(
+            "PUT /v1/mcp/connections",
+            c.refused,
+            c.contains.as_deref(),
+            &r,
+        )?;
         if c.refused {
             return Ok(());
         }
@@ -1784,7 +1849,7 @@ impl Engine {
         if r.ok() {
             self.ctx.conn.rest.push((c.id.clone(), key.clone()));
         }
-        self.judge(&format!("PUT {path}"), c.refused, &r)
+        self.judge_with(&format!("PUT {path}"), c.refused, c.contains.as_deref(), &r)
     }
 
     pub(super) fn expect_connectors(&mut self, x: &ConnectorsExpect) -> Result<(), Fail> {
@@ -2119,12 +2184,80 @@ mod tests {
                 "grant_type=refresh_token&client_id=e2e-filebox-client&client_secret=s-current&refresh_token=r1",
             )
         });
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(!t.is_finished());
-        // Logged on arrival, while it waits.
-        assert_eq!(m.filebox.lock().unwrap().log.len(), 1);
+        // Wait (bounded) for the request to arrive and be logged, then it must still be held.
+        let waited = std::time::Instant::now();
+        while m.filebox.lock().unwrap().log.is_empty()
+            && waited.elapsed() < std::time::Duration::from_secs(10)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(m.filebox.lock().unwrap().log.len(), 1, "logged on arrival");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!t.is_finished(), "held while the hold is on");
         m.filebox.lock().unwrap().fb.hold_token = false;
         assert!(t.join().unwrap().starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn a_revoked_filebox_refuses_a_refresh_before_consuming_the_token() {
+        let m = Mocks::start().unwrap();
+        filebox_ready(&m);
+        {
+            let mut st = m.filebox.lock().unwrap();
+            st.fb.live.insert("r1".into());
+            st.revoked = true;
+        }
+        let body = "grant_type=refresh_token&client_id=e2e-filebox-client&client_secret=s-current&refresh_token=r1";
+        let answer = token(&m, body);
+        assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+        assert!(answer.contains("invalid_grant"), "{answer}");
+        {
+            let st = m.filebox.lock().unwrap();
+            assert!(st.fb.live.contains("r1"), "the token was not consumed");
+            assert!(st.log.last().unwrap().fields.contains("refresh=revoked"));
+        }
+        // Not revoked: the single-use behavior is as before.
+        m.filebox.lock().unwrap().revoked = false;
+        assert!(token(&m, body).starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn a_secret_rotated_while_a_refresh_is_held_is_refused_when_it_is_released() {
+        let m = Mocks::start().unwrap();
+        filebox_ready(&m);
+        {
+            let mut st = m.filebox.lock().unwrap();
+            st.fb.live.insert("r1".into());
+            st.fb.hold_token = true;
+        }
+        let addr = m.filebox_addr;
+        let t = std::thread::spawn(move || {
+            post(
+                addr,
+                "/token",
+                "",
+                "grant_type=refresh_token&client_id=e2e-filebox-client&client_secret=s-current&refresh_token=r1",
+            )
+        });
+        let waited = std::time::Instant::now();
+        while m.filebox.lock().unwrap().log.is_empty()
+            && waited.elapsed() < std::time::Duration::from_secs(10)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // The provider rotates its secret while the request is held: the old one is refused.
+        {
+            let mut st = m.filebox.lock().unwrap();
+            let old = std::mem::replace(&mut st.fb.secret, "s-rotated".into());
+            st.fb.old.insert(old);
+            st.fb.hold_token = false;
+        }
+        let answer = t.join().unwrap();
+        assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
+        // Logged as it arrived (current), refused on what is current now, token not spent.
+        let st = m.filebox.lock().unwrap();
+        assert!(st.log[0].fields.contains("client-secret=current"));
+        assert!(st.fb.live.contains("r1"));
     }
 
     #[test]
