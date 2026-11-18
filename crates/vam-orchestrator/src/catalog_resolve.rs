@@ -210,6 +210,12 @@ pub enum ResolveMode {
     /// A draft run: a floating ref is the owner's own draft of the dependency when
     /// they have one, else the latest release.
     Draft,
+    /// An agent owned by someone who may not author (a Member), and the save of such an
+    /// agent: only releases count. A floating ref is the latest release (the owner's draft
+    /// is never taken); `X.Y.Z` is that release or an error (no "kept as-is" for a version
+    /// the catalog does not hold); `X.Y.Z-draft` is an error. `include_foreign_drafts` is
+    /// ignored.
+    ReleasedOnly,
 }
 
 /// Catalog kinds a floating ref can name. Agents are pinned on `RunSpec.agent_ref`.
@@ -239,7 +245,7 @@ impl ArtifactKind {
         }
     }
 
-    fn noun(self) -> &'static str {
+    pub(crate) fn noun(self) -> &'static str {
         match self {
             Self::Skill => "skill",
             Self::Playbook => "playbook",
@@ -270,11 +276,11 @@ struct Viewer<'a> {
 /// `owner` is the agent row's `owner_user_id`: the only user whose drafts count.
 /// Anyone else's draft is never used.
 ///
-/// | ref | [`ResolveMode::Release`] | [`ResolveMode::Draft`] |
-/// |---|---|---|
-/// | no version | latest release | `owner`'s draft if they have one, else latest release |
-/// | `X.Y.Z` | that release | that release |
-/// | `X.Y.Z-draft` | `owner`'s draft, else NotFound | `owner`'s draft, else NotFound |
+/// | ref | [`ResolveMode::Release`] | [`ResolveMode::Draft`] | [`ResolveMode::ReleasedOnly`] |
+/// |---|---|---|---|
+/// | no version | latest release | `owner`'s draft if they have one, else latest release | latest release |
+/// | `X.Y.Z` | that release | that release | that release, else an error (never kept as-is) |
+/// | `X.Y.Z-draft` | `owner`'s draft, else NotFound | `owner`'s draft, else NotFound | an error |
 ///
 /// A floating ref with neither a release nor an owner draft fails with
 /// `"<table> '<urn>' has no published version"`. An explicit digest on a versioned ref
@@ -573,6 +579,17 @@ fn resolve_inner(
     }
     let kind_noun = kind.noun();
 
+    if viewer.mode == ResolveMode::ReleasedOnly
+        && resource_ref
+            .version
+            .as_ref()
+            .is_some_and(|v| v.prerelease.eq_ignore_ascii_case("draft"))
+    {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "{kind_noun} '{urn}': drafts are not available to this agent"
+        )));
+    }
+
     let unversioned = is_unversioned(resource_ref);
     let pin = match kind {
         ArtifactKind::Skill => resolve_skill_pin(
@@ -611,6 +628,13 @@ fn resolve_inner(
         {
             return Err(err)
         }
+        Err(OrchestratorError::NotFound(_))
+            if !unversioned && viewer.mode == ResolveMode::ReleasedOnly =>
+        {
+            return Err(OrchestratorError::InvalidContract(format!(
+                "{kind_noun} '{urn}' not found in catalog"
+            )));
+        }
         Err(OrchestratorError::NotFound(_)) if !unversioned => {
             let kept = resource_ref.clone();
             if kept.version.is_none() || digest_is_unpinned(&kept) {
@@ -648,6 +672,11 @@ fn resolve_inner(
         .validate()
         .map_err(|e| OrchestratorError::InvalidContract(e.to_string()))?;
     let channel = channel_of(pinned.version.as_ref());
+    if viewer.mode == ResolveMode::ReleasedOnly && channel == SkillChannel::Draft {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "{kind_noun} '{urn}': drafts are not available to this agent"
+        )));
+    }
     Ok(PinnedRef {
         reference: pinned,
         channel,
@@ -1834,5 +1863,152 @@ mod tests {
         )
         .expect_err("kind mismatch");
         assert!(err.to_string().contains("not a playbook URN"), "{err}");
+    }
+    fn released_only(
+        store: &SqliteWorkflowStore,
+        kind: ArtifactKind,
+        r: &ResourceRef,
+        owner: &str,
+    ) -> Result<PinnedRef, OrchestratorError> {
+        resolve_ref_for_owner(store, kind, r, owner, ResolveMode::ReleasedOnly)
+    }
+
+    #[test]
+    fn released_only_floating_ref_is_the_latest_release_never_the_owners_draft() {
+        let store = store_with_alice_skill();
+        let draft_mode = resolve_ref_for_owner(
+            &store,
+            ArtifactKind::Skill,
+            &unversioned_skill(),
+            "alice",
+            ResolveMode::Draft,
+        )
+        .expect("draft mode");
+        assert_eq!(draft_mode.channel, SkillChannel::Draft);
+        let pinned = released_only(&store, ArtifactKind::Skill, &unversioned_skill(), "alice")
+            .expect("released only");
+        assert_eq!(pinned.channel, SkillChannel::Released);
+        assert_eq!(pinned.reference.digest.unwrap().hex_hash, DIGEST_100);
+    }
+
+    #[test]
+    fn released_only_floating_playbook_ignores_the_owners_draft() {
+        let store = store();
+        store.create_user("alice", "alice").expect("alice");
+        store
+            .put_playbook_with_owner(&test_playbook(), "alice")
+            .expect("release");
+        store
+            .publish_playbook_draft_with_owner(&test_playbook(), "alice")
+            .expect("draft");
+        let pinned = released_only(
+            &store,
+            ArtifactKind::Playbook,
+            &unversioned_ref(PLAYBOOK_URN),
+            "alice",
+        )
+        .expect("released only");
+        assert_eq!(pinned.channel, SkillChannel::Released);
+    }
+
+    #[test]
+    fn released_only_floating_ref_with_only_a_draft_is_an_error() {
+        let store = store();
+        store.create_user("alice", "alice").expect("alice");
+        store
+            .put_skill_package_with_owner(
+                &package(DIGEST_DRAFT, 1, 0, 0, "draft", SkillChannel::Draft),
+                "alice",
+            )
+            .expect("draft only");
+        released_only(&store, ArtifactKind::Skill, &unversioned_skill(), "alice")
+            .expect_err("nothing released");
+    }
+
+    #[test]
+    fn released_only_versioned_ref_is_that_release_or_an_error() {
+        let store = store_with_alice_skill();
+        let mut versioned = unversioned_skill();
+        versioned.version = Some(released_version());
+        let pinned = released_only(&store, ArtifactKind::Skill, &versioned, "bob")
+            .expect("1.0.0 is released");
+        assert_eq!(pinned.channel, SkillChannel::Released);
+
+        // A version and digest the catalog does not hold: kept as-is in Release mode,
+        // an error here.
+        let mut absent = unversioned_skill();
+        absent.version = Some(Version {
+            major: 2,
+            minor: 0,
+            patch: 0,
+            prerelease: String::new(),
+            build: String::new(),
+        });
+        absent.digest = Some(Digest {
+            algorithm: SHA256,
+            hex_hash: DIGEST_200.to_string(),
+        });
+        let kept = resolve_ref_for_owner(
+            &store,
+            ArtifactKind::Skill,
+            &absent,
+            "bob",
+            ResolveMode::Release,
+        )
+        .expect("kept as-is in Release mode");
+        assert_eq!(kept.reference, absent);
+        let err = released_only(&store, ArtifactKind::Skill, &absent, "bob")
+            .expect_err("no release at 2.0.0");
+        assert!(err.to_string().contains("not found in catalog"), "{err}");
+
+        // A digest that is not the release's.
+        let mut wrong = versioned.clone();
+        wrong.digest = Some(Digest {
+            algorithm: SHA256,
+            hex_hash: DIGEST_200.to_string(),
+        });
+        let err =
+            released_only(&store, ArtifactKind::Skill, &wrong, "bob").expect_err("digest mismatch");
+        assert!(err.to_string().contains("digest mismatch"), "{err}");
+    }
+
+    #[test]
+    fn released_only_refuses_an_explicit_draft_ref_even_for_the_owner_and_an_operator() {
+        let store = store_with_alice_skill();
+        let mut draft = unversioned_skill();
+        draft.version = Some(draft_version());
+        draft.digest = Some(Digest {
+            algorithm: SHA256,
+            hex_hash: DIGEST_DRAFT.to_string(),
+        });
+        resolve_ref_for_owner(
+            &store,
+            ArtifactKind::Skill,
+            &draft,
+            "alice",
+            ResolveMode::Release,
+        )
+        .expect("Release mode still resolves the owner's own draft");
+        let err = released_only(&store, ArtifactKind::Skill, &draft, "alice")
+            .expect_err("own draft refused");
+        assert!(
+            err.to_string().contains("drafts are not available"),
+            "{err}"
+        );
+        resolve_ref_visible(
+            &store,
+            ArtifactKind::Skill,
+            &draft,
+            "bob",
+            ResolveMode::ReleasedOnly,
+            true,
+        )
+        .expect_err("include_foreign_drafts is ignored");
+        // A differently cased `-Draft` is refused too.
+        let mut cased = draft.clone();
+        if let Some(v) = cased.version.as_mut() {
+            v.prerelease = "Draft".to_string();
+        }
+        released_only(&store, ArtifactKind::Skill, &cased, "alice").expect_err("cased draft");
     }
 }

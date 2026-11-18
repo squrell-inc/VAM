@@ -7014,9 +7014,12 @@ async fn owner_without_grant_cannot_release_until_org_admin_grants() {
     let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
     let app = test_app(app_state_http_only(store.clone()));
     let urn = "urn:vam:agent:local.vam.dev/acme/grant-me";
+    // Spec change (member-draft-agents Phase 3): a member holds `agents:draft`, so the PUT is
+    // no longer 403; a URN outside their namespace is a restricted-save 400, and it writes
+    // nothing. Release stays 403 below.
     assert_eq!(
         put_agent_as(&app, &alice, urn, "draft").await,
-        StatusCode::FORBIDDEN
+        StatusCode::BAD_REQUEST
     );
     assert_eq!(
         release_agent_as(&app, &alice, urn, "alice-no-grant").await,

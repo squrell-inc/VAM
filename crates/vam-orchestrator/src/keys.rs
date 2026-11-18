@@ -27,12 +27,22 @@ pub const USERS_ADMIN_SCOPE: &str = "users:admin";
 /// Live role is the source of truth so org-admin revoke sticks.
 pub const PUBLISH_GRANT_SCOPE: &str = "publish:grant";
 
+/// Scope that lets a caller without `catalog:write` save and edit its own draft agents
+/// (`PUT /v1/agents`, `PUT /v1/agents/{urn}/permissions`), under the restricted rules of
+/// [`crate::member_draft`]. It opens no other route.
+pub const AGENTS_DRAFT_SCOPE: &str = "agents:draft";
+
+/// Scopes added to the role defaults after the `scope_mode` backfill shipped. A key stored
+/// with the role's defaults minus these is a default key minted before the scope existed.
+const SCOPES_ADDED_AFTER_BACKFILL: &[&str] = &[AGENTS_DRAFT_SCOPE];
+
 /// Scopes tenants must never receive. Bootstrap/operator keys keep them.
 pub const OPERATOR_ONLY_SCOPES: &[&str] = &[KEYS_ADMIN_SCOPE, BROKERS_ADMIN_SCOPE];
 
 pub const BOOTSTRAP_SCOPES: &[&str] = &[
     KEYS_ADMIN_SCOPE,
     "catalog:write",
+    AGENTS_DRAFT_SCOPE,
     BROKERS_ADMIN_SCOPE,
     USERS_ADMIN_SCOPE,
     PUBLISH_GRANT_SCOPE,
@@ -49,6 +59,7 @@ pub const BOOTSTRAP_SCOPES: &[&str] = &[
 pub const ORG_ADMIN_SCOPES: &[&str] = &[
     USERS_ADMIN_SCOPE,
     "catalog:write",
+    AGENTS_DRAFT_SCOPE,
     PUBLISH_GRANT_SCOPE,
     "sessions:write",
     "runs:write",
@@ -62,6 +73,7 @@ pub const ORG_ADMIN_SCOPES: &[&str] = &[
 /// Default scopes for [`UserRole::Publisher`].
 pub const PUBLISHER_SCOPES: &[&str] = &[
     "catalog:write",
+    AGENTS_DRAFT_SCOPE,
     PUBLISH_GRANT_SCOPE,
     "sessions:write",
     "runs:write",
@@ -72,8 +84,10 @@ pub const PUBLISHER_SCOPES: &[&str] = &[
     "secrets:write",
 ];
 
-/// Default scopes for [`UserRole::Member`]. No catalog publish or user admin.
+/// Default scopes for [`UserRole::Member`]. No catalog publish or user admin; `agents:draft`
+/// lets a member save their own draft agents from released parts.
 pub const MEMBER_SCOPES: &[&str] = &[
+    AGENTS_DRAFT_SCOPE,
     "sessions:write",
     "runs:write",
     "approvals:write",
@@ -759,7 +773,8 @@ impl SqliteWorkflowStore {
 }
 
 /// One-shot backfill of `api_keys.scope_mode` (locked decision 2): an `http` key is `role`
-/// when its stored list equals, as a set, the defaults of its owner's CURRENT role; every
+/// when its stored list equals, as a set, the defaults of its owner's CURRENT role, with or
+/// without the scopes in [`SCOPES_ADDED_AFTER_BACKFILL`]; every
 /// other row keeps the column default `explicit`. A missing owner column (a database older
 /// than owner stamps) reads as `local`, and `bootstrap` as the operator, like the stamps do.
 fn backfill_scope_mode(
@@ -804,7 +819,15 @@ fn backfill_scope_mode(
         let stored: std::collections::HashSet<String> = stored.into_iter().collect();
         let defaults: std::collections::HashSet<String> =
             default_scopes_for_role(role).into_iter().collect();
-        if stored == defaults {
+        // A key stored with the defaults minus a scope added later is a default key minted
+        // before that scope existed: nobody could have narrowed away a scope that was not
+        // there, and any real narrowing drops another scope and fails both comparisons.
+        let pre_scope_defaults: std::collections::HashSet<String> = defaults
+            .iter()
+            .filter(|s| !SCOPES_ADDED_AFTER_BACKFILL.contains(&s.as_str()))
+            .cloned()
+            .collect();
+        if stored == defaults || stored == pre_scope_defaults {
             connection.execute(
                 "UPDATE api_keys SET scope_mode = 'role' WHERE key_id = ?1",
                 [&key_id],
@@ -880,6 +903,25 @@ mod tests {
         let scopes = sanitize_scopes_for_owner(LOCAL_USER_ID, &requested);
         assert_eq!(scopes, vec!["node:read".to_string()]);
         assert!(!scopes.iter().any(|s| is_operator_only_scope(s)));
+    }
+
+    #[test]
+    fn every_role_default_holds_agents_draft() {
+        for role in [
+            UserRole::Operator,
+            UserRole::OrgAdmin,
+            UserRole::Publisher,
+            UserRole::Member,
+        ] {
+            assert!(
+                default_scopes_for_role(role)
+                    .iter()
+                    .any(|s| s == AGENTS_DRAFT_SCOPE),
+                "{role:?}"
+            );
+        }
+        assert!(BOOTSTRAP_SCOPES.contains(&AGENTS_DRAFT_SCOPE));
+        assert!(!is_operator_only_scope(AGENTS_DRAFT_SCOPE));
     }
 
     #[test]
@@ -1427,5 +1469,74 @@ mod tests {
         assert_eq!(mode_of(&store, "old-member"), ScopeMode::Role);
         assert_eq!(mode_of(&store, "explicit-same"), ScopeMode::Explicit);
         assert_eq!(mode_of(&store, "role-same"), ScopeMode::Role);
+    }
+    /// A role set as it was before `agents:draft` existed.
+    fn without_agents_draft(set: &'static [&'static str]) -> Vec<&'static str> {
+        set.iter()
+            .copied()
+            .filter(|s| *s != AGENTS_DRAFT_SCOPE)
+            .collect()
+    }
+
+    fn users_table_with_publisher() -> &'static str {
+        "CREATE TABLE users (user_id TEXT PRIMARY KEY NOT NULL, username TEXT NOT NULL UNIQUE,
+           tenant_id TEXT NOT NULL, created_at INTEGER NOT NULL, password_hash TEXT,
+           password_updated_at INTEGER, role TEXT NOT NULL DEFAULT 'member', deactivated_at INTEGER);
+         INSERT INTO users (user_id, username, tenant_id, created_at, role)
+           VALUES ('pubby', 'pubby', 'pubby', 1, 'publisher');"
+    }
+
+    #[test]
+    fn backfill_old_member_set_becomes_role_and_gains_agents_draft() {
+        let old_member = without_agents_draft(MEMBER_SCOPES);
+        assert!(!old_member.contains(&AGENTS_DRAFT_SCOPE));
+        let conn = legacy_store_with_keys(&[("old-member", "local", &old_member)]);
+        let store = SqliteWorkflowStore::initialize(conn).expect("migrate");
+        assert_eq!(mode_of(&store, "old-member"), ScopeMode::Role);
+        let record = store.get_api_key("old-member").expect("key");
+        let effective = effective_scopes(&record, UserRole::Member);
+        assert!(effective.iter().any(|s| s == AGENTS_DRAFT_SCOPE));
+        assert!(!effective.iter().any(|s| s == "catalog:write"));
+    }
+
+    #[test]
+    fn backfill_old_publisher_set_becomes_role() {
+        let old_publisher = without_agents_draft(PUBLISHER_SCOPES);
+        let conn = legacy_store_with_keys(&[("old-pub", "pubby", &old_publisher)]);
+        conn.execute_batch(users_table_with_publisher())
+            .expect("users");
+        let store = SqliteWorkflowStore::initialize(conn).expect("migrate");
+        assert_eq!(mode_of(&store, "old-pub"), ScopeMode::Role);
+    }
+
+    #[test]
+    fn backfill_publisher_key_with_old_member_set_stays_explicit() {
+        let old_member = without_agents_draft(MEMBER_SCOPES);
+        let conn = legacy_store_with_keys(&[("pub-narrow", "pubby", &old_member)]);
+        conn.execute_batch(users_table_with_publisher())
+            .expect("users");
+        let store = SqliteWorkflowStore::initialize(conn).expect("migrate");
+        assert_eq!(mode_of(&store, "pub-narrow"), ScopeMode::Explicit);
+    }
+
+    #[test]
+    fn backfill_narrowed_member_key_stays_explicit() {
+        let mut narrowed = without_agents_draft(MEMBER_SCOPES);
+        narrowed.retain(|s| *s != "secrets:write");
+        let conn = legacy_store_with_keys(&[
+            ("narrow", "local", &narrowed),
+            (
+                "narrow-plus-draft",
+                "local",
+                &[AGENTS_DRAFT_SCOPE, "runs:write"],
+            ),
+        ]);
+        let store = SqliteWorkflowStore::initialize(conn).expect("migrate");
+        assert_eq!(mode_of(&store, "narrow"), ScopeMode::Explicit);
+        assert_eq!(mode_of(&store, "narrow-plus-draft"), ScopeMode::Explicit);
+        let record = store.get_api_key("narrow").expect("key");
+        assert!(!effective_scopes(&record, UserRole::Member)
+            .iter()
+            .any(|s| s == AGENTS_DRAFT_SCOPE));
     }
 }

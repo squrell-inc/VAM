@@ -46,5 +46,4 @@ mock:
     reply: { text: summarised }
   - when: { step: mp }
     reply: { toolCall: { name: step_complete, args: { step_id: summarise, outcome: done } } }
-status: pending
-expectFail: { step: when.0, class: product }
+status: active

@@ -57,6 +57,7 @@ pub mod marketplace;
 pub mod mcp_client;
 pub(crate) mod mcp_oauth_refresh;
 pub mod mcp_registry;
+pub mod member_draft;
 pub mod metrics_scrape;
 pub mod node_base;
 pub mod node_notify;

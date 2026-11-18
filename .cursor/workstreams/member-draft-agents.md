@@ -134,7 +134,7 @@ owner-approved spec change (a member's PUT of an own draft in their namespace is
 200, outside it 400).
 
 - [x] Wave 0: scenarios and harness
-- [ ] Wave 1: `agents:draft`, restricted mode on the two routes, the save
+- [x] Wave 1: `agents:draft`, restricted mode on the two routes, the save
   validator (refs, refused fields, namespace, cap), key backfill fix, test fallout
 - [ ] Wave 2: `ResolveMode::ReleasedOnly` at record and at session start;
   advanced refs recorded and loaded by pin; explain and check routes use the mode
@@ -346,7 +346,7 @@ as, refused}`, `set-role`, `identity-request`, `connector-*`):
   offered to a member's run, swap the piece for another released-skill tool and
   say so in the PR (the scenario's behaviour does not change).
   `Decide: NOW — proof 3, cost 1, line launch proof "a member builds their own agent".`
-- [ ] `MD-3.1` — **`agents:draft` scope, and the backfill keeps default keys
+- [x] `MD-3.1` — **`agents:draft` scope, and the backfill keeps default keys
   default.** `pub const AGENTS_DRAFT_SCOPE: &str = "agents:draft"` in
   `keys.rs`, added to `BOOTSTRAP_SCOPES`, `ORG_ADMIN_SCOPES`, `PUBLISHER_SCOPES`,
   `MEMBER_SCOPES` (`keys.rs:33-84`). `backfill_scope_mode` (`keys.rs:761-813`):
@@ -359,7 +359,7 @@ as, refused}`, `set-role`, `identity-request`, `connector-*`):
   gain `agents:draft`; a publisher key stored with the old member set stays
   `explicit`; `GET /v1/me` with a member default key lists `agents:draft`
   (`tests/me_tests.rs`). `Decide: NOW — proof 3, cost 1.`
-- [ ] `MD-3.2` — **Restricted mode on the two routes.** One helper (e.g.
+- [x] `MD-3.2` — **Restricted mode on the two routes.** One helper (e.g.
   `api/catalog_auth.rs` `require_agent_draft_write(auth) -> Result<AgentWriteMode,_>`):
   `keys:admin` or `catalog:write` → `Full` (today's path, unchanged);
   `agents:draft` → `Restricted`; neither → 403 "missing required scope
@@ -376,7 +376,7 @@ as, refused}`, `set-role`, `identity-request`, `connector-*`):
   403 on both. Turns green (with MD-3.3, MD-3.4): `member-builds-and-runs-own-draft-agent-from-a-released-skill`,
   `member-draft-agent-uses-a-connector-skill-through-the-members-connection`.
   `Decide: NOW — proof 3 (catalog write authority), cost 1.`
-- [ ] `MD-3.3` — **The save validator (refs and refused fields).** New
+- [x] `MD-3.3` — **The save validator (refs and refused fields).** New
   `member_draft.rs` (or in `catalog_publish.rs`):
   `validate_restricted_agent(store, spec) -> Result<(), OrchestratorError>`, run
   on the full spec that would be stored (after
@@ -408,7 +408,7 @@ as, refused}`, `set-role`, `identity-request`, `connector-*`):
   Turns green: `member-draft-agent-refuses-a-skill-that-is-not-released`, and
   `then.2` of `demoted-publishers-draft-agent-stops-using-their-draft-skill`.
   `Decide: NOW — proof 3 (R6, R12), cost 1.`
-- [ ] `MD-3.4` — **Namespace, ownership and cap, under the store lock.** A
+- [x] `MD-3.4` — **Namespace, ownership and cap, under the store lock.** A
   restricted writer next to `publish_agent_draft_with_owner`
   (`catalog_publish.rs:1022-1058`; `upsert_spec_draft` `:182-245`) that, holding
   the connection lock: if the caller owns any row of the URN → edit (skip
@@ -471,7 +471,7 @@ as, refused}`, `set-role`, `identity-request`, `connector-*`):
   `security.rs` tests. If a test asserts the "not pinned by digest" warning on a
   recorded run, that is the decision-7 spec change: one line in the PR.
   `Decide: NOW — proof 3 (R7, R17), cost 1.`
-- [ ] `MD-3.7` — **Rust test spec change and fallout (wave 1).**
+- [x] `MD-3.7` — **Rust test spec change and fallout (wave 1).**
   `tests/catalog_read_authorize_tests.rs:205-212` `member_put_agent_is_403`
   becomes `member_put_own_agent_draft_is_200_outside_namespace_is_400`: the
   member (`username` "member") PUTs `urn:vam:agent:local.vam.dev/member/member-write`
@@ -609,3 +609,4 @@ team has the handoff (`design/member-draft-agents.md` §9) on the docs site.
 | 2026-11-18 | 3 | Phase 3 breakdown drafted (5 new scenarios, waves 0–2); waiting for owner approval |
 | 2026-11-18 | 3 | Owner approved the Phase 3 breakdown with the open-question defaults (close a Member's explicit `-draft` refs, decision 7 amended; `local` is released-only; cap answers 409; one 400 message per kind; advanced policy pins recorded in every mode). |
 | 2026-11-18 | 3 W0 | Wave 0 on `feat/member-draft-agents-scenarios-member-drafts`: 5 scenarios `pending`, 5 world pieces, harness `{{ns}}`, `put-draft urnOf`, `publish-skill as`/`release: false`, `start-playbook` on a draft. Scoreboard: 0 green, 5 red (right reason, class `product`): four at the member's first save (403 `catalog:write`), the demotion one at `then.1` (the start is accepted and uses the draft skill). Publisher-swapped copies (deleted) confirmed the rest of each scenario passes. 1 fix cycle (playbook step tool on the agent piece), ~1h. Local smoke: the 9 Microsoft-mock sandbox failures as before. |
+| 2026-11-18 | 3 W1 | Wave 1 on `feat/member-draft-agents-member-save`: `agents:draft` in every role default, backfill keeps pre-scope default keys `role`, `require_agent_draft_write` on `PUT /v1/agents` and the agent permissions PUT (13 other `catalog:write` routes unchanged, table test), restricted save (`member_draft.rs`, `publish_agent_draft_restricted`: refused fields, released-only refs through `ResolveMode::ReleasedOnly`, namespace, owner with empty owner as `local`, cap 409 under the store lock), release routes authorize before reading the body. Scoreboard: 3 scenarios green locally (builds-and-runs, refuses-unreleased, private-and-namespace), the connector one `active` and red only at the Microsoft-mock request count (sandbox, as its sibling), demotion still `pending` (red at `then.1`, wave 2); re-run list green; 1 fix cycle (release auth order), ~1h. |
