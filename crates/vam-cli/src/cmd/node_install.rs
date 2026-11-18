@@ -36,6 +36,11 @@ pub struct Options {
     pub host_name: Option<String>,
     pub checkout: Option<PathBuf>,
     pub kit: Option<PathBuf>,
+    /// First-party brokers to install and register (`--broker`).
+    pub brokers: Vec<super::node_broker::Broker>,
+    /// The global `--host` and `--token`, used to register the brokers.
+    pub api_host: Option<String>,
+    pub api_token: Option<String>,
 }
 
 fn under(root: &Path, abs: &str) -> PathBuf {
@@ -572,9 +577,16 @@ async fn step_base(root: &Path, o: &Options) -> Result<()> {
 /// Run `vamd --init` against the redirected tree through its normal configuration (never
 /// `--root`, which `vamd` refuses outside `--preflight`). Its stdout is relayed line by line;
 /// the key line goes to our stdout and nowhere else.
-fn step_vamd_init(root: &Path, vamd: &Path, tls_sans: Option<&str>) -> Result<()> {
+fn step_vamd_init(root: &Path, vamd: &Path, tls_sans: Option<&str>) -> Result<Option<String>> {
     let state = under(root, STATE_DIR);
     let tls_before = state.join("tls/ca.pem").is_file();
+    // A node that already has its database and certificate is initialised: `vamd --init` would
+    // only touch the database's write-ahead log, and a re-run must change nothing.
+    if tls_before && state.join("state.db").is_file() {
+        unchanged("tls", &format!("{}/tls/ca.pem exists", state.display()));
+        unchanged("admin-key", "the node already has an admin key");
+        return Ok(None);
+    }
     let mut cmd = Command::new(vamd);
     cmd.arg("--init")
         .env("VAMD_DB_PATH", state.join("state.db"))
@@ -592,9 +604,14 @@ fn step_vamd_init(root: &Path, vamd: &Path, tls_sans: Option<&str>) -> Result<()
         .take()
         .ok_or_else(|| anyhow!("no stdout from vamd --init"))?;
     let mut minted = false;
+    let mut minted_key = None;
     let mut existing = false;
     for line in BufReader::new(out).lines() {
         let line = line?;
+        if let Some(k) = line.strip_prefix("admin key: ") {
+            // Held in memory for the broker registration, never written anywhere.
+            minted_key = k.split_whitespace().next().map(str::to_string);
+        }
         minted |= line.starts_with("admin key: ");
         existing |= line.contains("already has an admin key");
         println!("{line}");
@@ -616,7 +633,7 @@ fn step_vamd_init(root: &Path, vamd: &Path, tls_sans: Option<&str>) -> Result<()
     } else if existing {
         unchanged("admin-key", "the node already has an admin key");
     }
-    Ok(())
+    Ok(minted_key)
 }
 
 fn step_state_dir(root: &Path) -> Result<()> {
@@ -667,7 +684,8 @@ pub async fn run_install(o: Options) -> Result<()> {
     let root = o.root.clone();
     let vamd = find_vamd(o.vamd.as_deref())?;
 
-    let lines = node_init::run_checks(&root, Some(&vamd));
+    let mut lines = node_init::run_checks(&root, Some(&vamd));
+    lines.extend(super::node_broker::requested_check_lines(&o.brokers));
     let stop = blocking(&lines);
     if !stop.is_empty() {
         return Err(fail_with(&stop, "this host cannot run a node"));
@@ -719,8 +737,9 @@ pub async fn run_install(o: Options) -> Result<()> {
         }
     }
 
-    step_vamd_init(&root, &vamd, sans.as_deref())?;
+    let minted_key = step_vamd_init(&root, &vamd, sans.as_deref())?;
 
+    let mut vamd_started = false;
     if !o.no_systemd && !o.no_start && root == Path::new("/") {
         let _ = Command::new("systemctl").arg("daemon-reload").status();
         let active = Command::new("systemctl")
@@ -736,11 +755,32 @@ pub async fn run_install(o: Options) -> Result<()> {
             if unit_changed && active {
                 let _ = Command::new("systemctl").args(["restart", "vamd"]).status();
             }
+            vamd_started = true;
             done("service", "vamd is enabled and started");
         } else {
             unchanged("service", "vamd is enabled and running");
         }
     }
+
+    let mut rerun = String::new();
+    if root != Path::new("/") {
+        rerun.push_str(&format!(" --root {}", root.display()));
+    }
+    if o.no_systemd {
+        rerun.push_str(" --no-systemd");
+    }
+    super::node_broker::run_brokers(super::node_broker::Plan {
+        root: &root,
+        brokers: &o.brokers,
+        no_systemd: o.no_systemd,
+        no_start: o.no_start,
+        vamd_started,
+        minted_key: minted_key.as_deref(),
+        api_host: o.api_host.as_deref(),
+        api_token: o.api_token.as_deref(),
+        rerun_flags: rerun,
+    })
+    .await?;
 
     let host = o
         .host_name
@@ -878,6 +918,9 @@ esac\n",
             host_name: Some("node.example".into()),
             checkout: None,
             kit: None,
+            brokers: vec![],
+            api_host: None,
+            api_token: None,
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -931,6 +974,9 @@ esac\n",
             host_name: None,
             checkout: None,
             kit: None,
+            brokers: vec![],
+            api_host: None,
+            api_token: None,
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

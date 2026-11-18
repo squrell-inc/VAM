@@ -379,9 +379,23 @@ impl Engine {
         }
         // The binary under test (copied into the tree by `copyCli`, in this step or an earlier
         // one) is not output of the step: the tree scan skips copies of it.
-        let placed = std::fs::read(&built_cli).ok();
+        // The built brokers `copyBins` places beside it are the same kind of copy.
+        let mut placed: Vec<Vec<u8>> = std::fs::read(&built_cli).ok().into_iter().collect();
+        for var in [
+            "VAM_E2E_WEB_BROKER",
+            "VAM_E2E_SCHEDULE_BROKER",
+            "VAM_E2E_NOTIFY_BROKER",
+        ] {
+            if let Some(b) = std::env::var(var)
+                .ok()
+                .filter(|p| !p.is_empty())
+                .and_then(|p| std::fs::read(p).ok())
+            {
+                placed.push(b);
+            }
+        }
         for a in x.absent.iter().chain(&x.absent_in_files) {
-            if let Some(f) = find_in_tree(&root, sub(a).as_bytes(), placed.as_deref()) {
+            if let Some(f) = find_in_tree(&root, sub(a).as_bytes(), &placed) {
                 return Err(Fail::new(
                     Class::Product,
                     format!("no file under the tree contains `{a}`"),
@@ -461,6 +475,26 @@ impl Engine {
             let _ = self
                 .api
                 .delete(&format!("/v1/hosted/brokers/{}", super::seg(&id)));
+        }
+        // A broker `node init --no-systemd` started detached is not supervised: stop the ones
+        // recorded under the scratch tree.
+        if let Some(root) = &self.ctx.cli_root {
+            if let Ok(rd) = std::fs::read_dir(root.join("var/lib/vam/brokers")) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|x| x.to_str()) != Some("pid") {
+                        continue;
+                    }
+                    if let Some(pid) = std::fs::read_to_string(&p)
+                        .ok()
+                        .and_then(|t| t.trim().parse::<u32>().ok())
+                    {
+                        let _ = std::process::Command::new("kill")
+                            .arg(pid.to_string())
+                            .status();
+                    }
+                }
+            }
         }
     }
 
@@ -559,8 +593,8 @@ fn snapshot(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
 }
 
 /// The first file under `dir` that contains `needle`, skipping files whose bytes are exactly
-/// `skip` (the runner's own copies of the binary under test).
-fn find_in_tree(dir: &Path, needle: &[u8], skip: Option<&[u8]>) -> Option<PathBuf> {
+/// one of `skip` (the runner's own copies of the binaries under test).
+fn find_in_tree(dir: &Path, needle: &[u8], skip: &[Vec<u8>]) -> Option<PathBuf> {
     if needle.is_empty() {
         return None;
     }
@@ -573,7 +607,7 @@ fn find_in_tree(dir: &Path, needle: &[u8], skip: Option<&[u8]>) -> Option<PathBu
             }
         } else if t.is_file() {
             if let Ok(b) = std::fs::read(&p) {
-                if skip == Some(b.as_slice()) {
+                if skip.contains(&b) {
                     continue;
                 }
                 if b.windows(needle.len()).any(|w| w == needle) {
@@ -645,19 +679,33 @@ mod tests {
         std::fs::write(t.path().join("out.txt"), "done base: built from the kit").unwrap();
         let word = b"checkout";
         assert_eq!(
-            find_in_tree(t.path(), word, None),
+            find_in_tree(t.path(), word, &[]),
             Some(t.path().join("kit-1/vam"))
         );
-        assert_eq!(find_in_tree(t.path(), word, Some(&bin)), None);
+        assert_eq!(
+            find_in_tree(t.path(), word, std::slice::from_ref(&bin)),
+            None
+        );
         std::fs::write(t.path().join("out.txt"), "looking for a checkout").unwrap();
         assert_eq!(
-            find_in_tree(t.path(), word, Some(&bin)),
+            find_in_tree(t.path(), word, std::slice::from_ref(&bin)),
             Some(t.path().join("out.txt"))
         );
         // a modified copy is not the binary under test
         std::fs::write(t.path().join("kit-1/vam"), b"other checkout").unwrap();
         std::fs::write(t.path().join("out.txt"), "clean").unwrap();
-        assert!(find_in_tree(t.path(), word, Some(&bin)).is_some());
+        assert!(find_in_tree(t.path(), word, std::slice::from_ref(&bin)).is_some());
+        // a copied broker is skipped; a different file with the needle is still found
+        let broker = b"\x7fELF broker checkout".to_vec();
+        std::fs::write(t.path().join("kit-1/vam"), &bin).unwrap();
+        std::fs::write(t.path().join("vam-web-broker"), &broker).unwrap();
+        let skip = [bin.clone(), broker.clone()];
+        assert_eq!(find_in_tree(t.path(), word, &skip), None);
+        std::fs::write(t.path().join("other"), b"another checkout").unwrap();
+        assert_eq!(
+            find_in_tree(t.path(), word, &skip),
+            Some(t.path().join("other"))
+        );
     }
 
     #[test]

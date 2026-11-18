@@ -19,5 +19,4 @@ when:
         - "fix:"
 guards:
   - vam:crates/vam-cli/src/main.rs
-status: pending
-expectFail: { step: when.0, class: product }
+status: active
