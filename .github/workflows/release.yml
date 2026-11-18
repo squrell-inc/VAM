@@ -4,9 +4,10 @@ name: Release
 # schedule. Design: design/release-artifacts.md §4; locked decisions in
 # .cursor/workstreams/release-artifacts.md (2, 4, 5, 6, 7, 8, 9).
 #
-# This skeleton has the `validate` job only. Later waves add the build jobs (a reusable
-# release-build.yml) and the `publish` job behind the protected `release` environment; until
-# then a dispatch checks the guards and stops. scripts/release/check-workflow.sh (run by
+# `validate` checks the guards; `build` calls the reusable release-build.yml (channel `release`) beside
+# it, so the builds run while the guards do. A later wave adds the `publish` job behind the protected
+# `release` environment; until then a dispatch checks the guards, builds and stops, and the built
+# assets stay in the run's workflow artifacts. scripts/release/check-workflow.sh (run by
 # scripts/release/test/run.sh) holds the rules this file must keep: every action pinned by full
 # SHA, no caches, inputs reach shell only through `env:`, top-level `permissions: {}`, and write
 # permissions only in `publish`.
@@ -69,3 +70,17 @@ jobs:
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: scripts/release/guards.sh
+
+  # Every binary asset, built at the commit and version the dispatch names. Read-only, no secrets;
+  # release-build.yml is the same workflow pull requests run build-only. A build for a version
+  # the guards then refuse is wasted minutes and nothing else: only `publish` (a later wave)
+  # needs `validate`. The inputs are checked there (guard 1 and 2) and again by the build's `meta` job.
+  build:
+    name: build
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-build.yml
+    with:
+      version: ${{ inputs.version }}
+      commit: ${{ inputs.commit }}
+      channel: release

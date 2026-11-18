@@ -1,7 +1,14 @@
-# Pinned release tools (Linux x86_64 runners and sessions). One line per tool, whitespace-separated:
+# Pinned release tools (Linux x86_64 runners and sessions by default). One line per tool, whitespace-separated:
 #   name  version  url  sha256-of-the-archive  path-of-the-binary-inside-the-archive
 # The hash is checked before anything is unpacked; scripts/release/install-tool.sh does the install.
 # To bump a tool: change the version and URL, download the archive, `sha256sum` it, and say in the
 # PR where the hash was read (actionlint publishes a checksums file; cargo-deny does not).
 cargo-deny 0.21.0 https://github.com/EmbarkStudios/cargo-deny/releases/download/0.21.0/cargo-deny-0.21.0-x86_64-unknown-linux-musl.tar.gz a2170b854ff697e79e39c4c538981c9c1bdd803addbae6719a4cb66b4585a903 cargo-deny-0.21.0-x86_64-unknown-linux-musl/cargo-deny
 actionlint 1.7.12 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 actionlint
+# cargo-audit 0.23 reads the advisory database's CVSS 4.0 entries; 0.21.2 fails on them (spike, 2026-11-18).
+# Prebuilt x86_64 Linux musl binaries (hash computed by downloading the archive from the release
+# page named in the URL, 2026-11-18; no checksum file exists upstream for either).
+# A sixth column names another platform; with none, the line is for linux-x86_64. Other platforms
+# fall back to scripts/release/cargo.pins (cargo install --locked).
+cargo-auditable 0.7.2 https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.2/cargo-auditable-x86_64-unknown-linux-musl.tar.xz f194cc63276f458dc72ac157dfd6e668ab3eebf1e25769fcd55fcf318e6bcf18 cargo-auditable-x86_64-unknown-linux-musl/cargo-auditable
+cargo-audit 0.23.0 https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.23.0/cargo-audit-x86_64-unknown-linux-musl-v0.23.0.tgz 4f01c74ed84b2dffd0b1d37012a62cdf2a92c96e25bdf8eec7fcc0d4d3eb7811 cargo-audit-x86_64-unknown-linux-musl-v0.23.0/cargo-audit
