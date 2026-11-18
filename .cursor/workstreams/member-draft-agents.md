@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: member-draft-agents
-current_phase: 2 (approved 2026-11-18, wave 0 next)
+current_phase: 3 (approved 2026-11-18, wave 0 next)
 base_branch: feat/member-draft-agents
 design_docs:
   - design/member-draft-agents.md
@@ -84,6 +84,10 @@ wave 0 starts. Rationale and evidence: `design/member-draft-agents.md` §4.
    *Amended 2026-11-18 (follows decision 5, option B):* the clause "and an
    inline agent with no row run by such a caller" is dropped; no run carries an
    inline agent.
+   *Amended 2026-11-18 by the product owner (Phase 3 open question 1):* a
+   Member's explicit `-draft` ref (on a run, or on a run grant) to a playbook,
+   skill or policy is refused even when the member owns that draft; a Member
+   never runs draft parts.
 8. A restricted save refuses `capabilityPolicy`, `hitlPolicy`,
    `instructionArtifact`, `extends`, `overlay` and `completionPolicy.evaluatorRefs`.
 9. A restricted save may create a new agent URN only under
@@ -114,291 +118,7 @@ Done phase sections are deleted; git history keeps them.
 | Phase | Name | Done |
 |---|---|---|
 | 1 | API keys authorize by the live role | 2026-11-17: #22 (scenarios), #24 (scope_mode, effective scopes, release on effective `publish:grant`), #25 (queued start, docs). 3 scenarios active and green. |
-
-### Phase 2 — The run route never writes the catalog
-
-**Goal:** `POST /v1/runs` refuses any inline agent or inline playbook with 400
-and writes nothing; agents and playbooks are saved only through their PUT
-routes and run by ref. `vam run --file` saves the draft, shows any refusal and
-runs the draft by ref. No production path but the release routes and the
-marketplace import can write a released row.  
-**Depends on:** none in code; runs after Phase 1 in this lane (both touch `api/mod.rs`, so never in parallel)  
-**Plan:** approved by the owner 2026-11-18 (option B)  
-**Exit:** the three scenarios below `active` and green, the re-run list green;
-`vam run --file <dir>` saves and runs a publisher's draft and shows a member
-the PUT's refusal (CLI tests and the team checklist; the `cli` scenario step
-has no host or key, so it cannot prove this).
-
-- [x] Wave 0: scenarios and harness
-- [x] Wave 1: run route refuses inline parts; writers test-only; CLI and
-  bench save-then-run; test fallout; proto, OpenAPI and docs lines (one PR)
-
-**Benchmark delta:** none. A security floor (design §6 R1), no benchmark line.
-`scripts/bench-coldstart.sh` changes its requests, not what it measures.
-
-**CI (owner, 2026-11-17):** fast local checks in the session
-(`scripts/ci/local.sh --fast` and the wave's scenarios), the PR opens ready,
-GitHub Actions is the gate.
-
-**What the code does today** (checked 2026-11-17/18 on the base, Phase 1 merged)
-
-- `start_run` (`crates/vam-orchestrator/src/api/run_start.rs:216-601`) is the
-  only reader of `inline_agent` / `inline_playbook` in `src/`. An inline agent
-  with a `resourceId` calls `put_agent_with_owner` (`:345-351`; `catalog.rs:767-784`:
-  draft **and** release at 1.0.0); an inline playbook calls
-  `put_playbook_with_owner` (`:382-388`; `catalog.rs:951-970`). The only gate is
-  `runs:write` (`api/mod.rs:1360`). Other inline branches: `:338-342` (unbound
-  workspace), `:377` (message names `inline_agent`), `:437` →
-  `run_context::ensure_playbook_ref` (`run_context.rs:590-612`), and
-  `has_inline` for a busy workspace (`:283`, `api/inbox.rs:74`, `:471`).
-- Those two lines are the **only production callers** of the draft-and-release
-  writers (`put_*_with_owner`, `put_*_released_with_owner`,
-  `put_agent|playbook|skill|policy`, `put_platform_policy`). Every other caller
-  is a `#[cfg(test)]` module or one of **17 calls in 6 integration-test files**
-  (`tests/api_tests.rs`, `hermetic_tests.rs`, `legacy_permissions_tests.rs`,
-  `agent_check_tests.rs`, `playbook_examples_tests.rs`, `process_mode_run_api.rs`),
-  which link the library without `cfg(test)`, so hiding the writers needs a
-  feature. The marketplace import writes its rows in its own transaction; the
-  release routes use `release_*_with_meta`; vamd seeds nothing at boot.
-- Who sends inline parts: `vam run --file <dir | run.json>`
-  (`crates/vam-cli/src/cmd/run.rs`: `load_run_inputs` `:2080-2172` reads
-  `agent.json` / `playbook.json` next to the run file; `start_from_path`
-  `:1836-1852`; `start_run` `:350-412` PUTs both and **discards the answers**
-  `:357-374`, then posts the run with both inline) and
-  `scripts/bench-coldstart.sh` (PUT `:295`, inline agent in the run `:319`,
-  `POST /v1/runs` `:333`). The trigger gateway, the queue starter and the e2e
-  harness never send inline parts. No docs page mentions them.
-- An inline agent **without** a `resourceId` already fails for everyone (202,
-  then session start: "the run records no agent", `manager.rs:313-319`); an
-  inline playbook without one is silently ignored.
-
-**Scenario delta** (design/scenarios.md §9; touched scenarios found from
-`guards` on `catalog_publish.rs`, `api/mod.rs`, `api/catalog_auth.rs`,
-`keys.rs` and `given: org-*`; no scenario guards `api/run_start.rs`,
-`catalog.rs` or `cmd/run.rs`)
-
-| Scenario | Change | Layer | Given | Why |
-|---|---|---|---|---|
-| `a-run-with-an-inline-agent-is-refused-and-writes-nothing` | new, `pending` | process | `org-admin` as `admin`, `org-publisher` as `pub`, `org-member` as `member`, `agent-inline-probe` (new) | R1: member and publisher both 400, no row for anyone |
-| `a-run-with-an-inline-playbook-is-refused-and-writes-nothing` | new, `pending` | process | `org-admin` as `admin`, `org-publisher` as `pub`, `org-member` as `member`, `agent-plain`, `playbook-draft-probe` | R1 for playbooks; a plain chat is untouched |
-| `a-publisher-saves-a-draft-agent-and-runs-it-by-ref` | new, **`active` guard** | process | `org-admin` as `admin`, `org-publisher` as `pub`, `org-member` as `member`, `agent-inline-probe` | the save-then-run path `vam run --file` moves onto; draft stays private |
-| `member-chats-with-a-released-agent`, `always-allow-and-always-deny-are-remembered`, `release-shows-the-diff-against-the-previous-version`, `promotion-widens-a-default-key-but-not-a-narrowed-one`, `demotion-takes-catalog-writes-from-a-publisher-key`, `member-key-minted-with-catalog-write-cannot-write-the-catalog` | unchanged; re-run in W1 | process | as today | run by `agentRef`, draft runs, Always saves and release must not move (`catalog_publish.rs` writers move) |
-
-The three new scenarios guard `api/run_start.rs`, `catalog.rs`,
-`catalog_publish.rs` and `api/inbox.rs`. Sketches (red class `product`):
-
-- `a-run-with-an-inline-agent-is-refused-and-writes-nothing`. `when`:
-  `chat: { inline: agent-inline-probe, as: member, text: "e2e-step:im Hello", refused: true }`;
-  `expect: { refused: true, status: 400, contains: "PUT /v1/agents" }`; the same
-  `as: pub` (`e2e-step:ip`). `then`: `identity-request` as `admin`, `credential: key`,
-  `path: "/v1/agents/{{urn:agent-inline-probe:pub}}"`, `status: 404`; the same
-  for `{{urn:agent-inline-probe:member}}`; `pub` and `member` each get 404 on
-  their own URN. (The admin holds `users:admin` and sees every draft, so 404
-  means no row.) **Red at `when.0`:** a member's inline run is 202 today.
-- `a-run-with-an-inline-playbook-is-refused-and-writes-nothing`. `when`:
-  `chat: { agent: agent-plain, inlinePlaybook: playbook-draft-probe, as: pub, text: "e2e-step:pp Hello", refused: true }`;
-  `expect: { refused: true, status: 400, contains: "PUT /v1/playbooks" }`; the
-  same `as: member`. `then`: `admin` gets 404 on
-  `/v1/playbooks/{{urn:playbook-draft-probe:pub}}` and `…:member}}`;
-  `chat: { agent: agent-plain, as: member, text: "e2e-step:mq Hello" }`,
-  `expect: { run: succeeded }`. **Red at `when.0` or `when.1`:** today the
-  playbook is released and the start answers 202, or 400 naming the `topic`
-  input, never the `PUT /v1/playbooks` message; wave 0 records which.
-- `a-publisher-saves-a-draft-agent-and-runs-it-by-ref`. `when`:
-  `put-draft: { piece: agent-inline-probe, as: pub, status: 200 }`;
-  `chat: { agent: agent-inline-probe, draft: true, as: pub, text: "e2e-step:sd Hello" }`;
-  `expect: { run: succeeded }`. `then`: `pub` `GET
-  /v1/agents/{{urn:agent-inline-probe:pub}}/versions` 200, `lacks: "releasedAt"`;
-  `member` `GET` the agent 404; `member` `GET /v1/agents` 200, `lacks:
-  "{{urn:agent-inline-probe:pub}}"`. **Green on today's code** (saving by PUT
-  and running the draft by ref already work): it lands `active` in wave 0 as a
-  guard, proves the new harness lookups, and must stay green through wave 1.
-
-**Wave 0 harness additions** (`crates/vam-e2e`, documented in `e2e/README.md`
-"Roles and drafts"; everything else reuses `put-draft`, `chat {draft, as}`,
-`identity-request` and `expect {refused, contains}`):
-
-1. An `agent` piece with `deferred: true` and no `release` is not written at
-   `given` (`engine.rs:589-600`, today only playbooks skip). Existing deferred
-   agent pieces all have `release: true` and keep their meaning. New piece
-   `e2e/world/agent-inline-probe.yaml`: that, with the body of `agent-plain`.
-2. `chat` takes `inline: <agent piece>` (the piece's `spec` sent as
-   `inlineAgent`, no `agentRef`) and `inlinePlaybook: <playbook piece>` (sent
-   as `inlinePlaybook`, with `agent:` or `inline:`). The URN's `{{name}}` is
-   `<piece>-<as>-<scenario>-<runTag>`, the `put-draft` rule. `check.rs`
-   refuses either without `refused: true` (vamd accepts neither any more).
-3. `expect: { refused: true, status: <n> }`: the refusal's exact status
-   (today any 4xx passes).
-4. `put-draft` records the URN it wrote per `(piece, as)`; `chat { agent: <deferred piece>, as }`
-   runs that URN (class `scenario` if no `put-draft` wrote one).
-5. `{{urn:<piece>:<as>}}` in `identity-request` `path` (path-encoded),
-   `contains` and `lacks`: the URN a `put-draft` or `chat inline | inlinePlaybook`
-   step as `<as>` wrote or tried. None: class `scenario`.
-
-**Items** (each names the scenarios it turns green)
-
-- [x] `MD-2.0` — Wave 0 above. Files: `e2e/scenarios/` (3 new),
-  `e2e/world/agent-inline-probe.yaml`,
-  `crates/vam-e2e/src/{scenario.rs,engine.rs,identity.rs,world.rs,check.rs}`,
-  `e2e/README.md`. **Accept:** `cargo run -p vam-e2e -- check` clean;
-  `scripts/e2e/run.sh --scenarios a-run-with-an-inline-agent-is-refused-and-writes-nothing,a-run-with-an-inline-playbook-is-refused-and-writes-nothing`
-  red at the `expectFail` steps above, class `product`;
-  `--scenarios a-publisher-saves-a-draft-agent-and-runs-it-by-ref` green;
-  `--smoke` green; `vam-e2e` unit tests for the deferred-agent rule, the URN
-  lookup and `{{urn:…}}` expansion. `Decide: NOW — proof 3 (security floor R1), cost 1, line launch proof.`
-- [x] `MD-2.1` — **The run route refuses inline parts.** At the top of
-  `start_run` (`api/run_start.rs:216`), before `resolve_place` (`:256`) and
-  admission (`:280-298`): `req.inline_agent.is_some()` → 400
-  (`InvalidArgument`) "inlineAgent is not accepted: save the agent with PUT
-  /v1/agents and run it by agentRef (your draft is version {major: 1,
-  prerelease: \"draft\"})"; `req.inline_playbook.is_some()` → 400, the same
-  naming `PUT /v1/playbooks` and `playbookRef`. Any content, with or without
-  `resourceId`. Nothing is created (no Space, thread, run, inbox message or
-  catalog row). Remove the inline branches `:338-352`, `:382-388`, the
-  `inline_agent` wording at `:377`, the inline arm of `ensure_playbook_ref`
-  (`run_context.rs:590-612`, `:437`) and `has_inline` (`:283`,
-  `api/inbox.rs:74`, `:471`; the busy-workspace refusal keeps its
-  `playbookRef` arm). **Accept:** API tests in `tests/api_tests.rs`:
-  inline agent with and without `resourceId`, as a member and as the
-  bootstrap key → 400 naming `PUT /v1/agents`, no agent row, no Space, no run;
-  inline playbook → 400 naming `PUT /v1/playbooks`, no playbook row; a busy
-  workspace with an inline agent → 400 (the `:3909` test, now the inline
-  message), no inbox message. Turns green the two `pending` scenarios.
-  `Decide: NOW — proof 3 (R1), cost 1, line launch proof.`
-- [x] `MD-2.2` — **Release writers test-only.** `put_agent`,
-  `put_agent_with_owner`, `put_playbook`, `put_playbook_with_owner`,
-  `put_skill`, `put_skill_with_owner`, `put_policy`, `put_policy_with_owner`,
-  `put_platform_policy` (`catalog.rs:763-784`, `:947-970`, `:1078-1101`,
-  `:1115-1165`) and `put_agent|playbook|skill|policy_released_with_owner`
-  (`catalog_publish.rs:1099`, `:1214`, `:1315`, `:1432`) behind
-  `#[cfg(any(test, feature = "test-support"))]`;
-  `crates/vam-orchestrator/Cargo.toml` gains `test-support = []` (never in
-  `default`) and the self dev-dependency with that feature, the pattern of
-  `brokers/vam-web/Cargo.toml:38-42`. **Accept:** `cargo check -p vam-orchestrator --lib --bins`
-  without the feature (no production caller can exist); the PR lists the grep
-  of callers. `Decide: NOW — proof 3, cost 1.`
-- [x] `MD-2.3` — **`vam run --file` saves, then runs by ref.** In
-  `crates/vam-cli/src/cmd/run.rs` `start_run` (`:350-412`): with a playbook,
-  `PUT /v1/playbooks` first (the agent may name it), then with an agent `PUT
-  /v1/agents`; a non-2xx answer prints vamd's message plus one hint line
-  ("`agent.json` is saved as your draft, which needs `catalog:write`; run a
-  released agent with `vam run <agent> -p …`") and exits as any API error, with
-  no `POST /v1/runs`. Then set `spec.agent_ref` (and `spec.playbook_ref`) to the
-  saved URN at `{major: 1, prerelease: "draft"}`, no digest, and post the run
-  with no inline parts. `agent.json` / `playbook.json` without
-  `resourceId.urn`, or a `run.json` `agentRef` naming another URN than
-  `agent.json`: exit 2 before any request. `load_run_inputs` (`:2080-2172`)
-  and `start_from_path` (`:1836-1852`) keep their signatures; `dry_run_file`
-  (`:1801-1830`) is unchanged. **Accept:** `crates/vam-cli/tests/cli_tests.rs`
-  (httpmock): a directory with `agent.json` sends `PUT /v1/agents`, then one
-  `POST /v1/runs` whose body has no `inlineAgent` and `agentRef.version.prerelease
-  == "draft"`; with `playbook.json` the playbook PUT comes first and
-  `playbookRef` is pinned the same; a 403 on the PUT prints the message and the
-  hint, exits non-zero, sends no run; URN mismatch exits 2 with no request;
-  `--dry-run` unchanged. `cargo test -p vam-cli`.
-  `Decide: NOW — the CLI must not hide the refusal, cost 1.`
-- [x] `MD-2.4` — **`scripts/bench-coldstart.sh` save-then-run.** Check the PUT's
-  status (`:295`, `-sf` already fails on 4xx; keep it), drop `inlineAgent` from
-  the run body (`:319`) and pin `agentRef` to the draft. **Accept:**
-  `bash -n scripts/bench-coldstart.sh`; the run body built by the script has no
-  `inlineAgent` (`grep`). `Decide: NOW — cost 0.`
-- [x] `MD-2.5` — **Test fallout: inline runs become save-then-run.**
-  - `tests/api_tests.rs` fixtures `create_run_body` (`:2099-2125`) and
-    `sample_run_body` (`:3261-3292`) drop `inlineAgent` and pin `agentRef`
-    `{major: 1, prerelease: "draft"}`; their callers (`:2195`, `:2223`, `:2260`,
-    `:2341`, `:2373`, `:2401`, `:2518`, `:3374`, `:3423`, `:4110`, `:4182`,
-    `:4235`, `:4260`, `:4330`) save first with `put_test_agent` (`:3295`) and
-    the same key. Direct inline bodies `:2068`, `:2347-2348`, `:2381-2382`
-    (the two `playbook_activation_offers_…` runs save the agent twice, same
-    owner), `hermetic_tests.rs:3188`, `process_mode_run_api.rs:119`,
-    `allowed_models_tests.rs:100`: the same change.
-  - `idempotency_run_create_is_per_user` (`:1586`),
-    `workspace_prefix_isolates_users_and_rejects_guest_override` (`:1655`),
-    `spaces_are_created_once_per_key_and_renamed_in_place` (`:1790`) run as
-    **members** (`two_member_keys`, `:1433-1460`) through `create_run_body`. A
-    member cannot run a publisher's draft, so the agent is saved and released
-    once in setup with a publisher (or the bootstrap) key, and Alice and Bob
-    stay members and run `agentRef 1.0.0`. Their per-user assertions do not
-    change.
-  - Assertions on a stored `agentRef` of `1.0.0`, a released-kind Space or
-    another user seeing the agent change to the draft pin; anything else that
-    breaks is reported, not edited.
-  **Accept:** `scripts/ci/local.sh --fast`; the re-run list green.
-  `Decide: NOW — part of MD-2.1, cost 1.`
-- [x] `MD-2.6` — **Proto, OpenAPI and docs lines** (the full pass is Phase 4).
-  `proto/vam/v1/orchestrator.proto:855-856`: comments say `inline_agent` and
-  `inline_playbook` are refused (400); field numbers kept, not reserved or
-  renumbered. `docs/api/openapi.yaml:5479-5482`: the same in their
-  descriptions. `orchestrator/session.md` (`POST /v1/runs`, `:36`) and
-  `orchestrator/api.md` (runs row, `:43`): an inline agent or playbook is 400;
-  save it with the PUT route and run it by ref. `getting-started/cli.md`
-  `--file` (`:177-190`) and `getting-started/quickstart.md:83`: `agent.json` next to
-  the run file is saved as your draft (needs a publisher) and the draft is run;
-  a rerun starts a new draft Space. `authoring/playbook-tutorial.md:71` made
-  accurate. `proves:` on `orchestrator/user-isolation.md` gains the three
-  scenarios. **Accept:** `cargo run -p vam-e2e -- check`; `cargo test -p vam-spec --test conformance`
-  passes against `proto/vam/v1/baseline/vam_descriptor.bin` (comments only; if
-  it flags them, regenerate with `crates/vam-spec/examples/generate_baseline.rs`
-  and say so in the PR); `pnpm build`
-  in `docs/` if available. `Decide: NOW — docs say what ships, cost 0.`
-
-**Waves** (owner's matrix: Sonnet 5.5 high or medium, or Haiku 5.5 high)
-
-| Wave | Items | Turns green | Repo | Model | Budget | Depends on | Actions | Status | PR |
-|---|---|---|---|---|---|---|---|---|---|
-| 0 | `MD-2.0` (3 scenarios, 1 world piece, 5 harness additions, README) | `a-publisher-saves-a-draft-agent-and-runs-it-by-ref` (guard); the two refusal scenarios red, right reason, class `product` | vam | Sonnet 5.5 medium: new step fields and lookups across five `vam-e2e` modules, and proving red for the right reason | 90 min | — | gate: `rust.yml` fast jobs and smoke; no VM path (`skip-vm-lane`) | [ ] | |
-| 1 | `MD-2.1`–`MD-2.6` | `a-run-with-an-inline-agent-is-refused-and-writes-nothing`, `a-run-with-an-inline-playbook-is-refused-and-writes-nothing` (guard and re-run list stay green) | vam | Sonnet 5.5 high: who may write the catalog (refusal before any write, writers out of production builds) is a security boundary; the orchestrator reads the `start_run` diff, `Cargo.toml` and the CLI change before merging | 180 min | 0 | gate: full `rust.yml` and `docs`; no guest or VMM change (`skip-vm-lane`) | [ ] | |
-
-**Open questions** (each with a default)
-
-1. Status and wording: **default 400** (`InvalidArgument`) with the MD-2.1
-   messages; the scenarios check only the status and `PUT /v1/agents` /
-   `PUT /v1/playbooks`.
-2. A CLI from before the upgrade still PUTs, then sends inline parts: its run
-   is refused 400 after the draft was saved. **Default: accept**; the message
-   says how to run by ref, and the release notes say to update the CLI.
-3. `vam run --file` saves the playbook before the agent, and exits 2 on a
-   missing `resourceId` or a URN mismatch between `run.json` and `agent.json`.
-   **Default: yes.**
-4. A rerun after the upgrade lands in the agent's **draft** Space (a default
-   Space is per owner, agent and kind, `spaces.rs:245`), so a thread label used
-   before starts fresh. **Default: accept**, one line in `cli.md`.
-5. The quickstart and tutorials use `vam run --file`: a member now gets the
-   PUT's 403. **Default:** the docs lines say these need a publisher (or the
-   bootstrap key); Phase 4 owns the member path.
-
-**Out of scope here:** member draft agents (Phase 3), the ReleasedOnly mode
-(Phase 3), any change to the PUT routes, the release routes or the marketplace
-import.
-
-**Phase close:** unit suites on the merged base; release; team checklist out
-(the next phase does not wait for it; playbook §6).
-
-**Team checklist — Phase 2**
-
-Setup: deploy vamd from the base branch, with a CLI built from it. Have a
-publisher and a member, each with a CLI login or key, and one released agent
-the member can chat with. In an empty directory `t/`, write `agent.json`:
-`{"resourceId":{"urn":"urn:vam:agent:local.vam.dev/team/inline-check"},"displayName":"Inline check","role":"Tester","systemInstructions":"Answer briefly.","allowAnyPlaybook":true}`.
-
-1. As the publisher: `vam run --file t -p "hello" --follow`. **See:** the run
-   starts and replies.
-2. As the publisher: `vam agent versions urn:vam:agent:local.vam.dev/team/inline-check`.
-   **See:** a draft only, no release.
-3. As the member: `vam agent ls`. **See:** `inline-check` is not listed.
-4. As the member: `vam run --file t -p "hello"`. **See:** an error naming
-   `catalog:write` and the hint line; no run starts.
-5. As the publisher: `POST /v1/runs` with curl carrying `inlineAgent` (the
-   body of `agent.json`). **See:** 400 telling you to `PUT /v1/agents` first;
-   nothing new in `vam agent versions`.
-6. As the member: the same with an `inlinePlaybook` (any playbook body with a
-   new URN). **See:** 400 naming `PUT /v1/playbooks`.
-7. As the member: `vam run <released agent> -p "hello"`. **See:** it replies,
-   as before.
-8. As the publisher: `vam agent release urn:vam:agent:local.vam.dev/team/inline-check --note check`.
-   **See:** released; the member now lists it.
-
-Report: "Phase 2 pass", or the step number with the error text.
+| 2 | The run route never writes the catalog | 2026-11-18: #26 (plan, option B), #27 (scenarios), #35 (refusal, writers test-only, CLI and bench save-then-run, docs). 2 scenarios active and green, 1 guard. |
 
 ### Phase 3 — Members create, edit and run their own draft agents from released parts
 
@@ -407,40 +127,448 @@ skills, playbooks and policies are released; the save refuses anything else
 with a message naming the ref; the run resolves released-only even for a former
 publisher's old drafts; drafts stay private and in the member's namespace.  
 **Depends on:** Phase 1, Phase 2  
-**Plan:** not drafted (scenario delta and wave sketch below)  
-**Exit:** the five scenarios below `active` and green;
-`catalog_read_authorize_tests::member_put_agent_is_403` replaced by the
-owner-approved spec change (member PUT of an own draft is 200).  
-**From Phase 2 (option B, 2026-11-18):** the run route refuses inline
-agents, so a member's agent is only ever saved through `PUT /v1/agents`; the
-restricted-mode validator has two callers (that route and the permissions PUT),
-and wave 2 has no inline case.
+**Plan:** approved by the owner 2026-11-18 (open-question defaults accepted)  
+**Exit:** the five new scenarios below `active` and green, the re-run list
+green; `catalog_read_authorize_tests::member_put_agent_is_403` replaced by the
+owner-approved spec change (a member's PUT of an own draft in their namespace is
+200, outside it 400).
 
-- [ ] Wave 0: scenarios and harness (`publish-skill` takes `as` and
-  `release: false`; agent pieces deferred and written by `put-draft` as a
-  member; `chat {draft: true, as}` refused form if missing)
+- [ ] Wave 0: scenarios and harness
 - [ ] Wave 1: `agents:draft`, restricted mode on the two routes, the save
-  validator (refs, refused fields, namespace, cap)
-- [ ] Wave 2: `ResolveMode::ReleasedOnly` in `run_resolve_context`; advanced
-  refs recorded and loaded by pin; explain and check routes use the mode
+  validator (refs, refused fields, namespace, cap), key backfill fix, test fallout
+- [ ] Wave 2: `ResolveMode::ReleasedOnly` at record and at session start;
+  advanced refs recorded and loaded by pin; explain and check routes use the mode
 
-**Scenario delta**
+**Benchmark delta:** none moved; this phase is the launch proof "a member builds
+their own agent" (`member-builds-and-runs-own-draft-agent-from-a-released-skill`).
+
+**CI (owner, 2026-11-17):** fast local checks in the session
+(`scripts/ci/local.sh --fast` and the wave's scenarios), the PR opens ready,
+GitHub Actions is the gate. No wave touches a guest or VMM path (`skip-vm-lane`).
+
+**What the code does today** (checked 2026-11-18 on
+`feat/member-draft-agents-phase2-close`, Phases 1 and 2 merged; paths under
+`crates/vam-orchestrator/src/`)
+
+- **Scope check.** `ControlPlanePdp::authorize` (`api/auth.rs:80-96`) passes on
+  `keys:admin` or the one named scope, read from the effective scopes Phase 1
+  put on `auth.key.record.scopes` (`keys.rs:197-211` `effective_scopes`).
+  `MEMBER_SCOPES` (`keys.rs:76-84`) has no catalog scope; there is no
+  `agents:draft` anywhere.
+- **`catalog:write` call sites (15).** Opened in restricted mode (decision 6):
+  `PUT /v1/agents` (`api/mod.rs:572-591`, authorize `:579`) and
+  `PUT /v1/agents/{urn}/permissions` (`api/permissions.rs:144-172`, authorize
+  `:155`). **Stay closed (13):** migrate `api/permissions_migrate.rs:35`; delete
+  (always refused) `api/mod.rs:675`; `PUT /v1/policies` `api/mod.rs:801`;
+  `PUT /v1/playbooks` `:898`; `PUT /v1/skills` `:920`; `POST /v1/skills/packages`
+  `api/skill_packages.rs:42` and its release `:185`; release of agents,
+  playbooks, skills, policies `api/catalog_release.rs:43`, `:63`, `:85`, `:106`;
+  hosted brokers list and get `api/mod.rs:1960`, `:1979`. The release suggestion
+  (`api/release_suggestion.rs:35-47`) is a read gated by
+  `require_release_authorization` (`publish:grant`), so it stays closed too.
+  (Design §2.2 and §7 say "12"; the count is 15 sites, 13 closed.)
+- **Save path.** `put_agent` → `publish_agent_draft_with_owner`
+  (`catalog_publish.rs:1022-1058`): permission defaults
+  (`apply_publish_permission_defaults` `:845`), `spec.validate()`, platform-URN
+  refusal, then `upsert_spec_draft` (`:182-245`) under the store lock:
+  installed-URN refusal, `owner::require_matching_urn_owner` (`owner.rs:612-646`,
+  403 "only the artifact owner may version this agent"), upsert. No ref check, no
+  namespace rule, no cap. The permissions PUT loads the caller's draft (foreign =
+  404) and writes through `write_draft_permissions` (`catalog_publish.rs:911-931`)
+  into the same function. Always allow / deny (`session_targets.rs:636-700`,
+  `save_remembered_rule`) writes tool rules through `update_draft_permissions`
+  with no scope check (unchanged; it adds no refs).
+- **Namespace.** `vam_spec::default_namespace(username)` (`vam-spec/src/origin.rs:166-173`)
+  is only reported by `GET /v1/me` (`api/me.rs:47`), with `registryDomain`.
+- **Resolution.** `record_resolved_refs` (`catalog_resolve.rs:128-171`, called
+  synchronously in `start_run`, `api/run_start.rs:436`, so a resolution error is
+  the start's 400) pins `playbook_ref`, `skill_refs`, default/allowed playbooks,
+  overlay skills, playbook `requires` and the four legacy policy refs; **not**
+  `permissions.advanced`. `run_resolve_context` (`:180-202`) returns
+  `(agent row owner, Draft)` for a `-draft` agent pin, else `(caller, Release)`.
+  `resolve_inner` (`:561-647`): the "kept as-is" branch `:614-627` keeps a
+  versioned ref with a digest the catalog does not hold, labelled Released; an
+  explicit `-draft` resolves the owner's draft in both modes, and any owner's when
+  `include_foreign_drafts` (`users:admin` caller). Floating refs take the owner's
+  draft first in Draft mode (`resolve_skill_pin` `:676-683`,
+  `resolve_table_pin` `:755-763`).
+- **Session start.** Skill staging (`manager.rs:1232-1250`) takes the owner and
+  mode from `run_resolve_context`; recorded skill pins replace `skill_refs` first
+  (`overlay_resolved_refs` `catalog_resolve.rs:323-341`). A versioned pin is
+  looked up without an owner (`skill_package_resolve.rs:115-145`). Legacy policy
+  loads recorded pins (`policy_legacy.rs:315-331`). `load_advanced_policy`
+  (`security.rs:398-478`) uses a recorded pin when there is one, else
+  `get_policy_visible(urn, resolve_owner)` (`:464`), which can be the owner's
+  draft. `SessionAgent` (`policy_legacy.rs:30-40`, built `:83-135`) carries
+  `draft_run` and `resolve_owner` but no mode.
+- **Explain and check.** `permissions_view.rs` `load_agent` (`:632-665`)
+  hard-codes `ResolveMode::Draft` for a draft (`:660`), and `provenance_for`
+  (`:932-937`) derives "owner draft run" from `mode == Draft`.
+  `api/composition.rs:102` already calls `run_resolve_context`.
+- **Scheduled and triggered runs.** The gateway builds the run with an
+  unversioned `agent_ref` (`gateway.rs:858-868`); a draft-bound Space applies
+  the `-draft` pin (`catalog_resolve.rs:66-117`), so `record_resolved_refs`
+  decides the mode: no gateway change. Grant validation pins a `playbookRef` in
+  `Release` mode for the grant owner (`grants.rs:348-357`).
+- **Connectors.** Nothing on `AgentSpec` names a connector. A skill's
+  `requiresConnector` is checked at tool-call time for the **session owner**
+  (`connector_park.rs:60-110`: node enabled with consent, then the owner's own
+  connection, else park); MCP connections are the session owner's visible rows
+  while the node has the connector enabled (`mcp_registry.rs:1868-1900`). So a
+  member "attaches a connector" by attaching a released skill that requires it,
+  and their own draft run uses their own connection: no code change.
+- **Visibility.** Drafts list and get only for their owner and `users:admin`
+  (`api/mod.rs:649`, list `:775-789`); a foreign draft pin is 404
+  (`catalog_resolve.rs:43-55`, `tests/workspace_pin_tests.rs:291-322`). A member
+  pinning their own draft needs no code change.
+- **Phase 1 backfill hazard (found here).** `backfill_scope_mode`
+  (`keys.rs:761-813`, one-shot on the first start with the column) marks a key
+  `role` only when its stored list equals the owner's role defaults **now**.
+  Phase 1 is not on `main` yet (`origin/main...HEAD` = 0/8), so every existing
+  node runs this backfill for the first time with Phase 3's sets: a member's
+  default key minted before the upgrade (no `agents:draft`) would become
+  `explicit` and never gain `agents:draft`, nor `catalog:write` on promotion.
+  MD-3.1 fixes the comparison.
+
+**Scenario delta** (design/scenarios.md §9; touched scenarios found from
+`guards` on `api/mod.rs`, `api/permissions.rs`, `catalog_publish.rs`,
+`catalog_resolve.rs`, `keys.rs`, `owner.rs`, `security.rs`,
+`session_targets.rs`, `connectors.rs` and `given: org-*`)
 
 | Scenario | Change | Layer | Given | Why |
 |---|---|---|---|---|
-| `member-builds-and-runs-own-draft-agent-from-a-released-skill` | new | process | `org-admin`, `org-member`, a released skill piece, a deferred member agent piece (new) | the product: save 200, draft chat succeeds with the skill's tool; then a playbook `put-draft` and a `publish-skill` as the member are refused (red at the save: 403 today) |
-| `member-draft-agent-refuses-a-skill-that-is-not-released` | new | process | `org-admin`, `org-member`, a draft-only skill piece | decision 7 at save: 400 naming the skill (red: 403 scope today) |
-| `members-draft-run-takes-the-release-not-an-old-draft` | new | process | `org-admin`, `org-publisher`, a skill released then re-drafted with a different tool result | decision 7 at run: after demotion the floating ref runs the release (red: the owner's draft is used today) |
-| `member-draft-agent-is-private-and-in-the-members-namespace` | new | process | `org-admin`, `org-member` as two aliases, `org-publisher`, `agent-plain` | R9, R10: another member gets 404; a URN outside the namespace is 400; another user's URN is 403 "only the artifact owner" (red at the first save) |
-| `member-chats-with-a-released-agent` | unchanged; re-run | process | as today | members keep consuming released agents |
+| `member-builds-and-runs-own-draft-agent-from-a-released-skill` | new, `pending` | process | `org-admin`, `org-member` as `member`, `skill-host-echo` (new), `agent-member-draft-with-host-echo` (new), `playbook-one-step`, `playbook-draft-probe`, `skill-draft-probe` (new) | **the owner's symptom**: save 200, draft chat runs the released skill's tool, a released playbook runs on the draft; member still cannot author a playbook or skill or release |
+| `member-draft-agent-refuses-a-skill-that-is-not-released` | new, `pending` | process | `org-admin` as `admin`, `org-publisher` as `pub`, `org-member` as `member`, `skill-draft-probe`, `agent-member-draft-with-draft-probe` (new) | decision 7 at save, R6: missing URN and someone's draft get the same 400; nothing written |
+| `demoted-publishers-draft-agent-stops-using-their-draft-skill` | new, `pending` | process | `org-admin`, `org-publisher` as `pub`, `skill-draft-probe`, `agent-member-draft-with-draft-probe` | decision 7 at run, R6, R13: after demotion the same draft run is refused (no release to pin) and a re-save is 400 |
+| `member-draft-agent-is-private-and-in-the-members-namespace` | new, `pending` | process | `org-admin` as `admin`, `org-member` as `m1` and as `m2`, `org-publisher` as `pub`, `skill-host-echo`, `agent-member-draft-with-host-echo`, `agent-inline-probe` | decisions 9, 10, R9, R10: own draft pin works; another member and a publisher get 404, the admin 200; outside the namespace and another member's URN are 400, nothing overwritten |
+| `member-draft-agent-uses-a-connector-skill-through-the-members-connection` | new, `pending` | process | `org-member`, `org-administrator`, `mock-microsoft-login`, `mock-microsoft-graph`, `skill-m365-probe`, `agent-member-draft-with-m365-probe` (new) | owner intent "connectors enabled by the admin, connected by the member": the draft run parks until the member connects, then uses the member's connection |
+| `member-chats-with-a-released-agent`, `always-allow-and-always-deny-are-remembered`, `released-agent-approvals-are-once-only`, `a-publisher-saves-a-draft-agent-and-runs-it-by-ref`, `promotion-widens-a-default-key-but-not-a-narrowed-one`, `demotion-takes-catalog-writes-from-a-publisher-key`, `member-key-minted-with-catalog-write-cannot-write-the-catalog`, `skill-needing-microsoft-365-asks-the-member-to-connect-first`, `trigger-starts-a-run-as-the-grant-owner`, `morning-triage-runs-on-schedule-as-the-member-who-approved-it`, `release-shows-the-diff-against-the-previous-version` | unchanged; re-run in W1 and W2 | process | as today | released agents, publisher draft runs, Always on a draft, key scopes, connectors and grant-started runs must not move |
 
-**Wave sketch**
+No existing scenario's `then` changes: none asserts that a member's agent PUT is
+403 (the Phase 1 probes write a **playbook** on purpose, and members keep 403
+there), and `org-member-with-a-narrow-key` is an explicit list that stays
+without `agents:draft`. The only spec change is the Rust test below.
 
-| Wave | Items | Model | Why |
-|---|---|---|---|
-| 0 | scenarios, harness | Sonnet low | harness pattern |
-| 1 | scope in `keys.rs` sets; `api/mod.rs:576`, `api/permissions.rs:155`; validator; namespace; cap; spec change to `member_put_agent_is_403` | Sonnet high | catalog write authority for a new class of user (security boundary) |
-| 2 | `catalog_resolve.rs:180-202`, `:561-640`, `record_resolved_refs` advanced refs, `security.rs:398-470`, `permissions_view.rs:640-660`, `api/composition.rs:102` | Sonnet high | run-time resolution and session start must agree (security boundary) |
+Sketches (all red class `product`; the five guard `api/mod.rs`,
+`api/permissions.rs`, `catalog_publish.rs`, `keys.rs`, plus
+`catalog_resolve.rs`, `security.rs` and `permissions_view.rs` for the run
+scenarios, `owner.rs` for the namespace one, `connector_park.rs` for the
+connector one):
+
+- `member-builds-and-runs-own-draft-agent-from-a-released-skill`. `when`:
+  `put-draft: { piece: agent-member-draft-with-host-echo, as: member, status: 200 }`;
+  `chat: { agent: agent-member-draft-with-host-echo, draft: true, as: member, text: "e2e-step:me Echo" }`;
+  `expect: { run: succeeded }`; `expect: { thread: { role: tool, contains: host-echo-ok } }`;
+  `start-playbook: { playbook: playbook-one-step, agent: agent-member-draft-with-host-echo, draft: true, as: member, label: mp, inputs: { topic: e2e } }`;
+  `expect: { run: succeeded }`. `then`: `identity-request: { as: member, credential: key, path: /v1/me, status: 200, contains: "agents:draft", lacks: "catalog:write" }`;
+  `put-draft: { piece: playbook-draft-probe, as: member, status: 403, contains: "catalog:write" }`;
+  `publish-skill: { piece: skill-draft-probe, as: member, refused: true, contains: "catalog:write" }`;
+  `identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-member-draft-with-host-echo:member}}/release", status: 403 }`.
+  The agent piece's skill ref is **floating** (follows the latest release).
+  **Red at `when.0`:** 403 "missing required scope 'catalog:write'" today.
+- `member-draft-agent-refuses-a-skill-that-is-not-released`. `when`:
+  `put-draft: { piece: agent-member-draft-with-draft-probe, as: member, status: 400, contains: "released" }`
+  (the skill URN exists nowhere yet); `publish-skill: { piece: skill-draft-probe, as: pub, release: false }`;
+  `put-draft: { piece: agent-member-draft-with-draft-probe, as: member, status: 400, contains: "released" }`
+  (now a publisher's draft: same answer). `then`: `identity-request: { as: admin, credential: key, path: "/v1/agents/{{urn:agent-member-draft-with-draft-probe:member}}", status: 404 }`.
+  **Red at `when.0`:** 403 today.
+- `demoted-publishers-draft-agent-stops-using-their-draft-skill`. `when`:
+  `publish-skill: { piece: skill-draft-probe, as: pub, release: false }`;
+  `put-draft: { piece: agent-member-draft-with-draft-probe, as: pub, status: 200 }`;
+  `chat: { agent: agent-member-draft-with-draft-probe, draft: true, as: pub, text: "e2e-step:pd Hello" }`;
+  `expect: { run: succeeded }` (a publisher's draft run takes their draft skill);
+  `set-role: { as: pub, role: member }`. `then`:
+  `chat: { agent: agent-member-draft-with-draft-probe, draft: true, as: pub, text: "e2e-step:md Hello", refused: true }`;
+  `expect: { refused: true, status: 400, contains: "released" }`;
+  `put-draft: { piece: agent-member-draft-with-draft-probe, as: pub, status: 400, contains: "released" }`.
+  **Red at `then.0`:** the start is 202 and the run uses the owner's draft today.
+  `then.0` turns green in wave 2, `then.2` in wave 1.
+- `member-draft-agent-is-private-and-in-the-members-namespace`. `when`:
+  `put-draft: { piece: agent-member-draft-with-host-echo, as: m1, status: 200 }`;
+  `chat: { agent: agent-member-draft-with-host-echo, draft: true, as: m1, text: "e2e-step:pin Hello" }`;
+  `expect: { run: succeeded }`;
+  `put-draft: { piece: agent-inline-probe, as: m1, status: 400, contains: "namespace" }`
+  (its URN is under `local.vam.dev/e2e/`);
+  `put-draft: { piece: agent-member-draft-with-host-echo, as: m2, urnOf: m1, status: 400, contains: "namespace" }`.
+  `then`: `m2` GET `/v1/agents/{{urn:agent-member-draft-with-host-echo:m1}}` 404;
+  `m2` GET `/v1/agents` 200 `lacks` that URN; `pub` GET it 404; `admin` GET it 200;
+  `m1` GET `…/versions` 200, `lacks: "releasedAt"`, and `contains: "\"revision\":1"`
+  (or the field wave 0 finds that shows m2 changed nothing). **Red at `when.0`.**
+- `member-draft-agent-uses-a-connector-skill-through-the-members-connection`.
+  `when`: `connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-administrator }`;
+  `put-draft: { piece: agent-member-draft-with-m365-probe, as: org-member, status: 200 }`;
+  `chat: { agent: agent-member-draft-with-m365-probe, draft: true, as: org-member, text: "e2e-step:ask Search my mail", wait: false }`;
+  `expect: { run: paused }`; `expect: { approval: pending, tool: m365_probe_search }`;
+  `expect: { mock-requests: { piece: mock-microsoft-graph, path: "*", count: 0 } }`;
+  `connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }`.
+  `then`: `expect: { run: succeeded }`; `expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages, method: GET, count: 1, has: [bearer=current] } }`.
+  Mock script copied from `skill-needing-microsoft-365-asks-the-member-to-connect-first`.
+  **Red at `when.1`:** 403 today.
+
+**Wave 0 harness additions** (`crates/vam-e2e`, documented in `e2e/README.md`
+"Roles and drafts"; everything else reuses `put-draft`, `chat {agent, draft,
+as, refused}`, `set-role`, `identity-request`, `connector-*`):
+
+1. `{{ns}}` in the body of a piece that `put-draft` (or `chat inline`) writes:
+   the writer's `defaultNamespace` from `GET /v1/me` (cached per identity; the
+   bootstrap key's own when `as` is omitted), the value the frontend handoff
+   uses. `check` refuses `{{ns}}` in a piece that is written at `given`.
+2. `put-draft` takes `urnOf: <as>`: the body's URN is the one an earlier
+   `put-draft` of the same piece as `<as>` wrote (class `scenario` if none); the
+   step records it for its own identity too.
+3. `publish-skill` takes `as` (publish and release as that identity; the
+   bootstrap key when omitted, as today) and `release: false` (publish the
+   package as a draft only). `refused` keeps its meaning.
+4. `start-playbook: { agent: <deferred agent piece>, as }` runs the URN a
+   `put-draft` as `as` wrote, the `chat` rule (`engine.rs:1004-1034` `agent_of`
+   does not look up drafts today).
+5. New world pieces: `skill-host-echo` (released at `given`; one tool
+   `host_echo`, `host_exec` adapter `echo`, the tool of `skill-host-fixtures`
+   without the secret), `skill-draft-probe` (`deferred`, same body);
+   `agent-member-draft-with-host-echo`, `agent-member-draft-with-draft-probe`,
+   `agent-member-draft-with-m365-probe` (each `deferred`, no `release`, URN
+   `urn:vam:agent:local.vam.dev/{{ns}}/{{name}}`; floating skill ref to
+   `skill-host-echo` / `skill-draft-probe`, pinned `1.0.0` ref to
+   `skill-m365-probe`; `allowAnyPlaybook: true`; permissions as
+   `agent-with-host-fixtures` / `agent-with-m365-probe`).
+
+**Items** (each names the scenarios it turns green)
+
+- [ ] `MD-3.0` — Wave 0 above. Files: `e2e/scenarios/` (5 new),
+  `e2e/world/` (5 new pieces),
+  `crates/vam-e2e/src/{engine.rs,identity.rs,scenario.rs,check.rs}`,
+  `e2e/README.md`. **Accept:** `cargo run -p vam-e2e -- check` clean;
+  `scripts/e2e/run.sh --scenarios member-builds-and-runs-own-draft-agent-from-a-released-skill,member-draft-agent-refuses-a-skill-that-is-not-released,demoted-publishers-draft-agent-stops-using-their-draft-skill,member-draft-agent-is-private-and-in-the-members-namespace,member-draft-agent-uses-a-connector-skill-through-the-members-connection`
+  red at the `expectFail` steps above, class `product` (the demotion one must
+  pass its `when`, proving a publisher's draft run takes the draft skill);
+  `--smoke` green; `vam-e2e` unit tests for `{{ns}}`, `urnOf`, `publish-skill`
+  `as`/`release`, the `start-playbook` lookup. If the `host_echo` adapter is not
+  offered to a member's run, swap the piece for another released-skill tool and
+  say so in the PR (the scenario's behaviour does not change).
+  `Decide: NOW — proof 3, cost 1, line launch proof "a member builds their own agent".`
+- [ ] `MD-3.1` — **`agents:draft` scope, and the backfill keeps default keys
+  default.** `pub const AGENTS_DRAFT_SCOPE: &str = "agents:draft"` in
+  `keys.rs`, added to `BOOTSTRAP_SCOPES`, `ORG_ADMIN_SCOPES`, `PUBLISHER_SCOPES`,
+  `MEMBER_SCOPES` (`keys.rs:33-84`). `backfill_scope_mode` (`keys.rs:761-813`):
+  a key is `role` when its stored set equals the owner's role defaults **with or
+  without** `agents:draft` (the pre-Phase-3 sets), so nodes upgrading straight
+  from `main` keep members' default keys following the role. The bootstrap row
+  keeps its stored list (it holds `catalog:write`, so it is never restricted).
+  **Accept:** unit tests: each role's defaults hold `agents:draft`; a member key
+  stored with the old member set backfills to `role` and its effective scopes
+  gain `agents:draft`; a publisher key stored with the old member set stays
+  `explicit`; `GET /v1/me` with a member default key lists `agents:draft`
+  (`tests/me_tests.rs`). `Decide: NOW — proof 3, cost 1.`
+- [ ] `MD-3.2` — **Restricted mode on the two routes.** One helper (e.g.
+  `api/catalog_auth.rs` `require_agent_draft_write(auth) -> Result<AgentWriteMode,_>`):
+  `keys:admin` or `catalog:write` → `Full` (today's path, unchanged);
+  `agents:draft` → `Restricted`; neither → 403 "missing required scope
+  'catalog:write' or 'agents:draft'". `put_agent` (`api/mod.rs:579`) and
+  `put_draft_permissions` (`api/permissions.rs:155`) call it instead of
+  `authorize(…"catalog:write")`; `Restricted` goes through MD-3.3. The 13 closed
+  sites listed above are not touched. **Accept:** API tests
+  (`tests/catalog_read_authorize_tests.rs` or a new
+  `tests/member_draft_agents_tests.rs`): with a member key, each closed route
+  answers 403 naming `catalog:write` (or `publish:grant` for release), a table
+  test over all 13; a publisher key and the bootstrap key keep 200 on both open
+  routes with no member rule applied (a publisher may still save a draft-skill
+  ref and a URN outside their namespace); a narrowed key with neither scope is
+  403 on both. Turns green (with MD-3.3, MD-3.4): `member-builds-and-runs-own-draft-agent-from-a-released-skill`,
+  `member-draft-agent-uses-a-connector-skill-through-the-members-connection`.
+  `Decide: NOW — proof 3 (catalog write authority), cost 1.`
+- [ ] `MD-3.3` — **The save validator (refs and refused fields).** New
+  `member_draft.rs` (or in `catalog_publish.rs`):
+  `validate_restricted_agent(store, spec) -> Result<(), OrchestratorError>`, run
+  on the full spec that would be stored (after
+  `apply_publish_permission_defaults`, and for the permissions PUT after the new
+  permissions are applied). (a) Refused fields, 400 naming the JSON field:
+  `capabilityPolicy`, `hitlPolicy`, `instructionArtifact`, `extends`, `overlay`,
+  `completionPolicy.evaluatorRefs` (decision 8). (b) Every ref resolves through
+  `resolve_ref_for_owner(…, ResolveMode::ReleasedOnly)`. This item adds the
+  variant (`catalog_resolve.rs:206-214`) and its resolver rules, so save and run
+  share one definition: floating = latest release only (no owner draft:
+  `resolve_skill_pin` `:676-683`, `resolve_table_pin` `:755-763`); `X.Y.Z` =
+  that release or error, the "kept as-is" branch (`:614-627`) is an error;
+  `X.Y.Z-draft` = error "drafts are not available to this agent";
+  `include_foreign_drafts` is ignored. Refs checked:
+  `skillRefs`, `defaultPlaybookRef`, `allowedPlaybookRefs`,
+  `permissions.advanced`, `telemetryPolicy.policyRef`,
+  `completionPolicy.policyRef`. Any failure, whatever the cause (missing URN,
+  foreign draft, own draft, explicit `-draft`, a version with no release, a
+  digest mismatch) maps to one 400: "<kind> '<urn>' has no released version; an
+  agent saved by a member may use released skills, playbooks and policies only"
+  (no existence oracle). Files: the new module, `catalog_resolve.rs` (variant
+  and rules, with resolver unit tests per rule), `api/mod.rs:572-591`,
+  `api/permissions.rs:144-172`, `catalog_publish.rs:911-931` (the permissions
+  writer takes the mode). **Accept:** unit tests for each refused field, each
+  ref kind, and the five failure causes giving byte-identical messages; a
+  released skill floating and pinned `X.Y.Z` passes; the permissions PUT of an
+  own draft with a draft `advanced` policy is 400 and leaves the draft; Always
+  allow on a member's own draft run still saves (`session_targets.rs` test).
+  Turns green: `member-draft-agent-refuses-a-skill-that-is-not-released`, and
+  `then.2` of `demoted-publishers-draft-agent-stops-using-their-draft-skill`.
+  `Decide: NOW — proof 3 (R6, R12), cost 1.`
+- [ ] `MD-3.4` — **Namespace, ownership and cap, under the store lock.** A
+  restricted writer next to `publish_agent_draft_with_owner`
+  (`catalog_publish.rs:1022-1058`; `upsert_spec_draft` `:182-245`) that, holding
+  the connection lock: if the caller owns any row of the URN → edit (skip
+  namespace and cap; the owner check passes); otherwise the URN must be
+  `urn:vam:agent:<registry domain>/<default_namespace(username)>/<name>`
+  (`registry::registry_domains()`, the user's `username` from `users`) or 400
+  "a new agent saved by a member must be under urn:vam:agent:<domain>/<ns>/
+  (your namespace)"; then the owner check (a URN in the member's namespace
+  owned by someone else stays 403 "only the artifact owner may version this
+  agent"); then a new URN needs fewer than `VAMD_MEMBER_DRAFT_AGENTS_MAX`
+  (default 50, read once at start like `daemon.rs:112` `VAMD_EGRESS_MAX_BYTES`)
+  agent drafts owned by the caller, else 409 naming the limit. The namespace
+  check comes before the owner check for a URN the caller does not own, so a
+  foreign URN outside the namespace answers like a free one (no oracle). Files:
+  `catalog_publish.rs`, `owner.rs` (a `caller_owns_any_row` helper beside
+  `require_matching_urn_owner` `:612-646`), `daemon.rs` / `api/mod.rs`
+  `AppState` for the limit. **Accept:** unit tests: new URN in namespace 200,
+  outside 400, a username that is not a slug uses `default`; another member's
+  URN 400 and unchanged; a URN in the member's namespace owned by a publisher
+  403; editing an own draft outside the namespace (a former publisher's) 200
+  when its refs are released; the cap counts drafts only and refuses the 51st
+  new URN but not an edit; two concurrent creates at the limit leave at most the
+  limit. Turns green: `member-draft-agent-is-private-and-in-the-members-namespace`.
+  `Decide: NOW — proof 3 (R10, R11), cost 1.`
+- [ ] `MD-3.5` — **`ResolveMode::ReleasedOnly` at record.** In
+  `catalog_resolve.rs` (the variant and its rules landed in MD-3.3): `run_resolve_context`
+  (`:180-202`) returns `(owner, ReleasedOnly)` for a `-draft` agent pin whose
+  row owner's live role is Member (`users.role`; an owner with no users row is
+  Member, fail closed), else `(owner, Draft)` as today. One helper
+  (`draft_mode_for_owner(store, owner)`) shared with `permissions_view.rs`.
+  `record_resolved_refs` (`:128-171`) also
+  pins `permissions.advanced` refs (every mode; the same `resolve_ref_by_urn`).
+  **Accept:** unit tests: a Member-owned draft run pins the latest release of a
+  floating skill even when the owner has a draft; `X.Y.Z` with no release, a
+  kept-as-is digest and `-draft` each fail, also for a `users:admin` caller
+  running the member's draft; a publisher-owned draft run is unchanged; a
+  demoted publisher's draft run flips to ReleasedOnly; advanced refs appear in
+  `resolved_refs`; existing tests whose draft owner was created with
+  `create_user` (a Member) promote that owner to Publisher, nothing else
+  changes. Turns green: `then.0` of `demoted-publishers-draft-agent-stops-using-their-draft-skill`.
+  `Decide: NOW — proof 3 (R6, R13), cost 1.`
+- [ ] `MD-3.6` — **Session start, explain and check agree.**
+  `SessionAgent` (`policy_legacy.rs:30-40`, `:83-135`) carries the mode from
+  `run_resolve_context`; `load_advanced_policy` (`security.rs:398-478`) uses the
+  recorded pin (now always present for a recorded run) and, with no pin in a
+  non-Draft mode, loads the latest release only (`get_policy`, never
+  `get_policy_visible`, `:464`); `resolve_one_skill_ref`
+  (`skill_package_resolve.rs:55-145`) refuses a `-draft` pin in ReleasedOnly;
+  `permissions_view.rs` `load_agent` (`:655-663`) uses `draft_mode_for_owner`
+  for the draft's owner and `provenance_for` (`:932-937`) keys "owner draft
+  run" on "a draft" (not `mode == Draft`), so Always stays offered on a
+  member's own draft; `api/composition.rs:102` follows `run_resolve_context`
+  with no edit (check it). **Accept:** unit tests: a member's draft with a
+  floating advanced policy loads the recorded release at boot, never the
+  owner's draft; a boot whose mode turned ReleasedOnly after the run was
+  recorded with a draft pin fails closed; `GET …/permissions/effective` and
+  `POST /v1/agents/check` for a member's draft show the released skill version
+  the run pins; `owner_draft_run` stays true for a member's own draft.
+  `tests/permissions_view_tests.rs`, `tests/agent_check_tests.rs`,
+  `security.rs` tests. If a test asserts the "not pinned by digest" warning on a
+  recorded run, that is the decision-7 spec change: one line in the PR.
+  `Decide: NOW — proof 3 (R7, R17), cost 1.`
+- [ ] `MD-3.7` — **Rust test spec change and fallout (wave 1).**
+  `tests/catalog_read_authorize_tests.rs:205-212` `member_put_agent_is_403`
+  becomes `member_put_own_agent_draft_is_200_outside_namespace_is_400`: the
+  member (`username` "member") PUTs `urn:vam:agent:local.vam.dev/member/member-write`
+  → 200 and `…/acme/member-write` → 400 (spec change, owner-approved product
+  change: decisions 6 and 9). `member_put_policy_is_403` and every other member
+  403 stay. `tests/workspace_pin_tests.rs` gains `member_can_pin_own_draft` next
+  to `member_cannot_pin_foreign_draft` (`:291-322`, unchanged). `keys.rs` unit
+  tests on role sets gain `agents:draft`. Tests built on the scope constants
+  (`me_tests.rs`, `key_scope_mode_tests.rs`, `bootstrap_principal_tests.rs`,
+  `isolation_coverage_map_tests.rs:561`) follow the constants with no edit;
+  anything else that breaks is reported, not edited. **Accept:**
+  `scripts/ci/local.sh --fast`; the re-run list green.
+  `Decide: NOW — part of MD-3.2, cost 0.`
+
+**Waves** (owner's matrix: Sonnet 5.5 high or medium, or Haiku 5.5 high; as few
+as the work allows. One build wave was weighed and rejected: the save path and
+the run-time resolver each touch five or more files with their own test
+fallout, and one context would not hold both plus the orchestrator's security
+read.)
+
+| Wave | Items | Turns green | Repo | Model | Budget | Depends on | Actions | Status | PR |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | `MD-3.0` (5 scenarios, 5 world pieces, 4 harness additions, README) | — (5 red, right reason, class `product`) | vam | Sonnet 5.5 medium: new step fields across four `vam-e2e` modules and proving each red at the right step | 90 min | — | gate: `rust.yml` fast jobs and smoke (`skip-vm-lane`) | [ ] | |
+| 1 | `MD-3.1`, `MD-3.2`, `MD-3.3`, `MD-3.4`, `MD-3.7` | `member-builds-and-runs-own-draft-agent-from-a-released-skill`, `member-draft-agent-refuses-a-skill-that-is-not-released`, `member-draft-agent-is-private-and-in-the-members-namespace`, `member-draft-agent-uses-a-connector-skill-through-the-members-connection` (re-run list stays green) | vam | Sonnet 5.5 high: catalog write authority for a new class of user, a key-migration rule and a lock-held namespace and cap check (security boundary); the orchestrator reads the auth helper, the validator and the restricted writer before merging | 180 min | 0 | gate: full `rust.yml` (`skip-vm-lane`) | [ ] | |
+| 2 | `MD-3.5`, `MD-3.6` | `demoted-publishers-draft-agent-stops-using-their-draft-skill` (the other four and the re-run list stay green) | vam | Sonnet 5.5 high: run-time resolution, session start and the explain routes must agree, and a mismatch is a policy bypass (security boundary); the orchestrator reads `run_resolve_context`, `resolve_inner` and `load_advanced_policy` | 150 min | 1 | gate: full `rust.yml` (`skip-vm-lane`) | [ ] | |
+
+**Risks**
+
+- **Mode drift between record and boot.** The mode is derived twice (run start
+  and session start) from the live role; a promotion or demotion in between can
+  change it. Boot then fails closed (a draft pin refused in ReleasedOnly) or
+  takes recorded released pins (promotion). Accepted; no mode is stored on the
+  run.
+- **Test fallout in wave 2.** Unit tests create draft owners with
+  `create_user` (role Member: `users.rs:216-222`); their draft runs flip to
+  ReleasedOnly. The fix is to promote the owner in the fixture; a wave that
+  edits an assertion instead is reported.
+- **Backfill.** Without MD-3.1's comparison fix, the release that ships Phases
+  1–3 to `main` freezes every member's existing default key without
+  `agents:draft`.
+- **Permission defaults (R8).** A member's draft gets open internet and
+  side-effect tool rules like any agent (design §8 Q7, default same).
+
+**Open questions** (each with a default)
+
+1. **A member running a *released* agent with an explicit `-draft` ref** (a
+   `playbookRef` on the run, or on a grant: `grants.rs:348-357`) resolves in
+   `Release` mode, which still loads the caller's own draft, so a former
+   publisher can attach their old draft playbook to a released agent's run.
+   **Default: close it** — `run_resolve_context` returns ReleasedOnly also for
+   a non-draft run whose caller's live role is Member, and grant validation uses
+   the grant owner's mode; MD-3.5 takes one more branch. Taking it amends
+   decision 7 by one clause ("and any run started by a Member"); the orchestrator
+   edits the locked list first if approved.
+2. The legacy single-user owner `local` has role Member (`users.rs:209`), so
+   its draft runs become ReleasedOnly. **Default: yes** (follow the role
+   strictly); tests that meant an author use the operator or a publisher.
+3. Cap answer: **default 409** naming the limit and "edit one of your drafts".
+4. Validator wording and status: **default 400** with one message per kind (no
+   existence oracle); the scenarios check only `released` / `namespace`.
+5. Record `permissions.advanced` pins in every mode, not only ReleasedOnly.
+   **Default: every mode** (decision 7 says "recorded and loaded by pin"; one
+   rule).
+
+**Out of scope here:** docs and the frontend handoff (Phase 4), a member
+publish-request flow, draft deletion, `extends` / `overlay` for members.
+
+**Phase close:** unit suites on the merged base; team checklist out (the next
+phase does not wait for it; playbook §6).
+
+**Team checklist — Phase 3**
+
+Setup: deploy vamd from the base branch over an existing node with at least one
+member who has an API key minted before the upgrade; the bootstrap key; one
+publisher; a released skill (with a tool) and a released playbook.
+
+1. With the member's **old** key, `GET /v1/me`. **See:** `agents:draft` listed,
+   no `catalog:write`.
+2. As the member, `PUT /v1/agents` an agent at
+   `urn:vam:agent:<registryDomain>/<defaultNamespace>/my-agent` (both from
+   `GET /v1/me`) whose `skillRefs` names the released skill with no version.
+   **See:** 200.
+3. Chat with it pinned to the draft (`-draft`). **See:** the skill's tool runs.
+   Start the released playbook on it. **See:** the run succeeds.
+4. As the member, PUT an agent naming a skill that is only the publisher's
+   draft. **See:** 400 naming the skill; the same text for a skill URN that does
+   not exist.
+5. As the member, PUT an agent at `…/someone-else/x`. **See:** 400 naming your
+   namespace. `PUT /v1/playbooks`, `POST /v1/skills/packages` and
+   `POST /v1/agents/<your urn>/release`. **See:** 403 each.
+6. As another member, `GET /v1/agents/<first member's urn>`. **See:** 404. As the
+   org admin. **See:** 200.
+7. Promote a test user, save a draft skill and a draft agent that names it with
+   no version, chat (works), demote them, chat again. **See:** the start is
+   refused (400) naming the skill.
+
+Report: "Phase 3 pass", or the step number with the error text.
 
 ### Phase 4 — Docs and frontend handoff
 
@@ -477,5 +605,6 @@ team has the handoff (`design/member-draft-agents.md` §9) on the docs site.
 | 2026-11-17 | 1 | **Phase 1 closed.** Merged #22, #24, #25 into `feat/member-draft-agents` (Actions green on each). Scoreboard: 3 scenarios green, 0 red; 0 scenario fix cycles. Next: Phase 2 breakdown (the run route never writes released rows). |
 | 2026-11-17 | 2 | Phase 2 breakdown drafted (3 new scenarios, 3 waves); waiting for owner approval |
 | 2026-11-18 | 2 | Owner chose option B (the run route refuses inline agents and playbooks; `vam run --file` saves then runs by ref) and two waves. Decisions 5 and 7 amended; Phase 2 rewritten (3 scenarios: 2 pending, 1 guard; waves 0 and 1). Plan approved; wave 0 next. |
-| 2026-11-18 | 2 W0 | Wave 0 on `feat/member-draft-agents-scenarios-inline`: 3 scenarios (2 `pending`, 1 active guard), world piece `agent-inline-probe`, harness: deferred agent not written at `given`, `chat` `inline`/`inlinePlaybook`/`inputs` (with `refused`), `expect` `status`, `put-draft` URN per identity, `{{urn:<piece>:<as>}}`. Scoreboard: 1 green (guard), 2 red (right reason, class `product`, both at `when.0`: 202 today), 2 fix cycles (request shape; playbook inputs so the red is the inline rule), ~50 min. Local smoke: 9 Microsoft-mock scenarios fail the same on the base (container sandbox denies the guest's python under the `--out` path); Actions is the gate. |
-| 2026-11-18 | 2 W1 | Wave 1 on `feat/member-draft-agents-run-route`: run route refuses inline parts first in `start_run` (400, nothing written); 13 writers and dead helpers behind `test-support` (renamed self dev-dependency so `vam-orchestrator/process-guest` still applies); CLI and bench save-then-run; test fallout (fixture setup only, 2 new API tests, 4 CLI tests); proto/OpenAPI comments; docs lines. Harness: `identity-request` `credential: key` on the Owner piece sends the bootstrap key. Scoreboard: 2 turned green (the inline refusals), guard and re-run list green; 3 fix cycles (fixtures, feature flag takeover, Owner identity); ~45 min. No-feature `cargo check -p vam-orchestrator --lib --bins`: 0 warnings. Pre-existing (fails on base too): `process_mode_run_api::runs_on_any_model_but_mock_model_are_refused_in_process_mode` with `--features process-guest`. |
+| 2026-11-18 | 2 | **Phase 2 closed.** Merged #27, #35 (plan #26). Scoreboard: 2 scenarios green, 1 guard green, 0 red; 5 fix cycles across both waves. Next: Phase 3 breakdown (members create, edit and run their own draft agents from released parts). |
+| 2026-11-18 | 3 | Phase 3 breakdown drafted (5 new scenarios, waves 0–2); waiting for owner approval |
+| 2026-11-18 | 3 | Owner approved the Phase 3 breakdown with the open-question defaults (close a Member's explicit `-draft` refs, decision 7 amended; `local` is released-only; cap answers 409; one 400 message per kind; advanced policy pins recorded in every mode). |

@@ -19,7 +19,7 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | `connectors` | Connectors: connectivity, admin enable and consent, per-user connect; Microsoft 365 and Linear first (`design/connectors.md`) | active | 1 released to `main` 2026-11-08, checklist out; 0 done 2026-11-07 |
 | `machine-base` | Machine base (E7 Phase 1 + install slice, launch row 14): Debian slim default base with Python and git, `requiresRuntime` check, `vam node init` | active | 1 closed in base 2026-11-10 (W0-W5, 5/5 scenarios active); release PR into `main` open |
 | `user-identity` | User identity: self-service password change (`POST /v1/me/password`, `vam passwd`), then opaque user IDs and email usernames | active | 1 closed in base 2026-11-12 (self-service password change); 2 (opaque ids, email usernames) not drafted |
-| `member-draft-agents` | Member draft agents: members author their own agents from released parts; API keys follow the live role; the run route refuses inline agents and playbooks (`design/member-draft-agents.md`) | active | 1 closed 2026-11-17 (#22, #24, #25); 2 approved 2026-11-18 (option B), wave 0 next |
+| `member-draft-agents` | Member draft agents: members author their own agents from released parts; API keys follow the live role; the run route refuses inline agents and playbooks (`design/member-draft-agents.md`) | active | 1 closed 2026-11-17, 2 closed 2026-11-18 (#27, #35); 3 approved 2026-11-18, wave 0 next |
 
 
 ## Backlog (no tracker)
