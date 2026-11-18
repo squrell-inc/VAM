@@ -417,7 +417,7 @@ async fn exchange_code(
     state
         .pdp
         .authorize(&auth, "ExchangeConnectorCode", CONNECTION_SCOPE)?;
-    let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
+    let idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let found = entry_or_404(&state, &id)?;
     // A fixed message: a serde error can quote the value it rejected, and this body holds a code.
     let req: connector_client::CodeExchangeRequest = serde_json::from_str(&body).map_err(|_| {
@@ -469,6 +469,7 @@ async fn exchange_code(
             org: &org,
             client: &client,
             request: &req,
+            idempotency_key: &idempotency,
         };
         connector_exchange::exchange_and_connect(&store, &vault, &c, &mut gate)
     })
@@ -526,11 +527,32 @@ mod tests {
         secret: &str,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, serde_json::Value) {
+        call_with_key(app, method, uri, secret, body, "connectors-1").await
+    }
+
+    /// A fresh Idempotency-Key: every code exchange of a test is its own sign-in unless the test
+    /// repeats one on purpose.
+    fn next_idempotency_key() -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        format!(
+            "exchange-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        )
+    }
+
+    async fn call_with_key(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        secret: &str,
+        body: Option<serde_json::Value>,
+        key: &str,
+    ) -> (StatusCode, serde_json::Value) {
         let b = Request::builder()
             .method(method)
             .uri(uri)
             .header("authorization", format!("Bearer {secret}"))
-            .header("idempotency-key", "connectors-1")
+            .header("idempotency-key", key)
             .header("content-type", "application/json");
         let req = match body {
             Some(v) => b.body(Body::from(v.to_string())).unwrap(),
@@ -1639,14 +1661,142 @@ mod tests {
         id: &str,
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value) {
-        call(
+        exchange_with_key(n, who, id, body, &next_idempotency_key()).await
+    }
+
+    async fn exchange_with_key(
+        n: &Node,
+        who: &str,
+        id: &str,
+        body: serde_json::Value,
+        key: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        call_with_key(
             &n.app,
             "POST",
             &format!("/v1/connectors/{id}/connection/oauth/code"),
             who,
             Some(body),
+            key,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn a_repeated_exchange_with_the_same_key_never_sends_its_code_again() {
+        let n = xchg_node("xchg-idem");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // The first exchange succeeds; the app loses the answer and retries with the same key.
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange_with_key(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+            "sign-in-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(n.token.requests().len(), 1);
+        let connected = row_of(&n, "ada");
+        let refresh = token_of(&n, "ada", "filebox/oauth/refresh-token");
+        // The provider would refuse the reused code (and may revoke the first tokens); the node
+        // does not present it at all: a 409 saying to read the connection state, nothing changed.
+        n.token.reply(
+            400,
+            serde_json::json!({ "error": "invalid_grant", "error_description": "code reused" }),
+        );
+        let (s, b) = exchange_with_key(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+            "sign-in-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("already submitted"), "{b}");
+        assert_eq!(b["retryable"], false, "{b}");
+        assert_no_value("the repeat", &b.to_string());
+        assert_eq!(n.token.requests().len(), 1, "the code was sent again");
+        assert_eq!(row_of(&n, "ada").oauth, connected.oauth);
+        assert_eq!(token_of(&n, "ada", "filebox/oauth/refresh-token"), refresh);
+        // A first answer that was a failure after the send is not replayed either: the code may be
+        // spent. A request refused before the send (here: the connector is off) records nothing,
+        // so the same key goes through once the connector is back.
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/connectors/filebox/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({ "enabled": false })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let (s, b) = exchange_with_key(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+            "sign-in-2",
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/connectors/filebox/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // A new sign-in with its own key still works (the queued refusal is its answer first).
+        let (s, b) = exchange_with_key(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+            "sign-in-2",
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert_eq!(n.token.requests().len(), 2);
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange_with_key(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+            "sign-in-3",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(n.token.requests().len(), 3);
+        // Another member's key space is their own: the same key is a new sign-in for olga.
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange_with_key(
+            &n,
+            "orgadmin-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+            "sign-in-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(n.token.requests().len(), 4);
+        // And sign-in-2, whose code was sent and refused, is not sent again either.
+        let (s, b) = exchange_with_key(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+            "sign-in-2",
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(n.token.requests().len(), 4);
     }
 
     #[tokio::test]
@@ -2212,6 +2362,7 @@ mod tests {
                 org: &org,
                 client: &stale,
                 request: &req,
+                idempotency_key: &next_idempotency_key(),
             };
             connector_exchange::exchange_and_connect(&store, &vault, &c, &mut gate)
         })

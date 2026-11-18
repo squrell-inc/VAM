@@ -447,6 +447,16 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
             connector_id TEXT PRIMARY KEY,
             last_revision INTEGER NOT NULL
         );
+        -- One row per code exchange the node was about to send (CN-5.3), written before the code
+        -- goes to the provider: a request repeated with the same Idempotency-Key never sends its
+        -- code again. The key is stored as its SHA-256.
+        CREATE TABLE IF NOT EXISTS connector_code_exchanges (
+            owner_user_id TEXT NOT NULL,
+            connector_id TEXT NOT NULL,
+            key_digest TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (owner_user_id, connector_id, key_digest)
+        );
         ",
     )?;
     // A store from before the method was pinned: every saved client posts its secret, as it did.
@@ -633,7 +643,41 @@ fn same_client_state(a: Option<&NodeClient>, b: Option<&NodeClient>) -> bool {
     }
 }
 
+/// How long a code exchange's Idempotency-Key is remembered. An authorization code lives minutes;
+/// a week covers any retry of a lost answer by far.
+const CODE_EXCHANGE_KEY_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+
 impl SqliteWorkflowStore {
+    /// Records that `owner`'s code exchange for `connector_id` with this Idempotency-Key is about to
+    /// send its code. `false`: a request with the same key already got this far, so its code was
+    /// (or is being) sent, and this one must not send it again (RFC 6749 §4.1.2: a provider may
+    /// revoke the tokens of a code that is presented twice). Keys older than
+    /// [`CODE_EXCHANGE_KEY_TTL_SECS`] are forgotten here.
+    pub(crate) fn claim_code_exchange(
+        &self,
+        owner: &str,
+        connector_id: &str,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<bool, OrchestratorError> {
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(idempotency_key.as_bytes()));
+        let c = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        c.execute(
+            "DELETE FROM connector_code_exchanges WHERE created_at < ?1",
+            params![now.saturating_sub(CODE_EXCHANGE_KEY_TTL_SECS)],
+        )?;
+        let inserted = c.execute(
+            "INSERT OR IGNORE INTO connector_code_exchanges
+                 (owner_user_id, connector_id, key_digest, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![owner, connector_id, digest, now],
+        )?;
+        Ok(inserted == 1)
+    }
+
     pub fn node_client(&self, id: &str) -> Result<Option<NodeClient>, OrchestratorError> {
         let c = self
             .connection
