@@ -1153,7 +1153,9 @@ paths:
         the secrets API refuses to read, write or delete it. A new secret alone
         keeps members connected (and brings back a member whose refresh the
         provider had refused for this client, `invalid_client`; a revoked grant
-        still needs a sign-in); a new client id or a moved token endpoint marks
+        still needs a sign-in). A save that also disables the connector brings no
+        one back: those members stay parked, with their notifications open, until
+        the save that enables the connector again with the same client; a new client id or a moved token endpoint marks
         every member's connection `needs_reauth`. A token endpoint that moved to
         another host needs the secret entered again (409). `client: null` (only
         with `enabled: false`) removes the client and its secret. A disable

@@ -221,7 +221,9 @@ async fn put_node(
         },
     )?;
     // Members whose refresh the provider had refused for this client are connected again (the same
-    // client, a corrected secret): their reconnect notification is resolved and parked runs go on.
+    // client, a corrected secret, or the enable after a save that corrected it with a disable):
+    // their reconnect notification is resolved and parked runs go on. A save that leaves the
+    // connector off clears no one, so nothing is resumed on a disabled connector.
     for owner in &cleared {
         if let Ok(conn) = state
             .store
@@ -2959,6 +2961,79 @@ mod tests {
         // A revoked grant still needs a sign-in.
         assert_eq!(row_of(&n, "olga").oauth.unwrap().status, NeedsReauth);
         assert_eq!(open_notices(&n, "olga"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_corrected_secret_saved_with_a_disable_keeps_members_parked_until_the_enable() {
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        let n = xchg_node("xchg-corrected-off");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        for (who, key) in [("ada", "member-secret"), ("olga", "orgadmin-secret")] {
+            n.token.reply(200, tokens_reply());
+            let (s, b) = exchange(&n, key, "filebox", exchange_body("squrell://oauth")).await;
+            assert_eq!(s, StatusCode::OK, "{who} {b}");
+        }
+        n.store
+            .record_mcp_oauth_refresh_failure(
+                &row_of(&n, "ada"),
+                true,
+                connector_client::CLIENT_REFUSED_REASON,
+            )
+            .unwrap();
+        n.store
+            .record_mcp_oauth_refresh_failure(&row_of(&n, "olga"), true, "invalid_grant")
+            .unwrap();
+        assert_eq!(open_notices(&n, "ada"), 1);
+
+        // The admin corrects the secret and turns the connector off in the same save: nothing is
+        // released on a connector that is off.
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/connectors/filebox/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({
+                "enabled": false,
+                "client": { "clientId": "c-1", "clientSecret": "CORRECTED-SECRET-qqqqqqqq" }
+            })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(
+            oauth.last_refresh_error.as_deref(),
+            Some(connector_client::CLIENT_REFUSED_REASON)
+        );
+        assert_eq!(open_notices(&n, "ada"), 1);
+
+        // The enable that follows keeps the client: the rows the refused client parked are back.
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/connectors/filebox/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(row_of(&n, "ada").oauth.unwrap().status, Connected);
+        assert_eq!(open_notices(&n, "ada"), 0);
+        // A revoked grant still needs a sign-in.
+        assert_eq!(row_of(&n, "olga").oauth.unwrap().status, NeedsReauth);
+        assert_eq!(open_notices(&n, "olga"), 1);
+        // A save that keeps it enabled clears nothing more (there is nothing to clear).
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/connectors/filebox/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(row_of(&n, "olga").oauth.unwrap().status, NeedsReauth);
     }
 
     #[tokio::test]

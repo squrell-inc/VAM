@@ -138,7 +138,9 @@ runs parked, until `POST /v1/mcp/connections/{id}/refresh` lists them. A provide
 (`invalid_client`) is a 409 saying the client id or secret the admin entered was refused; a refused or
 spent code is a 400; an unreachable provider, or an answer with no refresh token, is a 502. When the admin saves a
 corrected secret for the same client, a member whose refresh the provider had refused for the client
-(`invalid_client`) is connected again; a revoked grant still needs a sign-in. No code, verifier,
+(`invalid_client`) is connected again; a revoked grant still needs a sign-in. A save that corrects the secret and
+turns the connector off connects no one again: those members stay parked until the admin enables it again with the
+same client. No code, verifier,
 secret or token is in any answer or error. For such a connector the app-path routes are closed:
 `PUT /v1/mcp/connections/:id/oauth/tokens` answers 400 (use the code exchange), a connect that names another
 token endpoint or client id is refused, and a `clientSecret` is refused for any connector-backed row. A refresh
@@ -198,7 +200,8 @@ manifest names the token gets nothing), plus the tests in `mcp_credentials_stay_
   `rotating-refresh-token-is-spent-once-when-two-tasks-call-at-once` and the gate tests in `host_tools.rs`.
 - A corrected or rotated secret keeps members connected, and a changed client id does not:
   `admin-corrects-the-client-secret-and-members-stay-connected`, and for a client the provider refused,
-  `a_corrected_secret_for_the_same_client_brings_back_members_a_refused_client_parked` in `api/connectors.rs`.
+  `a_corrected_secret_for_the_same_client_brings_back_members_a_refused_client_parked` and
+  `a_corrected_secret_saved_with_a_disable_keeps_members_parked_until_the_enable` in `api/connectors.rs`.
 - The commit rules (one transaction, a client replaced mid-exchange stores nothing, a moved connector's old row goes
   only after the new grant, a disconnect during `tools/list` is not undone, a stored sign-in whose tools cannot be read
   is retried by the tools-refresh route): `api/connectors.rs` route tests

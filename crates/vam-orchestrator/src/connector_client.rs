@@ -593,8 +593,10 @@ impl SqliteWorkflowStore {
     ///
     /// A save of a corrected secret for the unchanged client also clears the rows a refresh the
     /// provider refused for that client (`invalid_client`) put into `needs_reauth`, and only those:
-    /// a revoked grant still needs a sign-in. The owners of the cleared rows are returned so the
-    /// caller can continue their parked runs.
+    /// a revoked grant still needs a sign-in. That happens only when the save leaves the connector
+    /// enabled; a save that disables it clears nothing, and the save that enables it again (the
+    /// client kept or repeated) clears them instead. The owners of the cleared rows are returned so
+    /// the caller can continue their parked runs.
     ///
     /// This is the only code that writes `connector/<id>/oauth/client-secret`.
     pub(crate) fn put_node_with_client(
@@ -624,6 +626,7 @@ impl SqliteWorkflowStore {
                 CLIENT_CHANGED_WHILE_SAVING.into(),
             ));
         }
+        let was_enabled = crate::connectors::node_enabled_in(&tx, &node.connector_id)?;
         crate::connectors::put_node_connector_in(&tx, node)?;
         match &plan.write {
             ClientWrite::Keep => {}
@@ -684,15 +687,21 @@ impl SqliteWorkflowStore {
                 &[mcp_url],
                 "the admin changed the client: reconnect",
             )?;
-        } else if matches!(
-            &plan.write,
-            ClientWrite::Set {
-                secret: Some(_),
-                ..
-            }
-        ) {
+        } else if node.enabled
+            && (!was_enabled
+                || matches!(
+                    &plan.write,
+                    ClientWrite::Set {
+                        secret: Some(_),
+                        ..
+                    }
+                ))
+        {
             // The same client with a new secret: a refresh the old secret failed is worth another
             // try, so the rows it parked are back (the next call refreshes with the new secret).
+            // Only on a save that leaves the connector enabled: a save that corrects the secret
+            // and disables the connector leaves the rows parked, with their notifications open,
+            // and the enable that follows (with the client kept) is the save that clears them.
             cleared = crate::mcp_registry::clear_refused_client_rows(
                 &tx,
                 &node.connector_id,
