@@ -33,8 +33,8 @@ fn check_with_draft_posts_the_draft_ref_and_exits_zero_with_a_missing_skill() {
     let post = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/agent-checks")
-            .body_contains("\"prerelease\":\"draft\"")
-            .body_contains("composer");
+            .body_includes("\"prerelease\":\"draft\"")
+            .body_includes("composer");
         then.status(200)
             .header("content-type", "application/json")
             .body(RESPONSE);
@@ -50,7 +50,7 @@ fn check_with_version_posts_that_release() {
     let post = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/agent-checks")
-            .body_contains("\"minor\":2");
+            .body_includes("\"minor\":2");
         then.status(200)
             .header("content-type", "application/json")
             .body(RESPONSE);

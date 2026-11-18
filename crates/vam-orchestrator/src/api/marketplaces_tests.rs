@@ -1,8 +1,9 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use axum::body::{Body, HttpBody as _};
+use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt as _;
 use tower::ServiceExt;
 
 use crate::api::auth::ControlPlanePdp;
