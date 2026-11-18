@@ -7,7 +7,7 @@
 //! The providers are std-only loopback HTTP servers, started once per run and reset by each
 //! `mock-provider` piece:
 //! - `filebox` (a fictional Box-like service) serves one listener for three hosts: the MCP server
-//!   (`POST /mcp`, `search_files` and `read_file`), RFC 9728 and RFC 8414 metadata, `GET /authorize`
+//!   (`POST /mcp`, `search_files` and `get_file_content`), RFC 9728 and RFC 8414 metadata, `GET /authorize`
 //!   (the runner plays the browser) and `POST /token` and `/revoke`. The token endpoint is a
 //!   confidential client (`client_secret_post`) with single-use rotating refresh tokens.
 //! - `microsoft-login` serves `POST /{tenant}/oauth2/v2.0/token` for `refresh_token` grants. It
@@ -989,6 +989,7 @@ fn filebox_mcp(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
         .map(str::to_string);
     let mut fields = BTreeSet::new();
     fields.insert(format!("method={method}"));
+    let mut expired = false;
     let authed = {
         let st = state.lock().unwrap();
         let authed =
@@ -999,6 +1000,7 @@ fn filebox_mcp(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
                 fields.insert("authorization".to_string());
             }
             Some(t) if st.fb.stale.contains(t) => {
+                expired = true;
                 fields.insert("authorization-expired".to_string());
             }
             Some(_) => {
@@ -1017,6 +1019,18 @@ fn filebox_mcp(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     }
     log_filebox(state, &req, "/mcp", fields);
     if !authed {
+        // A held provider is slow on a refused call too: the request is logged on arrival and
+        // answered when the hold is released (at most 30 s). The node makes a caller that starts
+        // while a refresh is in flight wait for it before it sends, so this is what keeps two tasks
+        // in flight on the same expired token at once.
+        if expired {
+            let start = std::time::Instant::now();
+            while state.lock().unwrap().fb.hold_token
+                && start.elapsed() < std::time::Duration::from_secs(30)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
         return respond(out, 401, "application/json", r#"{"error":"unauthorized"}"#);
     }
     let result = match method.as_str() {
@@ -1030,7 +1044,7 @@ fn filebox_mcp(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
                 json!({ "name": name, "description": name,
                         "inputSchema": { "type": "object", "properties": {} } })
             };
-            json!({ "tools": [tool("search_files"), tool("read_file")] })
+            json!({ "tools": [tool("search_files"), tool("get_file_content")] })
         }
         "tools/call" => json!({ "content": [{ "type": "text", "text": "ok" }], "isError": false }),
         _ => return respond(out, 202, "application/json", ""),

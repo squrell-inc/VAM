@@ -28,7 +28,7 @@
         "sideEffect": "READ_ONLY"
       },
       {
-        "remote": "read_file",
+        "remote": "get_file_content",
         "sideEffect": "READ_ONLY"
       }
     ]

@@ -20,6 +20,7 @@ pub mod catalog_tier;
 pub mod connection_egress;
 pub mod connector_client;
 pub mod connector_discovery;
+pub(crate) mod connector_exchange;
 pub mod connector_park;
 pub mod connectors;
 pub mod contacts;

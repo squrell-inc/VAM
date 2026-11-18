@@ -512,6 +512,195 @@ impl SqliteWorkflowStore {
     }
 }
 
+// ---- what the node does with the client (CN-5.3, CN-5.4) ----------------------------------------
+
+/// A connector with an admin-supplied client, and the client the admin saved for it (if any).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OrgConnector {
+    pub(crate) mcp_url: String,
+    /// `clientSecret: "org_vault"`: the node holds a secret and does the code exchange.
+    pub(crate) keeps_secret: bool,
+    pub(crate) scopes: Vec<String>,
+    pub(crate) client: Option<NodeClient>,
+}
+
+/// How a connector-backed MCP row gets its OAuth client.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RowClient {
+    /// Not a connector's row, or a connector that uses the publisher's own client or discovers its
+    /// own (the row's stored endpoints and secret are what the member's app set).
+    Own,
+    /// The connector's client is the admin's: endpoints and client id come from the node row.
+    Org(Box<OrgConnector>),
+}
+
+impl SqliteWorkflowStore {
+    /// The connector with this id when it uses the admin's client (`provider.client: org`) and is an
+    /// MCP connector; `None` for every other connector id.
+    pub(crate) fn org_connector(
+        &self,
+        id: &str,
+    ) -> Result<Option<OrgConnector>, OrchestratorError> {
+        let Some(entry) = self.connector_entry(id)? else {
+            return Ok(None);
+        };
+        if client_kind(&entry.def) != ClientKind::Org {
+            return Ok(None);
+        }
+        let Some(policy) = crate::connectors::policy_of(id, &entry.def) else {
+            return Ok(None);
+        };
+        let scopes = match &entry.def.provider {
+            Provider::Oauth2(o) => o.scopes.clone(),
+            Provider::ApiKey(_) => Vec::new(),
+        };
+        Ok(Some(OrgConnector {
+            mcp_url: policy.url,
+            keeps_secret: keeps_secret(&entry.def),
+            scopes,
+            client: self.node_client(id)?,
+        }))
+    }
+
+    /// Whose client a member's MCP row uses. A row the connector owns (user scope, the connector's
+    /// URL) of a `client: org` connector uses the node's client; any other row uses its own.
+    pub(crate) fn row_client(
+        &self,
+        conn: &crate::mcp_registry::McpConnection,
+    ) -> Result<RowClient, OrchestratorError> {
+        if conn.scope != SecretScope::User {
+            return Ok(RowClient::Own);
+        }
+        Ok(match self.org_connector(&conn.connection_id)? {
+            Some(org) if org.mcp_url == conn.url => RowClient::Org(Box::new(org)),
+            _ => RowClient::Own,
+        })
+    }
+}
+
+/// The org's client secret, for one request to `endpoint`. **The only place the secret is read for
+/// sending.** It is read at org scope with [`SecretsVault::decrypt_secret_at`] (never a lookup that
+/// falls back across scopes), and only when the endpoint's host is the token endpoint's host the
+/// node pinned at Enable and the vault row is pinned to exactly that host: a provider answer, a
+/// member's request or a connector update can never aim the secret at another host (O2).
+pub(crate) fn org_client_secret(
+    vault: &SecretsVault,
+    client: &NodeClient,
+    endpoint: &str,
+) -> Result<secrecy::SecretString, OrchestratorError> {
+    let id = &client.connector_id;
+    let not_saved = || {
+        OrchestratorError::Conflict(format!(
+            "`{id}` has no client secret saved: ask your admin to save the client again"
+        ))
+    };
+    if !client.secret_set {
+        return Err(not_saved());
+    }
+    let host = host_of(endpoint);
+    let pinned = client.token_host();
+    let (Some(host), Some(pinned)) = (host, pinned) else {
+        return Err(OrchestratorError::PermissionDenied(
+            "the client secret is only sent to the token endpoint pinned at Enable".into(),
+        ));
+    };
+    if !host.eq_ignore_ascii_case(&pinned) {
+        return Err(OrchestratorError::PermissionDenied(
+            "the client secret is only sent to the token endpoint pinned at Enable".into(),
+        ));
+    }
+    let binding = client_secret_binding_id(id);
+    let meta = match vault.get_metadata_at(SecretScope::Org, ORG_OWNER_USER_ID, &binding) {
+        Ok(meta) => meta,
+        Err(OrchestratorError::StorageUnavailable) => {
+            return Err(OrchestratorError::StorageUnavailable)
+        }
+        Err(_) => return Err(not_saved()),
+    };
+    let pinned_to_host = meta.allowed_destinations.len() == 1
+        && meta.allowed_destinations[0].eq_ignore_ascii_case(&host);
+    if meta.kind != SecretKind::Connection || meta.scope != SecretScope::Org || !pinned_to_host {
+        return Err(OrchestratorError::PermissionDenied(
+            "the client secret is not pinned to the token endpoint's host".into(),
+        ));
+    }
+    vault.decrypt_secret_at(SecretScope::Org, ORG_OWNER_USER_ID, &binding)
+}
+
+/// The body of `POST /v1/connectors/{id}/connection/oauth/code`: what the app got from the browser
+/// sign-in. No endpoint and no client field: the node's pinned client is the only one. Holds a code
+/// and a verifier: no `Debug` output of them.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CodeExchangeRequest {
+    pub code: String,
+    pub code_verifier: String,
+    pub redirect_uri: String,
+}
+
+impl std::fmt::Debug for CodeExchangeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeExchangeRequest")
+            .field("redirect_uri", &self.redirect_uri)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The app's own redirect URIs (open question 6): `squrell://oauth`, or a loopback address with a
+/// port and a path. The admin registers them with the provider.
+pub const APP_REDIRECT_URI: &str = "squrell://oauth";
+const MAX_CODE_LEN: usize = 4096;
+
+/// Checks a code exchange body before anything is read or sent. Messages never quote a value.
+pub fn check_code_exchange(req: &CodeExchangeRequest) -> Result<(), OrchestratorError> {
+    let bad = |what: &str| OrchestratorError::InvalidContract(format!("code exchange: {what}"));
+    if req.code.trim().is_empty()
+        || req.code.len() > MAX_CODE_LEN
+        || req.code.bytes().any(|b| b.is_ascii_control() || b == b' ')
+    {
+        return Err(bad(
+            "`code` must be 1-4096 characters with no space or control character",
+        ));
+    }
+    // RFC 7636 §4.1: 43-128 unreserved characters.
+    let v = &req.code_verifier;
+    if !(43..=128).contains(&v.len())
+        || !v
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
+    {
+        return Err(bad(
+            "`codeVerifier` must be 43-128 characters of letters, digits, `-`, `.`, `_`, `~`",
+        ));
+    }
+    if !redirect_uri_is_the_apps(&req.redirect_uri) {
+        return Err(bad(
+            "`redirectUri` must be the app's: `squrell://oauth` or `http://127.0.0.1:<port>/<path>`",
+        ));
+    }
+    Ok(())
+}
+
+fn redirect_uri_is_the_apps(raw: &str) -> bool {
+    if raw == APP_REDIRECT_URI {
+        return true;
+    }
+    if raw.len() > 512 {
+        return false;
+    }
+    let Ok(u) = url::Url::parse(raw) else {
+        return false;
+    };
+    u.scheme() == "http"
+        && u.host_str() == Some("127.0.0.1")
+        && u.port().is_some()
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.query().is_none()
+        && u.fragment().is_none()
+        && u.path().starts_with('/')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,5 +975,374 @@ mod tests {
         assert!(!is_connector_org_row(SecretScope::User, &id));
         assert!(!is_connector_org_row(SecretScope::Org, "openai/api-key"));
         assert!(!is_connector_org_row(SecretScope::Org, "connectors/x"));
+    }
+}
+
+/// Fixtures the exchange, refresh and revoke tests share: the `filebox` connector as a marketplace
+/// installs it, and its client as an admin saves it, on hosts of one test's own `tag`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::connectors::NodeConnector;
+
+    /// The connector file of the `filebox` listing, on `https://mcp.<tag>.example/mcp`.
+    pub(crate) fn install_filebox_rows(store: &SqliteWorkflowStore, tag: &str) {
+        let json = serde_json::json!({
+            "urn": "urn:vam:connector:connectors.community.example/community/filebox",
+            "version": "1.0.0", "displayName": "Filebox", "publisher": "Community Tools Ltd",
+            "description": "Files.", "icon": "filebox",
+            "provider": { "kind": "oauth2", "profile": "discover", "client": "org",
+                          "clientSecret": "org_vault", "scopes": ["read"], "orgConsent": "none" },
+            "connection": { "holder": "user", "multiAccount": false, "label": "whoami.email" },
+            "mcp": { "url": format!("https://mcp.{tag}.example/mcp"),
+                     "tools": [ { "remote": "search_files", "sideEffect": "READ_ONLY" } ] }
+        });
+        let urn = json["urn"].as_str().unwrap_or_default().to_string();
+        let c = store.connection.lock().unwrap();
+        c.execute(
+            "INSERT INTO connector_releases (urn, major, minor, patch, digest, spec_bytes, created_at,
+                 updated_at, owner_user_id) VALUES (?1, 1, 0, 0, 'd', ?2, 1, 1, 'system')",
+            params![urn, json.to_string().as_bytes()],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO catalog_origins (kind, urn, major, minor, patch, marketplace_id, listing_id,
+                 git_ref, commit_sha, package_digest, installed_at)
+             VALUES ('connector', ?1, 1, 0, 0, 'm-1', 'filebox-connector', 'filebox-v1', 'c', 'd', 1)",
+            [urn],
+        )
+        .unwrap();
+    }
+
+    /// A member's connected row for `filebox` on `tag`'s hosts: the node's endpoints, `client_id`,
+    /// tokens `A-old` / `R-old`, and the one tool of the connector.
+    pub(crate) fn member_row(
+        store: &SqliteWorkflowStore,
+        vault: &SecretsVault,
+        tag: &str,
+        owner: &str,
+        client_id: &str,
+        revocation: Option<&str>,
+    ) -> crate::mcp_registry::McpConnection {
+        use crate::mcp_registry::{
+            McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
+        };
+        let oauth = McpOauthMetadata {
+            resource: format!("https://mcp.{tag}.example/mcp"),
+            authorization_server: format!("https://auth.{tag}.example"),
+            token_endpoint: format!("https://auth.{tag}.example/token"),
+            revocation_endpoint: revocation.map(str::to_string),
+            client_id: client_id.into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: None,
+            status: McpOauthStatus::Connected,
+            last_refresh_at: None,
+            last_refresh_error: None,
+        };
+        let tool = crate::mcp_client::McpTool {
+            name: "search_files".into(),
+            description: None,
+            input_schema: serde_json::json!({}),
+            ..Default::default()
+        };
+        let conn = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                owner,
+                "filebox",
+                &format!("https://mcp.{tag}.example/mcp"),
+                "",
+                &[],
+                &[tool],
+                McpAuthMode::Oauth,
+                Some(&oauth),
+            )
+            .unwrap();
+        crate::mcp_registry::store_refreshed_mcp_tokens(vault, &conn, "A-old", Some("R-old"))
+            .unwrap();
+        conn
+    }
+
+    /// The node's client for `filebox` on `tag`'s hosts: enabled, `client_id`, `secret` in the org
+    /// vault row pinned to `auth.<tag>.example`. Written the way Enable writes it.
+    pub(crate) fn enable_filebox(
+        store: &SqliteWorkflowStore,
+        vault: &SecretsVault,
+        tag: &str,
+        client_id: &str,
+        secret: &str,
+    ) -> NodeClient {
+        let client = NodeClient {
+            connector_id: "filebox".into(),
+            client_id: client_id.into(),
+            issuer: format!("https://auth.{tag}.example"),
+            authorize_endpoint: format!("https://auth.{tag}.example/authorize"),
+            token_endpoint: format!("https://auth.{tag}.example/token"),
+            revocation_endpoint: Some(format!("https://auth.{tag}.example/revoke")),
+            secret_set: true,
+            updated_at: 1,
+            updated_by: "olga".into(),
+        };
+        let node = NodeConnector {
+            connector_id: "filebox".into(),
+            enabled: true,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            updated_at: 1,
+            updated_by: "olga".into(),
+        };
+        let plan = ClientPlan {
+            write: ClientWrite::Set {
+                client: Box::new(client.clone()),
+                secret: Some(secret.to_string()),
+            },
+            reauth: false,
+        };
+        store
+            .put_node_with_client(
+                vault,
+                &node,
+                &plan,
+                &format!("https://mcp.{tag}.example/mcp"),
+            )
+            .unwrap();
+        client
+    }
+}
+
+#[cfg(test)]
+mod exchange_tests {
+    use super::test_support::*;
+    use super::*;
+    use secrecy::ExposeSecret;
+    use std::sync::Arc;
+
+    fn world(tag: &str) -> (Arc<SqliteWorkflowStore>, Arc<SecretsVault>, NodeClient) {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        install_filebox_rows(&store, tag);
+        let client = enable_filebox(&store, &vault, tag, "c-1", "ORG-SECRET-value");
+        (store, vault, client)
+    }
+
+    fn exchange(code: &str, verifier: &str, redirect: &str) -> CodeExchangeRequest {
+        CodeExchangeRequest {
+            code: code.into(),
+            code_verifier: verifier.into(),
+            redirect_uri: redirect.into(),
+        }
+    }
+
+    const VERIFIER: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+
+    #[test]
+    fn the_secret_is_read_only_for_the_pinned_token_host() {
+        let (_store, vault, client) = world("secret-host");
+        let ok = org_client_secret(&vault, &client, &client.token_endpoint).unwrap();
+        assert_eq!(ok.expose_secret(), "ORG-SECRET-value");
+        // The revocation endpoint is on the token host: allowed. Any other host is refused, whatever
+        // asks: no value is read.
+        let revoke = client.revocation_endpoint.clone().unwrap();
+        assert!(org_client_secret(&vault, &client, &revoke).is_ok());
+        for other in [
+            "https://evil.example/token",
+            "https://auth.secret-host.example.evil.example/token",
+            "https://mcp.secret-host.example/token",
+            "not a url",
+            "",
+        ] {
+            let e = org_client_secret(&vault, &client, other).unwrap_err();
+            assert!(
+                matches!(e, OrchestratorError::PermissionDenied(_)),
+                "{other}: {e}"
+            );
+            assert!(!e.to_string().contains("ORG-SECRET"), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_row_not_pinned_to_exactly_the_token_host_is_never_read() {
+        let (_store, vault, client) = world("secret-pin");
+        let binding = client_secret_binding_id("filebox");
+        // A wildcard, a second destination, or another host on the row: refused.
+        for dests in [
+            vec!["*".to_string()],
+            vec!["*.secret-pin.example".to_string()],
+            vec![
+                "auth.secret-pin.example".to_string(),
+                "evil.example".to_string(),
+            ],
+            vec!["evil.example".to_string()],
+        ] {
+            vault
+                .put_secret(
+                    &binding,
+                    "ORG-SECRET-value",
+                    SecretKind::Connection,
+                    &dests,
+                    None,
+                )
+                .unwrap();
+            let e = org_client_secret(&vault, &client, &client.token_endpoint).unwrap_err();
+            assert!(
+                matches!(e, OrchestratorError::PermissionDenied(_)),
+                "{dests:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_unset_secret_is_a_conflict_that_names_the_admin() {
+        let (_store, vault, mut client) = world("secret-missing");
+        vault
+            .delete_secret(&client_secret_binding_id("filebox"))
+            .unwrap();
+        let e = org_client_secret(&vault, &client, &client.token_endpoint).unwrap_err();
+        assert!(matches!(e, OrchestratorError::Conflict(_)), "{e}");
+        assert!(e.to_string().contains("admin"), "{e}");
+        client.secret_set = false;
+        assert!(matches!(
+            org_client_secret(&vault, &client, &client.token_endpoint),
+            Err(OrchestratorError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn a_members_own_row_with_the_same_binding_id_is_never_the_org_secret() {
+        let (_store, vault, client) = world("secret-scope");
+        let binding = client_secret_binding_id("filebox");
+        vault
+            .put_secret_with_owner(
+                &binding,
+                "MEMBER-VALUE",
+                SecretKind::Connection,
+                &["auth.secret-scope.example".to_string()],
+                None,
+                "ada",
+            )
+            .unwrap();
+        let got = org_client_secret(&vault, &client, &client.token_endpoint).unwrap();
+        assert_eq!(got.expose_secret(), "ORG-SECRET-value");
+    }
+
+    #[test]
+    fn the_exchange_body_is_checked_before_anything_is_sent() {
+        let good = exchange("code-1", VERIFIER, "squrell://oauth");
+        assert!(check_code_exchange(&good).is_ok());
+        for uri in [
+            "http://127.0.0.1:51234/callback",
+            "http://127.0.0.1:1/oauth/cb",
+            "http://127.0.0.1:5000",
+        ] {
+            assert!(
+                check_code_exchange(&exchange("c", VERIFIER, uri)).is_ok(),
+                "{uri}"
+            );
+        }
+        for uri in [
+            "",
+            "squrell://oauth/extra",
+            "squrell://other",
+            "https://evil.example/callback",
+            "https://127.0.0.1:5000/cb",
+            "http://localhost:5000/cb",
+            "http://127.0.0.1/cb",
+            "http://127.0.0.1:5000/cb?x=1",
+            "http://127.0.0.1:5000/cb#f",
+            "http://user@127.0.0.1:5000/cb",
+            "http://127.0.0.1.evil.example:5000/cb",
+            "http://[::1]:5000/cb",
+        ] {
+            let e = check_code_exchange(&exchange("c", VERIFIER, uri)).unwrap_err();
+            assert!(
+                matches!(e, OrchestratorError::InvalidContract(_)),
+                "{uri}: {e}"
+            );
+            assert!(e.to_string().contains("redirectUri"), "{uri}: {e}");
+        }
+        for code in ["", "a b", "a\nb", "a\0b", &"x".repeat(MAX_CODE_LEN + 1)] {
+            let e = check_code_exchange(&exchange(code, VERIFIER, "squrell://oauth")).unwrap_err();
+            assert!(e.to_string().contains("`code`"), "{e}");
+        }
+        for verifier in ["short", &"a".repeat(129), &format!("{}!", "a".repeat(50))] {
+            let e = check_code_exchange(&exchange("c", verifier, "squrell://oauth")).unwrap_err();
+            assert!(e.to_string().contains("codeVerifier"), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_never_quotes_the_code_or_the_verifier_and_debug_hides_them() {
+        let bad = exchange("CODE-VALUE-123", "short-VERIFIER-value", "squrell://oauth");
+        let e = check_code_exchange(&bad).unwrap_err();
+        for v in ["CODE-VALUE-123", "short-VERIFIER-value"] {
+            assert!(!e.to_string().contains(v), "{e}");
+            assert!(!format!("{bad:?}").contains(v));
+        }
+    }
+
+    #[test]
+    fn the_body_takes_no_endpoint_and_no_client() {
+        for extra in [
+            "tokenEndpoint",
+            "clientId",
+            "clientSecret",
+            "resource",
+            "extra",
+        ] {
+            let raw = format!(
+                r#"{{ "code": "c", "codeVerifier": "{VERIFIER}", "redirectUri": "squrell://oauth", "{extra}": "x" }}"#
+            );
+            assert!(
+                serde_json::from_str::<CodeExchangeRequest>(&raw).is_err(),
+                "{extra}"
+            );
+        }
+        let raw = format!(
+            r#"{{ "code": "c", "codeVerifier": "{VERIFIER}", "redirectUri": "squrell://oauth" }}"#
+        );
+        assert!(serde_json::from_str::<CodeExchangeRequest>(&raw).is_ok());
+    }
+
+    #[test]
+    fn a_connector_row_uses_the_nodes_client_only_on_the_connectors_own_url() {
+        let (store, _vault, client) = world("row-client");
+        let mut conn = crate::mcp_registry::McpConnection {
+            connection_id: "filebox".into(),
+            owner_user_id: "ada".into(),
+            scope: SecretScope::User,
+            url: "https://mcp.row-client.example/mcp".into(),
+            secret_binding_id: String::new(),
+            header_bindings: vec![],
+            auth_mode: crate::mcp_registry::McpAuthMode::Oauth,
+            oauth: None,
+            tools: vec![],
+            side_effects: Default::default(),
+            created_at: 1,
+            updated_at: 1,
+            ask_tools: vec![],
+            created_by_user_id: String::new(),
+            timeout_ms: crate::mcp_registry::DEFAULT_MCP_TIMEOUT_MS,
+            instructions: None,
+            approved_vendor_text: Default::default(),
+            effects: Default::default(),
+        };
+        match store.row_client(&conn).unwrap() {
+            RowClient::Org(org) => {
+                assert_eq!(org.client.as_ref(), Some(&client));
+                assert!(org.keeps_secret);
+            }
+            other => panic!("{other:?}"),
+        }
+        // A server the member added by hand under the id, an org-scope row, and another id.
+        conn.url = "https://elsewhere.example/mcp".into();
+        assert_eq!(store.row_client(&conn).unwrap(), RowClient::Own);
+        conn.url = "https://mcp.row-client.example/mcp".into();
+        conn.scope = SecretScope::Org;
+        assert_eq!(store.row_client(&conn).unwrap(), RowClient::Own);
+        conn.scope = SecretScope::User;
+        conn.connection_id = "linear".into();
+        assert_eq!(store.row_client(&conn).unwrap(), RowClient::Own);
     }
 }

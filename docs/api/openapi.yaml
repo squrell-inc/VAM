@@ -1308,6 +1308,83 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /v1/connectors/{id}/connection/oauth/code:
+    post:
+      summary: Exchange an authorization code on the node (admin-supplied client with a secret)
+      description: |
+        For an MCP connector with `provider.client: org` and `clientSecret: org_vault`
+        (`secrets:write`; Idempotency-Key required). The app runs the browser sign-in with
+        PKCE against `node.client.authorizeEndpoint` and the admin's client id, then posts
+        what it got. The body names no endpoint and no client; any other field is a 400.
+        `redirectUri` must be the app's own: `squrell://oauth` or
+        `http://127.0.0.1:<port>/<path>`. `codeVerifier` is 43-128 RFC 7636 characters.
+        `vamd` posts `grant_type=authorization_code`, `code`, `code_verifier`,
+        `redirect_uri`, `client_id`, the RFC 8707 `resource` and the org's `client_secret`
+        to the token endpoint pinned at Enable (DNS-pinned public address, no redirects),
+        then writes the caller's connection (the node's client id and endpoints), stores
+        the refresh token and the access token, and lists the vetted tools. Every refusal
+        is decided before the request and writes nothing. The answer is the caller's list
+        entry: no code, verifier, secret or token is in it or in any error.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code, codeVerifier, redirectUri]
+              properties:
+                code:
+                  type: string
+                codeVerifier:
+                  type: string
+                redirectUri:
+                  type: string
+      responses:
+        "200":
+          description: Connected. The caller's list entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorEntry"
+        "400":
+          description: An unknown body field, a redirect URI that is not the app's, a malformed code or verifier, a connector with no node exchange (it does not keep a secret), or the provider refused the code (spent, expired, wrong verifier).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Caller lacks `secrets:write`, or the node has not enabled the connector.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No such connector.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: The admin has saved no client or secret yet, or the provider refused the client id or secret the admin entered. Nothing was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: The provider could not be reached, or answered with no refresh token. Nothing was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /v1/connectors/{id}/connection/check:
     post:
       summary: Check a REST connection with one refresh
@@ -3478,7 +3555,11 @@ paths:
         - `{id}/oauth/refresh-token` pinned to the token endpoint host
         - `{id}/oauth/client-secret` (optional) pinned to the token endpoint host
 
-        vamd never sees the authorization code and does not open a browser.
+        vamd never sees the authorization code and does not open a browser, except
+        for a connector with an admin-supplied client and secret (`clientSecret:
+        org_vault`): its tokens come only from
+        `POST /v1/connectors/{id}/connection/oauth/code`, and this route answers 400
+        for it. A `clientSecret` is refused (400) for any connector-backed row.
         Re-upsert replaces vault ciphertext for those bindings. The connection
         must already exist with `authMode=oauth`; static connections and other
         owners are rejected. Responses include binding ids and updated

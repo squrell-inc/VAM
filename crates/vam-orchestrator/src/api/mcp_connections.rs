@@ -292,6 +292,35 @@ fn parse_connect_oauth(req: ConnectMcpOauthRequest) -> Result<McpOauthMetadata, 
     })
 }
 
+/// The `oauth` block of a connect to a connector that uses the admin's client (CN-5.3, O3): the
+/// token endpoint and client id must be the node's (a block naming others is refused), and the
+/// authorization server, revocation endpoint, resource and registration method are the node's and
+/// the connector's whatever the request says.
+fn pin_org_oauth(
+    id: &str,
+    org: &crate::connector_client::OrgConnector,
+    oauth: Option<McpOauthMetadata>,
+) -> Result<Option<McpOauthMetadata>, OrchestratorError> {
+    let Some(node) = org.client.as_ref() else {
+        return Err(OrchestratorError::Conflict(format!(
+            "`{id}` has no OAuth client saved by your admin yet"
+        )));
+    };
+    let Some(mut oauth) = oauth else {
+        return Ok(None);
+    };
+    if oauth.token_endpoint != node.token_endpoint || oauth.client_id != node.client_id {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "`{id}` uses the OAuth client and token endpoint your admin saved; a connection that names another is refused"
+        )));
+    }
+    oauth.authorization_server = node.issuer.clone();
+    oauth.revocation_endpoint = node.revocation_endpoint.clone();
+    oauth.resource = org.mcp_url.clone();
+    oauth.registration_method = McpOauthRegistrationMethod::Manual;
+    Ok(Some(oauth))
+}
+
 /// Org connections snapshot with the org credential only, so a shared
 /// snapshot is never taken with one member's personal token.
 fn credential_caller(scope: SecretScope, owner: &str) -> &str {
@@ -435,8 +464,25 @@ async fn connect(
         None => None,
         Some(oauth) => Some(parse_connect_oauth(oauth)?),
     };
+    // A connector whose client is the admin's: the client id and endpoints are the node's, never the
+    // request's (O3). Refused here, before anything is written.
+    let org = match &policy {
+        Some(_) => state.store.org_connector(&req.connection_id)?,
+        None => None,
+    };
+    let requested_oauth = match &org {
+        Some(org) => pin_org_oauth(&req.connection_id, org, requested_oauth)?,
+        None => requested_oauth,
+    };
     let (auth_mode, oauth) =
         resolve_connection_auth(existing.as_ref(), requested_mode, requested_oauth)?;
+    if org.is_some() && auth_mode != McpAuthMode::Oauth {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "`{}` signs in with the OAuth client your admin saved: connect it with authMode oauth",
+            req.connection_id
+        ))
+        .into());
+    }
     // Hold the refresh gate for an existing OAuth connection so an in-flight
     // token refresh cannot write bindings back after a mode switch or before
     // this update finishes.
@@ -946,6 +992,27 @@ async fn upsert_oauth_tokens(
     let owner = vault_owner_user_id(scope, auth.owner_user_id()).to_string();
     let conn = state.store.get_mcp_connection(scope, &owner, &id)?;
     let policy = connectors::gate_mcp_write(&state.store, &id, None, Some(&conn.url))?;
+    if policy.is_some() {
+        // A connector's client secret is the org's (or the publisher's) and never comes from the
+        // app (O1, O5), and a connector whose secret the node keeps connects by the node's code
+        // exchange: tokens the app got are refused. Nothing is written.
+        if req.client_secret.is_some() {
+            return Err(OrchestratorError::InvalidContract(
+                "a connector's client secret is not accepted from the app".into(),
+            )
+            .into());
+        }
+        if state
+            .store
+            .org_connector(&id)?
+            .is_some_and(|org| org.keeps_secret)
+        {
+            return Err(OrchestratorError::InvalidContract(format!(
+                "`{id}` connects through the node's code exchange: use POST /v1/connectors/{id}/connection/oauth/code"
+            ))
+            .into());
+        }
+    }
     // Serialize with tool-call refresh for this connection: a refresh that
     // started with the old credentials must not finish afterwards and mark
     // the freshly reconnected connection needs_reauth.
@@ -1011,29 +1078,7 @@ async fn upsert_oauth_tokens(
     drop(credentials);
     // A connector's tools are listed once its tokens are in, and only the vetted ones stay.
     let conn = match &policy {
-        Some(p) => {
-            let listed = snapshot_connection(&state, &conn).await?;
-            state.store.upsert_mcp_connection(
-                scope,
-                &owner,
-                &id,
-                &conn.url,
-                "",
-                &conn.header_bindings,
-                &listed.tools,
-                McpAuthMode::Oauth,
-                conn.oauth.as_ref(),
-            )?;
-            if listed.instructions.is_some() {
-                state.store.set_mcp_instructions(
-                    scope,
-                    &owner,
-                    &id,
-                    listed.instructions.as_deref(),
-                )?;
-            }
-            state.store.apply_connector_policy(scope, &owner, p)?
-        }
+        Some(p) => adopt_connector_tools(&state, &conn, p).await?,
         None => conn,
     };
     let mut bindings_json = serde_json::json!({
@@ -1044,7 +1089,52 @@ async fn upsert_oauth_tokens(
         bindings_json["clientSecret"] = serde_json::Value::String(client_secret_binding_id);
     }
     let has_refresh = refresh_binding_exists(&state.vault, &conn)?;
-    // A connector-backed row (Linear): its reconnect notification is done.
+    connector_row_reconnected(&state, &conn).await?;
+    Ok(respond(serde_json::json!({
+        "connection": connection_value(&conn, has_refresh)?,
+        "bindings": bindings_json,
+    })))
+}
+
+/// Lists a connector's tools with the row's stored tokens and keeps the vetted ones, the
+/// definition's instructions and risk classes. Shared by the app's token upsert and the node's code
+/// exchange.
+pub(crate) async fn adopt_connector_tools(
+    state: &AppState,
+    conn: &McpConnection,
+    policy: &connectors::McpPolicy,
+) -> Result<McpConnection, ApiError> {
+    let (scope, owner, id) = (
+        conn.scope,
+        conn.owner_user_id.clone(),
+        conn.connection_id.clone(),
+    );
+    let listed = snapshot_connection(state, conn).await?;
+    state.store.upsert_mcp_connection(
+        scope,
+        &owner,
+        &id,
+        &conn.url,
+        "",
+        &conn.header_bindings,
+        &listed.tools,
+        McpAuthMode::Oauth,
+        conn.oauth.as_ref(),
+    )?;
+    if listed.instructions.is_some() {
+        state
+            .store
+            .set_mcp_instructions(scope, &owner, &id, listed.instructions.as_deref())?;
+    }
+    Ok(state.store.apply_connector_policy(scope, &owner, policy)?)
+}
+
+/// A connected row is back: a connector-backed row's reconnect notification is done, and runs
+/// parked on it continue.
+pub(crate) async fn connector_row_reconnected(
+    state: &AppState,
+    conn: &McpConnection,
+) -> Result<(), ApiError> {
     if conn.scope == SecretScope::User
         && state
             .store
@@ -1058,11 +1148,8 @@ async fn upsert_oauth_tokens(
         );
     }
     // Runs parked on this connection (reauth) continue now that it is connected again.
-    super::reauth::resume_parked(&state, &conn).await;
-    Ok(respond(serde_json::json!({
-        "connection": connection_value(&conn, has_refresh)?,
-        "bindings": bindings_json,
-    })))
+    super::reauth::resume_parked(state, conn).await;
+    Ok(())
 }
 
 fn resolve_token_expires_at(

@@ -11,6 +11,7 @@ use std::time::Duration;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
+use crate::connector_client::{org_client_secret, RowClient};
 use crate::error::OrchestratorError;
 use crate::mcp_registry::{
     delete_mcp_connection_secrets, mcp_oauth_client_secret_binding_id,
@@ -214,16 +215,40 @@ fn refresh_target(
     refresh_token: &SecretString,
     client_secret: Option<&SecretString>,
 ) -> Result<RefreshedToken, RefreshFailure> {
-    let invalid = || RefreshFailure::needs_reauth("invalid OAuth token endpoint");
-    // Test-node seam: the Entra token endpoint reaches the runner's loopback mock only.
+    let (client, endpoint) = pinned_token_client(target.token_endpoint)?;
+    exchange(&client, &endpoint, target, refresh_token, client_secret)
+}
+
+/// The loopback stand-in for an authorization-server URL: the test-node seam of a process-mode
+/// `vamd` (the `oauth:<origin>` and Entra keys) and, in unit tests, [`test_seam`]. `None` on every
+/// other node, which then keeps the public-address rules.
+fn mapped_loopback(url: &str) -> Option<url::Url> {
+    #[cfg(test)]
+    if let Some(mapped) = test_seam::map(url) {
+        return Some(mapped);
+    }
     #[cfg(feature = "process-guest")]
-    if let Some(mapped) = crate::process_mode::map_connector_url(target.token_endpoint) {
+    if let Some(mapped) = crate::process_mode::map_connector_url(url) {
+        return Some(mapped);
+    }
+    let _ = url;
+    None
+}
+
+/// The HTTP client and URL for one request to `token_endpoint`: HTTPS only, the host's DNS answer
+/// pinned to a public address, no redirects, no proxy. A request to this client reaches the host the
+/// endpoint names and no other: nothing the authorization server answers moves it.
+fn pinned_token_client(
+    token_endpoint: &str,
+) -> Result<(reqwest::blocking::Client, url::Url), RefreshFailure> {
+    let invalid = || RefreshFailure::needs_reauth("invalid OAuth token endpoint");
+    if let Some(mapped) = mapped_loopback(token_endpoint) {
         let client = client_builder()
             .build()
             .map_err(|_| RefreshFailure::transient("failed to create OAuth HTTP client"))?;
-        return exchange(&client, &mapped, target, refresh_token, client_secret);
+        return Ok((client, mapped));
     }
-    let endpoint = url::Url::parse(target.token_endpoint).map_err(|_| invalid())?;
+    let endpoint = url::Url::parse(token_endpoint).map_err(|_| invalid())?;
     if endpoint.scheme() != "https"
         || endpoint.host_str().is_none()
         || !endpoint.username().is_empty()
@@ -241,13 +266,39 @@ fn refresh_target(
         .apply_to_client_builder(client_builder())
         .build()
         .map_err(|_| RefreshFailure::transient("failed to create OAuth HTTP client"))?;
-    exchange(
-        &client,
-        &pinned.final_url,
-        target,
-        refresh_token,
-        client_secret,
-    )
+    Ok((client, pinned.final_url))
+}
+
+/// Unit-test stand-ins for authorization-server hosts, by exact host, so a route test reaches a
+/// loopback server while the code under test still sees the `https://` endpoint the node pinned.
+/// Tests use hosts of their own so they never share an entry.
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    static HOSTS: Mutex<BTreeMap<String, url::Url>> = Mutex::new(BTreeMap::new());
+
+    /// `host` (no port) is answered by `http://127.0.0.1:<port>`; the path and query are kept.
+    pub(crate) fn serve(host: &str, loopback: url::Url) {
+        HOSTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(host.to_string(), loopback);
+    }
+
+    pub(crate) fn map(raw: &str) -> Option<url::Url> {
+        let u = url::Url::parse(raw).ok()?;
+        let base = HOSTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(u.host_str()?)
+            .cloned()?;
+        let mut out = base;
+        out.set_path(u.path());
+        out.set_query(u.query());
+        Some(out)
+    }
 }
 
 /// Loopback-only test seam. HTTPS metadata is mapped to HTTP on loopback for
@@ -384,9 +435,19 @@ fn exchange(
         refresh_token.expose_secret().as_str(),
         client_secret.map(|secret| secret.expose_secret().as_str()),
     );
+    post_token_form(client, endpoint, &form)
+}
+
+/// One POST of `form` to a token endpoint and the parsed answer. The failure carries a fixed or
+/// allowlisted reason, never the response body.
+fn post_token_form(
+    client: &reqwest::blocking::Client,
+    endpoint: &url::Url,
+    form: &[(&str, &str)],
+) -> Result<RefreshedToken, RefreshFailure> {
     let response = client
         .post(endpoint.clone())
-        .form(&form)
+        .form(form)
         .send()
         .map_err(|_| RefreshFailure::transient("OAuth token endpoint request failed"))?;
     let status = response.status();
@@ -417,6 +478,52 @@ fn exchange(
         expires_in: token.expires_in,
         refresh_token: token.refresh_token,
     })
+}
+
+/// One authorization-code exchange at a connector's pinned token endpoint (CN-5.3, D29).
+pub(crate) struct CodeGrant<'a> {
+    /// The endpoint the node pinned at Enable. Never a request's value.
+    pub(crate) token_endpoint: &'a str,
+    pub(crate) client_id: &'a str,
+    /// The connector's MCP URL (RFC 8707 `resource`).
+    pub(crate) resource: &'a str,
+    pub(crate) code: &'a str,
+    pub(crate) code_verifier: &'a str,
+    pub(crate) redirect_uri: &'a str,
+}
+
+/// The form of a code exchange. Pure, so the shape is unit-testable without a server.
+fn code_form<'a>(grant: &CodeGrant<'a>, client_secret: &'a str) -> Vec<(&'a str, &'a str)> {
+    vec![
+        ("grant_type", "authorization_code"),
+        ("code", grant.code),
+        ("client_id", grant.client_id),
+        // client_secret_post: the org's client is confidential.
+        ("client_secret", client_secret),
+        ("code_verifier", grant.code_verifier),
+        ("redirect_uri", grant.redirect_uri),
+        ("resource", grant.resource),
+    ]
+}
+
+/// Exchange an authorization code with the org's client secret. The secret leaves the node only
+/// here, in the body of one POST to the pinned public address of `grant.token_endpoint` (HTTPS, the
+/// host's DNS answer pinned, no redirects, no proxy). The caller has already checked that this host is
+/// the one the secret is pinned to. A failure is a fixed or allowlisted reason (`invalid_client`,
+/// `invalid_grant`, ...): never the endpoint, the code, the verifier or a token.
+pub(crate) fn exchange_authorization_code(
+    grant: &CodeGrant<'_>,
+    client_secret: &SecretString,
+) -> Result<RefreshedToken, RefreshFailure> {
+    validate_oauth_secret_value(client_secret.expose_secret())
+        .map_err(|_| RefreshFailure::needs_reauth("invalid OAuth client secret"))?;
+    for value in [grant.code, grant.code_verifier] {
+        validate_oauth_secret_value(value)
+            .map_err(|_| RefreshFailure::needs_reauth("invalid OAuth authorization code"))?;
+    }
+    let (client, endpoint) = pinned_token_client(grant.token_endpoint)?;
+    let form = code_form(grant, client_secret.expose_secret().as_str());
+    post_token_form(&client, &endpoint, &form)
 }
 
 /// Outcome of one best-effort RFC 7009 revocation. `reason` is safe to log:
@@ -499,6 +606,34 @@ fn revoke_oauth_refresh_if_configured(vault: &SecretsVault, conn: &McpConnection
     else {
         return RevokeAttempt::skipped();
     };
+    // A row of a connector whose client is the admin's revokes with the node's client: the pinned
+    // revocation endpoint, the node's client id and the org secret. The row's own are not used.
+    let org = match vault.workflow_store().row_client(conn) {
+        Ok(RowClient::Org(org)) => Some(org),
+        Ok(RowClient::Own) => None,
+        Err(_) => return RevokeAttempt::failed("credential store unavailable"),
+    };
+    let org_oauth: Option<McpOauthMetadata> = match &org {
+        None => None,
+        Some(org) => {
+            let Some(node) = org.client.as_ref() else {
+                return RevokeAttempt::skipped();
+            };
+            // Tokens of an earlier client or endpoint are not revoked with another client's secret.
+            if oauth.client_id != node.client_id || oauth.token_endpoint != node.token_endpoint {
+                return RevokeAttempt::skipped();
+            }
+            let Some(revocation) = node.revocation_endpoint.clone() else {
+                return RevokeAttempt::skipped();
+            };
+            Some(McpOauthMetadata {
+                revocation_endpoint: Some(revocation),
+                client_id: node.client_id.clone(),
+                ..oauth.clone()
+            })
+        }
+    };
+    let oauth = org_oauth.as_ref().unwrap_or(oauth);
     if oauth
         .revocation_endpoint
         .as_deref()
@@ -521,6 +656,20 @@ fn revoke_oauth_refresh_if_configured(vault: &SecretsVault, conn: &McpConnection
         Ok(token) => token,
         Err(_) => return RevokeAttempt::failed("credential store unavailable"),
     };
+    if let Some(org) = &org {
+        let client_secret = match (
+            org.keeps_secret,
+            org.client.as_ref(),
+            &oauth.revocation_endpoint,
+        ) {
+            (true, Some(node), Some(endpoint)) => match org_client_secret(vault, node, endpoint) {
+                Ok(secret) => Some(secret),
+                Err(_) => return RevokeAttempt::failed("OAuth client secret unavailable"),
+            },
+            _ => None,
+        };
+        return dispatch_revoke(oauth, &refresh_token, client_secret.as_ref());
+    }
     let client_secret_id = mcp_oauth_client_secret_binding_id(&conn.connection_id);
     let client_secret =
         match vault.has_binding_at(conn.scope, &conn.owner_user_id, &client_secret_id) {
@@ -579,6 +728,14 @@ pub(crate) fn revoke_refresh_token(
         Ok(endpoint) => endpoint,
         Err(attempt) => return attempt,
     };
+    // Test-node seam: the same loopback stand-ins as the token endpoint.
+    if let Some(mapped) = mapped_loopback(endpoint.as_str()) {
+        let client = match client_builder().build() {
+            Ok(client) => client,
+            Err(_) => return RevokeAttempt::failed("failed to create OAuth HTTP client"),
+        };
+        return post_revocation(&client, &mapped, oauth, refresh_token, client_secret);
+    }
     let host = match endpoint.host_str() {
         Some(host) => host.to_owned(),
         None => return RevokeAttempt::failed("invalid OAuth revocation endpoint"),
@@ -1472,5 +1629,305 @@ mod tests {
             store.get_mcp_connection(SecretScope::User, "alice", "acme"),
             Err(OrchestratorError::NotFound(_))
         ));
+    }
+}
+
+/// The code exchange and the revoke of a connector whose client is the admin's (CN-5.3, CN-5.4):
+/// what is sent, to which host, with which secret, and what an answer may say.
+#[cfg(test)]
+mod org_client_tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    use super::*;
+    use crate::connector_client::test_support::{enable_filebox, install_filebox_rows, member_row};
+    use crate::mcp_registry::{McpOauthRegistrationMethod, McpOauthStatus};
+    use crate::secrets::SecretScope;
+
+    const SECRET: &str = "ORG-SECRET-value-9f2c";
+
+    /// One loopback answer: reads one request, replies, returns the request text.
+    fn serve_once(status: &str, payload: &str) -> (url::Url, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let (status, payload) = (status.to_owned(), payload.to_owned());
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let body_start = loop {
+                let mut chunk = [0u8; 4096];
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = request.windows(4).position(|b| b == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let header = String::from_utf8_lossy(&request[..body_start]).to_ascii_lowercase();
+            let length: usize = header
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length: ").map(str::to_owned))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            while request.len() - body_start < length {
+                let mut chunk = [0u8; 4096];
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+            }
+            let reply = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (base, worker)
+    }
+
+    fn form_of(request: &str) -> std::collections::BTreeMap<String, String> {
+        url::form_urlencoded::parse(request.split_once("\r\n\r\n").unwrap().1.as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect()
+    }
+
+    fn grant<'a>(endpoint: &'a str) -> CodeGrant<'a> {
+        CodeGrant {
+            token_endpoint: endpoint,
+            client_id: "c-1",
+            resource: "https://mcp.example/mcp",
+            code: "CODE-1",
+            code_verifier: "VERIFIER-abcdefghijklmnopqrstuvwxyz0123456789-ABCDE",
+            redirect_uri: "squrell://oauth",
+        }
+    }
+
+    #[test]
+    fn a_code_exchange_posts_exactly_these_fields_to_the_pinned_endpoint() {
+        let (base, worker) = serve_once(
+            "200 OK",
+            r#"{"access_token":"A1","token_type":"bearer","expires_in":3600,"refresh_token":"R1"}"#,
+        );
+        test_seam::serve("auth.code-form.example", base);
+        let secret = SecretString::new(SECRET.into());
+        let tokens =
+            exchange_authorization_code(&grant("https://auth.code-form.example/token"), &secret)
+                .ok()
+                .unwrap();
+        assert_eq!(tokens.access_token, "A1");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("R1"));
+        assert_eq!(tokens.expires_in, Some(3600));
+        let request = worker.join().unwrap();
+        assert!(request.starts_with("POST /token HTTP/1.1\r\n"), "{request}");
+        let form = form_of(&request);
+        assert_eq!(
+            form.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "client_id",
+                "client_secret",
+                "code",
+                "code_verifier",
+                "grant_type",
+                "redirect_uri",
+                "resource"
+            ]
+        );
+        assert_eq!(form["grant_type"], "authorization_code");
+        assert_eq!(form["client_secret"], SECRET);
+        assert_eq!(form["client_id"], "c-1");
+        assert_eq!(form["code"], "CODE-1");
+        assert_eq!(form["redirect_uri"], "squrell://oauth");
+        assert_eq!(form["resource"], "https://mcp.example/mcp");
+    }
+
+    #[test]
+    fn a_refused_exchange_names_a_code_never_a_value() {
+        for (status, body, kind, reason) in [
+            (
+                "401 Unauthorized",
+                r#"{"error":"invalid_client","error_description":"bad ORG-SECRET-value-9f2c"}"#,
+                RefreshFailureKind::NeedsReauth,
+                "invalid_client",
+            ),
+            (
+                "400 Bad Request",
+                r#"{"error":"invalid_grant","error_description":"CODE-1 spent"}"#,
+                RefreshFailureKind::NeedsReauth,
+                "invalid_grant",
+            ),
+            (
+                "503 Service Unavailable",
+                r#"{"error":"temporarily_unavailable"}"#,
+                RefreshFailureKind::Transient,
+                "OAuth token endpoint unavailable (HTTP 503)",
+            ),
+            (
+                "200 OK",
+                r#"{"not":"a token"}"#,
+                RefreshFailureKind::Transient,
+                "invalid OAuth token response",
+            ),
+        ] {
+            let (base, worker) = serve_once(status, body);
+            let host = format!("auth.code-refused-{}.example", reason.len());
+            test_seam::serve(&host, base);
+            let secret = SecretString::new(SECRET.into());
+            let failure =
+                exchange_authorization_code(&grant(&format!("https://{host}/token")), &secret)
+                    .err()
+                    .unwrap();
+            worker.join().unwrap();
+            assert_eq!(failure.kind, kind, "{status}");
+            assert_eq!(failure.reason, reason);
+            for value in [SECRET, "CODE-1", "VERIFIER-abc", &host] {
+                assert!(!failure.reason.contains(value), "{}", failure.reason);
+            }
+        }
+    }
+
+    #[test]
+    fn the_exchange_never_leaves_the_public_https_rules() {
+        // No test-seam entry and no process-mode seam: the pin refuses a restricted address and a
+        // plain-http endpoint before any request, so the secret is never sent.
+        let secret = SecretString::new(SECRET.into());
+        for endpoint in [
+            "https://127.0.0.1:9/token",
+            "https://10.0.0.1/token",
+            "http://auth.never-mapped.example/token",
+            "https://user:pw@auth.never-mapped.example/token",
+            "not a url",
+        ] {
+            let failure = exchange_authorization_code(&grant(endpoint), &secret)
+                .err()
+                .unwrap();
+            assert!(
+                matches!(
+                    failure.reason.as_str(),
+                    "OAuth token endpoint rejected" | "invalid OAuth token endpoint"
+                ),
+                "{endpoint}: {}",
+                failure.reason
+            );
+        }
+        // A value that cannot travel in a form is refused first.
+        let bad_secret = SecretString::new("line\nbreak".into());
+        let failure = exchange_authorization_code(
+            &grant("https://auth.never-mapped.example/token"),
+            &bad_secret,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(failure.reason, "invalid OAuth client secret");
+    }
+
+    #[test]
+    fn a_disconnect_revokes_at_the_nodes_endpoint_with_the_org_secret() {
+        let store = std::sync::Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        install_filebox_rows(&store, "revoke-ok");
+        enable_filebox(&store, &vault, "revoke-ok", "c-1", SECRET);
+        // The row names a revocation endpoint of its own: the node's is the one used.
+        let conn = member_row(
+            &store,
+            &vault,
+            "revoke-ok",
+            "ada",
+            "c-1",
+            Some("https://evil.example/revoke"),
+        );
+        let (base, worker) = serve_once("200 OK", "");
+        test_seam::serve("auth.revoke-ok.example", base);
+        let attempt = best_effort_revoke_oauth_refresh(&vault, &conn);
+        assert!(attempt.attempted && attempt.succeeded, "{attempt:?}");
+        let request = worker.join().unwrap();
+        assert!(
+            request.starts_with("POST /revoke HTTP/1.1\r\n"),
+            "{request}"
+        );
+        let form = form_of(&request);
+        assert_eq!(form["token"], "R-old");
+        assert_eq!(form["token_type_hint"], "refresh_token");
+        assert_eq!(form["client_id"], "c-1");
+        assert_eq!(form["client_secret"], SECRET);
+    }
+
+    #[test]
+    fn tokens_of_another_client_are_not_revoked_with_this_clients_secret() {
+        let store = std::sync::Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        install_filebox_rows(&store, "revoke-old");
+        enable_filebox(&store, &vault, "revoke-old", "c-2", SECRET);
+        // The member's tokens belong to client c-1; the admin moved to c-2.
+        let conn = member_row(
+            &store,
+            &vault,
+            "revoke-old",
+            "ada",
+            "c-1",
+            Some("https://auth.revoke-old.example/revoke"),
+        );
+        // No server is registered: any request would fail, and `attempted` would be true.
+        let attempt = best_effort_revoke_oauth_refresh(&vault, &conn);
+        assert!(!attempt.attempted, "{attempt:?}");
+    }
+
+    #[test]
+    fn a_row_of_another_server_keeps_its_own_client_and_secret_for_revoke() {
+        let store = std::sync::Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        install_filebox_rows(&store, "revoke-own");
+        enable_filebox(&store, &vault, "revoke-own", "c-1", SECRET);
+        // A server added by hand under another connection id uses the per-row secret as before.
+        let oauth = McpOauthMetadata {
+            resource: "https://other.example/mcp".into(),
+            authorization_server: "https://auth.revoke-own.example".into(),
+            token_endpoint: "https://auth.revoke-own.example/token".into(),
+            revocation_endpoint: Some("https://auth.revoke-own.example/revoke".into()),
+            client_id: "member-client".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: None,
+            status: McpOauthStatus::Connected,
+            last_refresh_at: None,
+            last_refresh_error: None,
+        };
+        let conn = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                "other",
+                "https://other.example/mcp",
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&oauth),
+            )
+            .unwrap();
+        crate::mcp_registry::store_mcp_oauth_tokens(
+            &vault,
+            &conn,
+            &crate::mcp_registry::McpOauthTokenWrite {
+                access_token: "A".into(),
+                refresh_token: "R-other".into(),
+                client_secret: Some("MEMBER-OWN-SECRET".into()),
+            },
+            None,
+            crate::users::UserRole::Member,
+        )
+        .unwrap();
+        let (base, worker) = serve_once("200 OK", "");
+        test_seam::serve("auth.revoke-own.example", base);
+        let attempt = best_effort_revoke_oauth_refresh(&vault, &conn);
+        assert!(attempt.succeeded, "{attempt:?}");
+        let form = form_of(&worker.join().unwrap());
+        assert_eq!(form["client_id"], "member-client");
+        assert_eq!(form["client_secret"], "MEMBER-OWN-SECRET");
     }
 }

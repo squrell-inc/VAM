@@ -1758,7 +1758,18 @@ pub(crate) async fn lock_mcp_credentials(
     store: &SqliteWorkflowStore,
     conn: &crate::mcp_registry::McpConnection,
 ) -> Result<McpCredentialWriteGuard, String> {
-    let gate = mcp_refresh_gate(store, conn)?;
+    lock_mcp_credentials_for(store, conn.scope, &conn.owner_user_id, &conn.connection_id).await
+}
+
+/// [`lock_mcp_credentials`] for a connection that may not have a row yet (the code exchange of a
+/// member's first connect holds the same gate a refresh of that connection would).
+pub(crate) async fn lock_mcp_credentials_for(
+    store: &SqliteWorkflowStore,
+    scope: crate::secrets::SecretScope,
+    owner_user_id: &str,
+    connection_id: &str,
+) -> Result<McpCredentialWriteGuard, String> {
+    let gate = mcp_refresh_gate_for(store, scope, owner_user_id, connection_id)?;
     let state = Arc::clone(&gate.state).lock_owned().await;
     Ok(McpCredentialWriteGuard { _gate: gate, state })
 }
@@ -1766,6 +1777,15 @@ pub(crate) async fn lock_mcp_credentials(
 fn mcp_refresh_gate(
     store: &SqliteWorkflowStore,
     conn: &crate::mcp_registry::McpConnection,
+) -> Result<Arc<McpRefreshGate>, String> {
+    mcp_refresh_gate_for(store, conn.scope, &conn.owner_user_id, &conn.connection_id)
+}
+
+fn mcp_refresh_gate_for(
+    store: &SqliteWorkflowStore,
+    scope: crate::secrets::SecretScope,
+    owner_user_id: &str,
+    connection_id: &str,
 ) -> Result<Arc<McpRefreshGate>, String> {
     type Key = (usize, &'static str, String, String);
     static GATES: OnceLock<Mutex<HashMap<Key, Weak<McpRefreshGate>>>> = OnceLock::new();
@@ -1778,9 +1798,9 @@ fn mcp_refresh_gate(
     }
     let key = (
         store as *const SqliteWorkflowStore as usize,
-        conn.scope.as_str(),
-        conn.owner_user_id.clone(),
-        conn.connection_id.clone(),
+        scope.as_str(),
+        owner_user_id.to_string(),
+        connection_id.to_string(),
     );
     if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
         return Ok(gate);
@@ -2488,6 +2508,18 @@ fn mcp_connection_secret_values(
                 values.push(value.expose_secret().to_string());
             }
         }
+        // The org's client secret, when this row is a connector's with the admin's client.
+        if let Ok(crate::connector_client::RowClient::Org(org)) =
+            vault.workflow_store().row_client(conn)
+        {
+            if let (true, Some(node)) = (org.keeps_secret, org.client.as_ref()) {
+                if let Ok(value) =
+                    crate::connector_client::org_client_secret(vault, node, &node.token_endpoint)
+                {
+                    values.push(value.expose_secret().to_string());
+                }
+            }
+        }
     } else if !conn.secret_binding_id.is_empty() {
         if let Ok(value) =
             crate::mcp_client::resolve_auth_header(vault, caller_user_id, &conn.secret_binding_id)
@@ -3106,20 +3138,72 @@ fn exchange_and_store_mcp_tokens(
     let refresh_token = vault
         .decrypt_secret_at(conn.scope, &conn.owner_user_id, &refresh_id)
         .map_err(vault_error)?;
-    let client_secret_id = mcp_oauth_client_secret_binding_id(&conn.connection_id);
-    let client_secret = if vault
-        .has_binding_at(conn.scope, &conn.owner_user_id, &client_secret_id)
-        .map_err(vault_error)?
-    {
-        Some(
-            vault
-                .decrypt_secret_at(conn.scope, &conn.owner_user_id, &client_secret_id)
-                .map_err(vault_error)?,
-        )
-    } else {
-        None
+    // A connector whose client is the admin's refreshes with the node's client: the endpoints and
+    // client id the node pinned at Enable, and the org-scope secret read now (no cache, so a replaced
+    // secret is used by the next refresh). The member's own row never names the endpoint the secret
+    // goes to, and a per-row secret is never used for it (O2, O3).
+    let org_metadata: crate::mcp_registry::McpOauthMetadata;
+    let row_client = store.row_client(&conn).map_err(vault_error)?;
+    let org_client = matches!(row_client, crate::connector_client::RowClient::Org(_));
+    let (metadata, client_secret) = match row_client {
+        crate::connector_client::RowClient::Own => {
+            let client_secret_id = mcp_oauth_client_secret_binding_id(&conn.connection_id);
+            let client_secret = if vault
+                .has_binding_at(conn.scope, &conn.owner_user_id, &client_secret_id)
+                .map_err(vault_error)?
+            {
+                Some(
+                    vault
+                        .decrypt_secret_at(conn.scope, &conn.owner_user_id, &client_secret_id)
+                        .map_err(vault_error)?,
+                )
+            } else {
+                None
+            };
+            (metadata, client_secret)
+        }
+        crate::connector_client::RowClient::Org(org) => {
+            let Some(node) = org.client.as_ref() else {
+                return Err(RefreshFailure::needs_reauth(
+                    "the admin removed the OAuth client",
+                ));
+            };
+            // Tokens of another client or endpoint are not refreshed: no request is sent.
+            if metadata.client_id != node.client_id
+                || metadata.token_endpoint != node.token_endpoint
+            {
+                return Err(RefreshFailure::needs_reauth(
+                    "the admin changed the OAuth client",
+                ));
+            }
+            let client_secret = if org.keeps_secret {
+                Some(
+                    crate::connector_client::org_client_secret(vault, node, &node.token_endpoint)
+                        .map_err(|_| RefreshFailure::transient("OAuth client secret unavailable"))?,
+                )
+            } else {
+                None
+            };
+            org_metadata = crate::mcp_registry::McpOauthMetadata {
+                authorization_server: node.issuer.clone(),
+                revocation_endpoint: node.revocation_endpoint.clone(),
+                resource: org.mcp_url.clone(),
+                ..metadata.clone()
+            };
+            (&org_metadata, client_secret)
+        }
     };
-    let refreshed = refresh(metadata, &refresh_token, client_secret.as_ref())?;
+    let refreshed =
+        refresh(metadata, &refresh_token, client_secret.as_ref()).map_err(|failure| {
+            // A refused org client names the client, not the member's grant (open question 8).
+            if org_client && failure.reason == "invalid_client" {
+                RefreshFailure::needs_reauth(
+                    "the provider refused the client id or secret your admin entered",
+                )
+            } else {
+                failure
+            }
+        })?;
     crate::mcp_registry::store_refreshed_mcp_tokens(
         vault,
         &conn,
@@ -10323,5 +10407,312 @@ mod connection_write_tests {
         assert!(reserve_write(&store, SESSION, "mail_send", "call-1", 1)
             .unwrap()
             .is_none());
+    }
+}
+
+/// A connector whose client is the admin's refreshes with the node's client (CN-5.4): the endpoint
+/// and client id of the node row, the org-scope secret read at that refresh, one refresh when
+/// callers overlap, and no request at all when the row and the node disagree.
+#[cfg(test)]
+mod org_client_refresh_tests {
+    use super::*;
+    use crate::connector_client::test_support::{enable_filebox, install_filebox_rows, member_row};
+    use crate::mcp_oauth_refresh::{RefreshFailure, RefreshFailureKind, RefreshedToken};
+    use crate::mcp_registry::{
+        mcp_oauth_access_token_binding_id, mcp_oauth_refresh_token_binding_id, McpOauthStatus,
+    };
+    use crate::secrets::SecretScope;
+    use secrecy::{ExposeSecret, SecretString};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    const SECRET: &str = "ORG-SECRET-value-7d1e";
+
+    /// What a refresh request carried: token endpoint, client id, secret, refresh token.
+    type Seen = (String, String, Option<String>, String);
+
+    fn world(
+        tag: &str,
+    ) -> (
+        Arc<SqliteWorkflowStore>,
+        Arc<SecretsVault>,
+        crate::mcp_registry::McpConnection,
+    ) {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        install_filebox_rows(&store, tag);
+        enable_filebox(&store, &vault, tag, "c-1", SECRET);
+        let conn = member_row(&store, &vault, tag, "ada", "c-1", None);
+        (store, vault, conn)
+    }
+
+    fn token(vault: &SecretsVault, binding: &str) -> String {
+        vault
+            .decrypt_secret_at(SecretScope::User, "ada", binding)
+            .unwrap()
+            .expose_secret()
+            .clone()
+    }
+
+    #[test]
+    fn a_refresh_sends_the_nodes_client_and_the_org_secret_and_stores_the_rotation() {
+        static SEEN: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
+        fn refresher(
+            oauth: &crate::mcp_registry::McpOauthMetadata,
+            rt: &SecretString,
+            secret: Option<&SecretString>,
+        ) -> Result<RefreshedToken, RefreshFailure> {
+            SEEN.lock().unwrap().push((
+                oauth.token_endpoint.clone(),
+                oauth.client_id.clone(),
+                secret.map(|s| s.expose_secret().clone()),
+                rt.expose_secret().clone(),
+            ));
+            Ok(RefreshedToken {
+                access_token: "A-new".into(),
+                expires_in: Some(3600),
+                refresh_token: Some("R-new".into()),
+            })
+        }
+        let (store, vault, conn) = world("refresh-org");
+        // A secret of the member's own under the per-row binding id is never the one sent.
+        vault
+            .put_secret_with_owner(
+                &crate::mcp_registry::mcp_oauth_client_secret_binding_id("filebox"),
+                "MEMBER-ROW-SECRET",
+                crate::secrets::SecretKind::Connection,
+                &["auth.refresh-org.example".to_string()],
+                None,
+                "ada",
+            )
+            .unwrap();
+        refresh_mcp_connection(&store, &vault, &conn, refresher).unwrap();
+        assert_eq!(
+            SEEN.lock().unwrap().as_slice(),
+            [(
+                "https://auth.refresh-org.example/token".to_string(),
+                "c-1".to_string(),
+                Some(SECRET.to_string()),
+                "R-old".to_string()
+            )]
+        );
+        assert_eq!(
+            token(&vault, &mcp_oauth_refresh_token_binding_id("filebox")),
+            "R-new"
+        );
+        assert_eq!(
+            token(&vault, &mcp_oauth_access_token_binding_id("filebox")),
+            "A-new"
+        );
+        // A replaced secret is read by the next refresh (no cache).
+        enable_filebox(&store, &vault, "refresh-org", "c-1", "ORG-SECRET-replaced");
+        refresh_mcp_connection(&store, &vault, &conn, refresher).unwrap();
+        let seen = SEEN.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].2.as_deref(), Some("ORG-SECRET-replaced"));
+        assert_eq!(seen[1].3, "R-new");
+    }
+
+    #[test]
+    fn a_row_that_disagrees_with_the_node_is_not_refreshed_and_needs_a_reconnect() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn refresher(
+            _: &crate::mcp_registry::McpOauthMetadata,
+            _: &SecretString,
+            _: Option<&SecretString>,
+        ) -> Result<RefreshedToken, RefreshFailure> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Err(RefreshFailure::transient("must not be called"))
+        }
+        // The member's tokens belong to client c-1; the admin moved to c-2 without the row being marked.
+        let (store, vault, conn) = world("refresh-moved");
+        enable_filebox(&store, &vault, "refresh-moved", "c-2", SECRET);
+        let failure = refresh_mcp_connection(&store, &vault, &conn, refresher).unwrap_err();
+        assert_eq!(failure.kind, RefreshFailureKind::NeedsReauth);
+        assert!(failure.reason.contains("changed"), "{}", failure.reason);
+        let oauth = store
+            .get_mcp_connection(SecretScope::User, "ada", "filebox")
+            .unwrap()
+            .oauth
+            .unwrap();
+        assert_eq!(oauth.status, McpOauthStatus::NeedsReauth);
+        // The client removed: the same, and still no request.
+        let (store, vault, conn) = world("refresh-removed");
+        {
+            let c = store.connection.lock().unwrap();
+            crate::connector_client::clear_client_in(&c, "filebox").unwrap();
+        }
+        let failure = refresh_mcp_connection(&store, &vault, &conn, refresher).unwrap_err();
+        assert_eq!(failure.kind, RefreshFailureKind::NeedsReauth);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "no request was sent");
+        // The tokens were left where they were.
+        assert_eq!(
+            token(&vault, &mcp_oauth_refresh_token_binding_id("filebox")),
+            "R-old"
+        );
+    }
+
+    #[test]
+    fn a_refused_client_names_the_admins_client_and_a_missing_secret_is_only_transient() {
+        fn refused(
+            _: &crate::mcp_registry::McpOauthMetadata,
+            _: &SecretString,
+            _: Option<&SecretString>,
+        ) -> Result<RefreshedToken, RefreshFailure> {
+            Err(RefreshFailure::needs_reauth("invalid_client"))
+        }
+        let (store, vault, conn) = world("refresh-refused");
+        let failure = refresh_mcp_connection(&store, &vault, &conn, refused).unwrap_err();
+        assert_eq!(failure.kind, RefreshFailureKind::NeedsReauth);
+        assert!(
+            failure
+                .reason
+                .contains("client id or secret your admin entered"),
+            "{}",
+            failure.reason
+        );
+        let oauth = store
+            .get_mcp_connection(SecretScope::User, "ada", "filebox")
+            .unwrap()
+            .oauth
+            .unwrap();
+        assert_eq!(oauth.status, McpOauthStatus::NeedsReauth);
+        assert!(oauth
+            .last_refresh_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("your admin entered"));
+        // The admin's secret row gone: a later refresh may work once it is saved again, so the
+        // member is not asked to reconnect.
+        let (store, vault, conn) = world("refresh-nosecret");
+        vault
+            .delete_secret(&crate::connector_client::client_secret_binding_id(
+                "filebox",
+            ))
+            .unwrap();
+        let failure = refresh_mcp_connection(&store, &vault, &conn, refused).unwrap_err();
+        assert_eq!(failure.kind, RefreshFailureKind::Transient);
+        let oauth = store
+            .get_mcp_connection(SecretScope::User, "ada", "filebox")
+            .unwrap()
+            .oauth
+            .unwrap();
+        assert_eq!(oauth.status, McpOauthStatus::Connected);
+    }
+
+    /// Two calls of one member on one expired token share one refresh: the single-use refresh token
+    /// is spent once, with the org secret, and both calls end on the new access token (O4).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_overlapping_calls_spend_the_single_use_refresh_token_once() {
+        use crate::mcp_client::{mock, McpTool};
+
+        static REFUSED: AtomicUsize = AtomicUsize::new(0);
+        static SEEN: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
+        // The provider: a refresh token works once. It answers only after both calls were refused.
+        fn provider(
+            oauth: &crate::mcp_registry::McpOauthMetadata,
+            rt: &SecretString,
+            secret: Option<&SecretString>,
+        ) -> Result<RefreshedToken, RefreshFailure> {
+            let start = std::time::Instant::now();
+            while REFUSED.load(Ordering::SeqCst) < 2 && start.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let mut seen = SEEN.lock().unwrap();
+            let spent = seen.iter().any(|s| s.3 == *rt.expose_secret());
+            seen.push((
+                oauth.token_endpoint.clone(),
+                oauth.client_id.clone(),
+                secret.map(|s| s.expose_secret().clone()),
+                rt.expose_secret().clone(),
+            ));
+            if spent || secret.map(|s| s.expose_secret().as_str()) != Some(SECRET) {
+                return Err(RefreshFailure::needs_reauth("invalid_grant"));
+            }
+            Ok(RefreshedToken {
+                access_token: "A-new".into(),
+                expires_in: Some(3600),
+                refresh_token: Some("R-new".into()),
+            })
+        }
+        let (store, vault, conn) = world("refresh-race");
+        let (mcp_url, seen_by_mcp) = mock::spawn_with_status(move |method, id, params| {
+            if method == "tools/call" {
+                if REFUSED.load(Ordering::SeqCst) < 2 {
+                    REFUSED.fetch_add(1, Ordering::SeqCst);
+                    return Some((401, "text/plain".into(), "expired".into()));
+                }
+                return mock::ok(
+                    id,
+                    serde_json::json!({ "content": [{ "type": "text", "text": "ok" }] }),
+                )
+                .map(|(ct, body)| (200, ct, body));
+            }
+            mock::standard(method, id, params).map(|(ct, body)| (200, ct, body))
+        });
+        let mcp_origin = url::Url::parse(&mcp_url).unwrap();
+        crate::mcp_oauth_refresh::test_seam::serve("mcp.refresh-race.example", mcp_origin);
+        let conn = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                "filebox",
+                &conn.url,
+                "",
+                &[],
+                &[McpTool {
+                    name: "search_files".into(),
+                    description: None,
+                    input_schema: serde_json::json!({}),
+                    ..Default::default()
+                }],
+                crate::mcp_registry::McpAuthMode::Oauth,
+                conn.oauth.as_ref(),
+            )
+            .unwrap();
+        let args = Struct::default();
+        let call = || {
+            invoke_mcp_tool_with(
+                &store,
+                &conn,
+                Some(&vault),
+                "search_files",
+                &args,
+                5_000,
+                "ada",
+                crate::mcp_client::McpClient::connect,
+                provider,
+            )
+        };
+        let (first, second) = tokio::join!(call(), call());
+        assert_eq!(first.unwrap().0.text, "ok");
+        assert_eq!(second.unwrap().0.text, "ok");
+        // One refresh, with the org's client and secret, on the original refresh token.
+        assert_eq!(
+            SEEN.lock().unwrap().as_slice(),
+            [(
+                "https://auth.refresh-race.example/token".to_string(),
+                "c-1".to_string(),
+                Some(SECRET.to_string()),
+                "R-old".to_string()
+            )]
+        );
+        assert_eq!(
+            token(&vault, &mcp_oauth_refresh_token_binding_id("filebox")),
+            "R-new"
+        );
+        // Both refused calls carried the old token, both retries the new one.
+        let auth: Vec<_> = {
+            let seen = seen_by_mcp.lock().unwrap();
+            seen.methods
+                .iter()
+                .zip(&seen.auth)
+                .filter(|(m, _)| *m == "tools/call")
+                .map(|(_, a)| a.clone().unwrap_or_default())
+                .collect()
+        };
+        assert_eq!(auth.len(), 4, "{auth:?}");
+        assert!(auth[..2].iter().all(|a| a == "Bearer A-old"), "{auth:?}");
+        assert!(auth[2..].iter().all(|a| a == "Bearer A-new"), "{auth:?}");
     }
 }
