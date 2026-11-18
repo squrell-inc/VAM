@@ -2728,6 +2728,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_listing_never_marks_a_row_another_request_already_moved_on() {
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        let tools_ok = Arc::new(AtomicBool::new(false));
+        let n = xchg_node_with("xchg-mark-race", tools_ok.clone());
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        // Two recoveries read the pending row at the same credential generation.
+        let pending = row_of(&n, "ada");
+        let generation = crate::host_tools::lock_mcp_credentials(&n.store, &pending)
+            .await
+            .unwrap()
+            .generation_handle();
+        let policy = n.store.mcp_policy("filebox").unwrap().unwrap();
+        // One adopts the tools.
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let connected = row_of(&n, "ada");
+        assert_eq!(connected.oauth.as_ref().unwrap().status, Connected);
+        // The other's listing fails after that: a 409, and the connected row is not marked.
+        tools_ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        let e = super::super::mcp_connections::adopt_tools_and_reconnect(
+            &n.state,
+            &pending,
+            &policy,
+            &generation,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT, "{}", e.message);
+        let row = row_of(&n, "ada");
+        assert_eq!(row.oauth, connected.oauth);
+        assert_eq!(row.tools.len(), 1, "{:?}", row.tools);
+
+        // An admin save marks the row while a listing for the connected row is in flight: the
+        // failed listing leaves the admin's mark.
+        let (s, b) = put_client(&n, "c-2", Some("OTHER-SECRET-qqqqqqqqqqqq")).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let marked = row_of(&n, "ada");
+        assert_eq!(marked.oauth.as_ref().unwrap().status, NeedsReauth);
+        let e = super::super::mcp_connections::adopt_tools_and_reconnect(
+            &n.state,
+            &connected,
+            &policy,
+            &generation,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT, "{}", e.message);
+        assert_eq!(row_of(&n, "ada").oauth, marked.oauth);
+    }
+
+    #[tokio::test]
     async fn an_adoption_clears_instructions_the_server_no_longer_sends() {
         let n = xchg_node("xchg-instructions");
         let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;

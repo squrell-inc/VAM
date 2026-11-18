@@ -3005,6 +3005,42 @@ impl SqliteWorkflowStore {
         self.get_mcp_connection(scope, &owner, id)
     }
 
+    /// Puts a connector row whose tools could not be read into the tools-pending state
+    /// ([`TOOLS_PENDING_REASON`]), but only while the row is still the one the caller's listing was
+    /// for: present, on `observed.url`, and with exactly `observed`'s OAuth metadata, checked in the
+    /// same transaction as the write. A row another adoption connected, an admin save marked, or a
+    /// later sign-in, refresh or disconnect rewrote or removed is left as it is (`Ok(false)`).
+    pub(crate) fn mark_tools_pending_if_unchanged(
+        &self,
+        observed: &McpConnection,
+    ) -> Result<bool, OrchestratorError> {
+        let owner = vault_owner_user_id(observed.scope, &observed.owner_user_id).to_string();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let tx = connection.transaction()?;
+        let Some((url, raw)) = tx
+            .query_row(
+                "SELECT url, oauth_metadata_json FROM mcp_connections
+                 WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3
+                   AND auth_mode = 'oauth'",
+                params![observed.scope.as_str(), owner, observed.connection_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        let stored = serde_json::from_str::<McpOauthMetadata>(&raw).ok();
+        if url != observed.url || stored.is_none() || stored.as_ref() != observed.oauth.as_ref() {
+            return Ok(false);
+        }
+        record_refresh_failure_in(&tx, observed, true, TOOLS_PENDING_REASON)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Record a successful host-side refresh without replacing the pinned tool
     /// snapshot or the rest of the connection. Token material stays in the vault.
     pub fn record_mcp_oauth_refresh(

@@ -1205,7 +1205,7 @@ pub(crate) async fn adopt_tools_and_reconnect(
         // rewritten by another sign-in, refresh or save): it is not marked.
         Err(failure) if failure.status == StatusCode::CONFLICT => Err(failure),
         Err(_) => {
-            mark_tools_pending(state, conn, credentials).await;
+            mark_tools_pending(state, conn, credentials).await?;
             Err(OrchestratorError::Mcp(
                 "you are signed in, but the connector's tools could not be read yet: refresh the connection to finish connecting"
                     .into(),
@@ -1216,28 +1216,27 @@ pub(crate) async fn adopt_tools_and_reconnect(
 }
 
 /// Leaves a stored sign-in whose tools were not adopted in the retryable state, if the connection is
-/// still the one that was written (same generation, row present). Best effort.
+/// still the one the listing was for: the same credential generation, and the row still on `conn`'s
+/// URL with exactly `conn`'s OAuth metadata (checked in the transaction that writes the mark). A
+/// row that moved on (another adoption connected it, an admin save marked it, a sign-in, refresh or
+/// disconnect rewrote or removed it) is left unchanged and the answer is a 409. A store failure is
+/// logged and the caller reports the listing failure.
 async fn mark_tools_pending(
     state: &AppState,
     conn: &McpConnection,
     credentials: &crate::host_tools::CredentialGeneration,
-) {
+) -> Result<(), ApiError> {
+    let superseded = || crate::mcp_registry::tools_read_superseded(&conn.connection_id).into();
     let Some(_gate) = credentials.lock_if_unchanged().await else {
-        return;
+        return Err(superseded());
     };
-    let Ok(current) =
-        state
-            .store
-            .get_mcp_connection(conn.scope, &conn.owner_user_id, &conn.connection_id)
-    else {
-        return;
-    };
-    if let Err(e) = state.store.record_mcp_oauth_refresh_failure(
-        &current,
-        true,
-        crate::mcp_registry::TOOLS_PENDING_REASON,
-    ) {
-        tracing::warn!(connection_id = %conn.connection_id, error = %e, "tools-pending state not recorded");
+    match state.store.mark_tools_pending_if_unchanged(conn) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(superseded()),
+        Err(e) => {
+            tracing::warn!(connection_id = %conn.connection_id, error = %e, "tools-pending state not recorded");
+            Ok(())
+        }
     }
 }
 
