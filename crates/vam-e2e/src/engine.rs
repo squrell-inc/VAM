@@ -193,6 +193,8 @@ struct Ctx {
     /// The URN a `put-draft` or an inline `chat` step wrote or tried, by (piece alias, identity
     /// alias or `bootstrap`).
     drafts: HashMap<(String, String), String>,
+    /// `defaultNamespace` per identity alias (or `bootstrap`), for `{{ns}}`.
+    namespaces: HashMap<String, String>,
     /// A wait ended on the step or scenario budget (not on the product failing).
     budget_timeout: bool,
     threads: u32,
@@ -1223,6 +1225,19 @@ impl Engine {
         who: Option<&str>,
         scenario_id: &str,
     ) -> Result<(PieceKind, Value), Fail> {
+        self.draft_body_of(alias, who, None, scenario_id)
+    }
+
+    /// As `draft_body`. `{{ns}}` becomes the writer's `defaultNamespace` (`GET /v1/me`, cached per
+    /// identity). With `urn_of`, the body's URN is the one an earlier `put-draft` of the same piece
+    /// as `urn_of` wrote (class `scenario` when none), so a second identity aims at it.
+    pub(super) fn draft_body_of(
+        &mut self,
+        alias: &str,
+        who: Option<&str>,
+        urn_of: Option<&str>,
+        scenario_id: &str,
+    ) -> Result<(PieceKind, Value), Fail> {
         let rec = self.ctx.pieces.get(alias).cloned().ok_or_else(|| {
             Fail::new(
                 Class::Scenario,
@@ -1246,20 +1261,62 @@ impl Engine {
         })?;
         let who = who.unwrap_or("bootstrap");
         let name = format!("{alias}-{who}-{scenario_id}-{}", self.eff_tag().0);
-        let text = self.subst(body.to_string(), &name);
-        let body: Value = serde_json::from_str(&text).map_err(|e| {
+        let mut text = self.subst(body.to_string(), &name);
+        if text.contains("{{ns}}") {
+            let ns = self.namespace_of(if who == "bootstrap" { None } else { Some(who) })?;
+            text = text.replace("{{ns}}", &ns);
+        }
+        let mut body: Value = serde_json::from_str(&text).map_err(|e| {
             Fail::new(
                 Class::Harness,
                 "a JSON body after substitution",
                 e.to_string(),
             )
         })?;
+        if let Some(other) = urn_of {
+            let urn = self.draft_urn(alias, Some(other)).ok_or_else(|| {
+                Fail::new(
+                    Class::Scenario,
+                    format!("a `put-draft` of `{alias}` as `{other}` before `urnOf: {other}`"),
+                    "none yet",
+                )
+            })?;
+            body["spec"]["resourceId"]["urn"] = Value::String(urn.to_string());
+        }
         if let Some(urn) = body.pointer("/spec/resourceId/urn").and_then(Value::as_str) {
             self.ctx
                 .drafts
                 .insert((alias.to_string(), who.to_string()), urn.to_string());
         }
         Ok((wp.kind, body))
+    }
+
+    /// The `defaultNamespace` of `GET /v1/me` for the identity (the bootstrap key when `who` is
+    /// `None`), asked once and kept for the scenario.
+    fn namespace_of(&mut self, who: Option<&str>) -> Result<String, Fail> {
+        let slot = who.unwrap_or("bootstrap").to_string();
+        if let Some(ns) = self.ctx.namespaces.get(&slot) {
+            return Ok(ns.clone());
+        }
+        let key = self.key_of(who)?;
+        let r = self.api.get_as(key.as_deref(), "/v1/me").map_err(conn)?;
+        let ns = r.json()["defaultNamespace"]
+            .as_str()
+            .filter(|n| !n.is_empty())
+            .map(String::from);
+        let Some(ns) = ns.filter(|_| r.ok()) else {
+            return Err(Fail::new(
+                Class::Harness,
+                format!("GET /v1/me as `{slot}` answers a defaultNamespace (for `{{{{ns}}}}`)"),
+                format!(
+                    "{} {}",
+                    r.status,
+                    r.body.chars().take(200).collect::<String>()
+                ),
+            ));
+        };
+        self.ctx.namespaces.insert(slot, ns.clone());
+        Ok(ns)
     }
 
     /// The URN a `put-draft` (or inline `chat`) step as `who` wrote or tried for the piece.
@@ -1269,6 +1326,37 @@ impl Engine {
             .drafts
             .get(&(alias.to_string(), who.to_string()))
             .map(String::as_str)
+    }
+
+    /// The agent a `chat` or `start-playbook` runs: `agent_of`, except that a deferred agent
+    /// that is not released has no URN until a `put-draft` step wrote it as `identity`; the run
+    /// then names that URN.
+    fn agent_for(
+        &self,
+        agent: Option<&str>,
+        identity: Option<&str>,
+    ) -> Result<(String, String), Fail> {
+        let (alias, urn) = self.agent_of(agent)?;
+        let deferred_draft = self
+            .ctx
+            .pieces
+            .get(&alias)
+            .and_then(|r| self.pieces.get(&r.piece))
+            .is_some_and(|w| w.kind == PieceKind::Agent && w.written_by_step());
+        if !deferred_draft {
+            return Ok((alias, urn));
+        }
+        let urn = self
+            .draft_urn(&alias, identity)
+            .ok_or_else(|| {
+                Fail::new(
+                    Class::Scenario,
+                    format!("a `put-draft` of `{alias}` as this identity before the run"),
+                    "none yet",
+                )
+            })?
+            .to_string();
+        Ok((alias, urn))
     }
 
     fn chat(&mut self, c: &Chat, s: &Scenario) -> Result<(), Fail> {
@@ -1296,34 +1384,7 @@ impl Engine {
                     .unwrap_or_default()
                     .to_string(),
             ),
-            None => {
-                let (alias, urn) = self.agent_of(c.agent())?;
-                // A deferred agent that is not released has no URN until a `put-draft` step
-                // wrote it for this identity.
-                let deferred_draft = self
-                    .ctx
-                    .pieces
-                    .get(&alias)
-                    .and_then(|r| self.pieces.get(&r.piece))
-                    .is_some_and(|w| w.kind == PieceKind::Agent && w.written_by_step());
-                if deferred_draft {
-                    let urn = self
-                        .draft_urn(&alias, identity.as_deref())
-                        .ok_or_else(|| {
-                            Fail::new(
-                                Class::Scenario,
-                                format!(
-                                    "a `put-draft` of `{alias}` as this identity before the chat"
-                                ),
-                                "none yet",
-                            )
-                        })?
-                        .to_string();
-                    (alias, urn)
-                } else {
-                    (alias, urn)
-                }
-            }
+            None => self.agent_for(c.agent(), identity.as_deref())?,
         };
         let inline_playbook = match c.inline_playbook() {
             Some(piece) => {
@@ -1433,7 +1494,7 @@ impl Engine {
         sp: &crate::scenario::StartPlaybook,
         s: &Scenario,
     ) -> Result<(), Fail> {
-        let (alias, urn) = self.agent_of(sp.agent.as_deref())?;
+        let (alias, urn) = self.agent_for(sp.agent.as_deref(), sp.as_.as_deref())?;
         let pb = self.playbook_of(&sp.playbook)?;
         self.key_of(sp.as_.as_deref())?;
         let slug = self.workspace_slug(&urn, sp.as_.as_deref(), sp.draft);
@@ -3107,7 +3168,7 @@ impl Engine {
                 format!("{} {}", r.status, r.body),
             ));
         }
-        self.release_skill_piece(piece, urn)
+        self.release_skill_piece(piece, urn, None)
     }
 
     /// `publish-skill: { piece, refused, contains }`: publishes and releases a `deferred` skill
@@ -3128,9 +3189,15 @@ impl Engine {
             )
         })?;
         let archive = self.skill_package(&wp, &rec.name, &rec.urn)?;
+        let key = self.key_of(p.as_.as_deref())?;
         let r = self
             .api
-            .post_file("/v1/skills/packages", "skill.tar.gz", archive)
+            .post_file_as(
+                key.as_deref(),
+                "/v1/skills/packages",
+                "skill.tar.gz",
+                archive,
+            )
             .map_err(conn)?;
         let shown = format!(
             "{} {}",
@@ -3163,7 +3230,10 @@ impl Engine {
                 shown,
             ));
         }
-        self.release_skill_piece(&p.piece, &rec.urn)?;
+        if !p.release {
+            return Ok(());
+        }
+        self.release_skill_piece(&p.piece, &rec.urn, key.as_deref())?;
         // An agent piece marked `deferred` that requires this skill is released now.
         let agents: Vec<(String, String)> = self
             .ctx
@@ -3179,7 +3249,8 @@ impl Engine {
         for (piece, urn) in agents {
             let r = self
                 .api
-                .post(
+                .post_as(
+                    key.as_deref(),
                     &format!("/v1/agents/{}/release", seg(&urn)),
                     &json!({ "version": { "major": 1, "minor": 0, "patch": 0 } }),
                 )
@@ -3195,10 +3266,16 @@ impl Engine {
         Ok(())
     }
 
-    fn release_skill_piece(&mut self, piece: &str, urn: &str) -> Result<(), Fail> {
+    fn release_skill_piece(
+        &mut self,
+        piece: &str,
+        urn: &str,
+        key: Option<&str>,
+    ) -> Result<(), Fail> {
         let r = self
             .api
-            .post(
+            .post_as(
+                key,
                 &format!("/v1/skills/packages/{}/release", seg(urn)),
                 &json!({ "urn": urn, "version": { "major": 1, "minor": 0, "patch": 0 } }),
             )

@@ -1,0 +1,17 @@
+piece: skill-host-echo
+kind: skill
+# Released at `given`. One host tool that echoes its arguments: the `host_echo` tool of `skill-host-fixtures`
+# without the secret, so an agent that names it needs no secret piece.
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: A host tool that echoes its arguments (test nodes only)
+    tools:
+      - name: host_echo
+        description: Echoes its arguments
+        inputSchemaJson: "{\"type\":\"object\"}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        host_exec:
+          adapter_id: echo
+          config: {}

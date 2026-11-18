@@ -1,0 +1,44 @@
+id: demoted-publishers-draft-agent-stops-using-their-draft-skill
+title: After a publisher is demoted, their draft agent that names their own draft skill is no longer started, and saving it again is refused
+description: >
+  While a publisher, the user saves a draft skill and a draft agent that names it with no version, and a
+  draft chat runs the skill's tool. After the user is demoted to member the same chat is refused with
+  400 saying the skill has no released version, because a member's run takes released parts only, and
+  saving the agent again is refused with the same answer.
+tags: [members, chat, permissions]
+needs: process
+given:
+  - org-admin
+  - { piece: org-publisher, as: pub }
+  - skill-draft-probe
+  - agent-member-draft-with-draft-probe
+when:
+  - publish-skill: { piece: skill-draft-probe, as: pub, release: false }
+  - put-draft: { piece: agent-member-draft-with-draft-probe, as: pub, status: 200 }
+  - chat: { agent: agent-member-draft-with-draft-probe, draft: true, as: pub, text: "e2e-step:pd Hello" }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: host-echo-ok } }
+  - set-role: { as: pub, role: member }
+then:
+  - chat: { agent: agent-member-draft-with-draft-probe, draft: true, as: pub, text: "e2e-step:md Hello", refused: true }
+  - expect: { refused: true, status: 400, contains: "released" }
+  - put-draft: { piece: agent-member-draft-with-draft-probe, as: pub, status: 400, contains: "released" }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/permissions.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/catalog_resolve.rs
+  - vam:crates/vam-orchestrator/src/keys.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/permissions_view.rs
+mock:
+  - when: { step: pd, toolName: host_echo }
+    reply: { text: Echoed. }
+  - when: { step: pd, toolName: load_skill }
+    reply: { toolCall: { name: host_echo, args: { marker: host-echo-ok } } }
+  - when: { step: pd, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-draft-probe-demoted-publishers-draft-agent-stops-using-their-draft-skill } } }
+  - when: { step: md }
+    reply: { text: Hello. }
+status: pending
+expectFail: { step: then.1, class: product }

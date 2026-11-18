@@ -328,6 +328,13 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D:
 pub struct PublishSkill {
     /// The alias of a `skill` world piece.
     pub piece: String,
+    /// Alias of the `org` piece whose identity publishes and releases it; the bootstrap key when
+    /// omitted.
+    #[serde(rename = "as")]
+    pub as_: Option<String>,
+    /// `false`: publish the package as a draft only and do not release it.
+    #[serde(default = "yes")]
+    pub release: bool,
     /// The step passes only when publishing answers 4xx.
     #[serde(default)]
     pub refused: bool,
@@ -951,6 +958,40 @@ pub struct AtLeast {
 #[cfg(test)]
 mod harness_tests {
     use super::*;
+
+    #[test]
+    fn publish_skill_takes_an_identity_and_releases_unless_told_not_to() {
+        let publish = |yaml: &str| -> PublishSkill {
+            let Step::PublishSkill(p) = serde_yaml::from_str::<Step>(yaml).unwrap() else {
+                panic!("a publish-skill step");
+            };
+            p
+        };
+        let p = publish("publish-skill: { piece: skill-x }");
+        assert_eq!(
+            (p.as_.as_deref(), p.release, p.refused),
+            (None, true, false)
+        );
+        let p = publish("publish-skill: { piece: skill-x, as: pub, release: false }");
+        assert_eq!((p.as_.as_deref(), p.release), (Some("pub"), false));
+        assert!(
+            serde_yaml::from_str::<Step>("publish-skill: { piece: s, relase: false }").is_err()
+        );
+    }
+
+    #[test]
+    fn start_playbook_names_a_deferred_agent_and_an_identity() {
+        let Step::StartPlaybook(sp) = serde_yaml::from_str::<Step>(
+            "start-playbook: { playbook: pb, agent: a, draft: true, as: member, label: mp, inputs: { topic: e2e } }",
+        )
+        .unwrap() else {
+            panic!("a start-playbook step");
+        };
+        assert_eq!(
+            (sp.agent.as_deref(), sp.as_.as_deref(), sp.draft),
+            (Some("a"), Some("member"), Some(true))
+        );
+    }
 
     #[test]
     fn thread_is_a_mode_word_or_an_id_of_the_latest() {

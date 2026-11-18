@@ -133,7 +133,7 @@ green; `catalog_read_authorize_tests::member_put_agent_is_403` replaced by the
 owner-approved spec change (a member's PUT of an own draft in their namespace is
 200, outside it 400).
 
-- [ ] Wave 0: scenarios and harness
+- [x] Wave 0: scenarios and harness
 - [ ] Wave 1: `agents:draft`, restricted mode on the two routes, the save
   validator (refs, refused fields, namespace, cap), key backfill fix, test fallout
 - [ ] Wave 2: `ResolveMode::ReleasedOnly` at record and at session start;
@@ -334,7 +334,7 @@ as, refused}`, `set-role`, `identity-request`, `connector-*`):
 
 **Items** (each names the scenarios it turns green)
 
-- [ ] `MD-3.0` — Wave 0 above. Files: `e2e/scenarios/` (5 new),
+- [x] `MD-3.0` — Wave 0 above. Files: `e2e/scenarios/` (5 new),
   `e2e/world/` (5 new pieces),
   `crates/vam-e2e/src/{engine.rs,identity.rs,scenario.rs,check.rs}`,
   `e2e/README.md`. **Accept:** `cargo run -p vam-e2e -- check` clean;
@@ -608,3 +608,4 @@ team has the handoff (`design/member-draft-agents.md` §9) on the docs site.
 | 2026-11-18 | 2 | **Phase 2 closed.** Merged #27, #35 (plan #26). Scoreboard: 2 scenarios green, 1 guard green, 0 red; 5 fix cycles across both waves. Next: Phase 3 breakdown (members create, edit and run their own draft agents from released parts). |
 | 2026-11-18 | 3 | Phase 3 breakdown drafted (5 new scenarios, waves 0–2); waiting for owner approval |
 | 2026-11-18 | 3 | Owner approved the Phase 3 breakdown with the open-question defaults (close a Member's explicit `-draft` refs, decision 7 amended; `local` is released-only; cap answers 409; one 400 message per kind; advanced policy pins recorded in every mode). |
+| 2026-11-18 | 3 W0 | Wave 0 on `feat/member-draft-agents-scenarios-member-drafts`: 5 scenarios `pending`, 5 world pieces, harness `{{ns}}`, `put-draft urnOf`, `publish-skill as`/`release: false`, `start-playbook` on a draft. Scoreboard: 0 green, 5 red (right reason, class `product`): four at the member's first save (403 `catalog:write`), the demotion one at `then.1` (the start is accepted and uses the draft skill). Publisher-swapped copies (deleted) confirmed the rest of each scenario passes. 1 fix cycle (playbook step tool on the agent piece), ~1h. Local smoke: the 9 Microsoft-mock sandbox failures as before. |

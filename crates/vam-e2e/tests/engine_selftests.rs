@@ -2027,3 +2027,156 @@ fn outcomes_steps_are_checked_for_shape() {
         2
     );
 }
+
+// ---- members' own draft agents: `{{ns}}`, `urnOf`, `publish-skill` as and release, `start-playbook` ----
+
+const MEMBER_GIVEN: &str =
+    "[org-admin, { piece: org-member, as: m1 }, { piece: org-member, as: m2 }, skill-host-echo, agent-member-draft-with-host-echo, playbook-one-step, skill-draft-probe]";
+
+/// The keys of the identities `given` made, in order (the fake's key is `secret-of-<username>`).
+fn made_keys(fake: &Fake) -> Vec<String> {
+    fake.requests_to("POST", "/v1/users")
+        .iter()
+        .filter_map(|u| u["username"].as_str())
+        .map(|n| format!("secret-of-{n}"))
+        .collect()
+}
+
+fn agent_puts(fake: &Fake) -> Vec<Value> {
+    fake.requests_to("PUT", "/v1/agents")
+}
+
+#[test]
+fn ns_is_the_writers_default_namespace_asked_once_per_identity() {
+    let fake = Fake::new();
+    let mut e = make(&fake, fast(), Some("process"));
+    let s = scen_given(
+        MEMBER_GIVEN,
+        &format!("when:\n  - put-draft: {{ piece: agent-member-draft-with-host-echo, as: m1, status: 200 }}\n  - put-draft: {{ piece: agent-member-draft-with-host-echo, as: m1, status: 200 }}\n  - put-draft: {{ piece: agent-member-draft-with-host-echo, as: m2, status: 200 }}\n{ACTIVE}"),
+    );
+    let r = go(&mut e, &s);
+    assert_eq!(r.report, Report::Pass, "{} / {}", r.expected, r.observed);
+    let urns: Vec<String> = agent_puts(&fake)
+        .iter()
+        .map(|b| b["spec"]["resourceId"]["urn"].as_str().unwrap().to_string())
+        .collect();
+    // The agent piece is deferred and unreleased, so `given` wrote none: the three are the steps'.
+    assert_eq!(urns.len(), 3, "{urns:?}");
+    let keys = made_keys(&fake);
+    let ns = |k: &str| format!("urn:vam:agent:local.vam.dev/ns-{k}/");
+    assert!(
+        urns[0].starts_with(&ns(&keys[0])),
+        "{} vs {keys:?}",
+        urns[0]
+    );
+    assert!(urns[1].starts_with(&ns(&keys[0])), "{}", urns[1]);
+    assert!(urns[2].starts_with(&ns(&keys[1])), "{}", urns[2]);
+    assert!(!urns.iter().any(|u| u.contains("{{")), "{urns:?}");
+    // One `GET /v1/me` per identity, made with that identity's key.
+    assert_eq!(fake.bearers("GET", "/v1/me"), keys);
+}
+
+#[test]
+fn urn_of_aims_the_second_identity_at_the_first_ones_urn() {
+    let fake = Fake::new();
+    let mut e = make(&fake, fast(), Some("process"));
+    let s = scen_given(
+        MEMBER_GIVEN,
+        &format!("when:\n  - put-draft: {{ piece: agent-member-draft-with-host-echo, as: m1, status: 200 }}\n  - put-draft: {{ piece: agent-member-draft-with-host-echo, as: m2, urnOf: m1, status: 200 }}\nthen:\n  - identity-request: {{ as: m2, credential: key, path: \"/v1/me\", status: 200 }}\n{ACTIVE}"),
+    );
+    let r = go(&mut e, &s);
+    assert_eq!(r.report, Report::Pass, "{} / {}", r.expected, r.observed);
+    let puts = agent_puts(&fake);
+    assert_eq!(puts.len(), 2);
+    assert_eq!(
+        puts[0]["spec"]["resourceId"]["urn"],
+        puts[1]["spec"]["resourceId"]["urn"]
+    );
+    // Each PUT was sent with its own identity's key.
+    assert_eq!(fake.bearers("PUT", "/v1/agents"), made_keys(&fake));
+}
+
+#[test]
+fn urn_of_without_an_earlier_put_draft_is_a_scenario_error() {
+    let fake = Fake::new();
+    let mut e = make(&fake, fast(), Some("process"));
+    let s = scen_given(
+        MEMBER_GIVEN,
+        &format!("when:\n  - put-draft: {{ piece: agent-member-draft-with-host-echo, as: m2, urnOf: m1, status: 200 }}\n{ACTIVE}"),
+    );
+    let r = go(&mut e, &s);
+    assert_eq!(failed(&r), ("when.0".to_string(), Class::Scenario));
+    assert!(agent_puts(&fake).is_empty());
+}
+
+#[test]
+fn publish_skill_as_an_identity_with_release_false_publishes_and_releases_nothing() {
+    let fake = Fake::new();
+    let mut e = make(&fake, fast(), Some("process"));
+    let s = scen_given(
+        MEMBER_GIVEN,
+        &format!("when:\n  - publish-skill: {{ piece: skill-draft-probe, as: m1, release: false }}\n{ACTIVE}"),
+    );
+    let r = go(&mut e, &s);
+    assert_eq!(r.report, Report::Pass, "{} / {}", r.expected, r.observed);
+    // Only `skill-host-echo` (a skill piece released at `given`) was released, by the bootstrap key.
+    assert_eq!(fake.count("POST", "/v1/skills/packages/"), 1);
+    let posts = fake.bearers("POST", "/v1/skills/packages");
+    assert_eq!(posts.len(), 3, "{posts:?}");
+    assert_eq!(posts[0], "key");
+    assert_eq!(posts[1], "key");
+    assert_eq!(posts[2], made_keys(&fake)[0]);
+}
+
+#[test]
+fn publish_skill_as_an_identity_releases_as_that_identity_by_default() {
+    let fake = Fake::new();
+    let mut e = make(&fake, fast(), Some("process"));
+    let s = scen_given(
+        MEMBER_GIVEN,
+        &format!("when:\n  - publish-skill: {{ piece: skill-draft-probe, as: m1 }}\n{ACTIVE}"),
+    );
+    let r = go(&mut e, &s);
+    assert_eq!(r.report, Report::Pass, "{} / {}", r.expected, r.observed);
+    assert_eq!(fake.count("POST", "/v1/skills/packages/"), 2);
+    let rel = fake.bearers("POST", "/v1/skills/packages/");
+    assert_eq!(rel[0], "key");
+    assert_eq!(rel[1], made_keys(&fake)[0]);
+}
+
+#[test]
+fn start_playbook_on_a_deferred_draft_runs_the_urn_the_put_draft_wrote() {
+    let fake = Fake::new();
+    let mut e = make(&fake, fast(), Some("process"));
+    let s = scen_given(
+        MEMBER_GIVEN,
+        &format!("when:\n  - put-draft: {{ piece: agent-member-draft-with-host-echo, as: m1, status: 200 }}\n  - start-playbook: {{ playbook: playbook-one-step, agent: agent-member-draft-with-host-echo, draft: true, as: m1, inputs: {{ topic: e2e }} }}\nthen:\n  - expect: {{ run: succeeded }}\n{ACTIVE}"),
+    );
+    let r = go(&mut e, &s);
+    assert_eq!(r.report, Report::Pass, "{} / {}", r.expected, r.observed);
+    let urn = agent_puts(&fake)[0]["spec"]["resourceId"]["urn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let runs = run_bodies(&fake);
+    let spec = &runs[0]["spec"];
+    assert_eq!(spec["agentRef"]["resourceId"]["urn"], urn.as_str());
+    assert_eq!(spec["agentRef"]["version"]["prerelease"], "draft");
+    assert!(spec["playbookRef"]["resourceId"]["urn"]
+        .as_str()
+        .unwrap()
+        .contains("playbook-one-step"));
+    assert_eq!(spec["inputs"]["topic"], "e2e");
+}
+
+#[test]
+fn start_playbook_on_a_deferred_draft_nobody_wrote_is_a_scenario_error() {
+    let fake = Fake::new();
+    let mut e = make(&fake, fast(), Some("process"));
+    let s = scen_given(
+        MEMBER_GIVEN,
+        &format!("when:\n  - start-playbook: {{ playbook: playbook-one-step, agent: agent-member-draft-with-host-echo, draft: true, as: m1, inputs: {{ topic: e2e }} }}\n{ACTIVE}"),
+    );
+    let r = go(&mut e, &s);
+    assert_eq!(failed(&r), ("when.0".to_string(), Class::Scenario));
+}
