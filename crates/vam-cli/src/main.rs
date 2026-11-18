@@ -140,6 +140,12 @@ enum Commands {
         #[command(subcommand)]
         command: cmd::thread::ThreadCmd,
     },
+    /// Copy this `vam` to a per-user directory and put it on your PATH (Linux and macOS; no admin rights).
+    Dock(cmd::dock::DockArgs),
+    /// Remove the `vam` that `vam dock` copied and the PATH lines it added.
+    Undock(cmd::dock::UndockArgs),
+    /// Upgrade this `vam` to a newer release (not built yet).
+    Upgrade,
 }
 
 #[tokio::main]
@@ -223,6 +229,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Workspace { command } => cmd::workspace::run(cli.host, cli.token, command).await,
         Commands::Space { command } => cmd::space::run(cli.host, cli.token, command).await,
         Commands::Thread { command } => cmd::thread::run(cli.host, cli.token, command).await,
+        Commands::Dock(args) => cmd::dock::run_dock(args),
+        Commands::Undock(args) => cmd::dock::run_undock(args),
+        Commands::Upgrade => anyhow::bail!("vam upgrade is not built yet"),
     }
 }
 

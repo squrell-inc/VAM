@@ -58,5 +58,5 @@ when:
         .zshrc: { absent: "# added by vam dock" }
 guards:
   - vam:crates/vam-cli/src/main.rs
-status: pending
-expectFail: { step: when.0, class: product }
+  - vam:crates/vam-cli/src/cmd/dock.rs
+status: active
