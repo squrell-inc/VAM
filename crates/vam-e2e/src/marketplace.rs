@@ -597,7 +597,7 @@ impl Engine {
     }
 
     /// Fields and absent paths must hold on `entry`.
-    fn mkt_fields(
+    pub(super) fn mkt_fields(
         &self,
         what: &str,
         entry: &Value,
