@@ -2221,6 +2221,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_exchange_for_a_client_changed_and_changed_back_meanwhile_stores_nothing() {
+        let n = xchg_node("xchg-aba");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let c1 = n.store.node_client("filebox").unwrap().unwrap();
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+
+        // While ada's next sign-in is at the provider, the admin saves c-2 (her row is marked) and
+        // then c-1 again: the client id and token endpoint are the ones the sign-in started with.
+        let (s, b) = put_client(&n, "c-2", Some("C2-SECRET-wwwwwwwwwwww")).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let back = n.store.node_client("filebox").unwrap().unwrap();
+        assert_eq!(
+            (&back.client_id, &back.token_endpoint),
+            (&c1.client_id, &c1.token_endpoint)
+        );
+        assert!(back.revision > c1.revision, "{back:?} {c1:?}");
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "LATE-A", "refresh_token": "LATE-R" }),
+        );
+        let e = exchange_made_with(&n, "ada", c1).await.err().unwrap();
+        assert!(matches!(e, OrchestratorError::Conflict(_)), "{e}");
+        assert!(e.to_string().contains("sign in again"), "{e}");
+        // The mark the admin's saves left stays, and so do the tokens.
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(
+            oauth.status,
+            crate::mcp_registry::McpOauthStatus::NeedsReauth
+        );
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            NEW_REFRESH
+        );
+        // A sign-in under the client as it is now connects.
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+    }
+
+    #[tokio::test]
     async fn a_save_that_fails_after_the_code_was_spent_replaces_nothing_and_says_to_sign_in_again()
     {
         let n = xchg_node("xchg-atomic");

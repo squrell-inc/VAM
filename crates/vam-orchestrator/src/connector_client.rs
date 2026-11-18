@@ -140,6 +140,13 @@ pub struct NodeClient {
     pub secret_set: bool,
     pub updated_at: i64,
     pub updated_by: String,
+    /// Moves on every write of the client row, a secret-only save and a save that repeats the stored
+    /// client included. It never goes back, not even through a removed and re-added client
+    /// ([`next_client_revision`]), so a sign-in, a refresh or a save plan that captured it can tell
+    /// "still the client I read" from "the same client id again" (A→B→A) or "a newer save in the
+    /// same second" (`updated_at` has one-second resolution). Set by
+    /// [`SqliteWorkflowStore::put_node_with_client`]; a planned client carries the stored one.
+    pub revision: i64,
 }
 
 impl NodeClient {
@@ -346,6 +353,7 @@ pub fn plan_client(
                     && (req.client_secret.is_some() || existing.is_some_and(|e| e.secret_set)),
                 updated_at: now,
                 updated_by: by.to_string(),
+                revision: existing.map_or(0, |e| e.revision),
             };
             let reauth = existing.is_some_and(|e| {
                 e.client_id != client.client_id || e.token_endpoint != client.token_endpoint
@@ -415,7 +423,14 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
             secret_set INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             updated_by TEXT NOT NULL,
-            token_auth_method TEXT NOT NULL DEFAULT 'client_secret_post'
+            token_auth_method TEXT NOT NULL DEFAULT 'client_secret_post',
+            revision INTEGER NOT NULL DEFAULT 0
+        );
+        -- The last client revision a connector was given. Kept when its client is removed, so a
+        -- client saved again later never reuses a revision a sign-in or a refresh captured.
+        CREATE TABLE IF NOT EXISTS node_connector_client_revisions (
+            connector_id TEXT PRIMARY KEY,
+            last_revision INTEGER NOT NULL
         );
         ",
     )?;
@@ -433,11 +448,43 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
             [],
         )?;
     }
+    // A store from before the client revision: every saved client starts at 0, and the first save
+    // that changes it moves it to 1 or more.
+    let has_revision: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('node_connector_clients') WHERE name = 'revision'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_revision == 0 {
+        connection.execute(
+            "ALTER TABLE node_connector_clients ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
+/// The next client revision for `connector_id`, inside the caller's transaction: one more than any
+/// revision the connector's client ever had, a removed client's included.
+fn next_client_revision(c: &Connection, connector_id: &str) -> Result<i64, OrchestratorError> {
+    c.execute(
+        "INSERT INTO node_connector_client_revisions (connector_id, last_revision)
+         VALUES (?1, COALESCE((SELECT revision FROM node_connector_clients
+                               WHERE connector_id = ?1), 0) + 1)
+         ON CONFLICT(connector_id) DO UPDATE SET last_revision = MAX(last_revision,
+             COALESCE((SELECT revision FROM node_connector_clients WHERE connector_id = ?1), 0)) + 1",
+        params![connector_id],
+    )?;
+    Ok(c.query_row(
+        "SELECT last_revision FROM node_connector_client_revisions WHERE connector_id = ?1",
+        params![connector_id],
+        |r| r.get(0),
+    )?)
+}
+
 const COLUMNS: &str = "connector_id, client_id, issuer, authorize_endpoint, token_endpoint, \
-                       revocation_endpoint, secret_set, updated_at, updated_by, token_auth_method";
+                       revocation_endpoint, secret_set, updated_at, updated_by, token_auth_method, \
+                       revision";
 
 fn row_to_client(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeClient> {
     Ok(NodeClient {
@@ -451,6 +498,7 @@ fn row_to_client(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeClient> {
         updated_at: r.get(7)?,
         updated_by: r.get(8)?,
         token_auth_method: TokenAuthMethod::parse(&r.get::<_, String>(9)?),
+        revision: r.get(10)?,
     })
 }
 
@@ -494,9 +542,10 @@ pub(crate) struct PlanBasis<'a> {
 /// The text of the 409 when the state moved under a save.
 pub(crate) const CLIENT_CHANGED_WHILE_SAVING: &str = "the client changed while saving; save again";
 
-/// Whether two reads of a connector's client are the same state for a plan: the id, the token
-/// endpoint, whether a secret is set and when it was saved (a new secret under the same id moves
-/// `updated_at`, and a plan that keeps "the stored secret" must keep that one).
+/// Whether two reads of a connector's client are the same state for a plan. The revision decides
+/// it: every client write moves it, so a secret-only save in the same second as the plan's read
+/// (which leaves `updated_at` as it was) still makes the plan stale, and a plan that keeps or
+/// clears "the stored client" acts only on the one it read.
 fn same_client_state(a: Option<&NodeClient>, b: Option<&NodeClient>) -> bool {
     match (a, b) {
         (None, None) => true,
@@ -505,6 +554,7 @@ fn same_client_state(a: Option<&NodeClient>, b: Option<&NodeClient>) -> bool {
                 && a.token_endpoint == b.token_endpoint
                 && a.secret_set == b.secret_set
                 && a.updated_at == b.updated_at
+                && a.revision == b.revision
         }
         _ => false,
     }
@@ -567,8 +617,8 @@ impl SqliteWorkflowStore {
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         let tx = c.transaction()?;
         let def_now = crate::connectors::entry_in(&tx, &node.connector_id)?.map(|e| e.def);
-        if def_now.as_ref() != Some(basis.def)
-            || !same_client_state(client_in(&tx, &node.connector_id)?.as_ref(), basis.client)
+        let stored = client_in(&tx, &node.connector_id)?;
+        if def_now.as_ref() != Some(basis.def) || !same_client_state(stored.as_ref(), basis.client)
         {
             return Err(OrchestratorError::Conflict(
                 CLIENT_CHANGED_WHILE_SAVING.into(),
@@ -581,10 +631,11 @@ impl SqliteWorkflowStore {
                 clear_client_in(&tx, &node.connector_id)?;
             }
             ClientWrite::Set { client, .. } => {
+                let revision = next_client_revision(&tx, &node.connector_id)?;
                 tx.execute(
                     &format!(
                         "INSERT INTO node_connector_clients ({COLUMNS})
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                          ON CONFLICT(connector_id) DO UPDATE SET client_id = excluded.client_id,
                              issuer = excluded.issuer,
                              authorize_endpoint = excluded.authorize_endpoint,
@@ -592,7 +643,8 @@ impl SqliteWorkflowStore {
                              revocation_endpoint = excluded.revocation_endpoint,
                              secret_set = excluded.secret_set,
                              updated_at = excluded.updated_at, updated_by = excluded.updated_by,
-                             token_auth_method = excluded.token_auth_method"
+                             token_auth_method = excluded.token_auth_method,
+                             revision = excluded.revision"
                     ),
                     params![
                         client.connector_id,
@@ -604,7 +656,8 @@ impl SqliteWorkflowStore {
                         client.secret_set as i64,
                         client.updated_at,
                         client.updated_by,
-                        client.token_auth_method.as_str()
+                        client.token_auth_method.as_str(),
+                        revision
                     ],
                 )?;
                 if let (Some(sealed), Some(host)) = (&sealed, client.token_host()) {
@@ -907,6 +960,7 @@ mod tests {
             secret_set: secret,
             updated_at: 1,
             updated_by: "olga".into(),
+            revision: 1,
         }
     }
 
@@ -1028,6 +1082,9 @@ mod tests {
         let saved = client_in(&c, "filebox").unwrap().unwrap();
         assert_eq!(saved.token_auth_method, TokenAuthMethod::ClientSecretPost);
         assert_eq!(saved.client_id, "c1");
+        // And at revision 0: the first save that changes it moves it on.
+        assert_eq!(saved.revision, 0);
+        assert_eq!(next_client_revision(&c, "filebox").unwrap(), 1);
         assert_eq!(
             TokenAuthMethod::parse("client_secret_basic").as_str(),
             "client_secret_basic"
@@ -1317,6 +1374,7 @@ pub(crate) mod test_support {
             secret_set: true,
             updated_at: 1,
             updated_by: "olga".into(),
+            revision: 0,
         };
         let node = NodeConnector {
             connector_id: "filebox".into(),
@@ -1335,7 +1393,7 @@ pub(crate) mod test_support {
             reauth: false,
         };
         write_node(store, vault, &node, &plan, tag);
-        client
+        store.node_client("filebox").unwrap().unwrap()
     }
 
     /// Pins `method` on the saved client of `filebox`, the way an Enable against a provider that
@@ -1346,7 +1404,7 @@ pub(crate) mod test_support {
             .lock()
             .unwrap()
             .execute(
-                "UPDATE node_connector_clients SET token_auth_method = ?1
+                "UPDATE node_connector_clients SET token_auth_method = ?1, revision = revision + 1
                  WHERE connector_id = 'filebox'",
                 [method.as_str()],
             )
@@ -1577,6 +1635,84 @@ mod exchange_tests {
         assert!(plan.reauth);
         assert!(write_node(&store, &vault, &node(true), &plan, tag).is_empty());
         assert_eq!(status("cy").0, NeedsReauth);
+    }
+
+    #[test]
+    fn a_clear_planned_before_a_secret_only_save_in_the_same_second_commits_nothing() {
+        let tag = "same-second";
+        let (store, vault, _first) = world(tag);
+        let def = store.connector_entry("filebox").unwrap().unwrap().def;
+        // Both saves below are stamped with the same second (`set` plans at `now = 5`).
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-1", Some("FIRST-SECRET"));
+        write_node(&store, &vault, &node(true), &plan, tag);
+        // Admin A reads the client and plans to clear it.
+        let earlier = store.node_client("filebox").unwrap().unwrap();
+        // Admin B saves a new secret for the same client in that second.
+        let plan = set(&def, Some(&earlier), tag, "c-1", Some("NEWER-SECRET"));
+        write_node(&store, &vault, &node(true), &plan, tag);
+        let newer = store.node_client("filebox").unwrap().unwrap();
+        assert_eq!(newer.updated_at, earlier.updated_at);
+        // A's clear, planned from the earlier row, is refused and removes nothing.
+        let clear = ClientPlan {
+            write: ClientWrite::Clear,
+            reauth: true,
+        };
+        let e = store
+            .put_node_with_client(
+                &vault,
+                &node(false),
+                &clear,
+                &format!("https://mcp.{tag}.example/mcp"),
+                &PlanBasis {
+                    def: &def,
+                    client: Some(&earlier),
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&e, OrchestratorError::Conflict(m) if m == CLIENT_CHANGED_WHILE_SAVING),
+            "{e}"
+        );
+        assert_eq!(store.node_client("filebox").unwrap(), Some(newer));
+        assert_eq!(org_secret_of(&vault), "NEWER-SECRET");
+    }
+
+    #[test]
+    fn the_client_revision_moves_on_every_client_write_and_never_goes_back() {
+        let tag = "revision";
+        let (store, vault, first) = world(tag);
+        let def = store.connector_entry("filebox").unwrap().unwrap().def;
+        let rev = || store.node_client("filebox").unwrap().map(|c| c.revision);
+        assert!(first.revision > 0);
+        let save = |id: &str, secret: Option<&str>| {
+            let read = store.node_client("filebox").unwrap();
+            let plan = set(&def, read.as_ref(), tag, id, secret);
+            write_node(&store, &vault, &node(true), &plan, tag);
+        };
+        // Every write moves it: the same client saved again, a new secret, another id, and that id
+        // back again.
+        save("c-1", None);
+        let resaved = rev().unwrap();
+        assert!(resaved > first.revision);
+        save("c-1", Some("NEW-SECRET"));
+        let after_secret = rev().unwrap();
+        assert!(after_secret > resaved);
+        save("c-2", Some("B-SECRET"));
+        let after_b = rev().unwrap();
+        assert!(after_b > after_secret);
+        save("c-1", Some("NEW-SECRET"));
+        let back = rev().unwrap();
+        assert!(back > after_b);
+        // Removed and saved again: the revision does not start over.
+        let clear = ClientPlan {
+            write: ClientWrite::Clear,
+            reauth: true,
+        };
+        write_node(&store, &vault, &node(false), &clear, tag);
+        assert_eq!(rev(), None);
+        save("c-1", Some("AGAIN"));
+        assert!(rev().unwrap() > back);
     }
 
     #[test]

@@ -131,8 +131,8 @@ next, and the member's connector entry is the answer.
 
 The local checks (body, redirect URI, code and verifier syntax, the connector, the enable, the saved client and
 secret) run before the request and write nothing. After the provider has accepted the code it cannot be used again,
-so what can still fail says so: a client replaced, or the connector turned off, while the provider was answering is
-a 409 and nothing is stored; a failure to save is a 502 that replaces nothing and says to sign in again; tools that
+so what can still fail says so: a client replaced (even replaced and then put back, judged by the client's
+revision), or the connector turned off, while the provider was answering is a 409 and nothing is stored; a failure to save is a 502 that replaces nothing and says to sign in again; tools that
 cannot be read leave the sign-in stored but the connection `needsReconnect`, with the notification open and parked
 runs parked, until `POST /v1/mcp/connections/{id}/refresh` lists them. A provider that refuses the client
 (`invalid_client`) is a 409 saying the client id or secret the admin entered was refused; a refused or
