@@ -29,5 +29,6 @@ pub mod secrets;
 pub mod session;
 pub mod space;
 pub mod thread;
+pub mod upgrade;
 pub mod users;
 pub mod workspace;

@@ -144,8 +144,8 @@ enum Commands {
     Dock(cmd::dock::DockArgs),
     /// Remove the `vam` that `vam dock` copied and the PATH lines it added.
     Undock(cmd::dock::UndockArgs),
-    /// Upgrade this `vam` to a newer release (not built yet).
-    Upgrade,
+    /// Upgrade this `vam` to a newer release, after checking its hash and attestation.
+    Upgrade(cmd::upgrade::UpgradeArgs),
 }
 
 #[tokio::main]
@@ -231,7 +231,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Thread { command } => cmd::thread::run(cli.host, cli.token, command).await,
         Commands::Dock(args) => cmd::dock::run_dock(args),
         Commands::Undock(args) => cmd::dock::run_undock(args),
-        Commands::Upgrade => anyhow::bail!("vam upgrade is not built yet"),
+        Commands::Upgrade(args) => cmd::upgrade::run(args).await,
     }
 }
 

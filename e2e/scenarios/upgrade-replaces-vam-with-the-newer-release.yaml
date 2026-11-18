@@ -57,5 +57,5 @@ when:
       contains: ["vam 9.9.9 (fixture)"]
 guards:
   - vam:crates/vam-cli/src/main.rs
-status: pending
-expectFail: { step: when.2, class: product }
+  - vam:crates/vam-cli/src/cmd/upgrade.rs
+status: active
