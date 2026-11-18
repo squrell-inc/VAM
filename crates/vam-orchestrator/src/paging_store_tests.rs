@@ -250,7 +250,7 @@ fn skill_package(
         prerelease: "draft".to_string(),
         ..Default::default()
     };
-    let digest: String = std::iter::repeat(digest).take(64).collect();
+    let digest: String = std::iter::repeat_n(digest, 64).collect();
     let mut spec = skill_manifest(&urn);
     spec.version = Some(draft.clone());
     let package = vam_spec::v1::SkillPackageRecord {
