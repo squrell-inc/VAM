@@ -11,7 +11,7 @@ use std::time::Duration;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
-use crate::connector_client::{org_client_secret, RowClient};
+use crate::connector_client::{org_client_secret, RowClient, TokenAuthMethod};
 use crate::error::OrchestratorError;
 use crate::mcp_registry::{
     delete_mcp_connection_secrets, mcp_oauth_client_secret_binding_id,
@@ -127,6 +127,8 @@ pub(crate) struct RefreshTarget<'a> {
     pub(crate) token_endpoint: &'a str,
     pub(crate) client_id: &'a str,
     pub(crate) profile: RefreshProfile<'a>,
+    /// How a client secret authenticates (only read when one is sent).
+    pub(crate) auth_method: TokenAuthMethod,
 }
 
 /// The only host a connector refresh with the Entra profile is ever sent to.
@@ -154,9 +156,12 @@ fn refresh_form<'a>(
     match target.profile {
         RefreshProfile::Mcp { resource } => {
             form.push(("resource", resource));
-            if let Some(secret) = client_secret {
+            if let (Some(secret), TokenAuthMethod::ClientSecretPost) =
+                (client_secret, target.auth_method)
+            {
                 // client_secret_post: registered confidential clients may provide a
-                // client secret; public clients omit this parameter entirely.
+                // client secret; public clients omit this parameter entirely. With
+                // client_secret_basic the secret travels in the Authorization header instead.
                 form.push(("client_secret", secret));
             }
         }
@@ -174,6 +179,7 @@ pub(crate) fn refresh_access_token(
     oauth: &McpOauthMetadata,
     refresh_token: &SecretString,
     client_secret: Option<&SecretString>,
+    auth_method: TokenAuthMethod,
 ) -> Result<RefreshedToken, RefreshFailure> {
     refresh_target(
         &RefreshTarget {
@@ -182,6 +188,7 @@ pub(crate) fn refresh_access_token(
             profile: RefreshProfile::Mcp {
                 resource: &oauth.resource,
             },
+            auth_method,
         },
         refresh_token,
         client_secret,
@@ -204,6 +211,7 @@ pub(crate) fn refresh_access_token_entra(
             token_endpoint: &endpoint,
             client_id,
             profile: RefreshProfile::Entra { scope },
+            auth_method: TokenAuthMethod::default(),
         },
         refresh_token,
         None,
@@ -309,6 +317,7 @@ pub(crate) fn refresh_access_token_unpinned_for_tests(
     oauth: &McpOauthMetadata,
     refresh_token: &SecretString,
     client_secret: Option<&SecretString>,
+    auth_method: TokenAuthMethod,
 ) -> Result<RefreshedToken, RefreshFailure> {
     refresh_target_unpinned_for_tests(
         &RefreshTarget {
@@ -317,6 +326,7 @@ pub(crate) fn refresh_access_token_unpinned_for_tests(
             profile: RefreshProfile::Mcp {
                 resource: &oauth.resource,
             },
+            auth_method,
         },
         refresh_token,
         client_secret,
@@ -430,12 +440,28 @@ fn exchange(
             .map_err(|_| RefreshFailure::needs_reauth("invalid OAuth client secret"))?;
     }
 
-    let form = refresh_form(
-        target,
-        refresh_token.expose_secret().as_str(),
-        client_secret.map(|secret| secret.expose_secret().as_str()),
-    );
-    post_token_form(client, endpoint, &form)
+    let secret = client_secret.map(|secret| secret.expose_secret().as_str());
+    let form = refresh_form(target, refresh_token.expose_secret().as_str(), secret);
+    let basic = match (secret, target.auth_method) {
+        (Some(secret), TokenAuthMethod::ClientSecretBasic) => Some((target.client_id, secret)),
+        _ => None,
+    };
+    post_token_form(client, endpoint, &form, basic)
+}
+
+/// `client_secret_basic` (RFC 6749 §2.3.1): the client id and the secret, each
+/// `application/x-www-form-urlencoded`, are the user name and the password of HTTP Basic.
+fn with_basic_client_auth(
+    request: reqwest::blocking::RequestBuilder,
+    credentials: Option<(&str, &str)>,
+) -> reqwest::blocking::RequestBuilder {
+    let Some((client_id, secret)) = credentials else {
+        return request;
+    };
+    let encode = |value: &str| -> String {
+        url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+    };
+    request.basic_auth(encode(client_id), Some(encode(secret)))
 }
 
 /// One POST of `form` to a token endpoint and the parsed answer. The failure carries a fixed or
@@ -444,10 +470,9 @@ fn post_token_form(
     client: &reqwest::blocking::Client,
     endpoint: &url::Url,
     form: &[(&str, &str)],
+    basic: Option<(&str, &str)>,
 ) -> Result<RefreshedToken, RefreshFailure> {
-    let response = client
-        .post(endpoint.clone())
-        .form(form)
+    let response = with_basic_client_auth(client.post(endpoint.clone()).form(form), basic)
         .send()
         .map_err(|_| RefreshFailure::transient("OAuth token endpoint request failed"))?;
     let status = response.status();
@@ -490,20 +515,28 @@ pub(crate) struct CodeGrant<'a> {
     pub(crate) code: &'a str,
     pub(crate) code_verifier: &'a str,
     pub(crate) redirect_uri: &'a str,
+    /// The method pinned at Enable for the org's secret.
+    pub(crate) auth_method: TokenAuthMethod,
 }
 
 /// The form of a code exchange. Pure, so the shape is unit-testable without a server.
 fn code_form<'a>(grant: &CodeGrant<'a>, client_secret: &'a str) -> Vec<(&'a str, &'a str)> {
-    vec![
+    let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", grant.code),
         ("client_id", grant.client_id),
-        // client_secret_post: the org's client is confidential.
-        ("client_secret", client_secret),
+    ];
+    // The org's client is confidential: the secret is in the body for client_secret_post, and in
+    // the Authorization header (not here) for client_secret_basic.
+    if grant.auth_method == TokenAuthMethod::ClientSecretPost {
+        form.push(("client_secret", client_secret));
+    }
+    form.extend([
         ("code_verifier", grant.code_verifier),
         ("redirect_uri", grant.redirect_uri),
         ("resource", grant.resource),
-    ]
+    ]);
+    form
 }
 
 /// Exchange an authorization code with the org's client secret. The secret leaves the node only
@@ -522,8 +555,11 @@ pub(crate) fn exchange_authorization_code(
             .map_err(|_| RefreshFailure::needs_reauth("invalid OAuth authorization code"))?;
     }
     let (client, endpoint) = pinned_token_client(grant.token_endpoint)?;
-    let form = code_form(grant, client_secret.expose_secret().as_str());
-    post_token_form(&client, &endpoint, &form)
+    let secret = client_secret.expose_secret().as_str();
+    let form = code_form(grant, secret);
+    let basic = (grant.auth_method == TokenAuthMethod::ClientSecretBasic)
+        .then_some((grant.client_id, secret));
+    post_token_form(&client, &endpoint, &form, basic)
 }
 
 /// Outcome of one best-effort RFC 7009 revocation. `reason` is safe to log:
@@ -668,7 +704,12 @@ fn revoke_oauth_refresh_if_configured(vault: &SecretsVault, conn: &McpConnection
             },
             _ => None,
         };
-        return dispatch_revoke(oauth, &refresh_token, client_secret.as_ref());
+        let method = org
+            .client
+            .as_ref()
+            .map(|node| node.token_auth_method)
+            .unwrap_or_default();
+        return dispatch_revoke(oauth, &refresh_token, client_secret.as_ref(), method);
     }
     let client_secret_id = mcp_oauth_client_secret_binding_id(&conn.connection_id);
     let client_secret =
@@ -682,22 +723,33 @@ fn revoke_oauth_refresh_if_configured(vault: &SecretsVault, conn: &McpConnection
             Ok(false) => None,
             Err(_) => return RevokeAttempt::failed("credential store unavailable"),
         };
-    dispatch_revoke(oauth, &refresh_token, client_secret.as_ref())
+    dispatch_revoke(
+        oauth,
+        &refresh_token,
+        client_secret.as_ref(),
+        TokenAuthMethod::default(),
+    )
 }
 
 fn dispatch_revoke(
     oauth: &McpOauthMetadata,
     refresh_token: &SecretString,
     client_secret: Option<&SecretString>,
+    auth_method: TokenAuthMethod,
 ) -> RevokeAttempt {
     // Crate unit tests may point `revocationEndpoint` at a loopback mock.
     // Release builds and integration tests always use the pinned HTTPS client,
     // which rejects loopback before a request is sent.
     #[cfg(test)]
     if revocation_endpoint_is_loopback(oauth) {
-        return revoke_refresh_token_unpinned_for_tests(oauth, refresh_token, client_secret);
+        return revoke_refresh_token_unpinned_for_tests(
+            oauth,
+            refresh_token,
+            client_secret,
+            auth_method,
+        );
     }
-    revoke_refresh_token(oauth, refresh_token, client_secret)
+    revoke_refresh_token(oauth, refresh_token, client_secret, auth_method)
 }
 
 #[cfg(test)]
@@ -720,6 +772,7 @@ pub(crate) fn revoke_refresh_token(
     oauth: &McpOauthMetadata,
     refresh_token: &SecretString,
     client_secret: Option<&SecretString>,
+    auth_method: TokenAuthMethod,
 ) -> RevokeAttempt {
     let Some(raw) = oauth.revocation_endpoint.as_deref() else {
         return RevokeAttempt::skipped();
@@ -734,7 +787,14 @@ pub(crate) fn revoke_refresh_token(
             Ok(client) => client,
             Err(_) => return RevokeAttempt::failed("failed to create OAuth HTTP client"),
         };
-        return post_revocation(&client, &mapped, oauth, refresh_token, client_secret);
+        return post_revocation(
+            &client,
+            &mapped,
+            oauth,
+            refresh_token,
+            client_secret,
+            auth_method,
+        );
     }
     let host = match endpoint.host_str() {
         Some(host) => host.to_owned(),
@@ -754,6 +814,7 @@ pub(crate) fn revoke_refresh_token(
         oauth,
         refresh_token,
         client_secret,
+        auth_method,
     )
 }
 
@@ -764,6 +825,7 @@ pub(crate) fn revoke_refresh_token_unpinned_for_tests(
     oauth: &McpOauthMetadata,
     refresh_token: &SecretString,
     client_secret: Option<&SecretString>,
+    auth_method: TokenAuthMethod,
 ) -> RevokeAttempt {
     let Some(raw) = oauth.revocation_endpoint.as_deref() else {
         return RevokeAttempt::skipped();
@@ -785,7 +847,14 @@ pub(crate) fn revoke_refresh_token_unpinned_for_tests(
         Ok(client) => client,
         Err(_) => return RevokeAttempt::failed("failed to create OAuth HTTP client"),
     };
-    post_revocation(&client, &endpoint, oauth, refresh_token, client_secret)
+    post_revocation(
+        &client,
+        &endpoint,
+        oauth,
+        refresh_token,
+        client_secret,
+        auth_method,
+    )
 }
 
 fn parse_revocation_url(raw: &str, require_https: bool) -> Result<url::Url, RevokeAttempt> {
@@ -822,6 +891,7 @@ fn post_revocation(
     oauth: &McpOauthMetadata,
     refresh_token: &SecretString,
     client_secret: Option<&SecretString>,
+    auth_method: TokenAuthMethod,
 ) -> RevokeAttempt {
     if validate_oauth_secret_value(refresh_token.expose_secret()).is_err() {
         return RevokeAttempt::failed("invalid OAuth refresh token");
@@ -836,10 +906,19 @@ fn post_revocation(
         ("token_type_hint", "refresh_token"),
         ("client_id", oauth.client_id.as_str()),
     ];
+    let mut basic = None;
     if let Some(secret) = client_secret {
-        form.push(("client_secret", secret.expose_secret().as_str()));
+        match auth_method {
+            TokenAuthMethod::ClientSecretPost => {
+                form.push(("client_secret", secret.expose_secret().as_str()));
+            }
+            TokenAuthMethod::ClientSecretBasic => {
+                basic = Some((oauth.client_id.as_str(), secret.expose_secret().as_str()));
+            }
+        }
     }
-    let response = match client.post(endpoint.clone()).form(&form).send() {
+    let request = with_basic_client_auth(client.post(endpoint.clone()).form(&form), basic);
+    let response = match request.send() {
         Ok(response) => response,
         Err(_) => return RevokeAttempt::failed("OAuth revocation endpoint request failed"),
     };
@@ -964,6 +1043,7 @@ mod tests {
             &metadata(url),
             &SecretString::new("old refresh+&".into()),
             Some(&SecretString::new("client secret=&".into())),
+            TokenAuthMethod::ClientSecretPost,
         )
         .ok()
         .unwrap();
@@ -1002,6 +1082,7 @@ mod tests {
             profile: RefreshProfile::Mcp {
                 resource: "https://mcp.example/mcp",
             },
+            auth_method: TokenAuthMethod::default(),
         };
         let form: std::collections::HashMap<_, _> =
             refresh_form(&mcp, "rt", Some("cs")).into_iter().collect();
@@ -1015,6 +1096,7 @@ mod tests {
             profile: RefreshProfile::Entra {
                 scope: "openid offline_access Mail.ReadWrite",
             },
+            auth_method: TokenAuthMethod::default(),
         };
         // Even handed a secret, an Entra request has none and has no `resource`.
         let form: std::collections::HashMap<_, _> =
@@ -1041,6 +1123,7 @@ mod tests {
                 profile: RefreshProfile::Entra {
                     scope: "openid offline_access User.Read",
                 },
+                auth_method: TokenAuthMethod::default(),
             },
             &SecretString::new("old refresh+&".into()),
             None,
@@ -1069,6 +1152,7 @@ mod tests {
                 token_endpoint: &url,
                 client_id: "c",
                 profile: RefreshProfile::Entra { scope: "openid" },
+                auth_method: TokenAuthMethod::default(),
             },
             &SecretString::new("SECRET-REFRESH".into()),
             None,
@@ -1117,6 +1201,7 @@ mod tests {
             &metadata(https_url),
             &SecretString::new("old-refresh".into()),
             None,
+            TokenAuthMethod::ClientSecretPost,
         )
         .ok()
         .unwrap();
@@ -1136,6 +1221,7 @@ mod tests {
             &metadata(url),
             &SecretString::new("SECRET-REFRESH".into()),
             Some(&SecretString::new("SECRET-CLIENT".into())),
+            TokenAuthMethod::ClientSecretPost,
         )
         .err()
         .unwrap();
@@ -1180,6 +1266,7 @@ mod tests {
                 &metadata(url),
                 &SecretString::new("SECRET-REFRESH".into()),
                 None,
+                TokenAuthMethod::ClientSecretPost,
             )
             .err()
             .unwrap();
@@ -1200,6 +1287,7 @@ mod tests {
             &metadata(format!("http://{addr}/oauth/token")),
             &SecretString::new("SECRET-REFRESH".into()),
             None,
+            TokenAuthMethod::ClientSecretPost,
         )
         .err()
         .unwrap();
@@ -1235,6 +1323,7 @@ mod tests {
                 &metadata(url),
                 &SecretString::new("SECRET-REFRESH".into()),
                 None,
+                TokenAuthMethod::ClientSecretPost,
             )
             .err()
             .unwrap();
@@ -1246,17 +1335,27 @@ mod tests {
     #[test]
     fn production_rejects_loopback_and_http_before_sending() {
         let oauth = metadata("http://127.0.0.1:12345/token".into());
-        let err = refresh_access_token(&oauth, &SecretString::new("refresh".into()), None)
-            .err()
-            .unwrap();
+        let err = refresh_access_token(
+            &oauth,
+            &SecretString::new("refresh".into()),
+            None,
+            TokenAuthMethod::ClientSecretPost,
+        )
+        .err()
+        .unwrap();
         assert_eq!(
             err,
             RefreshFailure::needs_reauth("invalid OAuth token endpoint")
         );
         let oauth = metadata("https://127.0.0.1:12345/token".into());
-        let err = refresh_access_token(&oauth, &SecretString::new("refresh".into()), None)
-            .err()
-            .unwrap();
+        let err = refresh_access_token(
+            &oauth,
+            &SecretString::new("refresh".into()),
+            None,
+            TokenAuthMethod::ClientSecretPost,
+        )
+        .err()
+        .unwrap();
         assert_eq!(
             err,
             RefreshFailure::needs_reauth("OAuth token endpoint rejected")
@@ -1279,9 +1378,14 @@ mod tests {
     fn unresolvable_token_endpoint_is_transient() {
         // RFC 6761: `.invalid` never resolves, standing in for a DNS outage.
         let oauth = metadata("https://auth.vam-test.invalid/token".into());
-        let err = refresh_access_token(&oauth, &SecretString::new("refresh".into()), None)
-            .err()
-            .unwrap();
+        let err = refresh_access_token(
+            &oauth,
+            &SecretString::new("refresh".into()),
+            None,
+            TokenAuthMethod::ClientSecretPost,
+        )
+        .err()
+        .unwrap();
         assert_eq!(
             err,
             RefreshFailure::transient("OAuth token endpoint could not be resolved")
@@ -1387,6 +1491,7 @@ mod tests {
             &revocation_metadata(url),
             &SecretString::new(refresh.into()),
             Some(&SecretString::new(secret.into())),
+            TokenAuthMethod::ClientSecretPost,
         );
         assert!(attempt.succeeded, "{}", attempt.reason);
         assert!(attempt.reason.is_empty());
@@ -1411,6 +1516,7 @@ mod tests {
             &revocation_metadata(url),
             &SecretString::new("public-refresh".into()),
             None,
+            TokenAuthMethod::ClientSecretPost,
         );
         assert!(attempt.succeeded, "{}", attempt.reason);
         let (request, retried) = worker.join().unwrap();
@@ -1431,6 +1537,7 @@ mod tests {
             &revocation_metadata(url),
             &SecretString::new(refresh.into()),
             None,
+            TokenAuthMethod::ClientSecretPost,
         );
         assert!(attempt.attempted);
         assert!(!attempt.succeeded);
@@ -1458,13 +1565,23 @@ mod tests {
     fn production_revoke_rejects_loopback_without_sending_the_token() {
         let refresh = "must-not-appear";
         let oauth = revocation_metadata("https://127.0.0.1:9/oauth/revoke".into());
-        let attempt = revoke_refresh_token(&oauth, &SecretString::new(refresh.into()), None);
+        let attempt = revoke_refresh_token(
+            &oauth,
+            &SecretString::new(refresh.into()),
+            None,
+            TokenAuthMethod::ClientSecretPost,
+        );
         assert!(attempt.attempted);
         assert!(!attempt.succeeded);
         assert_eq!(attempt.reason, "OAuth revocation endpoint rejected");
         assert!(!attempt.reason.contains(refresh));
         let http = revocation_metadata("http://auth.example.com/oauth/revoke".into());
-        let attempt = revoke_refresh_token(&http, &SecretString::new(refresh.into()), None);
+        let attempt = revoke_refresh_token(
+            &http,
+            &SecretString::new(refresh.into()),
+            None,
+            TokenAuthMethod::ClientSecretPost,
+        );
         assert_eq!(attempt.reason, "invalid OAuth revocation endpoint");
         assert!(!attempt.reason.contains(refresh));
     }
@@ -1705,7 +1822,114 @@ mod org_client_tests {
             code: "CODE-1",
             code_verifier: "VERIFIER-abcdefghijklmnopqrstuvwxyz0123456789-ABCDE",
             redirect_uri: "squrell://oauth",
+            auth_method: TokenAuthMethod::ClientSecretPost,
         }
+    }
+
+    /// The value of one request header (case of the name ignored, case of the value kept).
+    fn header_of(request: &str, name: &str) -> Option<String> {
+        request.split("\r\n").find_map(|line| {
+            let (k, v) = line.split_once(": ")?;
+            k.eq_ignore_ascii_case(name).then(|| v.to_string())
+        })
+    }
+
+    /// A secret that every character class of `application/x-www-form-urlencoded` touches, and
+    /// that again as RFC 6749 §2.3.1 sends it (the user name is `c-1`).
+    const BASIC_SECRET: &str = "s3cr3t:with space/+&=%\u{e9}";
+    fn basic_header() -> String {
+        use base64::Engine as _;
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD
+                .encode("c-1:s3cr3t%3Awith+space%2F%2B%26%3D%25%C3%A9")
+        )
+    }
+
+    #[test]
+    fn client_secret_basic_sends_the_urlencoded_id_and_secret_as_http_basic_and_no_secret_field() {
+        // The code exchange.
+        let (base, worker) = serve_once(
+            "200 OK",
+            r#"{"access_token":"A1","token_type":"bearer","refresh_token":"R1"}"#,
+        );
+        test_seam::serve("auth.basic-code.example", base);
+        let mut g = grant("https://auth.basic-code.example/token");
+        g.auth_method = TokenAuthMethod::ClientSecretBasic;
+        let secret = SecretString::new(BASIC_SECRET.into());
+        exchange_authorization_code(&g, &secret).ok().unwrap();
+        let request = worker.join().unwrap();
+        assert_eq!(header_of(&request, "authorization"), Some(basic_header()));
+        let form = form_of(&request);
+        assert!(!form.contains_key("client_secret"), "{form:?}");
+        assert!(!request.contains("s3cr3t"), "{request}");
+        assert_eq!(form["client_id"], "c-1");
+        assert_eq!(form["grant_type"], "authorization_code");
+        assert_eq!(form["code"], "CODE-1");
+
+        // The refresh.
+        let (base, worker) = serve_once(
+            "200 OK",
+            r#"{"access_token":"A2","token_type":"bearer","refresh_token":"R2"}"#,
+        );
+        test_seam::serve("auth.basic-refresh.example", base);
+        let oauth = McpOauthMetadata {
+            resource: "https://mcp.example/mcp".into(),
+            authorization_server: "https://auth.basic-refresh.example".into(),
+            token_endpoint: "https://auth.basic-refresh.example/token".into(),
+            revocation_endpoint: None,
+            client_id: "c-1".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: None,
+            status: McpOauthStatus::Connected,
+            last_refresh_at: None,
+            last_refresh_error: None,
+        };
+        refresh_access_token(
+            &oauth,
+            &SecretString::new("R1".into()),
+            Some(&secret),
+            TokenAuthMethod::ClientSecretBasic,
+        )
+        .ok()
+        .unwrap();
+        let request = worker.join().unwrap();
+        assert_eq!(header_of(&request, "authorization"), Some(basic_header()));
+        let form = form_of(&request);
+        assert!(!form.contains_key("client_secret"), "{form:?}");
+        assert_eq!(form["grant_type"], "refresh_token");
+        assert_eq!(form["resource"], "https://mcp.example/mcp");
+
+        // The revoke.
+        let (base, worker) = serve_once("200 OK", "");
+        let mut revoking = oauth.clone();
+        revoking.revocation_endpoint = Some(format!("{base}revoke"));
+        let attempt = revoke_refresh_token_unpinned_for_tests(
+            &revoking,
+            &SecretString::new("R2".into()),
+            Some(&secret),
+            TokenAuthMethod::ClientSecretBasic,
+        );
+        assert!(attempt.succeeded, "{attempt:?}");
+        let request = worker.join().unwrap();
+        assert_eq!(header_of(&request, "authorization"), Some(basic_header()));
+        let form = form_of(&request);
+        assert!(!form.contains_key("client_secret"), "{form:?}");
+        assert_eq!(form["token"], "R2");
+
+        // The default is the body, and sends no Authorization header at all.
+        let (base, worker) = serve_once(
+            "200 OK",
+            r#"{"access_token":"A3","token_type":"bearer","refresh_token":"R3"}"#,
+        );
+        test_seam::serve("auth.post-code.example", base);
+        exchange_authorization_code(&grant("https://auth.post-code.example/token"), &secret)
+            .ok()
+            .unwrap();
+        let request = worker.join().unwrap();
+        assert_eq!(header_of(&request, "authorization"), None);
+        assert_eq!(form_of(&request)["client_secret"], BASIC_SECRET);
     }
 
     #[test]

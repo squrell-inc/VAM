@@ -1267,11 +1267,9 @@ fn put_mcp_connection_secret(
     Ok(binding_id.to_string())
 }
 
-/// Delete every vault binding listed on the connection (and legacy auth id).
-pub fn delete_mcp_connection_secrets(
-    vault: &SecretsVault,
-    conn: &McpConnection,
-) -> Result<(), OrchestratorError> {
+/// Every vault binding id a connection can hold (its headers, its legacy auth id, its OAuth tokens
+/// and its own client secret), in a stable order.
+pub(crate) fn connection_binding_ids(conn: &McpConnection) -> Vec<String> {
     let mut ids: BTreeMap<String, ()> = BTreeMap::new();
     for binding in &conn.header_bindings {
         ids.insert(binding.binding_id.clone(), ());
@@ -1282,7 +1280,15 @@ pub fn delete_mcp_connection_secrets(
     ids.insert(mcp_oauth_access_token_binding_id(&conn.connection_id), ());
     ids.insert(mcp_oauth_refresh_token_binding_id(&conn.connection_id), ());
     ids.insert(mcp_oauth_client_secret_binding_id(&conn.connection_id), ());
-    for binding_id in ids.keys() {
+    ids.into_keys().collect()
+}
+
+/// Delete every vault binding listed on the connection (and legacy auth id).
+pub fn delete_mcp_connection_secrets(
+    vault: &SecretsVault,
+    conn: &McpConnection,
+) -> Result<(), OrchestratorError> {
+    for binding_id in &connection_binding_ids(conn) {
         match vault.delete_secret_at(conn.scope, &conn.owner_user_id, binding_id) {
             Ok(_) | Err(OrchestratorError::NotFound(_)) => {}
             Err(err) => return Err(err),
@@ -1305,8 +1311,23 @@ pub fn delete_replaced_auth_mode_bindings(
     new_mode: McpAuthMode,
     retained_binding_ids: &[String],
 ) -> Result<(), OrchestratorError> {
+    for binding_id in &replaced_auth_mode_binding_ids(previous, new_mode, retained_binding_ids) {
+        match vault.delete_secret_at(previous.scope, &previous.owner_user_id, binding_id) {
+            Ok(_) | Err(OrchestratorError::NotFound(_)) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+/// The binding ids [`delete_replaced_auth_mode_bindings`] deletes.
+pub(crate) fn replaced_auth_mode_binding_ids(
+    previous: &McpConnection,
+    new_mode: McpAuthMode,
+    retained_binding_ids: &[String],
+) -> Vec<String> {
     if previous.auth_mode == new_mode {
-        return Ok(());
+        return Vec::new();
     }
     let mut ids: BTreeMap<String, ()> = BTreeMap::new();
     match previous.auth_mode {
@@ -1334,18 +1355,12 @@ pub fn delete_replaced_auth_mode_bindings(
             ids.insert(mcp_auth_binding_id(&previous.connection_id), ());
         }
     }
-    for binding_id in ids.keys() {
-        if previous.auth_mode == McpAuthMode::Static
-            && retained_binding_ids.iter().any(|kept| kept == binding_id)
-        {
-            continue;
-        }
-        match vault.delete_secret_at(previous.scope, &previous.owner_user_id, binding_id) {
-            Ok(_) | Err(OrchestratorError::NotFound(_)) => {}
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(())
+    ids.into_keys()
+        .filter(|binding_id| {
+            !(previous.auth_mode == McpAuthMode::Static
+                && retained_binding_ids.iter().any(|kept| kept == binding_id))
+        })
+        .collect()
 }
 
 /// Resolve every connection header for `caller_user_id`.
@@ -2191,6 +2206,204 @@ pub(crate) fn mark_connector_rows_need_reauth(
     Ok(changed)
 }
 
+/// Puts back to `connected` every member's connector row that is `needs_reauth` because of exactly
+/// `reason` (the one text a refused admin client leaves), and returns their owners. A row that needs
+/// a sign-in for any other reason (a revoked or spent grant, a changed client) is left alone, and so
+/// is a row on another URL (a server the member added by hand). Runs inside the caller's transaction.
+pub(crate) fn clear_refused_client_rows(
+    connection: &Connection,
+    connection_id: &str,
+    urls: &[&str],
+    reason: &str,
+) -> Result<Vec<String>, OrchestratorError> {
+    let rows: Vec<(String, String)> = {
+        let mut stmt = connection.prepare(
+            "SELECT owner_user_id, oauth_metadata_json, url FROM mcp_connections
+             WHERE connection_id = ?1 AND scope = ?2 AND auth_mode = 'oauth'",
+        )?;
+        let rows = stmt
+            .query_map(params![connection_id, SecretScope::User.as_str()], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .filter(|(_, _, url)| urls.contains(&url.as_str()))
+            .map(|(owner, raw, _)| (owner, raw))
+            .collect()
+    };
+    let mut cleared = Vec::new();
+    for (owner, raw) in rows {
+        let Ok(mut oauth) = serde_json::from_str::<McpOauthMetadata>(&raw) else {
+            continue;
+        };
+        if oauth.status != McpOauthStatus::NeedsReauth
+            || oauth.last_refresh_error.as_deref() != Some(reason)
+        {
+            continue;
+        }
+        oauth.status = McpOauthStatus::Connected;
+        oauth.last_refresh_error = None;
+        let json = oauth_metadata_json(Some(&oauth))?;
+        connection.execute(
+            "UPDATE mcp_connections SET oauth_metadata_json = ?1, updated_at = ?2
+             WHERE scope = ?3 AND owner_user_id = ?4 AND connection_id = ?5 AND auth_mode = 'oauth'",
+            params![json, now_secs(), SecretScope::User.as_str(), owner, connection_id],
+        )?;
+        cleared.push(owner);
+    }
+    Ok(cleared)
+}
+
+/// The two columns a connector's policy writes for a row holding `tools`: the fixed risk classes and
+/// the ask rules, each only for a tool the row has.
+fn policy_columns(
+    policy: &crate::connectors::McpPolicy,
+    tools: &[McpTool],
+) -> Result<(String, String), OrchestratorError> {
+    let on_row: BTreeMap<String, i32> = policy
+        .side_effects
+        .iter()
+        .filter(|(name, _)| tools.iter().any(|t| &t.name == *name))
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let ask: Vec<String> = policy
+        .ask_tools
+        .iter()
+        .filter(|name| tools.iter().any(|t| &t.name == *name))
+        .cloned()
+        .collect();
+    let effects_json = serde_json::to_string(&on_row)
+        .map_err(|err| OrchestratorError::InvalidContract(err.to_string()))?;
+    let ask_json = serde_json::to_string(&ask)
+        .map_err(|err| OrchestratorError::InvalidContract(err.to_string()))?;
+    Ok((effects_json, ask_json))
+}
+
+/// Deletes `ids` from a scope's vault on a connection the caller already holds.
+fn delete_bindings_in(
+    connection: &Connection,
+    scope: SecretScope,
+    owner_user_id: &str,
+    ids: &[String],
+) -> Result<(), OrchestratorError> {
+    let owner = vault_owner_user_id(scope, owner_user_id);
+    for binding_id in ids {
+        connection.execute(
+            "DELETE FROM host_secrets WHERE scope = ?1 AND owner_user_id = ?2 AND binding_id = ?3",
+            params![scope.as_str(), owner, binding_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// The `lastRefreshError` of a connector row whose sign-in worked but whose tools could not be read
+/// yet. The row is `needs_reauth` while it carries it (calls fail fast, parked runs stay parked); the
+/// tools-refresh route adopts the tools, and only then does the row go back to `connected`.
+pub(crate) const TOOLS_PENDING_REASON: &str =
+    "signed in but the tool list could not be read: refresh the connection";
+
+/// What one member's code exchange commits (CN-5.3): the row, both tokens, and the end of a
+/// previous server's row, all in one transaction.
+pub(crate) struct ConnectorConnectionCommit<'a> {
+    pub(crate) owner: &'a str,
+    pub(crate) creator: &'a str,
+    pub(crate) connection_id: &'a str,
+    pub(crate) url: &'a str,
+    pub(crate) oauth: &'a McpOauthMetadata,
+    pub(crate) header_bindings: &'a [HeaderBinding],
+    pub(crate) tools: &'a [McpTool],
+    pub(crate) access_token: &'a str,
+    pub(crate) refresh_token: &'a str,
+    /// The member's row of the connector's previous server (the connector moved): removed, with its
+    /// credentials, in the same commit that connects the new one.
+    pub(crate) stale: Option<&'a McpConnection>,
+    /// The member's row under the connector's own URL that was not an OAuth row: its static
+    /// credentials go in the same commit.
+    pub(crate) replaced_auth: Option<&'a McpConnection>,
+}
+
+/// Validates and writes one `mcp_connections` row on a connection the caller already holds (inside a
+/// transaction, or not): the body of [`SqliteWorkflowStore::upsert_mcp_connection`].
+#[allow(clippy::too_many_arguments)] // mirrors `upsert_mcp_connection`
+fn write_mcp_connection_row(
+    connection: &Connection,
+    scope: SecretScope,
+    owner_user_id: &str,
+    connection_id: &str,
+    url: &str,
+    secret_binding_id: &str,
+    header_bindings: &[HeaderBinding],
+    tools: &[McpTool],
+    auth_mode: McpAuthMode,
+    oauth: Option<&McpOauthMetadata>,
+) -> Result<(), OrchestratorError> {
+    validate_connection_id(connection_id)?;
+    let oauth = match auth_mode {
+        McpAuthMode::Static => {
+            if oauth.is_some() {
+                return Err(OrchestratorError::InvalidContract(
+                    "oauth metadata is only allowed when authMode is oauth".into(),
+                ));
+            }
+            None
+        }
+        McpAuthMode::Oauth => {
+            let meta = oauth.ok_or_else(|| {
+                OrchestratorError::InvalidContract(
+                    "oauth metadata is required when authMode is oauth".into(),
+                )
+            })?;
+            validate_oauth_metadata(meta)?;
+            Some(meta.clone())
+        }
+    };
+    let tools: Vec<McpTool> = tools.iter().map(sanitize_mcp_tool).collect();
+    plan_mcp_tools(connection_id, &tools)?;
+    let owner = vault_owner_user_id(scope, owner_user_id).to_string();
+    let snapshot = serde_json::to_string(&tools)
+        .map_err(|e| OrchestratorError::InvalidContract(e.to_string()))?;
+    let header_bindings = synthesize_header_bindings(secret_binding_id, header_bindings.to_vec());
+    let auth_binding = if secret_binding_id.is_empty() {
+        authorization_binding_id(&header_bindings)
+    } else {
+        secret_binding_id.to_string()
+    };
+    let headers_json = serde_json::to_string(&header_bindings)
+        .map_err(|e| OrchestratorError::InvalidContract(e.to_string()))?;
+    let oauth_json = oauth_metadata_json(oauth.as_ref())?;
+    let now = now_secs();
+    // `timeout_ms` is omitted: a new row takes the column default
+    // (120000) and a reconnect or refresh keeps the stored value.
+    connection.execute(
+        "INSERT INTO mcp_connections (
+            connection_id, owner_user_id, scope, url, secret_binding_id,
+            tools_snapshot_json, created_at, updated_at, header_bindings_json,
+            auth_mode, oauth_metadata_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9, ?10)
+         ON CONFLICT(scope, owner_user_id, connection_id) DO UPDATE SET
+            url = excluded.url,
+            secret_binding_id = excluded.secret_binding_id,
+            tools_snapshot_json = excluded.tools_snapshot_json,
+            updated_at = excluded.updated_at,
+            header_bindings_json = excluded.header_bindings_json,
+            auth_mode = excluded.auth_mode,
+            oauth_metadata_json = excluded.oauth_metadata_json",
+        params![
+            connection_id,
+            owner,
+            scope.as_str(),
+            url,
+            auth_binding,
+            snapshot,
+            now,
+            headers_json,
+            auth_mode.as_str(),
+            oauth_json
+        ],
+    )?;
+    Ok(())
+}
+
 fn oauth_metadata_json(oauth: Option<&McpOauthMetadata>) -> Result<String, OrchestratorError> {
     match oauth {
         None => Ok("null".into()),
@@ -2447,78 +2660,206 @@ impl SqliteWorkflowStore {
         auth_mode: McpAuthMode,
         oauth: Option<&McpOauthMetadata>,
     ) -> Result<McpConnection, OrchestratorError> {
-        validate_connection_id(connection_id)?;
-        let oauth = match auth_mode {
-            McpAuthMode::Static => {
-                if oauth.is_some() {
-                    return Err(OrchestratorError::InvalidContract(
-                        "oauth metadata is only allowed when authMode is oauth".into(),
-                    ));
-                }
-                None
-            }
-            McpAuthMode::Oauth => {
-                let meta = oauth.ok_or_else(|| {
-                    OrchestratorError::InvalidContract(
-                        "oauth metadata is required when authMode is oauth".into(),
-                    )
-                })?;
-                validate_oauth_metadata(meta)?;
-                Some(meta.clone())
-            }
-        };
-        let tools: Vec<McpTool> = tools.iter().map(sanitize_mcp_tool).collect();
-        plan_mcp_tools(connection_id, &tools)?;
         let owner = vault_owner_user_id(scope, owner_user_id).to_string();
-        let snapshot = serde_json::to_string(&tools)
-            .map_err(|e| OrchestratorError::InvalidContract(e.to_string()))?;
-        let header_bindings =
-            synthesize_header_bindings(secret_binding_id, header_bindings.to_vec());
-        let auth_binding = if secret_binding_id.is_empty() {
-            authorization_binding_id(&header_bindings)
-        } else {
-            secret_binding_id.to_string()
-        };
-        let headers_json = serde_json::to_string(&header_bindings)
-            .map_err(|e| OrchestratorError::InvalidContract(e.to_string()))?;
-        let oauth_json = oauth_metadata_json(oauth.as_ref())?;
-        let now = now_secs();
         {
             let connection = self
                 .connection
                 .lock()
                 .map_err(|_| OrchestratorError::StorageUnavailable)?;
-            // `timeout_ms` is omitted: a new row takes the column default
-            // (120000) and a reconnect or refresh keeps the stored value.
-            connection.execute(
-                "INSERT INTO mcp_connections (
-                    connection_id, owner_user_id, scope, url, secret_binding_id,
-                    tools_snapshot_json, created_at, updated_at, header_bindings_json,
-                    auth_mode, oauth_metadata_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9, ?10)
-                 ON CONFLICT(scope, owner_user_id, connection_id) DO UPDATE SET
-                    url = excluded.url,
-                    secret_binding_id = excluded.secret_binding_id,
-                    tools_snapshot_json = excluded.tools_snapshot_json,
-                    updated_at = excluded.updated_at,
-                    header_bindings_json = excluded.header_bindings_json,
-                    auth_mode = excluded.auth_mode,
-                    oauth_metadata_json = excluded.oauth_metadata_json",
-                params![
-                    connection_id,
-                    owner,
-                    scope.as_str(),
-                    url,
-                    auth_binding,
-                    snapshot,
-                    now,
-                    headers_json,
-                    auth_mode.as_str(),
-                    oauth_json
-                ],
+            write_mcp_connection_row(
+                &connection,
+                scope,
+                owner_user_id,
+                connection_id,
+                url,
+                secret_binding_id,
+                header_bindings,
+                tools,
+                auth_mode,
+                oauth,
             )?;
         }
         self.get_mcp_connection(scope, &owner, connection_id)
+    }
+
+    /// Commits a member's connector connection from a code exchange: the OAuth row, the refresh
+    /// token and the access token (both sealed before the transaction opens), the removal of a
+    /// previous server's row and of a per-row client secret, in ONE transaction: all of it, or none,
+    /// so a failure cannot leave the new row beside the old tokens or one new token beside an old one.
+    /// `check` runs first inside the transaction, on the state the commit will replace.
+    pub(crate) fn commit_connector_connection(
+        &self,
+        vault: &SecretsVault,
+        c: &ConnectorConnectionCommit<'_>,
+        check: &dyn Fn(&Connection) -> Result<(), OrchestratorError>,
+    ) -> Result<McpConnection, OrchestratorError> {
+        validate_oauth_secret_value(c.access_token)?;
+        validate_oauth_secret_value(c.refresh_token)?;
+        let mcp_host = connection_host(c.url)?;
+        let token_host = connection_host(&c.oauth.token_endpoint)?;
+        let access = vault.seal(c.access_token)?;
+        let refresh = vault.seal(c.refresh_token)?;
+        let scope = SecretScope::User;
+        let owner = vault_owner_user_id(scope, c.owner).to_string();
+        {
+            let mut connection = self
+                .connection
+                .lock()
+                .map_err(|_| OrchestratorError::StorageUnavailable)?;
+            let tx = connection.transaction()?;
+            check(&tx)?;
+            if let Some(stale) = c.stale {
+                delete_bindings_in(&tx, scope, c.owner, &connection_binding_ids(stale))?;
+                tx.execute(
+                    "DELETE FROM mcp_connections
+                     WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3",
+                    params![scope.as_str(), owner, c.connection_id],
+                )?;
+            }
+            if let Some(prior) = c.replaced_auth {
+                delete_bindings_in(
+                    &tx,
+                    scope,
+                    c.owner,
+                    &replaced_auth_mode_binding_ids(prior, McpAuthMode::Oauth, &[]),
+                )?;
+            }
+            write_mcp_connection_row(
+                &tx,
+                scope,
+                c.owner,
+                c.connection_id,
+                c.url,
+                "",
+                c.header_bindings,
+                c.tools,
+                McpAuthMode::Oauth,
+                Some(c.oauth),
+            )?;
+            for (binding_id, sealed, host) in [
+                (
+                    mcp_oauth_refresh_token_binding_id(c.connection_id),
+                    &refresh,
+                    token_host,
+                ),
+                (
+                    mcp_oauth_access_token_binding_id(c.connection_id),
+                    &access,
+                    mcp_host,
+                ),
+            ] {
+                crate::secrets::put_host_secret_in(
+                    &tx,
+                    &binding_id,
+                    SecretKind::Connection,
+                    &sealed.nonce,
+                    &sealed.ciphertext,
+                    &sealed.fingerprint,
+                    &[host],
+                    None,
+                    scope,
+                    c.owner,
+                )?;
+            }
+            // The org's client has one secret, the org's: a per-row secret never belongs to this row.
+            delete_bindings_in(
+                &tx,
+                scope,
+                c.owner,
+                &[mcp_oauth_client_secret_binding_id(c.connection_id)],
+            )?;
+            let created_by = crate::owner::resolved_owner(c.creator);
+            if !created_by.is_empty() {
+                tx.execute(
+                    "UPDATE mcp_connections SET created_by_user_id = ?1
+                     WHERE scope = ?2 AND owner_user_id = ?3 AND connection_id = ?4
+                       AND created_by_user_id = ''",
+                    params![created_by, scope.as_str(), owner, c.connection_id],
+                )?;
+            }
+            tx.commit()?;
+        }
+        self.get_mcp_connection(scope, &owner, c.connection_id)
+    }
+
+    /// Writes the vetted tool list, the server's instructions and the connector's risk classes onto a
+    /// connector row that is still there and still on `expected_url`: a row a disconnect removed in
+    /// the meantime is NOT brought back (`Conflict`, nothing written). A row that carries
+    /// [`TOOLS_PENDING_REASON`] goes back to `connected` in the same write: its tools are adopted.
+    pub(crate) fn adopt_connector_tools_if_present(
+        &self,
+        scope: SecretScope,
+        owner_user_id: &str,
+        policy: &crate::connectors::McpPolicy,
+        tools: &[McpTool],
+        instructions: Option<&str>,
+    ) -> Result<McpConnection, OrchestratorError> {
+        let id = policy.connector_id.as_str();
+        let tools: Vec<McpTool> = tools.iter().map(sanitize_mcp_tool).collect();
+        plan_mcp_tools(id, &tools)?;
+        let snapshot = serde_json::to_string(&tools)
+            .map_err(|e| OrchestratorError::InvalidContract(e.to_string()))?;
+        let (effects_json, ask_json) = policy_columns(policy, &tools)?;
+        let owner = vault_owner_user_id(scope, owner_user_id).to_string();
+        let gone = || {
+            OrchestratorError::Conflict(format!(
+                "the connection to `{id}` was removed or changed while its tools were being read; connect again"
+            ))
+        };
+        {
+            let mut connection = self
+                .connection
+                .lock()
+                .map_err(|_| OrchestratorError::StorageUnavailable)?;
+            let tx = connection.transaction()?;
+            let (url, raw): (String, String) = tx
+                .query_row(
+                    "SELECT url, oauth_metadata_json FROM mcp_connections
+                     WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3",
+                    params![scope.as_str(), owner, id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .ok_or_else(gone)?;
+            if url != policy.url {
+                return Err(gone());
+            }
+            let mut oauth_json = raw;
+            if let Ok(mut oauth) = serde_json::from_str::<McpOauthMetadata>(&oauth_json) {
+                if oauth.status == McpOauthStatus::NeedsReauth
+                    && oauth.last_refresh_error.as_deref() == Some(TOOLS_PENDING_REASON)
+                {
+                    oauth.status = McpOauthStatus::Connected;
+                    oauth.last_refresh_error = None;
+                    oauth_json = oauth_metadata_json(Some(&oauth))?;
+                }
+            }
+            tx.execute(
+                "UPDATE mcp_connections
+                 SET tools_snapshot_json = ?1, side_effect_overrides_json = ?2, ask_tools_json = ?3,
+                     oauth_metadata_json = ?4, updated_at = ?5
+                 WHERE scope = ?6 AND owner_user_id = ?7 AND connection_id = ?8",
+                params![
+                    snapshot,
+                    effects_json,
+                    ask_json,
+                    oauth_json,
+                    now_secs(),
+                    scope.as_str(),
+                    owner,
+                    id
+                ],
+            )?;
+            if let Some(text) = instructions.and_then(sanitize_mcp_instructions) {
+                tx.execute(
+                    "UPDATE mcp_connections SET instructions = ?1
+                     WHERE scope = ?2 AND owner_user_id = ?3 AND connection_id = ?4",
+                    params![text, scope.as_str(), owner, id],
+                )?;
+            }
+            tx.commit()?;
+        }
+        self.get_mcp_connection(scope, &owner, id)
     }
 
     /// Record a successful host-side refresh without replacing the pinned tool
@@ -2866,22 +3207,7 @@ impl SqliteWorkflowStore {
         policy: &crate::connectors::McpPolicy,
     ) -> Result<McpConnection, OrchestratorError> {
         let existing = self.get_mcp_connection(scope, owner_user_id, &policy.connector_id)?;
-        let on_row: BTreeMap<String, i32> = policy
-            .side_effects
-            .iter()
-            .filter(|(name, _)| existing.tools.iter().any(|t| &t.name == *name))
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
-        let ask: Vec<String> = policy
-            .ask_tools
-            .iter()
-            .filter(|name| existing.tools.iter().any(|t| &t.name == *name))
-            .cloned()
-            .collect();
-        let effects_json = serde_json::to_string(&on_row)
-            .map_err(|err| OrchestratorError::InvalidContract(err.to_string()))?;
-        let ask_json = serde_json::to_string(&ask)
-            .map_err(|err| OrchestratorError::InvalidContract(err.to_string()))?;
+        let (effects_json, ask_json) = policy_columns(policy, &existing.tools)?;
         let owner = vault_owner_user_id(scope, owner_user_id);
         {
             let connection = self

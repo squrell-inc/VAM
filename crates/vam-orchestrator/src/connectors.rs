@@ -1433,6 +1433,17 @@ impl SqliteWorkflowStore {
 }
 
 /// Upserts the node row on a connection the caller already holds (inside a transaction, or not).
+/// Whether the node has this connector enabled, read on a connection the caller already holds.
+pub(crate) fn node_enabled_in(c: &Connection, id: &str) -> Result<bool, OrchestratorError> {
+    Ok(c.query_row(
+        "SELECT enabled FROM node_enabled_connectors WHERE connector_id = ?1",
+        params![id],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()?
+    .is_some_and(|enabled| enabled != 0))
+}
+
 pub(crate) fn put_node_connector_in(
     connection: &Connection,
     row: &NodeConnector,
