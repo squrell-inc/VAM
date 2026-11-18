@@ -919,6 +919,39 @@ impl SqliteWorkflowStore {
             _ => RowClient::Own,
         })
     }
+
+    /// Whose client revokes a member's MCP row's refresh token. As [`Self::row_client`], and also a
+    /// user-scope row on another URL than the connector's (the connector's server moved) whose
+    /// grant was issued to the node's current client: the same client id and token endpoint. That
+    /// grant belongs to the admin's client, so a provider that requires client authentication at
+    /// revocation (RFC 7009 §2.1) needs the org secret to revoke it; sent without it, the revoke is
+    /// refused while the row is deleted, and the token stays valid at the provider.
+    ///
+    /// Refresh keeps [`Self::row_client`]: a row on the connector's old URL was marked
+    /// `needs_reauth` when the server moved, is never refreshed, and is replaced by the next
+    /// sign-in.
+    pub(crate) fn revoke_client(
+        &self,
+        conn: &crate::mcp_registry::McpConnection,
+    ) -> Result<RowClient, OrchestratorError> {
+        let own = self.row_client(conn)?;
+        if matches!(own, RowClient::Org(_)) || conn.scope != SecretScope::User {
+            return Ok(own);
+        }
+        let Some(grant) = conn.oauth.as_ref() else {
+            return Ok(own);
+        };
+        Ok(match self.org_connector(&conn.connection_id)? {
+            Some(org)
+                if org.client.as_ref().is_some_and(|node| {
+                    node.client_id == grant.client_id && node.token_endpoint == grant.token_endpoint
+                }) =>
+            {
+                RowClient::Org(Box::new(org))
+            }
+            _ => own,
+        })
+    }
 }
 
 /// The text of the 409 when the admin saved the client again between the read of the client and the

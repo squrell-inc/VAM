@@ -169,7 +169,10 @@ and the revoke on disconnect use the node's endpoints, client id and the org sec
 replaced secret is used by the next refresh); the revoke authenticates the way the provider's
 `revocation_endpoint_auth_methods_supported` says (the same choice as for the token endpoint), with
 `client_secret_basic` when the provider omits the field (RFC 8414 §2's default), and as the token endpoint does when
-the list has nothing this node can use or the client was saved before the field was read; a row whose client id or endpoint differs from the node's is
+the list has nothing this node can use or the client was saved before the field was read. The revoke picks the
+node's client by the grant's client id and token endpoint, not by the connector's current URL, so the row a
+connector update left on its previous server (revoked once its replacement commits, or on disconnect) is revoked
+with the org secret too when its grant is the admin's current client; a row whose client id or endpoint differs from the node's is
 marked `needs_reauth` without a request, and `invalid_client` on a refresh marks it `needs_reauth` naming the
 admin's client, unless the admin saved the client again while the provider was answering: then the refusal was
 of a secret no longer saved and nothing is recorded for it. When that save only replaced the secret of the same

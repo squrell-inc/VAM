@@ -1422,6 +1422,26 @@ mod tests {
         seen: Arc<Mutex<Vec<Seen>>>,
         replies: Arc<Mutex<VecDeque<(u16, String)>>>,
         hold: HeldReply,
+        /// While set, `/revoke` requires this client id and secret (RFC 7009 §2.1 client
+        /// authentication), in the body or as HTTP Basic, and answers anything else with a 401
+        /// `invalid_client` without taking a queued reply.
+        revoke_auth: Arc<Mutex<Option<(String, String)>>>,
+    }
+
+    /// Whether a request authenticated as `client_id` with `secret`: exactly the body fields with no
+    /// `Authorization` header, or exactly that HTTP Basic header with no secret in the body.
+    fn client_authenticated(seen: &Seen, client_id: &str, secret: &str) -> bool {
+        use base64::Engine as _;
+        let basic = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{client_id}:{secret}"))
+        );
+        let in_body = seen.authorization.is_none()
+            && seen.form.get("client_id").map(String::as_str) == Some(client_id)
+            && seen.form.get("client_secret").map(String::as_str) == Some(secret);
+        let as_basic = seen.authorization.as_deref() == Some(basic.as_str())
+            && !seen.form.contains_key("client_secret");
+        in_body || as_basic
     }
 
     /// The next request's answer is held: the provider says the request arrived on the first
@@ -1435,7 +1455,9 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::<Seen>::new()));
         let replies = Arc::new(Mutex::new(VecDeque::<(u16, String)>::new()));
         let hold: HeldReply = Arc::new(Mutex::new(None));
+        let revoke_auth = Arc::new(Mutex::new(None::<(String, String)>));
         let (log, queue, held) = (seen.clone(), replies.clone(), hold.clone());
+        let required = revoke_auth.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
@@ -1467,11 +1489,27 @@ mod tests {
                 let form = url::form_urlencoded::parse(&body)
                     .map(|(k, v)| (k.into_owned(), v.into_owned()))
                     .collect();
-                log.lock().unwrap().push(Seen {
+                let request = Seen {
                     path,
                     form,
                     authorization,
-                });
+                };
+                let refused = request.path == "/revoke"
+                    && required
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|(id, secret)| !client_authenticated(&request, id, secret));
+                log.lock().unwrap().push(request);
+                if refused {
+                    let payload = r#"{"error":"invalid_client"}"#;
+                    let reply = format!(
+                        "HTTP/1.1 401 X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    stream.write_all(reply.as_bytes()).unwrap();
+                    continue;
+                }
                 let pending = held.lock().unwrap().take();
                 if let Some((arrived, release)) = pending {
                     let _ = arrived.send(());
@@ -1494,10 +1532,15 @@ mod tests {
             seen,
             replies,
             hold,
+            revoke_auth,
         }
     }
 
     impl Provider {
+        /// From now on `/revoke` refuses a request that does not authenticate as this client.
+        fn require_revoke_auth(&self, client_id: &str, secret: &str) {
+            *self.revoke_auth.lock().unwrap() = Some((client_id.into(), secret.into()));
+        }
         /// Holds the answer to the next request: returns "it arrived" and "answer now".
         fn hold_next(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
             let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
@@ -2733,6 +2776,100 @@ mod tests {
         assert_eq!(
             token_of(&n, "ada", "filebox/oauth/access-token"),
             NEW_ACCESS
+        );
+    }
+
+    #[tokio::test]
+    async fn a_moved_connectors_old_grant_of_the_admins_client_is_revoked_with_the_org_secret() {
+        use crate::mcp_registry::{
+            McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
+        };
+        let tag = "xchg-moved-auth";
+        let n = xchg_node(tag);
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // Ada signed in on the connector's previous server with the admin's current client; the
+        // update moved the server, so her row no longer matches the connector's URL.
+        let oauth = McpOauthMetadata {
+            resource: "https://mcp.old-home.example/mcp".into(),
+            authorization_server: format!("https://auth.{tag}.example"),
+            token_endpoint: format!("https://auth.{tag}.example/token"),
+            revocation_endpoint: Some(format!("https://auth.{tag}.example/revoke")),
+            client_id: "c-1".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: None,
+            status: McpOauthStatus::NeedsReauth,
+            last_refresh_at: None,
+            last_refresh_error: Some("the connector moved".into()),
+        };
+        let stale = n
+            .store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                "filebox",
+                "https://mcp.old-home.example/mcp",
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&oauth),
+            )
+            .unwrap();
+        crate::mcp_registry::store_refreshed_mcp_tokens(&n.vault, &stale, "OLD-A", Some("OLD-R"))
+            .unwrap();
+        // The provider refuses a revocation that does not authenticate the client.
+        n.token.require_revoke_auth("c-1", SECRET);
+        let basic = {
+            use base64::Engine as _;
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("c-1:{SECRET}"))
+            )
+        };
+
+        // A disconnect of that row revokes with the org secret, the way the node's client is
+        // pinned to (the provider omits the revocation methods: HTTP Basic).
+        n.token.reply(200, serde_json::Value::Null);
+        let (vault, row) = (n.vault.clone(), stale.clone());
+        let attempt = tokio::task::spawn_blocking(move || {
+            crate::mcp_oauth_refresh::best_effort_revoke_oauth_refresh(&vault, &row)
+        })
+        .await
+        .unwrap();
+        assert!(attempt.succeeded, "{attempt:?}");
+        let seen = n.token.requests();
+        let revoke = seen.last().unwrap();
+        assert_eq!(revoke.path, "/revoke");
+        assert_eq!(revoke.form["token"], "OLD-R");
+        assert_eq!(revoke.authorization.as_deref(), Some(basic.as_str()));
+
+        // The sign-in on the new server replaces the row, and the old grant is revoked the same
+        // way once the replacement has committed.
+        n.token.reply(200, tokens_reply());
+        n.token.reply(200, serde_json::Value::Null);
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let seen = n.token.requests();
+        let revoke = seen.last().unwrap();
+        assert_eq!(revoke.path, "/revoke", "{seen:?}");
+        assert_eq!(revoke.form["token"], "OLD-R");
+        assert_eq!(revoke.authorization.as_deref(), Some(basic.as_str()));
+        assert!(
+            !revoke.form.contains_key("client_secret"),
+            "{:?}",
+            revoke.form
+        );
+        assert_eq!(
+            row_of(&n, "ada").url,
+            format!("https://mcp.{tag}.example/mcp")
         );
     }
 

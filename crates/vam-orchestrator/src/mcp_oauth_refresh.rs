@@ -690,7 +690,10 @@ pub(crate) fn prepare_oauth_refresh_revoke(
     };
     // A row of a connector whose client is the admin's revokes with the node's client: the pinned
     // revocation endpoint, the node's client id and the org secret. The row's own are not used.
-    let org = match vault.workflow_store().row_client(conn) {
+    // The client is chosen by the grant's client id and token endpoint, not by the connector's
+    // current URL: a row left on the server a connector update moved away from still holds a grant
+    // of the admin's client (`revoke_client`).
+    let org = match vault.workflow_store().revoke_client(conn) {
         Ok(RowClient::Org(org)) => Some(org),
         Ok(RowClient::Own) => None,
         Err(_) => return Err(RevokeAttempt::failed("credential store unavailable")),
