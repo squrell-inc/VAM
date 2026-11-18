@@ -162,6 +162,9 @@ jobs:
       VERSION: ${{ needs.meta.outputs.version }}
       VAM_BUILD_CHANNEL: ${{ needs.meta.outputs.channel }}
       COMMIT: ${{ needs.meta.outputs.commit }}
+      # fixed homes: in the container $HOME (/github/home) is not the euid's home (/root), which rustup warns about
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
     steps:
       # git first, so actions/checkout does a real clone with tags (it falls back to a tarball without git).
       - name: Install the build packages
@@ -180,6 +183,8 @@ jobs:
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           scripts/release/install-rust.sh
+          # GITHUB_PATH reaches later steps only: put cargo on this step's PATH for the cargo installs
+          export PATH="$CARGO_HOME/bin:$PATH"
           scripts/release/install-tool.sh cargo-auditable cargo-audit
       - name: Build the host binaries (native gcc, glibc 2.34)
         run: scripts/release/build.sh "$TARGET" --set node --out "$RUNNER_TEMP/bin"
@@ -239,6 +244,9 @@ jobs:
       VERSION: ${{ needs.meta.outputs.version }}
       VAM_BUILD_CHANNEL: ${{ needs.meta.outputs.channel }}
       COMMIT: ${{ needs.meta.outputs.commit }}
+      # fixed homes: in the container $HOME (/github/home) is not the euid's home (/root), which rustup warns about
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
     steps:
       - name: Install the build packages
         run: |
@@ -256,6 +264,8 @@ jobs:
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           scripts/release/install-rust.sh
+          # GITHUB_PATH reaches later steps only: put cargo on this step's PATH for the cargo installs
+          export PATH="$CARGO_HOME/bin:$PATH"
           scripts/release/install-tool.sh cargo-auditable cargo-audit
       - name: Build vam (native gcc, glibc 2.34)
         run: scripts/release/build.sh "$TARGET" --set cli --out "$RUNNER_TEMP/bin"
