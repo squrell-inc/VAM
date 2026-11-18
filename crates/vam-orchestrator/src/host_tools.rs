@@ -3187,11 +3187,17 @@ pub(crate) enum PendingRefreshError {
 /// back to tools-pending (never `connected`), and this route finishes it; a transient
 /// failure records nothing, so the row stays pending and the member can retry. A row with no
 /// recorded expiry is listed with the stored token. The generation is taken after the refresh.
+///
+/// `rejected` is the generation of a token the MCP server just refused (HTTP 401) while the tools
+/// were listed: the token is then refreshed whatever its recorded expiry says (a provider that
+/// sent no `expires_in` leaves none), but only if no credential write happened since that
+/// generation; when one did, the token it stored is used as it is.
 pub(crate) async fn prepare_pending_tools_row(
     store: &Arc<SqliteWorkflowStore>,
     vault: &Arc<SecretsVault>,
     conn: &crate::mcp_registry::McpConnection,
     refresh: McpRefresher,
+    rejected: Option<&CredentialGeneration>,
 ) -> Result<(crate::mcp_registry::McpConnection, CredentialGeneration), PendingRefreshError> {
     let lock_failed = || {
         PendingRefreshError::Store(crate::error::OrchestratorError::CorruptState(
@@ -3207,10 +3213,13 @@ pub(crate) async fn prepare_pending_tools_row(
     };
     let current = read()?;
     let now = crate::connectors::now_secs();
+    let rejected_now =
+        rejected.is_some_and(|r| Arc::ptr_eq(&r.gate, &gate) && r.generation == state.generation);
     let expired = current.oauth.as_ref().is_some_and(|o| {
         crate::mcp_registry::is_tools_pending(o)
-            && o.expires_at
-                .is_some_and(|at| at <= now.saturating_add(PENDING_TOOLS_EXPIRY_SKEW_SECS))
+            && (rejected_now
+                || o.expires_at
+                    .is_some_and(|at| at <= now.saturating_add(PENDING_TOOLS_EXPIRY_SKEW_SECS)))
     });
     if expired {
         let (store2, vault2, row, gate2) = (

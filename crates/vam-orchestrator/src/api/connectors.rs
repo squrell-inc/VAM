@@ -1529,6 +1529,16 @@ mod tests {
 
     /// [`xchg_node`] whose MCP server refuses `tools/list` while `tools_ok` is false.
     fn xchg_node_with(tag: &str, tools_ok: Arc<AtomicBool>) -> Node {
+        xchg_node_rejecting(tag, tools_ok, Arc::new(Mutex::new(Vec::new())))
+    }
+
+    /// [`xchg_node_with`] whose MCP server answers HTTP 401 to any request whose bearer token is in
+    /// `rejected`.
+    fn xchg_node_rejecting(
+        tag: &str,
+        tools_ok: Arc<AtomicBool>,
+        rejected: Arc<Mutex<Vec<String>>>,
+    ) -> Node {
         let (app, state) = app_world_with_state();
         let (store, vault) = (state.store.clone(), state.vault.clone());
         install_filebox(&store, tag);
@@ -1537,26 +1547,27 @@ mod tests {
             &format!("auth.{tag}.example"),
             token.base.clone(),
         );
-        let (mcp_url, mcp_seen) = crate::mcp_client::mock::spawn(move |method, id, params| {
-            if method == "tools/list" {
-                if !tools_ok.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Some((
-                        "application/json".into(),
-                        serde_json::json!({ "jsonrpc": "2.0", "id": id,
-                            "error": { "code": -32000, "message": "tools are down" } })
-                        .to_string(),
-                    ));
+        let seen_slot: Arc<std::sync::OnceLock<Arc<Mutex<crate::mcp_client::mock::Seen>>>> =
+            Arc::new(std::sync::OnceLock::new());
+        let slot = seen_slot.clone();
+        let (mcp_url, mcp_seen) =
+            crate::mcp_client::mock::spawn_with_status(move |method, id, params| {
+                let auth = slot
+                    .get()
+                    .and_then(|seen| seen.lock().unwrap().auth.last().cloned().flatten());
+                let refused = auth.is_some_and(|a| {
+                    rejected
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|t| a == format!("Bearer {t}"))
+                });
+                if refused {
+                    return Some((401, "application/json".into(), "{}".into()));
                 }
-                return crate::mcp_client::mock::ok(
-                    id,
-                    serde_json::json!({ "tools": [
-                        { "name": "search_files", "inputSchema": { "type": "object" } },
-                        { "name": "delete_everything", "inputSchema": { "type": "object" } }
-                    ] }),
-                );
-            }
-            crate::mcp_client::mock::standard(method, id, params)
-        });
+                with_status_ok(xchg_mcp_reply(&tools_ok, method, id, params))
+            });
+        let _ = seen_slot.set(mcp_seen.clone());
         crate::mcp_oauth_refresh::test_seam::serve(
             &format!("mcp.{tag}.example"),
             url::Url::parse(&mcp_url).unwrap(),
@@ -1569,6 +1580,37 @@ mod tests {
             token,
             mcp_seen,
         }
+    }
+
+    fn with_status_ok(reply: Option<(String, String)>) -> Option<(u16, String, String)> {
+        reply.map(|(ct, body)| (200, ct, body))
+    }
+
+    /// The `filebox` MCP server of [`xchg_node_with`].
+    fn xchg_mcp_reply(
+        tools_ok: &AtomicBool,
+        method: &str,
+        id: &serde_json::Value,
+        params: &serde_json::Value,
+    ) -> Option<(String, String)> {
+        if method == "tools/list" {
+            if !tools_ok.load(std::sync::atomic::Ordering::SeqCst) {
+                return Some((
+                    "application/json".into(),
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id,
+                        "error": { "code": -32000, "message": "tools are down" } })
+                    .to_string(),
+                ));
+            }
+            return crate::mcp_client::mock::ok(
+                id,
+                serde_json::json!({ "tools": [
+                    { "name": "search_files", "inputSchema": { "type": "object" } },
+                    { "name": "delete_everything", "inputSchema": { "type": "object" } }
+                ] }),
+            );
+        }
+        crate::mcp_client::mock::standard(method, id, params)
     }
 
     async fn exchange(
@@ -3184,6 +3226,90 @@ mod tests {
         assert_eq!(s, StatusCode::OK, "{b}");
         assert_eq!(b["drift"], "adopted", "{b}");
         assert_eq!(row_of(&n, "ada").oauth.unwrap().status, Connected);
+    }
+
+    #[tokio::test]
+    async fn a_pending_sign_in_whose_token_the_server_refuses_is_refreshed_once_and_adopted() {
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        let rejected = Arc::new(Mutex::new(vec![NEW_ACCESS.to_string()]));
+        let n = xchg_node_rejecting(
+            "xchg-pending-401",
+            Arc::new(AtomicBool::new(true)),
+            rejected.clone(),
+        );
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // The provider sends no `expires_in`, so no expiry is stored; the MCP server refuses the
+        // access token, so the tools cannot be read and the sign-in is pending.
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": NEW_ACCESS, "refresh_token": NEW_REFRESH, "token_type": "Bearer" }),
+        );
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(oauth.expires_at, None);
+
+        // The retry: the refused token is refreshed once, and the renewed one is refused too.
+        // No loop: a 502, one refresh, and the sign-in stays pending with the rotated tokens.
+        rejected.lock().unwrap().push("STILL-BAD".into());
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "STILL-BAD", "refresh_token": "R-2" }),
+        );
+        let refresh = || {
+            call(
+                &n.app,
+                "POST",
+                "/v1/mcp/connections/filebox/refresh",
+                "member-secret",
+                None,
+            )
+        };
+        let (s, b) = refresh().await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        assert_eq!(n.token.requests().len(), 2, "exchange, one refresh");
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(
+            oauth.last_refresh_error.as_deref(),
+            Some(crate::mcp_registry::TOOLS_PENDING_REASON)
+        );
+        assert_eq!(token_of(&n, "ada", "filebox/oauth/refresh-token"), "R-2");
+
+        // The next retry: refused once more, refreshed once, and the new token lists the tools.
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "FRESH-A", "refresh_token": "FRESH-R" }),
+        );
+        let (s, b) = refresh().await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["drift"], "adopted", "{b}");
+        assert_eq!(n.token.requests().len(), 3, "one refresh per retry");
+        let grant = n.token.requests().last().cloned().unwrap();
+        assert_eq!(grant.form["grant_type"], "refresh_token");
+        assert_eq!(grant.form["refresh_token"], "R-2");
+        assert_eq!(token_of(&n, "ada", "filebox/oauth/access-token"), "FRESH-A");
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            "FRESH-R"
+        );
+        let row = row_of(&n, "ada");
+        assert_eq!(row.oauth.unwrap().status, Connected);
+        assert_eq!(
+            row.tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["search_files"]
+        );
     }
 
     #[tokio::test]

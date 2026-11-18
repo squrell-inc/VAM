@@ -577,7 +577,10 @@ pub(crate) fn client_in(c: &Connection, id: &str) -> Result<Option<NodeClient>, 
 
 /// Whether a secret was saved for the connector's client while the connector was disabled, and no
 /// enable has acted on it yet (see [`SqliteWorkflowStore::put_node_with_client`]).
-fn secret_saved_while_off_in(c: &Connection, connector_id: &str) -> Result<bool, OrchestratorError> {
+fn secret_saved_while_off_in(
+    c: &Connection,
+    connector_id: &str,
+) -> Result<bool, OrchestratorError> {
     Ok(c.query_row(
         "SELECT secret_saved_while_off FROM node_connector_clients WHERE connector_id = ?1",
         params![connector_id],
@@ -1799,10 +1802,7 @@ mod exchange_tests {
         assert!(write_node(&store, &vault, &node(false), &plan, tag).is_empty());
         assert!(write_node(&store, &vault, &node(false), &keep, tag).is_empty());
         assert_eq!(status(), NeedsReauth);
-        assert_eq!(
-            write_node(&store, &vault, &node(true), &keep, tag),
-            ["ada"]
-        );
+        assert_eq!(write_node(&store, &vault, &node(true), &keep, tag), ["ada"]);
         assert_eq!(status(), Connected);
 
         // The enable used the marker up: refused again, another plain toggle parks her still.
@@ -1853,7 +1853,10 @@ mod exchange_tests {
         let read = store.node_client("filebox").unwrap();
         let plan = set(&def, read.as_ref(), tag, "c-1", Some("CORRECTED"));
         assert!(write_node(&store, &vault, &node(true), &plan, tag).is_empty());
-        assert_eq!(state("ada"), (NeedsReauth, TOOLS_PENDING_REASON.to_string()));
+        assert_eq!(
+            state("ada"),
+            (NeedsReauth, TOOLS_PENDING_REASON.to_string())
+        );
 
         // A→B→A: refused again while pending, then the admin moves to c-2 and back to c-1 with a
         // corrected secret. B's save replaced the recoverable mark: she signs in again.

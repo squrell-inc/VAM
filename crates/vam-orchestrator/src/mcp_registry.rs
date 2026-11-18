@@ -1447,10 +1447,39 @@ pub fn fetch_tools_snapshot_for_connection(
     conn: &McpConnection,
     timeout_ms: u64,
 ) -> Result<McpSnapshot, OrchestratorError> {
-    let allowlist = allowlist_from_connection_url(&conn.url)?;
-    let headers = resolve_mcp_connection_headers(vault, caller_user_id, conn)?;
-    let mut client = McpClient::connect(&conn.url, &allowlist, headers, timeout_ms)?;
-    let tools = client.list_tools()?;
+    fetch_tools_snapshot_classified(vault, caller_user_id, conn, timeout_ms).map_err(|e| match e {
+        SnapshotFailure::Unauthorized => McpClientError::HttpStatus(401).into(),
+        SnapshotFailure::Other(e) => e,
+    })
+}
+
+/// Why a tool listing failed, with the MCP server's refusal of the access token (HTTP 401) told
+/// apart: the one failure a token refresh can fix.
+#[derive(Debug)]
+pub(crate) enum SnapshotFailure {
+    Unauthorized,
+    Other(OrchestratorError),
+}
+
+/// [`fetch_tools_snapshot_for_connection`] that reports an HTTP 401 as
+/// [`SnapshotFailure::Unauthorized`].
+pub(crate) fn fetch_tools_snapshot_classified(
+    vault: &SecretsVault,
+    caller_user_id: &str,
+    conn: &McpConnection,
+    timeout_ms: u64,
+) -> Result<McpSnapshot, SnapshotFailure> {
+    let classify = |e: McpClientError| match e {
+        McpClientError::HttpStatus(401) => SnapshotFailure::Unauthorized,
+        e => SnapshotFailure::Other(e.into()),
+    };
+    let allowlist =
+        allowlist_from_connection_url(&conn.url).map_err(|e| SnapshotFailure::Other(e.into()))?;
+    let headers = resolve_mcp_connection_headers(vault, caller_user_id, conn)
+        .map_err(SnapshotFailure::Other)?;
+    let mut client =
+        McpClient::connect(&conn.url, &allowlist, headers, timeout_ms).map_err(classify)?;
+    let tools = client.list_tools().map_err(classify)?;
     Ok(McpSnapshot {
         tools,
         instructions: client.server_instructions().map(str::to_string),
@@ -2496,12 +2525,12 @@ fn record_refresh_failure_in(
     let transition = needs_reauth && oauth.status != McpOauthStatus::NeedsReauth;
     // A refused admin client on a sign-in whose tools are not adopted yet keeps that fact: a
     // corrected secret puts the row back to tools-pending, not to `connected`.
-    let error = if error == crate::connector_client::CLIENT_REFUSED_REASON && is_tools_pending(&oauth)
-    {
-        crate::connector_client::CLIENT_REFUSED_PENDING_REASON
-    } else {
-        error
-    };
+    let error =
+        if error == crate::connector_client::CLIENT_REFUSED_REASON && is_tools_pending(&oauth) {
+            crate::connector_client::CLIENT_REFUSED_PENDING_REASON
+        } else {
+            error
+        };
     if needs_reauth {
         oauth.status = McpOauthStatus::NeedsReauth;
     }

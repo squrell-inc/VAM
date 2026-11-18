@@ -23,14 +23,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::mcp_registry::{
     apply_oauth_token_metadata, assert_no_visible_name_collision,
     decide_pinned_snapshot_with_instructions, delete_replaced_auth_mode_bindings,
-    fetch_tools_snapshot, fetch_tools_snapshot_for_connection, flagged_vendor_text,
-    mcp_auth_binding_id, mcp_capabilities, mcp_oauth_refresh_token_binding_id,
-    merge_header_bindings, normalize_connect_headers, parse_side_effect_class,
-    resolve_connection_auth, sanitize_oauth_last_refresh_error, sanitized_oauth_metadata,
-    store_mcp_header_credential, store_mcp_oauth_tokens, suggested_read_only_tools,
-    validate_connection_id, validate_mcp_timeout_ms, HeaderBinding, McpAuthMode, McpConnection,
-    McpHeaderInput, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
-    McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision,
+    fetch_tools_snapshot, flagged_vendor_text, mcp_auth_binding_id, mcp_capabilities,
+    mcp_oauth_refresh_token_binding_id, merge_header_bindings, normalize_connect_headers,
+    parse_side_effect_class, resolve_connection_auth, sanitize_oauth_last_refresh_error,
+    sanitized_oauth_metadata, store_mcp_header_credential, store_mcp_oauth_tokens,
+    suggested_read_only_tools, validate_connection_id, validate_mcp_timeout_ms, HeaderBinding,
+    McpAuthMode, McpConnection, McpHeaderInput, McpOauthMetadata, McpOauthRegistrationMethod,
+    McpOauthStatus, McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision,
 };
 use crate::secrets::{
     authorize_org_secret_write, resolve_secret_scope, vault_owner_user_id, SecretScope,
@@ -823,10 +822,33 @@ async fn refresh(
         // The row and the generation are read together under the credential gate (a sign-in that
         // commits between two separate reads would pair an old row with its new generation; the
         // write checks both), after the stored access token is refreshed if it has expired.
-        let (current, credentials) = pending_row_with_fresh_token(&state, &existing).await?;
+        let (current, credentials) = pending_row_with_fresh_token(&state, &existing, None).await?;
         existing = current;
         if let Some(policy) = pending_tools_policy(&state, &existing)? {
-            let conn = adopt_tools_and_reconnect(&state, &existing, &policy, &credentials).await?;
+            // A stored access token the server refuses (a provider that sent no `expires_in`
+            // leaves no expiry to go by) is refreshed once, under the gate, and the adoption is
+            // tried once more with the generation taken after that refresh. No more than once.
+            let conn = match adopt_tools_and_reconnect_classified(
+                &state,
+                &existing,
+                &policy,
+                &credentials,
+                true,
+            )
+            .await
+            {
+                Ok(conn) => conn,
+                Err(AdoptFailure::Unauthorized) => {
+                    let (current, credentials) =
+                        pending_row_with_fresh_token(&state, &existing, Some(&credentials)).await?;
+                    existing = current;
+                    let Some(policy) = pending_tools_policy(&state, &existing)? else {
+                        return Err(crate::mcp_registry::tools_read_superseded(&id).into());
+                    };
+                    adopt_tools_and_reconnect(&state, &existing, &policy, &credentials).await?
+                }
+                Err(AdoptFailure::Other(e)) => return Err(e),
+            };
             let has_refresh = refresh_binding_exists(&state.vault, &conn)?;
             return Ok(respond(serde_json::json!({
                 "connection": connection_value(&conn, has_refresh)?,
@@ -976,6 +998,47 @@ async fn snapshot_connection(
     state: &AppState,
     conn: &McpConnection,
 ) -> Result<McpSnapshot, ApiError> {
+    snapshot_connection_classified(state, conn)
+        .await
+        .map_err(AdoptFailure::into_api)
+}
+
+/// Why a connector's tools could not be adopted: the MCP server refused the access token (HTTP
+/// 401, which a token refresh can fix), or anything else.
+enum AdoptFailure {
+    Unauthorized,
+    Other(ApiError),
+}
+
+impl AdoptFailure {
+    fn into_api(self) -> ApiError {
+        match self {
+            Self::Unauthorized => ApiError::from(OrchestratorError::from(
+                crate::mcp_client::McpClientError::HttpStatus(401),
+            )),
+            Self::Other(e) => e,
+        }
+    }
+}
+
+impl From<ApiError> for AdoptFailure {
+    fn from(e: ApiError) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl From<OrchestratorError> for AdoptFailure {
+    fn from(e: OrchestratorError) -> Self {
+        Self::Other(e.into())
+    }
+}
+
+/// [`snapshot_connection`] that reports the server's refusal of the access token apart.
+async fn snapshot_connection_classified(
+    state: &AppState,
+    conn: &McpConnection,
+) -> Result<McpSnapshot, AdoptFailure> {
+    use crate::mcp_registry::SnapshotFailure;
     let vault = state.vault.clone();
     let caller = credential_caller(conn.scope, &conn.owner_user_id).to_string();
     let policy = state
@@ -983,19 +1046,25 @@ async fn snapshot_connection(
         .mcp_policy(&conn.connection_id)?
         .filter(|p| p.url == conn.url);
     let conn = conn.clone();
-    tokio::task::spawn_blocking(move || {
-        fetch_tools_snapshot_for_connection(&vault, &caller, &conn, DEFAULT_MCP_TIMEOUT_MS)
+    let listed = tokio::task::spawn_blocking(move || {
+        crate::mcp_registry::fetch_tools_snapshot_classified(
+            &vault,
+            &caller,
+            &conn,
+            DEFAULT_MCP_TIMEOUT_MS,
+        )
     })
     .await
     .map_err(|e| OrchestratorError::Core(format!("mcp snapshot task failed: {e}")))?
-    .map_err(ApiError::from)
-    .map(sanitize_snapshot)
-    .map(|mut listed| {
-        if let Some(p) = &policy {
-            listed.tools.retain(|t| p.is_vetted(&t.name));
-        }
-        listed
-    })
+    .map_err(|e| match e {
+        SnapshotFailure::Unauthorized => AdoptFailure::Unauthorized,
+        SnapshotFailure::Other(e) => AdoptFailure::Other(e.into()),
+    })?;
+    let mut listed = sanitize_snapshot(listed);
+    if let Some(p) = &policy {
+        listed.tools.retain(|t| p.is_vetted(&t.name));
+    }
+    Ok(listed)
 }
 
 async fn upsert_oauth_tokens(
@@ -1132,14 +1201,27 @@ async fn upsert_oauth_tokens(
 /// the gate, and goes ahead only if the credential generation is still `expected_generation` (the
 /// one the caller's own write left) and the row is still there. A member who disconnected while
 /// `tools/list` was in flight has removed the row and moved the generation: nothing is written, and
-/// the row is not brought back.
+/// the row is not brought back. (Routes call it through [`adopt_tools_and_reconnect`].)
+#[cfg(test)]
 pub(crate) async fn adopt_connector_tools(
     state: &AppState,
     conn: &McpConnection,
     policy: &connectors::McpPolicy,
     credentials: &crate::host_tools::CredentialGeneration,
 ) -> Result<McpConnection, ApiError> {
-    let listed = snapshot_connection(state, conn).await?;
+    adopt_connector_tools_classified(state, conn, policy, credentials)
+        .await
+        .map_err(AdoptFailure::into_api)
+}
+
+/// [`adopt_connector_tools`], with the server's refusal of the access token reported apart.
+async fn adopt_connector_tools_classified(
+    state: &AppState,
+    conn: &McpConnection,
+    policy: &connectors::McpPolicy,
+    credentials: &crate::host_tools::CredentialGeneration,
+) -> Result<McpConnection, AdoptFailure> {
+    let listed = snapshot_connection_classified(state, conn).await?;
     let Some(gate) = credentials.lock_if_unchanged().await else {
         return Err(crate::mcp_registry::tools_read_superseded(&conn.connection_id).into());
     };
@@ -1161,6 +1243,7 @@ pub(crate) async fn adopt_connector_tools(
 async fn pending_row_with_fresh_token(
     state: &AppState,
     conn: &McpConnection,
+    rejected: Option<&crate::host_tools::CredentialGeneration>,
 ) -> Result<(McpConnection, crate::host_tools::CredentialGeneration), OrchestratorError> {
     use crate::host_tools::PendingRefreshError;
     use crate::mcp_oauth_refresh::RefreshFailureKind;
@@ -1169,6 +1252,7 @@ async fn pending_row_with_fresh_token(
         &state.vault,
         conn,
         crate::mcp_oauth_refresh::refresh_access_token,
+        rejected,
     )
     .await
     .map_err(|e| match e {
@@ -1201,14 +1285,33 @@ pub(crate) async fn adopt_tools_and_reconnect(
     policy: &connectors::McpPolicy,
     credentials: &crate::host_tools::CredentialGeneration,
 ) -> Result<McpConnection, ApiError> {
-    match adopt_connector_tools(state, conn, policy, credentials).await {
+    adopt_tools_and_reconnect_classified(state, conn, policy, credentials, false)
+        .await
+        .map_err(AdoptFailure::into_api)
+}
+
+/// [`adopt_tools_and_reconnect`]. With `report_unauthorized`, a listing the MCP server refused
+/// for the access token (HTTP 401) is returned as [`AdoptFailure::Unauthorized`] and records
+/// nothing, so the caller can refresh the token once and try again; without it, it is a listing
+/// failure like any other.
+async fn adopt_tools_and_reconnect_classified(
+    state: &AppState,
+    conn: &McpConnection,
+    policy: &connectors::McpPolicy,
+    credentials: &crate::host_tools::CredentialGeneration,
+    report_unauthorized: bool,
+) -> Result<McpConnection, AdoptFailure> {
+    match adopt_connector_tools_classified(state, conn, policy, credentials).await {
         Ok(adopted) => {
             connector_row_reconnected(state, &adopted).await?;
             Ok(adopted)
         }
+        Err(AdoptFailure::Unauthorized) if report_unauthorized => Err(AdoptFailure::Unauthorized),
         // A conflict means the row is no longer the sign-in this adoption was for (removed, or
         // rewritten by another sign-in, refresh or save): it is not marked.
-        Err(failure) if failure.status == StatusCode::CONFLICT => Err(failure),
+        Err(AdoptFailure::Other(failure)) if failure.status == StatusCode::CONFLICT => {
+            Err(AdoptFailure::Other(failure))
+        }
         Err(_) => {
             mark_tools_pending(state, conn, credentials).await?;
             Err(OrchestratorError::Mcp(
