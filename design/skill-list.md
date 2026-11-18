@@ -36,15 +36,23 @@ SkillRecord[], pagination }`.
   `catalog:write` callers; an admin reads a foreign draft by URN if needed. This is the playbook
   and policy rule (`catalog_visible_where_sql`, `catalog.rs:341`), not the agent list's
   `include_foreign_drafts`.
+- **Both skill tables.** A skill published as a package (`POST /v1/skills/packages`, `vam skill
+  publish`) lives only in `skill_packages`; `skills` holds metadata saved with `PUT /v1/skills`.
+  A skill ref resolves to a package first and falls back to `skills`
+  (`catalog_resolve::resolve_skill_pin`, `catalog_resolve.rs:800-840`). The list is the union of
+  both, and a `skills` row whose URN has a released package is left out, so a picker shows what a
+  ref would resolve to. (Found in wave 1: a `skills`-only list was empty for the scenario's
+  packaged skill.)
 - **One record per stored row** (each release, plus the caller's draft when asked), the shape of
   `ListPlaybooksResponse.records`. `SkillRecord` mirrors `PlaybookRecord`: `spec`, `ownerUserId`,
-  `channel`, `catalogTier`, `tier`, `readOnly`, `origin`, `version`.
+  `channel`, `catalogTier`, `tier`, `readOnly`, `origin`, `version`, plus `source` (`package` or
+  `manifest`).
 - **Paging** follows `orchestrator/api` "Paging": `pageSize` 1..1000, default 50, larger clamped,
   negative or non-number a 400; `pageToken` is the opaque `nextPageToken` (`api/paging.rs`), kind
-  `skills`. Newest first by the row's SQLite `rowid` keyset (`rowid < cursor`), the runs rule
-  (`list_runs_page_for_owner`, `catalog.rs:2241`). A draft edit is an `UPDATE` in place
-  (`upsert_spec_draft`, `catalog_publish.rs:183`), so its `rowid` and place do not move; a new
-  release is a new row on top, so it never shifts the next page.
+  `skills`. Newest first by the keyset `(created_at, source, rowid)`: `rowid` alone collides
+  across two tables. A draft edit is an `UPDATE` in place in both tables (`upsert_spec_draft`,
+  `catalog_publish.rs:183`; `skill_packages.rs:146`), so `created_at` and `rowid` do not move; a new
+  release is a new row on top, so it never repeats or skips a row on the next page.
 
 ## Rejected
 

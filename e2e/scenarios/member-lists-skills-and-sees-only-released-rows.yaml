@@ -27,5 +27,4 @@ guards:
   - vam:crates/vam-orchestrator/src/api/catalog_auth.rs
   - vam:crates/vam-orchestrator/src/api/paging.rs
   - vam:crates/vam-orchestrator/src/catalog.rs
-status: pending
-expectFail: { step: then.0, class: product }
+status: active

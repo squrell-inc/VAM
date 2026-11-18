@@ -54,6 +54,32 @@ fn openapi_has_the_self_service_password_change() {
 }
 
 #[test]
+fn openapi_lists_skills_with_paging_and_include_drafts() {
+    let doc = load();
+    let get = &doc["paths"]["/v1/skills"]["get"];
+    assert!(get.is_mapping(), "missing GET /v1/skills");
+    let params = get["parameters"].as_sequence().expect("parameters");
+    let has = |needle: &str| {
+        params.iter().any(|p| {
+            p["$ref"].as_str().is_some_and(|r| r.ends_with(needle))
+                || p["name"].as_str() == Some(needle)
+        })
+    };
+    for p in ["PageSize", "PageToken", "includeDrafts"] {
+        assert!(has(p), "missing parameter {p}");
+    }
+    for code in ["200", "400", "403"] {
+        assert!(
+            get["responses"][code].is_mapping(),
+            "missing response {code}"
+        );
+    }
+    let schemas = &doc["components"]["schemas"];
+    assert!(schemas["ListSkillsResponse"]["properties"]["pagination"].is_mapping());
+    assert!(schemas["SkillRecord"]["properties"]["source"].is_mapping());
+}
+
+#[test]
 fn every_local_ref_resolves() {
     fn walk(v: &serde_yaml::Value, doc: &serde_yaml::Value, bad: &mut Vec<String>) {
         match v {
