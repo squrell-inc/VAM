@@ -108,6 +108,45 @@ check_release() { # <json>: the dispatch workflow
   # pull-requests: read is the cap for release-build.yml's `assemble` job (it reads PR bodies for the notes)
   jq -e '.jobs.build.permissions == {"contents": "read", "pull-requests": "read"}' <<< "$j" >/dev/null || err "build permissions must be exactly contents: read, pull-requests: read (the called workflow's assemble job reads pull requests; nothing else)"
   jq -e '(.jobs.build | has("secrets") | not) and (.jobs.build | has("environment") | not)' <<< "$j" >/dev/null || err "build passes no secrets (no secrets: inherit) and has no environment"
+  check_publish "$j"
+}
+
+# the publish job: the only writer, behind the owner's approval, steps in a fixed order
+check_publish() { # <json>
+  local j="$1" i
+  jq -e '.jobs | has("publish")' <<< "$j" >/dev/null || { err "no publish job"; return; }
+  jq -e '.jobs.publish.needs | (if type == "string" then [.] else . end) | sort == ["build", "validate"]' <<< "$j" >/dev/null 2>&1 || err "publish must need exactly validate and build"
+  jq -e '.jobs.publish.if? | strings | contains("inputs.dry_run")' <<< "$j" >/dev/null 2>&1 || err "publish must run only when dry_run is false (an if: on inputs.dry_run)"
+  jq -e '.jobs.publish | .. | strings | select(test("secrets\\."))' <<< "$j" >/dev/null 2>&1 && err "publish references secrets.*; it needs only the job's GITHUB_TOKEN"
+  jq -e '.jobs.publish.permissions == {"contents": "write", "id-token": "write", "attestations": "write"}' <<< "$j" >/dev/null || err "publish permissions must be exactly contents: write, id-token: write, attestations: write"
+  # the two commits it compares come from two different jobs, and the build's own outputs
+  jq -e '.jobs.publish.env.COMMIT == "${{ needs.build.outputs.commit }}" and .jobs.publish.env.VERSION == "${{ needs.build.outputs.version }}"' <<< "$j" >/dev/null || err "publish env COMMIT and VERSION must be needs.build.outputs.commit and .version"
+  jq -e '.jobs.publish.env.VALIDATED_COMMIT == "${{ needs.validate.outputs.commit }}" and .jobs.publish.env.VALIDATED_VERSION == "${{ needs.validate.outputs.version }}"' <<< "$j" >/dev/null || err "publish env VALIDATED_COMMIT and VALIDATED_VERSION must be needs.validate.outputs.commit and .version (the check compares them with the build's)"
+  jq -e '[.jobs.publish.steps[] | select((.uses? // "") | startswith("actions/download-artifact@")) | .with.name | tostring | startswith("release-")] | any' <<< "$j" >/dev/null || err "publish must download the release-<version> artifact"
+  # every release operation lives in scripts/release/publish.sh and verify.sh, where the fixture tests are
+  while IFS= read -r i; do
+    [ -n "$i" ] || continue
+    err "publish runs '$i' in the workflow; release operations belong in scripts/release/publish.sh and verify.sh (tested against fixtures)"
+  done < <(jq -r '.jobs.publish.steps[] | .run? // empty | split("\n")[] | select(test("gh[[:space:]]+release[[:space:]]+(create|edit|delete|upload)|draft=false|-X[[:space:]]+(PATCH|DELETE|POST|PUT)|gh[[:space:]]+api")) | gsub("^[[:space:]]+"; "")' <<< "$j")
+  # the order: check, draft, attest..., verify the draft, publish, verify the release
+  jq -e '
+    [.jobs.publish.steps | to_entries[] | .key as $k | .value
+      | {k: $k, run: (.run? // ""), uses: (.uses? // "")}] as $s
+    | def first(f): [$s[] | select(f) | .k] | first;
+      def last(f): [$s[] | select(f) | .k] | last;
+      (first(.run | contains("publish.sh check"))) as $check
+    | (first(.run | contains("publish.sh draft"))) as $draft
+    | (first(.uses | startswith("actions/attest@"))) as $attest_first
+    | (last(.uses | startswith("actions/attest@"))) as $attest_last
+    | (first(.run | contains("verify.sh draft"))) as $vdraft
+    | (first(.run | contains("publish.sh publish"))) as $publish
+    | (first(.run | contains("verify.sh release"))) as $vrelease
+    | ([$check, $draft, $attest_first, $attest_last, $vdraft, $publish, $vrelease] | all(. != null))
+      and $check < $draft and $draft < $attest_first and $attest_last < $vdraft and $vdraft < $publish and $publish < $vrelease' <<< "$j" >/dev/null 2>&1 \
+    || err "publish steps must run in this order: publish.sh check, publish.sh draft, actions/attest (every one), verify.sh draft, publish.sh publish, verify.sh release"
+  jq -e '[.jobs.publish.steps[] | select((.run? // "") | contains("publish.sh abort")) | select((.if? // "") | (contains("failure()") and contains("cancelled()")))] | length == 1' <<< "$j" >/dev/null 2>&1 \
+    || err "publish needs one cleanup step running publish.sh abort with if: failure() || cancelled()"
+  jq -e '(.jobs.publish.steps | last | .run? // "") | contains("publish.sh abort")' <<< "$j" >/dev/null 2>&1 || err "the cleanup step (publish.sh abort) must be the last step of publish"
 }
 
 check_release_build() { # <json>: the reusable build workflow
