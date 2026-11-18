@@ -1692,10 +1692,7 @@ fn run_file_in(dir: &std::path::Path, server: &MockServer, extra: &[&str]) -> st
 
 /// The body of the run the CLI posted: no inline part, the saved draft pinned by reference.
 fn posted_run_pins_draft(req: &httpmock::prelude::HttpMockRequest, playbook: bool) -> bool {
-    let Some(body) = req.body.as_ref() else {
-        return false;
-    };
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
         return false;
     };
     let draft = |r: &serde_json::Value, urn: &str| {
@@ -1718,7 +1715,7 @@ fn run_file_saves_the_agent_draft_then_runs_it_by_ref() {
         when.method(PUT)
             .path("/v1/agents")
             .header_exists("idempotency-key")
-            .body_contains("inline-check");
+            .body_includes("inline-check");
         then.status(200)
             .header("content-type", "application/json")
             .body("{}");
@@ -1730,7 +1727,7 @@ fn run_file_saves_the_agent_draft_then_runs_it_by_ref() {
     let created = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/runs")
-            .matches(|req| posted_run_pins_draft(req, false));
+            .is_true(|req| posted_run_pins_draft(req, false));
         then.status(202)
             .header("content-type", "application/json")
             .body(r#"{"status":{"state":"RUN_STATE_PENDING"}}"#);
@@ -1745,9 +1742,9 @@ fn run_file_saves_the_agent_draft_then_runs_it_by_ref() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(put_agent.hits(), 1);
-    assert_eq!(put_playbook.hits(), 0);
-    assert_eq!(created.hits(), 1);
+    assert_eq!(put_agent.calls(), 1);
+    assert_eq!(put_playbook.calls(), 0);
+    assert_eq!(created.calls(), 1);
 }
 
 #[test]
@@ -1763,13 +1760,13 @@ fn run_file_saves_the_playbook_too_and_pins_both_drafts() {
         when.method(PUT)
             .path("/v1/playbooks")
             .header_exists("idempotency-key")
-            .body_contains("inline-flow");
+            .body_includes("inline-flow");
         then.status(200).body("{}");
     });
     let created = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/runs")
-            .matches(|req| posted_run_pins_draft(req, true));
+            .is_true(|req| posted_run_pins_draft(req, true));
         then.status(202)
             .header("content-type", "application/json")
             .body(r#"{"status":{"state":"RUN_STATE_PENDING"}}"#);
@@ -1785,9 +1782,9 @@ fn run_file_saves_the_playbook_too_and_pins_both_drafts() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(put_playbook.hits(), 1);
-    assert_eq!(put_agent.hits(), 1);
-    assert_eq!(created.hits(), 1);
+    assert_eq!(put_playbook.calls(), 1);
+    assert_eq!(put_agent.calls(), 1);
+    assert_eq!(created.calls(), 1);
 }
 
 #[test]
@@ -1819,8 +1816,8 @@ fn run_file_shows_a_refused_save_and_posts_no_run() {
     );
     assert!(all.contains("catalog:write is required"), "{all}");
     assert!(all.contains("vam run <agent>"), "{all}");
-    assert_eq!(put_agent.hits(), 1);
-    assert_eq!(created.hits(), 0);
+    assert_eq!(put_agent.calls(), 1);
+    assert_eq!(created.calls(), 0);
 }
 
 #[test]
@@ -1853,7 +1850,7 @@ fn run_file_exits_2_before_any_request_on_a_missing_or_mismatched_urn() {
     .unwrap();
     let out = run_file_in(dir.path(), &server, &[]);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
-    assert_eq!(any.hits(), 0);
+    assert_eq!(any.calls(), 0);
 }
 
 #[test]

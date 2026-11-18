@@ -83,7 +83,7 @@ async fn call(
         .await
         .expect("response");
     let status = response.status();
-    let bytes = hyper::body::to_bytes(response.into_body())
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
     (status, String::from_utf8_lossy(&bytes).to_string())
