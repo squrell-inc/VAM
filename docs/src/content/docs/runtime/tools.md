@@ -140,7 +140,9 @@ spent code is a 400; an unreachable provider, or an answer with no refresh token
 corrected secret for the same client, a member whose refresh the provider had refused for the client
 (`invalid_client`) is connected again; a revoked grant still needs a sign-in. A save that corrects the secret and
 turns the connector off connects no one again: those members stay parked until the admin enables it again with the
-same client. No code, verifier,
+same client. Turning the connector off and on again with no secret saved in between is not a correction (the
+provider refused the secret that is still saved), so those members stay parked; the node keeps a marker on the
+client for a secret saved while the connector was off, and only the enable that follows such a save clears it. No code, verifier,
 secret or token is in any answer or error. For such a connector the app-path routes are closed:
 `PUT /v1/mcp/connections/:id/oauth/tokens` answers 400 (use the code exchange), a connect that names another
 token endpoint or client id is refused, and a `clientSecret` is refused for any connector-backed row. A refresh

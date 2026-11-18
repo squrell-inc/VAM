@@ -3100,6 +3100,22 @@ mod tests {
             .unwrap();
         assert_eq!(open_notices(&n, "ada"), 1);
 
+        // A plain off and on, with no secret saved in between, is not a correction: the provider
+        // refused the secret that is still saved, so ada stays parked.
+        for enabled in [false, true] {
+            let (s, b) = call(
+                &n.app,
+                "PUT",
+                "/v1/connectors/filebox/node",
+                "orgadmin-secret",
+                Some(serde_json::json!({ "enabled": enabled })),
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{b}");
+        }
+        assert_eq!(row_of(&n, "ada").oauth.unwrap().status, NeedsReauth);
+        assert_eq!(open_notices(&n, "ada"), 1);
+
         // The admin corrects the secret and turns the connector off in the same save: nothing is
         // released on a connector that is off.
         let (s, b) = call(
