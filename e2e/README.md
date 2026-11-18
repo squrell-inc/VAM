@@ -432,6 +432,25 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   `product`); `copyCli: <path in tree>` (runs a copy of `vam` placed there); and `files: { <path>:
   { contains, absent, unchanged } }` (assertions on files in the tree; `unchanged` compares with the
   file before the step).
+  Fields for commands that act on the user's machine or a release: `home: tree` (`HOME` is the
+  scratch tree itself, not a directory beside it, so a command that edits login files can be
+  judged); `env: { NAME: value }` (extra variables on top of `PATH` and `HOME`; `{{root}}` and
+  `{{url:<release-server alias>}}` are replaced in values); `exec: <path in tree>` (run the file
+  already there, not a fresh copy of the built program, so a step can run a binary an earlier
+  step replaced); `copyBins: [vam-web-broker, ...]` (the built brokers are copied beside the
+  `copyCli` copy); `requests: { piece, count }` (a `release-server` piece in `given` has answered
+  exactly that many requests); `cleanupBrokers: [<broker id>]` (the runner deletes these broker
+  registrations, `DELETE /v1/hosted/brokers/{id}`, at cleanup, so a command that registers a
+  broker leaks nothing into later scenarios); and in `files`: `count: n` (with `contains`, the text
+  occurs exactly n times) and `exists: true|false`.
+- Piece kind `release-server`: `fixture` (the files of the release archive), `releaseTag`
+  (default `v9.9.9`), `prerelease` (then `releases/latest` answers 404) and `tamper: sum` (one
+  wrong `SHA256SUMS` line). The runner serves on loopback, with no network, GitHub's
+  `/repos/squrell-inc/VAM/releases` (list, `latest`, `tags/<tag>`) and `/assets/<name>` for
+  `vam-<tag>-<host target>.tar.gz` and `SHA256SUMS` (hashed with `sha256sum`, or `shasum -a 256`),
+  and counts every request. `{{url:<alias>}}` in a `cli` step is its base URL; the built `vam`
+  reaches it only through the `VAM_UPGRADE_API_URL` test seam (a loopback URL, `vam-cli` feature
+  `upgrade-seam`).
 - A `fields` path segment `key=value` picks the array element whose `key` is that string
   (`status.base.runtimes.name=python.version`).
 - `publish-skill`'s `contains` takes one string or a list (all must be in the refusal).
