@@ -168,6 +168,67 @@ fn the_index_can_be_read_from_a_named_branch_while_artifacts_still_come_from_the
 }
 
 #[test]
+fn a_named_branch_read_does_not_need_the_remotes_default_head() {
+    let state = tempfile::tempdir().unwrap();
+    let Some(c) = cfg(state.path()) else { return };
+    let r = repo_with_a_staging_index();
+    // The remote's `HEAD` names a branch that does not exist: the default branch is unresolved.
+    r.git(&[
+        "--git-dir=../bare.git",
+        "symbolic-ref",
+        "HEAD",
+        "refs/heads/gone",
+    ]);
+    let pins = BTreeMap::new();
+    let mut i = input("squrell-staging", &r, "hub.squrell.cloud", &pins);
+    i.index_ref = Some("staging");
+    let read = read_marketplace(&c.fetcher, &i).unwrap();
+    let l = listing(&read.data, "microsoft-365");
+    assert_eq!(l.error, None, "{l:?}");
+    assert_eq!(l.artifacts.len(), 3);
+    assert!(l.description.contains("Staging index"), "{l:?}");
+    // Reading the default branch of that remote is still a failed read: nothing falls back.
+    let e = read_marketplace(
+        &c.fetcher,
+        &input("squrell-default", &r, "hub.squrell.cloud", &pins),
+    )
+    .err()
+    .unwrap();
+    assert!(e.to_string().contains("default branch"), "{e}");
+}
+
+#[test]
+fn a_pinned_tag_installs_whether_or_not_the_index_branch_still_exists() {
+    let state = tempfile::tempdir().unwrap();
+    let Some(mut c) = cfg(state.path()) else {
+        return;
+    };
+    c.squrell_index_ref = Some("staging".into());
+    let store = SqliteWorkflowStore::in_memory().unwrap();
+    let r = repo_with_a_staging_index();
+    map(SQ_URL, &r);
+    let done = refresh_blocking(&store, &c, "squrell").unwrap();
+    assert!(done.refused.is_none(), "{:?}", done.refused);
+    let pinned = r.rev("microsoft-365-v1.0.0");
+    assert_eq!(
+        cached_tag_commit(&store, &c, &done.row, "microsoft-365-v1.0.0").unwrap(),
+        pinned
+    );
+    // The staging branch is deleted after the refresh: the pinned tag is unchanged, so it installs.
+    r.git(&["--git-dir=../bare.git", "branch", "-D", "staging"]);
+    assert_eq!(
+        cached_tag_commit(&store, &c, &done.row, "microsoft-365-v1.0.0").unwrap(),
+        pinned
+    );
+    // The moved-tag and missing-tag checks stand: they read the tags, not the branch.
+    r.git(&["--git-dir=../bare.git", "tag", "-d", "microsoft-365-v1.0.0"]);
+    assert!(matches!(
+        cached_tag_commit(&store, &c, &done.row, "microsoft-365-v1.0.0"),
+        Err(CachedTagError::Gone(_))
+    ));
+}
+
+#[test]
 fn only_the_preconfigured_entry_uses_the_index_ref_and_a_bad_name_is_refused() {
     let state = tempfile::tempdir().unwrap();
     let Some(mut c) = cfg(state.path()) else {

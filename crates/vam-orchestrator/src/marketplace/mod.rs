@@ -366,7 +366,9 @@ pub fn read_marketplace(f: &Fetcher, input: &ReadInput<'_>) -> Result<ReadResult
         listings.push(state);
     }
     if !to_fetch.is_empty() {
-        f.fetch(id, &input.remote, &to_fetch)?;
+        // The index was fetched above (from `HEAD` or the named branch); only the tags are needed
+        // here, so a remote whose `HEAD` does not resolve cannot fail this read.
+        f.fetch_tags(id, &input.remote, &to_fetch)?;
     }
 
     // Each tag is read from the cache at the commit it names, which must be the commit the remote
@@ -501,8 +503,10 @@ pub fn cached_tag_commit(
     let remote = Remote::for_url(&u);
     let f = &cfg.fetcher;
     f.precheck(&remote)?;
-    let refs = f.ls_remote_at(&remote, cfg.index_ref_for(row))?;
-    match refs.tags.get(tag) {
+    // Only the tags are asked for: whether the index branch (or `HEAD`) still exists does not decide
+    // whether a pinned tag can be installed.
+    let tags = f.ls_remote_tags(&remote)?;
+    match tags.get(tag) {
         None => return Err(CachedTagError::Gone(tag.to_string())),
         Some(now) if *now != pinned => {
             return Err(CachedTagError::Moved(MovedTag {
@@ -514,7 +518,7 @@ pub fn cached_tag_commit(
         Some(_) => {}
     }
     if f.tag_commit(&row.id, tag)?.as_deref() != Some(pinned.as_str()) {
-        f.fetch(&row.id, &remote, &[tag.to_string()])?;
+        f.fetch_tags(&row.id, &remote, &[tag.to_string()])?;
         if f.tag_commit(&row.id, tag)?.as_deref() != Some(pinned.as_str()) {
             return Err(CachedTagError::Gone(tag.to_string()));
         }
