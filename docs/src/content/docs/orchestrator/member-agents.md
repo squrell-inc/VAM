@@ -25,6 +25,7 @@ proves:
   - crates/vam-orchestrator/src/member_draft.rs::a_urn_in_my_namespace_owned_by_a_publisher_is_403
   - crates/vam-orchestrator/src/member_draft.rs::the_cap_counts_drafts_only_and_refuses_a_new_row_not_an_edit
   - crates/vam-orchestrator/src/member_draft.rs::cap_parses_a_positive_number_else_the_default
+  - crates/vam-orchestrator/src/member_draft.rs::always_allow_cannot_add_a_skill_playbook_or_policy_ref
   - crates/vam-orchestrator/src/catalog_resolve.rs::member_owned_draft_run_pins_the_latest_release_not_the_owners_draft
   - crates/vam-orchestrator/src/catalog_resolve.rs::a_members_explicit_draft_playbook_is_refused_even_on_their_own_draft
   - crates/vam-orchestrator/src/catalog_resolve.rs::released_only_refuses_an_explicit_draft_ref_even_for_the_owner_and_an_operator
@@ -114,7 +115,9 @@ object. Both need an `Idempotency-Key`. In member mode, `vamd` checks these in o
    counted (`the_cap_counts_drafts_only_and_refuses_a_new_row_not_an_edit`).
 
 The save writes the member's draft row and never releases. "Always allow" and "always deny" on a
-run of your own draft still save tool and host rules; they do not go through these checks.
+run of your own draft save one tool or host rule without these checks. They change only
+`tools.rules` and `internet.rules`: they cannot add a skill, playbook or policy ref, and every
+other field of the draft is written back unchanged.
 
 ## Error messages
 
@@ -255,7 +258,5 @@ The points below are for the frontend. Each one names the call.
 
 - The exact order of checks in a save is read from `publish_agent_draft_restricted`; each check
   has its own test, but no test fixes the order of all six.
-- That `Always allow` and `Always deny` skip the member checks is read from
-  `session_targets.rs`; no test covers a member.
 - The "known limitation" on shared namespaces is read from the code
   (`vam_spec::default_namespace`); no test drives two users into one namespace.
