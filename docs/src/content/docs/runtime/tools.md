@@ -145,7 +145,11 @@ token endpoint or client id is refused, and a `clientSecret` is refused for any 
 and the revoke on disconnect use the node's endpoints, client id and the org secret, read at that moment (a
 replaced secret is used by the next refresh); a row whose client id or endpoint differs from the node's is
 marked `needs_reauth` without a request, and `invalid_client` on a refresh marks it `needs_reauth` naming the
-admin's client. Providers whose refresh tokens are single-use are safe: the refresh gate below makes
+admin's client, unless the admin saved the client again while the provider was answering: then the refusal was
+of a secret no longer saved, nothing is recorded, and the next call refreshes with the saved one. A refresh the
+provider accepts after the admin changed the client id or token endpoint stores nothing and leaves the member
+`needs_reauth`; one accepted after a secret-only save is stored. A corrected secret reconnects only members whose
+tokens are of the current client id and token endpoint. Providers whose refresh tokens are single-use are safe: the refresh gate below makes
 concurrent calls spend the token once.
 
 `vamd` stores the access and refresh tokens as `connection` vault rows, each pinned to one host

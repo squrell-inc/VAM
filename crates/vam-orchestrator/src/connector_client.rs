@@ -1638,6 +1638,38 @@ mod exchange_tests {
     }
 
     #[test]
+    fn a_corrected_secret_for_a_later_client_leaves_a_row_an_earlier_client_parked() {
+        use crate::mcp_registry::McpOauthStatus::NeedsReauth;
+        let tag = "fix-later-client";
+        let (store, vault, _c1) = world(tag);
+        let def = store.connector_entry("filebox").unwrap().unwrap().def;
+        // c-1 was refused for ada; her tokens are c-1's.
+        let ada = member_row(&store, &vault, tag, "ada", "c-1", None);
+        store
+            .record_mcp_oauth_refresh_failure(&ada, true, CLIENT_REFUSED_REASON)
+            .unwrap();
+        // The admin moves to c-2 (ada is already parked, so the mark leaves her reason), then
+        // corrects c-2's secret.
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-2", Some("C2-FIRST"));
+        assert!(plan.reauth);
+        write_node(&store, &vault, &node(true), &plan, tag);
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-2", Some("C2-CORRECTED"));
+        assert!(!plan.reauth);
+        let cleared = write_node(&store, &vault, &node(true), &plan, tag);
+        // Her c-1 tokens are not c-2's: she still signs in again.
+        assert!(cleared.is_empty(), "{cleared:?}");
+        let oauth = store
+            .get_mcp_connection(SecretScope::User, "ada", "filebox")
+            .unwrap()
+            .oauth
+            .unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(oauth.client_id, "c-1");
+    }
+
+    #[test]
     fn a_clear_planned_before_a_secret_only_save_in_the_same_second_commits_nothing() {
         let tag = "same-second";
         let (store, vault, _first) = world(tag);
