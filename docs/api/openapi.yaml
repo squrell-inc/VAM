@@ -1332,7 +1332,10 @@ paths:
         to the token endpoint pinned at Enable (DNS-pinned public address, no redirects),
         then writes the caller's connection (the node's client id and endpoints), stores
         the refresh token and the access token in one transaction, and lists the vetted
-        tools. The secret goes in the body (`client_secret_post`) or as HTTP Basic
+        tools. The connection is committed with its tools pending (`needsReconnect`, no
+        notification) and is `connected` only once they are adopted, so a request dropped
+        between the two (the app went away, the node stopped) leaves a connection that
+        `POST /v1/mcp/connections/{id}/refresh` finishes. The secret goes in the body (`client_secret_post`) or as HTTP Basic
         (`client_secret_basic`), whichever Enable pinned from the provider's metadata.
         The local checks (body, redirect URI, code and verifier syntax, the connector, its
         enable, the saved client and secret) run before the request and write nothing. Once

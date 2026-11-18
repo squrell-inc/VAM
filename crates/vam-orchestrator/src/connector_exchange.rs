@@ -14,6 +14,11 @@
 //! transaction first checks that the admin's client (by its revision), the connector's server and
 //! the enable are still the ones the code was exchanged for: a client replaced while the provider
 //! was answering, even one replaced and then put back, stores nothing and the member signs in again.
+//!
+//! The row is committed tools-pending (`needs_reauth` with `TOOLS_PENDING_REASON`): the route then
+//! adopts the vetted tools, and only that adoption makes it `connected`. A caller that goes away
+//! between the two leaves a row the tools-refresh route finishes, never a `connected` row with no
+//! tools.
 
 use crate::api::error::ApiError;
 use crate::connector_client::{
@@ -28,7 +33,7 @@ use crate::mcp_oauth_refresh::{
 };
 use crate::mcp_registry::{
     ConnectorConnectionCommit, McpAuthMode, McpConnection, McpOauthMetadata,
-    McpOauthRegistrationMethod, McpOauthStatus,
+    McpOauthRegistrationMethod, McpOauthStatus, TOOLS_PENDING_REASON,
 };
 use crate::secrets::{SecretScope, SecretsVault};
 use crate::workflow::SqliteWorkflowStore;
@@ -166,9 +171,13 @@ pub(crate) fn exchange_and_connect(
             .expires_in
             .and_then(|s| i64::try_from(s).ok())
             .map(|s| now.saturating_add(s)),
-        status: McpOauthStatus::Connected,
+        // Committed as a sign-in whose tools are not adopted yet: `needs_reauth` with
+        // TOOLS_PENDING_REASON, which only the tool adoption clears. If the request goes away (or
+        // the node stops) between this commit and the adoption, the row is not left `connected`
+        // with no tools: it waits, retryable, for `POST /v1/mcp/connections/{id}/refresh`.
+        status: McpOauthStatus::NeedsReauth,
         last_refresh_at: Some(now),
-        last_refresh_error: None,
+        last_refresh_error: Some(TOOLS_PENDING_REASON.into()),
     };
     let oauth_prior = existing
         .as_ref()

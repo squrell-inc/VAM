@@ -476,9 +476,11 @@ async fn exchange_code(
             "connector code exchange task failed".into(),
         ))
     })??;
-    // Tools are listed with the member's new token and the vetted ones stay; the reconnect
-    // (notification, parked runs) follows once they are in. If they cannot be read the sign-in is
-    // kept in a state the tools-refresh route finishes (see `adopt_tools_and_reconnect`).
+    // The row was committed tools-pending. Tools are listed with the member's new token and the
+    // vetted ones stay, which makes it `connected`; the reconnect (notification, parked runs)
+    // follows once they are in. If they cannot be read, or this request is dropped before this
+    // point, the row stays in the pending state the tools-refresh route finishes (see
+    // `adopt_tools_and_reconnect`).
     if let Some(policy) = state.store.mcp_policy(&id)? {
         super::mcp_connections::adopt_tools_and_reconnect(
             &state,
@@ -2775,6 +2777,52 @@ mod tests {
                 .unwrap();
             assert_eq!(adopted.instructions.as_deref(), Some(""), "{presented:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_first_sign_in_whose_request_is_dropped_before_adoption_stays_retryable() {
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        let n = xchg_node("xchg-dropped");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // The worker commits the exchange; the handler that would adopt the tools is gone (the
+        // client disconnected, or the node stopped).
+        let client = n.store.node_client("filebox").unwrap().unwrap();
+        n.token.reply(200, tokens_reply());
+        let connected = exchange_made_with(&n, "ada", client).await.unwrap();
+        drop(connected);
+        // Not `connected` with no tools: pending, and not announced.
+        let row = row_of(&n, "ada");
+        assert!(row.tools.is_empty());
+        let oauth = row.oauth.clone().unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(
+            oauth.last_refresh_error.as_deref(),
+            Some(crate::mcp_registry::TOOLS_PENDING_REASON)
+        );
+        assert_eq!(open_notices(&n, "ada"), 0);
+        let (_, l) = call(&n.app, "GET", "/v1/connectors", "member-secret", None).await;
+        assert_eq!(state_of(&l, "filebox"), "needsReconnect");
+        // The tools-refresh route finishes it.
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["drift"], "adopted", "{b}");
+        let row = row_of(&n, "ada");
+        assert_eq!(row.oauth.unwrap().status, Connected);
+        assert_eq!(
+            row.tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["search_files"]
+        );
     }
 
     #[tokio::test]
