@@ -1215,8 +1215,15 @@ mod tests {
         assert_eq!(status(), McpOauthStatus::Connected);
         // The row holds the new secret (replaced in place).
         assert_eq!(org_secret_value(&vault), "A-NEW-SECRET-yyyyyyyy");
-        // A new client id: members must connect again.
+        // A new client id without its secret is refused and changes nothing: a secret belongs to
+        // the client it was registered with.
         let (s, b) = put(client_body("c-2", None)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(b.to_string().contains("secret"), "{b}");
+        assert_eq!(status(), McpOauthStatus::Connected);
+        assert_eq!(org_secret_value(&vault), "A-NEW-SECRET-yyyyyyyy");
+        // A new client id with its secret: members must connect again.
+        let (s, b) = put(client_body("c-2", Some("C2-SECRET-zzzzzzzzzzzz"))).await;
         assert_eq!(s, StatusCode::OK, "{b}");
         assert_eq!(b["node"]["client"]["clientId"], "c-2");
         assert_eq!(status(), McpOauthStatus::NeedsReauth);

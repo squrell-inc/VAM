@@ -159,8 +159,9 @@ fn check_secret(id: &str, value: &str) -> Result<(), OrchestratorError> {
 ///
 /// - a client on a connector that uses the publisher's own client: 400 (names the client);
 /// - enabling an `org` connector with no client stored or given: 409 (names the client id);
-/// - `org_vault` with no secret stored or given: 400 (names the secret); a secret on a connector
-///   that keeps none: 400;
+/// - `org_vault` with no secret stored or given: 400 (names the secret). A stored secret is kept
+///   only for the same client id: a secret belongs to the client it was registered with, so a new
+///   client id needs its secret again (400). A secret on a connector that keeps none: 400;
 /// - `client: null` only with `enabled: false`.
 pub fn check_request(
     def: &Connector,
@@ -199,7 +200,8 @@ pub fn check_request(
             check_client_id(&id, &c.client_id)?;
             match (secret_kind(def), &c.client_secret) {
                 (ClientSecret::OrgVault, Some(s)) => check_secret(&id, s)?,
-                (ClientSecret::OrgVault, None) if existing.is_some_and(|e| e.secret_set) => {}
+                (ClientSecret::OrgVault, None)
+                    if existing.is_some_and(|e| e.secret_set && e.client_id == c.client_id) => {}
                 (ClientSecret::OrgVault, None) => {
                     return Err(invalid(format!(
                         "`{id}` needs the client secret you registered with the provider: send `client.clientSecret`"
@@ -602,8 +604,10 @@ mod tests {
         let e = check_request(&org(), None, true, &req("c1", None)).unwrap_err();
         assert!(matches!(e, OrchestratorError::InvalidContract(_)));
         assert!(e.to_string().contains("secret"), "{e}");
-        // Stored: a client id change alone is allowed.
-        assert!(check_request(&org(), Some(&stored(true)), true, &req("c2", None)).is_ok());
+        // Stored: the same client id keeps its secret; a new client id needs its own secret.
+        assert!(check_request(&org(), Some(&stored(true)), true, &req("c1", None)).is_ok());
+        let e = check_request(&org(), Some(&stored(true)), true, &req("c2", None)).unwrap_err();
+        assert!(e.to_string().contains("secret"), "{e}");
         assert!(check_request(&org(), Some(&stored(false)), true, &req("c2", None)).is_err());
         // A connector that keeps no secret takes none.
         let none = def("org", "none");
