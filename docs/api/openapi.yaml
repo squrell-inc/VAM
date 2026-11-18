@@ -6448,6 +6448,9 @@ components:
         indexDigest:
           type: string
           description: SHA-256 of the `marketplace.json` last read.
+        indexRef:
+          type: string
+          description: Staging nodes only (`VAMD_SQURELL_MARKETPLACE_INDEX_REF`), preconfigured Squrell entry only. The branch its `marketplace.json` is read from; absent when the default branch is read. Artifacts are still installed only at the tags the index names.
         tagsSeen:
           type: array
           items:
@@ -6662,7 +6665,9 @@ components:
             provider: { type: string }
             profile: { type: string }
             clientId: { type: string }
-            clientSecret: { type: string }
+            client: { type: string, description: "`org` when the node's admin supplies the OAuth client (and, for `org_vault`, its secret) at Enable; absent for the file's own client." }
+            clientText: { type: string, description: "With `client: org`: \"admin-supplied client\" or \"admin-supplied client (with a secret)\"." }
+            clientSecret: { type: string, description: "`none`, `squrell_relay` or `org_vault`." }
             orgConsent: { type: string }
             scopes:
               type: array

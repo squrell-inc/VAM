@@ -515,6 +515,17 @@ impl Fetcher {
 
     /// `git ls-remote`: the default branch head and the tags (peeled to commits).
     pub fn ls_remote(&self, remote: &Remote) -> Result<RemoteRefs, FetchError> {
+        self.ls_remote_at(remote, None)
+    }
+
+    /// [`Fetcher::ls_remote`] with the index read from the head of branch `index_ref` instead of
+    /// the default branch (`RemoteRefs::head` is then that branch's head).
+    pub fn ls_remote_at(
+        &self,
+        remote: &Remote,
+        index_ref: Option<&str>,
+    ) -> Result<RemoteRefs, FetchError> {
+        let head_name = head_ref_name(index_ref)?;
         let out = self.run(Call {
             git_dir: None,
             remote: Some(remote),
@@ -522,7 +533,7 @@ impl Fetcher {
                 "ls-remote".into(),
                 "--".into(),
                 remote.url().into(),
-                "HEAD".into(),
+                head_name.clone().into(),
                 "refs/tags/*".into(),
             ],
             timeout: self.limits.ls_remote,
@@ -530,7 +541,11 @@ impl Fetcher {
             max_stdout: self.limits.max_ls_bytes,
             watch: None,
         })?;
-        parse_ls_remote(&String::from_utf8_lossy(&out), self.limits.max_tags)
+        parse_ls_remote_at(
+            &String::from_utf8_lossy(&out),
+            self.limits.max_tags,
+            &head_name,
+        )
     }
 
     /// Makes the bare cache of `id` if it is not there yet.
@@ -564,6 +579,19 @@ impl Fetcher {
     /// Fetches the remote's `HEAD` into `refs/vam/head` and each tag into its own ref, shallow
     /// (depth 1), with no other tags and no submodules. Tags are validated first.
     pub fn fetch(&self, id: &str, remote: &Remote, tags: &[String]) -> Result<(), FetchError> {
+        self.fetch_at(id, remote, None, tags)
+    }
+
+    /// [`Fetcher::fetch`] with `refs/vam/head` taken from branch `index_ref` instead of `HEAD`.
+    /// Only the index is read from the branch; artifacts still come from tags.
+    pub fn fetch_at(
+        &self,
+        id: &str,
+        remote: &Remote,
+        index_ref: Option<&str>,
+        tags: &[String],
+    ) -> Result<(), FetchError> {
+        let head_name = head_ref_name(index_ref)?;
         for t in tags {
             check_git_ref(t).map_err(|why| FetchError::Invalid(format!("tag `{t}` {why}")))?;
         }
@@ -576,7 +604,7 @@ impl Fetcher {
             "--force".into(),
             "--".into(),
             remote.url().into(),
-            format!("+HEAD:{HEAD_REF}").into(),
+            format!("+{head_name}:{HEAD_REF}").into(),
         ];
         for t in tags {
             args.push(format!("+refs/tags/{t}:{}", tag_ref(t)).into());
@@ -867,7 +895,52 @@ fn safe_join(dest: &Path, rel: &str) -> Result<PathBuf, FetchError> {
 }
 
 /// Parses `git ls-remote` output: `<sha>\t<ref>` lines.
+#[cfg(test)]
 pub(crate) fn parse_ls_remote(out: &str, max_tags: usize) -> Result<RemoteRefs, FetchError> {
+    parse_ls_remote_at(out, max_tags, "HEAD")
+}
+
+/// A branch name the Squrell index may be read from (`VAMD_SQURELL_MARKETPLACE_INDEX_REF`): 1 to
+/// 100 characters of `A-Za-z0-9._/-`, no `..`, no leading `-`, `.` or `/`, no trailing `/`, `.` or
+/// `.lock`, no `//`. It is put in a git refspec, so nothing else is accepted.
+pub fn check_index_ref(name: &str) -> Result<(), String> {
+    let ok_chars = name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'));
+    let ok = !name.is_empty()
+        && name.len() <= 100
+        && ok_chars
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.starts_with(['-', '.', '/'])
+        && !name.ends_with(['/', '.'])
+        && !name.ends_with(".lock");
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{name}` is not a branch name: use 1 to 100 characters of letters, digits, '.', '_', '-' and '/', with no '..', '//' or leading '-'"
+        ))
+    }
+}
+
+/// The ref the index is read from: `HEAD`, or `refs/heads/<branch>` for a checked branch name.
+fn head_ref_name(index_ref: Option<&str>) -> Result<String, FetchError> {
+    match index_ref {
+        None => Ok("HEAD".to_string()),
+        Some(b) => {
+            check_index_ref(b).map_err(FetchError::Invalid)?;
+            Ok(format!("refs/heads/{b}"))
+        }
+    }
+}
+
+/// [`parse_ls_remote`] where the index ref is `head_name` (`HEAD` or `refs/heads/<branch>`).
+pub(crate) fn parse_ls_remote_at(
+    out: &str,
+    max_tags: usize,
+    head_name: &str,
+) -> Result<RemoteRefs, FetchError> {
     let mut head: Option<String> = None;
     let mut direct: BTreeMap<String, String> = BTreeMap::new();
     let mut peeled: BTreeMap<String, String> = BTreeMap::new();
@@ -880,7 +953,7 @@ pub(crate) fn parse_ls_remote(out: &str, max_tags: usize) -> Result<RemoteRefs, 
                 "the repository did not answer with SHA-1 object ids".into(),
             ));
         }
-        if name == "HEAD" {
+        if name == head_name {
             head = Some(sha.to_string());
         } else if let Some(tag) = name.strip_prefix("refs/tags/") {
             let (tag, is_peeled) = match tag.strip_suffix("^{}") {
@@ -899,8 +972,9 @@ pub(crate) fn parse_ls_remote(out: &str, max_tags: usize) -> Result<RemoteRefs, 
             }
         }
     }
-    let head = head.ok_or_else(|| {
-        FetchError::Invalid("the repository has no default branch (is it empty?)".into())
+    let head = head.ok_or_else(|| match head_name.strip_prefix("refs/heads/") {
+        Some(b) => FetchError::Invalid(format!("the repository has no branch `{b}`")),
+        None => FetchError::Invalid("the repository has no default branch (is it empty?)".into()),
     })?;
     let mut tags = direct;
     for (t, c) in peeled {

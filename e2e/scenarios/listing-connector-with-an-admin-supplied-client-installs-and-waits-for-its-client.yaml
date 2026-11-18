@@ -29,8 +29,10 @@ when:
   - marketplace-install: { marketplace: marketplace-community-connectors, listing: connector-with-a-secret, as: org-admin, refused: true, contains: secret }
   - marketplace-install: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-admin }
 then:
-  - expect: { connectors: { id: filebox, as: org-member, fields: { state: askAdmin, trust: unverified, node.enabled: false, provider.client: org, provider.clientSecret: org_vault } } }
-  - expect: { connectors: { id: bugwatch, as: org-member, fields: { state: askAdmin, trust: unverified, provider.profile: discover } } }
+  - expect: { connectors: { id: filebox, as: org-member, fields: { state: askAdmin, trust: unverified, node.enabled: false } } }
+  - expect: { connectors: { id: filebox, as: org-admin, fields: { capabilities.client: org, capabilities.clientSecret: org_vault, capabilities.profile: discover } } }
+  - expect: { connectors: { id: bugwatch, as: org-member, fields: { state: askAdmin, trust: unverified } } }
+  - expect: { connectors: { id: bugwatch, as: org-admin, fields: { capabilities.profile: discover, capabilities.clientSecret: none } } }
   - expect: { connectors: { id: linear, as: org-member, fields: { state: askAdmin, source: builtin, trust: squrell }, absent: [origin] } }
 guards:
   - vam:crates/vam-orchestrator/src/marketplace/import.rs
@@ -38,5 +40,4 @@ guards:
   - vam:crates/vam-spec/src/connector.rs
   - vam:crates/vam-spec/src/connector_listing.rs
   - vam:crates/vam-spec/src/package.rs
-status: pending
-expectFail: { step: when.2, class: product }
+status: active
