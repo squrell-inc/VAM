@@ -824,7 +824,11 @@ impl SqliteWorkflowStore {
     /// agent resolves in that owner's mode, never a release row's owner.
     pub(crate) fn agent_draft_owner(&self, urn: &str) -> Result<Option<String>, OrchestratorError> {
         match self.query_latest_draft_listing(CatalogKind::Agent.table(), urn) {
-            Ok(listing) => Ok(Some(listing.owner_user_id).filter(|owner| !owner.is_empty())),
+            // An unset owner reads as `local`, like the restricted save (a Member).
+            Ok(listing) if listing.owner_user_id.is_empty() => {
+                Ok(Some(crate::users::LOCAL_USER_ID.to_string()))
+            }
+            Ok(listing) => Ok(Some(listing.owner_user_id)),
             Err(OrchestratorError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),
         }

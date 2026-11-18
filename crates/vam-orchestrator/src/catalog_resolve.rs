@@ -199,8 +199,13 @@ pub fn run_resolve_context(
         .agent_ref
         .as_ref()
         .and_then(|r| r.resource_id.as_ref())
-        .and_then(|id| store.agent_draft_owner(&id.urn).ok().flatten())
-        .unwrap_or_else(|| caller.to_string());
+        .map(|id| store.agent_draft_owner(&id.urn));
+    let owner = match owner {
+        Some(Ok(Some(owner))) => owner,
+        // A lookup error fails closed: `local` is a Member, so the run is released-only.
+        Some(Err(_)) => crate::users::LOCAL_USER_ID.to_string(),
+        Some(Ok(None)) | None => caller.to_string(),
+    };
     let mode = draft_mode_for_owner(store, &owner);
     (owner, mode)
 }
