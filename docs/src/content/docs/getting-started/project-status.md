@@ -3,6 +3,8 @@ title: Project Status
 description: Real-time maturity assessment, status matrix, and development rules.
 ---
 
+Looking for a build to run? See [Releases](/getting-started/releases/).
+
 :::caution[Alpha Stability Warning]
 VAM is an active design and prototyping project in **Alpha**. The repository is currently a scaffold: many of the submodules, traits, and RPC interfaces described throughout these pages represent *planned designs* rather than complete, production-ready Rust code.
 :::
