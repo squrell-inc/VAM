@@ -1235,7 +1235,11 @@ pub async fn fire_grant(
         .map_err(|e| format!("endpoint: {e}"))?
         .connect_with_connector(tower::service_fn(move |_uri: http::Uri| {
             let path = path.clone();
-            async move { tokio::net::UnixStream::connect(path).await }
+            async move {
+                tokio::net::UnixStream::connect(path)
+                    .await
+                    .map(hyper_util::rt::TokioIo::new)
+            }
         }))
         .await
         .map_err(|e| format!("gateway socket {}: {e}", gateway_socket.display()))?;
@@ -1337,7 +1341,11 @@ mod trigger_broker_tests {
             .unwrap()
             .connect_with_connector(tower::service_fn(move |_u: http::Uri| {
                 let p = p.clone();
-                async move { tokio::net::UnixStream::connect(p).await }
+                async move {
+                    tokio::net::UnixStream::connect(p)
+                        .await
+                        .map(hyper_util::rt::TokioIo::new)
+                }
             }))
             .await
             .unwrap();

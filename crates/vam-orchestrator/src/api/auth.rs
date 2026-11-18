@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use axum::async_trait;
 use axum::body::Body;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -97,7 +96,6 @@ impl ControlPlanePdp {
     }
 }
 
-#[async_trait]
 impl<S> FromRequestParts<S> for AuthContext
 where
     S: Send + Sync,
@@ -126,7 +124,7 @@ where
 pub async fn bearer_auth_middleware(
     store: Arc<SqliteWorkflowStore>,
     mut req: Request<Body>,
-    next: Next<Body>,
+    next: Next,
 ) -> Response {
     let path = req.uri().path();
     if path == "/v1/health"

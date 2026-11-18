@@ -158,7 +158,9 @@ async fn check(app: &axum::Router, secret: &str, agent_ref: Value) -> (StatusCod
         .await
         .unwrap();
     let status = response.status();
-    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, value)
 }
@@ -334,7 +336,9 @@ async fn playbook_list_carries_records_with_version_and_requires() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     let record = &body["records"][0];
     assert_eq!(record["spec"]["resourceId"]["urn"], PLAYBOOK);

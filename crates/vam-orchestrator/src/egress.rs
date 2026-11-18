@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use vam_security::tls_roots::BundledRoots;
 
 use vam_spec::v1::SignedEnvelope;
 use vam_telemetry::{
@@ -268,6 +269,7 @@ fn drain_one(spool: &DiskSpoolQueue, url: &str, content_type: &str) {
 
 fn post_json_blocking(url: &str, content_type: &str, body: &[u8]) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
+        .bundled_roots()
         .timeout(HTTP_TIMEOUT)
         .build()
         .map_err(|e| e.to_string())?;

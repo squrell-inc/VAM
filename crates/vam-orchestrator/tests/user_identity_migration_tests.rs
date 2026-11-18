@@ -48,7 +48,7 @@ fn app_for(store: Arc<SqliteWorkflowStore>) -> axum::Router {
 
 async fn body_text(response: axum::response::Response) -> String {
     String::from_utf8(
-        hyper::body::to_bytes(response.into_body())
+        axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap()
             .to_vec(),

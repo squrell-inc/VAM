@@ -222,13 +222,13 @@ async fn ws_server() -> Ws {
             let (rx, a) = (rx.clone(), a.clone());
             tokio::spawn(async move {
                 let hello = json!({ "type": "hello", "num_connections": 1 });
-                let _ = ws.send(Message::Text(hello.to_string())).await;
+                let _ = ws.send(Message::Text(hello.to_string().into())).await;
                 let mut rx = rx.lock().await;
                 loop {
                     tokio::select! {
                         Some(v) = rx.recv() => {
                             let disconnect = v["type"] == "disconnect";
-                            if ws.send(Message::Text(v.to_string())).await.is_err() {
+                            if ws.send(Message::Text(v.to_string().into())).await.is_err() {
                                 return;
                             }
                             if disconnect {
@@ -603,7 +603,11 @@ async fn dial(path: PathBuf) -> Channel {
         .unwrap()
         .connect_with_connector(tower::service_fn(move |_: Uri| {
             let p = path.clone();
-            async move { tokio::net::UnixStream::connect(p).await }
+            async move {
+                tokio::net::UnixStream::connect(p)
+                    .await
+                    .map(hyper_util::rt::TokioIo::new)
+            }
         }))
         .await
         .unwrap()

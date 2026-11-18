@@ -15,16 +15,16 @@ encoding_rs = "0.8"
 # one htmd already builds on, named here so we can inspect and prune the tree.
 htmd = "=0.5.5"
 markup5ever_rcdom = "0.38"
-prost-types = "0.12"
+prost-types = "0.14"
 # gzip: the body cap counts decoded bytes, so a compression bomb stops at the cap.
-reqwest = { version = "0.11", features = ["json", "rustls-tls", "gzip"], default-features = false }
+reqwest = { workspace = true, features = ["json", "gzip"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.34", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tonic = { version = "0.10", features = ["transport"] }
+tonic = { version = "0.14", features = ["transport"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url = "2.5"
@@ -40,7 +40,7 @@ test-support = []
 [dev-dependencies]
 # Enables `test-support` for this package's own tests only.
 vam-web = { path = ".", features = ["test-support"] }
-httpmock = "0.7"
+httpmock = "0.9"
 flate2 = "1"
 tempfile = "3.8"
 

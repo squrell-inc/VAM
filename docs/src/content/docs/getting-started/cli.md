@@ -21,7 +21,7 @@ Every `vam` subcommand supports global flags:
 
 Credential resolution order: `--token` → `VAM_API_KEY` → `session_token` from `~/.config/vam/config.toml` (written by `vam login`) → `api_key` from `vam config set-key`. There is **no OIDC/SAML/SSO** yet.
 
-`vam --version` prints the crate version and the git commit it was built from, for example `vam 0.1.0 (93eb949+dirty)`. `+dirty` means the working tree had uncommitted changes at build time. Use it to confirm the CLI matches the `vamd` you are checking. A build without git prints `unknown` in place of the commit.
+`vam --version` prints the version and the commit it was built from, for example `vam 0.1.0-rc.1 (93eb949)`. A release build prints its exact version. Any other build prints the nearest tag plus `+dev`, for example `0.1.0+dev.14 (93eb949)`. `+dirty` after the commit means the tree had uncommitted changes at build time. A build without git prints `unknown` in place of the commit. `vam-web-broker`, `vam-schedule-broker` and `vam-notify-broker` take `--version` and print the same way. Proved by `cli-prints-its-version-and-commit`.
 
 ### Scripting and agents
 
@@ -94,6 +94,16 @@ vam node status
 # Revoke the server-side session and clear local tokens
 vam logout
 ```
+
+`vam node status` prints the node's build and the CLI's build on two lines, then a warning when the major or minor numbers differ:
+
+```text
+node: vamd 0.1.0-rc.1 (93eb949) release
+cli: vam 0.1.0-rc.1 (93eb949)
+warning: the node runs 0.2, this vam is 0.1: minor versions differ
+```
+
+An older node prints `node: version unknown (older vamd)`. Patch, rc and `+dev` differences print no warning. Proved by `node-status-shows-the-node-and-cli-versions`.
 
 `vam login` writes `session_token`, `refresh_token`, and `session_expires_at` to `~/.config/vam/config.toml` (mode `0600`). If the access token is expired and a refresh token is present, the CLI refreshes before the next call. `VAM_API_KEY` still wins when set. After sign-in, `GET /v1/me` returns `userId`, `username`, `role`, and the bearer's scopes (members included).
 
