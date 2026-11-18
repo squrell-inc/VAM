@@ -137,7 +137,9 @@ cannot be read leave the sign-in stored but the connection `needsReconnect`, wit
 runs parked, until `POST /v1/mcp/connections/{id}/refresh` lists them. A listing that fails is recorded only while
 the row is still the sign-in it was for (its URL and OAuth state, checked in the transaction that writes the mark):
 when another refresh already adopted the tools, or an admin save marked the row, the failure is a 409 and the row is
-left as it is. A provider that refuses the client
+left as it is. That recovery runs only while the connector is enabled: on a connector the admin turned off it is a
+409 before the provider is contacted, the adoption checks the enable again in its commit, and the sign-in stays
+pending until the connector is on again. A provider that refuses the client
 (`invalid_client`) is a 409 saying the client id or secret the admin entered was refused; a refused or
 spent code is a 400; an unreachable provider, or an answer with no refresh token, is a 502. When the admin saves a
 corrected secret for the same client, a member whose refresh the provider had refused for the client

@@ -815,6 +815,11 @@ async fn refresh(
     // same first pin the connect makes), and only then is the connection `connected` again.
     let mut existing = existing;
     if pending_tools_policy(&state, &existing)?.is_some() {
+        // Recovery renews the token, adopts the tools and resumes parked runs: none of that on a
+        // connector the node turned off. The adoption checks the enable again in its commit.
+        if !state.store.connector_enabled(&id)? {
+            return Err(crate::mcp_registry::connector_turned_off(&id).into());
+        }
         // The row and the generation are read together under the credential gate (a sign-in that
         // commits between two separate reads would pair an old row with its new generation; the
         // write checks both), after the stored access token is refreshed if it has expired.

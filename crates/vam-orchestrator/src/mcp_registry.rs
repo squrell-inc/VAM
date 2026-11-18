@@ -2355,6 +2355,14 @@ pub(crate) fn tools_read_superseded(id: &str) -> OrchestratorError {
     ))
 }
 
+/// The 409 when a pending sign-in's recovery runs on a connector the node has turned off: nothing is
+/// sent to the provider or written, and the sign-in stays pending.
+pub(crate) fn connector_turned_off(id: &str) -> OrchestratorError {
+    OrchestratorError::Conflict(format!(
+        "the `{id}` connector is turned off on this node: your sign-in stays stored, and refreshing the connection finishes it once your admin turns the connector on again"
+    ))
+}
+
 /// What one member's code exchange commits (CN-5.3): the row, both tokens, and the end of a
 /// previous server's row, all in one transaction.
 pub(crate) struct ConnectorConnectionCommit<'a> {
@@ -2960,6 +2968,14 @@ impl SqliteWorkflowStore {
             let stored = serde_json::from_str::<McpOauthMetadata>(&raw).ok();
             if stored.as_ref() != observed {
                 return Err(gone());
+            }
+            // A pending sign-in is finished only on an enabled connector: one turned off while
+            // the tools were read keeps the sign-in pending (nothing written, no run resumed), and
+            // the tools-refresh route finishes it once the connector is on again.
+            if stored.as_ref().is_some_and(is_tools_pending)
+                && !crate::connectors::node_enabled_in(&tx, id)?
+            {
+                return Err(connector_turned_off(id));
             }
             let mut oauth_json = raw;
             if let Ok(mut oauth) = serde_json::from_str::<McpOauthMetadata>(&oauth_json) {
