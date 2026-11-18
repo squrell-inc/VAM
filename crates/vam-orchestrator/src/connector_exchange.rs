@@ -11,9 +11,9 @@
 //! on a blocking worker that owns the connection's credential gate, so a caller that goes away
 //! cannot leave a spent single-use code or refresh token unstored. The member's row, both tokens and
 //! the end of a previous server's row are ONE transaction (`commit_connector_connection`), and the
-//! transaction first checks that the admin's client, the connector's server and the enable are still
-//! the ones the code was exchanged for: a client replaced while the provider was answering stores
-//! nothing and the member signs in again.
+//! transaction first checks that the admin's client (by its revision), the connector's server and
+//! the enable are still the ones the code was exchanged for: a client replaced while the provider
+//! was answering, even one replaced and then put back, stores nothing and the member signs in again.
 
 use crate::connector_client::{
     client_in, org_client_secret, CodeExchangeRequest, NodeClient, OrgConnector,
@@ -186,9 +186,14 @@ pub(crate) fn exchange_and_connect(
     // Inside the transaction: the node's client, the enable and the connector's server are still
     // what this code was exchanged for. The admin's own write marked the member's old row
     // `needs_reauth` when it replaced the client, so a refused commit leaves that mark as it is.
+    // The client is compared by its revision, not by its id: a client changed A→B→A while the
+    // provider answered has A's id again, but B's save marked the row, and only a new sign-in
+    // under the current client may clear that mark.
     let still_current = |tx: &rusqlite::Connection| -> Result<(), OrchestratorError> {
         let same_client = client_in(tx, id)?.is_some_and(|n| {
-            n.client_id == c.client.client_id && n.token_endpoint == c.client.token_endpoint
+            n.revision == c.client.revision
+                && n.client_id == c.client.client_id
+                && n.token_endpoint == c.client.token_endpoint
         });
         let enabled = crate::connectors::node_enabled_in(tx, id)?;
         let same_server =

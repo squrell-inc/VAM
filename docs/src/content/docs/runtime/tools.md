@@ -131,8 +131,8 @@ next, and the member's connector entry is the answer.
 
 The local checks (body, redirect URI, code and verifier syntax, the connector, the enable, the saved client and
 secret) run before the request and write nothing. After the provider has accepted the code it cannot be used again,
-so what can still fail says so: a client replaced, or the connector turned off, while the provider was answering is
-a 409 and nothing is stored; a failure to save is a 502 that replaces nothing and says to sign in again; tools that
+so what can still fail says so: a client replaced (even replaced and then put back, judged by the client's
+revision), or the connector turned off, while the provider was answering is a 409 and nothing is stored; a failure to save is a 502 that replaces nothing and says to sign in again; tools that
 cannot be read leave the sign-in stored but the connection `needsReconnect`, with the notification open and parked
 runs parked, until `POST /v1/mcp/connections/{id}/refresh` lists them. A provider that refuses the client
 (`invalid_client`) is a 409 saying the client id or secret the admin entered was refused; a refused or
@@ -145,7 +145,11 @@ token endpoint or client id is refused, and a `clientSecret` is refused for any 
 and the revoke on disconnect use the node's endpoints, client id and the org secret, read at that moment (a
 replaced secret is used by the next refresh); a row whose client id or endpoint differs from the node's is
 marked `needs_reauth` without a request, and `invalid_client` on a refresh marks it `needs_reauth` naming the
-admin's client. Providers whose refresh tokens are single-use are safe: the refresh gate below makes
+admin's client, unless the admin saved the client again while the provider was answering: then the refusal was
+of a secret no longer saved, nothing is recorded, and the next call refreshes with the saved one. A refresh the
+provider accepts after the admin changed the client id or token endpoint stores nothing and leaves the member
+`needs_reauth`; one accepted after a secret-only save is stored. A corrected secret reconnects only members whose
+tokens are of the current client id and token endpoint. Providers whose refresh tokens are single-use are safe: the refresh gate below makes
 concurrent calls spend the token once.
 
 `vamd` stores the access and refresh tokens as `connection` vault rows, each pinned to one host

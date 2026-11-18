@@ -2209,13 +2209,19 @@ pub(crate) fn mark_connector_rows_need_reauth(
 /// Puts back to `connected` every member's connector row that is `needs_reauth` because of exactly
 /// `reason` (the one text a refused admin client leaves), and returns their owners. A row that needs
 /// a sign-in for any other reason (a revoked or spent grant, a changed client) is left alone, and so
-/// is a row on another URL (a server the member added by hand). Runs inside the caller's transaction.
+/// is a row on another URL (a server the member added by hand). Only a row whose tokens are of the
+/// node's current client (its client id and token endpoint, read here inside the caller's
+/// transaction) is cleared: a row a refused c1 parked stays parked when the admin moved to c2 and
+/// then fixed c2's secret. Runs inside the caller's transaction.
 pub(crate) fn clear_refused_client_rows(
     connection: &Connection,
     connection_id: &str,
     urls: &[&str],
     reason: &str,
 ) -> Result<Vec<String>, OrchestratorError> {
+    let Some(client) = crate::connector_client::client_in(connection, connection_id)? else {
+        return Ok(Vec::new());
+    };
     let rows: Vec<(String, String)> = {
         let mut stmt = connection.prepare(
             "SELECT owner_user_id, oauth_metadata_json, url FROM mcp_connections
@@ -2238,6 +2244,8 @@ pub(crate) fn clear_refused_client_rows(
         };
         if oauth.status != McpOauthStatus::NeedsReauth
             || oauth.last_refresh_error.as_deref() != Some(reason)
+            || oauth.client_id != client.client_id
+            || oauth.token_endpoint != client.token_endpoint
         {
             continue;
         }
@@ -2414,6 +2422,59 @@ fn oauth_metadata_json(oauth: Option<&McpOauthMetadata>) -> Result<String, Orche
                 .map_err(|err| OrchestratorError::InvalidContract(err.to_string()))
         }
     }
+}
+
+/// [`SqliteWorkflowStore::record_mcp_oauth_refresh_failure`] on a connection the caller holds.
+fn record_refresh_failure_in(
+    connection: &Connection,
+    conn: &McpConnection,
+    needs_reauth: bool,
+    error: &str,
+) -> Result<(), OrchestratorError> {
+    let owner = vault_owner_user_id(conn.scope, &conn.owner_user_id);
+    let raw: String = connection.query_row(
+        "SELECT oauth_metadata_json FROM mcp_connections
+         WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3 AND auth_mode = 'oauth'",
+        params![conn.scope.as_str(), owner, conn.connection_id],
+        |row| row.get(0),
+    )?;
+    let mut oauth: McpOauthMetadata = serde_json::from_str(&raw)
+        .map_err(|_| OrchestratorError::InvalidContract("invalid oauth metadata".into()))?;
+    let transition = needs_reauth && oauth.status != McpOauthStatus::NeedsReauth;
+    if needs_reauth {
+        oauth.status = McpOauthStatus::NeedsReauth;
+    }
+    // Callers pass fixed strings. Sanitize again so a raw
+    // authorization-server body never lands in the row.
+    oauth.last_refresh_error = sanitize_oauth_last_refresh_error(error);
+    let json = oauth_metadata_json(Some(&oauth))?;
+    connection.execute(
+        "UPDATE mcp_connections SET oauth_metadata_json = ?1, updated_at = ?2
+         WHERE scope = ?3 AND owner_user_id = ?4 AND connection_id = ?5 AND auth_mode = 'oauth'",
+        params![
+            json,
+            now_secs(),
+            conn.scope.as_str(),
+            owner,
+            conn.connection_id
+        ],
+    )?;
+    // A connector-backed row (Linear) tells its owner once per transition (open question 9).
+    // Hand-added MCP rows keep the outbox event only.
+    if transition && conn.scope == SecretScope::User {
+        if let Some(policy) = crate::connectors::mcp_policy_in(connection, &conn.connection_id)? {
+            if policy.url == conn.url {
+                let name = policy.display_name.clone();
+                let _ = crate::notifications::record_connection_needs_reauth(
+                    connection,
+                    &conn.owner_user_id,
+                    &conn.connection_id,
+                    &name,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn with_tools(
@@ -2777,9 +2838,29 @@ impl SqliteWorkflowStore {
                     params![created_by, scope.as_str(), owner, c.connection_id],
                 )?;
             }
+            // The row is read inside the transaction: `Ok` means the write committed, so the caller
+            // advances the credential generation exactly when the new tokens are on disk. A row that
+            // cannot be read back rolls the write back instead of committing it unreported.
+            let row = tx
+                .query_row(
+                    &format!(
+                        "SELECT {SELECT_COLUMNS} FROM mcp_connections
+                         WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3"
+                    ),
+                    params![scope.as_str(), owner, c.connection_id],
+                    row_to_connection,
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    OrchestratorError::CorruptState(format!(
+                        "mcp connection '{}' was not there after its write",
+                        c.connection_id
+                    ))
+                })
+                .and_then(with_tools)?;
             tx.commit()?;
+            Ok(row)
         }
-        self.get_mcp_connection(scope, &owner, c.connection_id)
     }
 
     /// Writes the vetted tool list, the server's instructions and the connector's risk classes onto a
@@ -2899,6 +2980,111 @@ impl SqliteWorkflowStore {
         Ok(())
     }
 
+    /// Stores a refresh of a connector row whose client is the admin's: both tokens and the row's
+    /// `connected` state in ONE transaction that first checks the admin's client is still the one
+    /// the refresh used. It is, when its revision is unchanged; or, after saves that kept the client
+    /// id and token endpoint (a new secret), when no save marked the row `needs_reauth` meanwhile.
+    /// Otherwise (another client id or endpoint, a removed client, a row a save marked) nothing is
+    /// stored and the row is never set `connected`; a row not marked yet is marked `needs_reauth`
+    /// naming the changed client. Returns whether the tokens were stored. The check, the writes and
+    /// the admin's save (`put_node_with_client`) all hold the store's connection, so no save lands
+    /// between the check and the write.
+    pub(crate) fn commit_org_client_refresh(
+        &self,
+        vault: &SecretsVault,
+        conn: &McpConnection,
+        used: &crate::connector_client::NodeClient,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        expires_in: Option<u64>,
+    ) -> Result<bool, OrchestratorError> {
+        validate_oauth_secret_value(access_token)?;
+        if let Some(token) = refresh_token {
+            validate_oauth_secret_value(token)?;
+        }
+        let oauth = conn
+            .oauth
+            .as_ref()
+            .filter(|_| conn.auth_mode == McpAuthMode::Oauth)
+            .ok_or_else(|| {
+                OrchestratorError::InvalidContract(
+                    "oauth refresh requires an oauth connection".into(),
+                )
+            })?;
+        let token_host = connection_host(&oauth.token_endpoint)?;
+        let mcp_host = connection_host(&conn.url)?;
+        let access = vault.seal(access_token)?;
+        let refresh = refresh_token.map(|t| vault.seal(t)).transpose()?;
+        let owner = vault_owner_user_id(conn.scope, &conn.owner_user_id).to_string();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let tx = connection.transaction()?;
+        let raw: String = tx.query_row(
+            "SELECT oauth_metadata_json FROM mcp_connections
+             WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3 AND auth_mode = 'oauth'",
+            params![conn.scope.as_str(), owner, conn.connection_id],
+            |row| row.get(0),
+        )?;
+        let mut current: McpOauthMetadata = serde_json::from_str(&raw)
+            .map_err(|_| OrchestratorError::InvalidContract("invalid oauth metadata".into()))?;
+        let node = crate::connector_client::client_in(&tx, &conn.connection_id)?;
+        let still_used = node.as_ref().is_some_and(|n| {
+            n.revision == used.revision
+                || (n.client_id == used.client_id
+                    && n.token_endpoint == used.token_endpoint
+                    && current.status != McpOauthStatus::NeedsReauth)
+        });
+        if !still_used {
+            if current.status != McpOauthStatus::NeedsReauth {
+                record_refresh_failure_in(&tx, conn, true, "the admin changed the OAuth client")?;
+            }
+            tx.commit()?;
+            return Ok(false);
+        }
+        let mut tokens = vec![(
+            mcp_oauth_access_token_binding_id(&conn.connection_id),
+            &access,
+            mcp_host,
+        )];
+        if let Some(sealed) = &refresh {
+            tokens.push((
+                mcp_oauth_refresh_token_binding_id(&conn.connection_id),
+                sealed,
+                token_host,
+            ));
+        }
+        for (binding_id, sealed, host) in tokens {
+            crate::secrets::put_host_secret_in(
+                &tx,
+                &binding_id,
+                SecretKind::Connection,
+                &sealed.nonce,
+                &sealed.ciphertext,
+                &sealed.fingerprint,
+                &[host],
+                None,
+                conn.scope,
+                &conn.owner_user_id,
+            )?;
+        }
+        let now = now_secs();
+        current.status = McpOauthStatus::Connected;
+        current.last_refresh_at = Some(now);
+        current.last_refresh_error = None;
+        current.expires_at = expires_in
+            .map(|seconds| now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)));
+        let json = oauth_metadata_json(Some(&current))?;
+        tx.execute(
+            "UPDATE mcp_connections SET oauth_metadata_json = ?1, updated_at = ?2
+             WHERE scope = ?3 AND owner_user_id = ?4 AND connection_id = ?5 AND auth_mode = 'oauth'",
+            params![json, now, conn.scope.as_str(), owner, conn.connection_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Record a failed host-side refresh. `needs_reauth = true` persists
     /// `status = needs_reauth` so tool calls fail fast until a token upsert
     /// (reconnect) clears it; a transient failure only records the error.
@@ -2910,50 +3096,40 @@ impl SqliteWorkflowStore {
         needs_reauth: bool,
         error: &str,
     ) -> Result<(), OrchestratorError> {
-        let owner = vault_owner_user_id(conn.scope, &conn.owner_user_id);
         let connection = self
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        let raw: String = connection.query_row(
-            "SELECT oauth_metadata_json FROM mcp_connections
-             WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3 AND auth_mode = 'oauth'",
-            params![conn.scope.as_str(), owner, conn.connection_id],
-            |row| row.get(0),
-        )?;
-        let mut oauth: McpOauthMetadata = serde_json::from_str(&raw)
-            .map_err(|_| OrchestratorError::InvalidContract("invalid oauth metadata".into()))?;
-        let transition = needs_reauth && oauth.status != McpOauthStatus::NeedsReauth;
-        if needs_reauth {
-            oauth.status = McpOauthStatus::NeedsReauth;
+        record_refresh_failure_in(&connection, conn, needs_reauth, error)
+    }
+
+    /// Records a refresh the provider refused for the admin's client (`invalid_client`), parking
+    /// the row with [`crate::connector_client::CLIENT_REFUSED_REASON`], but only while the admin's
+    /// client is still at `client_revision`, the revision whose secret the refresh sent. The check
+    /// and the write hold the store's connection, so no client save lands between them: a save
+    /// that replaced the secret after the refresh read it found no parked row to clear, and this
+    /// refusal of the replaced secret is then not recorded either (`Ok(false)`, nothing written).
+    pub(crate) fn record_client_refused_refresh_failure(
+        &self,
+        conn: &McpConnection,
+        client_revision: i64,
+    ) -> Result<bool, OrchestratorError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let current = crate::connector_client::client_in(&connection, &conn.connection_id)?
+            .is_some_and(|c| c.revision == client_revision);
+        if !current {
+            return Ok(false);
         }
-        // Callers pass fixed strings. Sanitize again so a raw
-        // authorization-server body never lands in the row.
-        oauth.last_refresh_error = sanitize_oauth_last_refresh_error(error);
-        let json = oauth_metadata_json(Some(&oauth))?;
-        connection.execute(
-            "UPDATE mcp_connections SET oauth_metadata_json = ?1, updated_at = ?2
-             WHERE scope = ?3 AND owner_user_id = ?4 AND connection_id = ?5 AND auth_mode = 'oauth'",
-            params![json, now_secs(), conn.scope.as_str(), owner, conn.connection_id],
+        record_refresh_failure_in(
+            &connection,
+            conn,
+            true,
+            crate::connector_client::CLIENT_REFUSED_REASON,
         )?;
-        // A connector-backed row (Linear) tells its owner once per transition (open question 9).
-        // Hand-added MCP rows keep the outbox event only.
-        if transition && conn.scope == SecretScope::User {
-            if let Some(policy) =
-                crate::connectors::mcp_policy_in(&connection, &conn.connection_id)?
-            {
-                if policy.url == conn.url {
-                    let name = policy.display_name.clone();
-                    let _ = crate::notifications::record_connection_needs_reauth(
-                        &connection,
-                        &conn.owner_user_id,
-                        &conn.connection_id,
-                        &name,
-                    );
-                }
-            }
-        }
-        Ok(())
+        Ok(true)
     }
 
     pub fn get_mcp_connection(
