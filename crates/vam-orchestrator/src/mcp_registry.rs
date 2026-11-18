@@ -2777,9 +2777,29 @@ impl SqliteWorkflowStore {
                     params![created_by, scope.as_str(), owner, c.connection_id],
                 )?;
             }
+            // The row is read inside the transaction: `Ok` means the write committed, so the caller
+            // advances the credential generation exactly when the new tokens are on disk. A row that
+            // cannot be read back rolls the write back instead of committing it unreported.
+            let row = tx
+                .query_row(
+                    &format!(
+                        "SELECT {SELECT_COLUMNS} FROM mcp_connections
+                         WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3"
+                    ),
+                    params![scope.as_str(), owner, c.connection_id],
+                    row_to_connection,
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    OrchestratorError::CorruptState(format!(
+                        "mcp connection '{}' was not there after its write",
+                        c.connection_id
+                    ))
+                })
+                .and_then(with_tools)?;
             tx.commit()?;
+            Ok(row)
         }
-        self.get_mcp_connection(scope, &owner, c.connection_id)
     }
 
     /// Writes the vetted tool list, the server's instructions and the connector's risk classes onto a

@@ -2440,6 +2440,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_exchange_that_reports_a_failure_committed_nothing_so_its_generation_is_current() {
+        // The exchange advances the credential generation only on `Ok`. So every failure must mean
+        // nothing was committed: a write that lands and then fails to read its row back would leave
+        // new tokens on disk while waiters keep the replaced single-use refresh token.
+        let n = xchg_node("xchg-readback");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let before = crate::host_tools::lock_mcp_credentials(&n.store, &row_of(&n, "ada"))
+            .await
+            .unwrap()
+            .generation_handle();
+        // The write lands, but the row it leaves cannot be read back.
+        n.store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER unreadable_row AFTER UPDATE OF tools_snapshot_json ON mcp_connections
+                 WHEN NEW.connection_id = 'filebox' AND NEW.tools_snapshot_json <> 'not json'
+                 BEGIN UPDATE mcp_connections SET tools_snapshot_json = 'not json'
+                       WHERE rowid = NEW.rowid; END;
+                 CREATE TRIGGER unreadable_new_row AFTER INSERT ON mcp_connections
+                 WHEN NEW.connection_id = 'filebox'
+                 BEGIN UPDATE mcp_connections SET tools_snapshot_json = 'not json'
+                       WHERE rowid = NEW.rowid; END;",
+            )
+            .unwrap();
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "RE-A", "refresh_token": "RE-R" }),
+        );
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        let committed = token_of(&n, "ada", "filebox/oauth/refresh-token") == "RE-R";
+        let moved = before.lock_if_unchanged().await.is_none();
+        assert!(
+            !committed || moved,
+            "new tokens committed but the credential generation did not move"
+        );
+        // The failure rolled the whole write back: the first sign-in's tokens are still the ones.
+        assert!(!committed, "a reported failure left the new tokens on disk");
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/access-token"),
+            NEW_ACCESS
+        );
+    }
+
+    #[tokio::test]
     async fn a_disconnect_while_tools_are_listed_does_not_bring_the_row_back() {
         let n = xchg_node("xchg-disconnect");
         let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
