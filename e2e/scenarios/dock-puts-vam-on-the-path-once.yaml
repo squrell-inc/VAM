@@ -1,0 +1,62 @@
+id: dock-puts-vam-on-the-path-once
+title: vam dock puts vam on the PATH once, and undock takes only that away
+description: >
+  `vam dock --dir DIR` copies the running `vam` into DIR and adds one line marked
+  `# added by vam dock` to the login profiles that exist (`.profile` and `.zshrc` in the fixture
+  home), never to a system file. The command runs with `HOME` set to the scratch tree and a `PATH`
+  that does not hold DIR. A second run prints `unchanged` and each profile still holds the line
+  once. With `--no-modify-path` the command prints the line and changes no profile. `vam undock`
+  removes the binary and both lines and leaves the rest of each profile as it was.
+tags: [release]
+needs: process
+given: []
+when:
+  - cli:
+      args: [dock, --dir, "{{root}}/.local/bin"]
+      root: { from: dock/home }
+      copyCli: bin/vam
+      home: tree
+      env: { PATH: "{{root}}/nobin" }
+      exit: ok
+      files:
+        .local/bin/vam: { exists: true }
+        .profile: { contains: "# added by vam dock", count: 1 }
+        .zshrc: { contains: "# added by vam dock", count: 1 }
+  - cli:
+      args: [dock, --dir, "{{root}}/.local/bin"]
+      root: { same: true }
+      copyCli: bin/vam
+      home: tree
+      env: { PATH: "{{root}}/nobin" }
+      exit: ok
+      contains: ["unchanged"]
+      files:
+        .profile: { contains: "# added by vam dock", count: 1 }
+        .zshrc: { contains: "# added by vam dock", count: 1 }
+  - cli:
+      args: [undock, --dir, "{{root}}/.local/bin"]
+      root: { same: true }
+      copyCli: bin/vam
+      home: tree
+      env: { PATH: "{{root}}/nobin" }
+      exit: ok
+      files:
+        .local/bin/vam: { exists: false }
+        .profile: { absent: "# added by vam dock" }
+        .zshrc: { absent: "# added by vam dock" }
+  - cli:
+      args: [dock, --dir, "{{root}}/.local/bin", --no-modify-path]
+      root: { from: dock/home }
+      copyCli: bin/vam
+      home: tree
+      env: { PATH: "{{root}}/nobin" }
+      exit: ok
+      contains: ["PATH"]
+      files:
+        .local/bin/vam: { exists: true }
+        .profile: { absent: "# added by vam dock" }
+        .zshrc: { absent: "# added by vam dock" }
+guards:
+  - vam:crates/vam-cli/src/main.rs
+status: pending
+expectFail: { step: when.0, class: product }

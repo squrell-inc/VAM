@@ -1,0 +1,50 @@
+id: node-init-installs-and-registers-the-brokers-asked-for
+title: node init installs the broker it is asked for and registers it through the API
+description: >
+  `vam node init --broker web` on a ready host, run as the org admin (the key a re-run is given),
+  with `vam-web-broker` beside the copied `vam`, writes the broker's argument file under
+  `etc/vam/` (no secret in it) and registers it through the API: `done broker vam.web:
+  registered`. Notify and schedule are left alone (the shared node's schedule broker piece
+  already registers `vam.schedule`). A second run reports `ok (unchanged)`. A run on the same tree
+  without a key changes nothing and prints the command that registers the broker. The runner
+  deletes the `vam.web` registration at cleanup, so it reaches no later scenario.
+tags: [release]
+needs: process
+given:
+  - org-admin
+when:
+  - cli:
+      args: [node, init, --root, "{{root}}", --no-systemd, --broker, web, --vamd, "{{vamd}}"]
+      root: { from: node-init/ready }
+      cwd: root
+      copyCli: bin/vam
+      copyBins: [vam-web-broker]
+      cleanupBrokers: [vam.web]
+      as: org-admin
+      exit: ok
+      contains: ["done broker vam.web: registered"]
+      files:
+        etc/vam/broker-web.env: { exists: true }
+  - cli:
+      args: [node, init, --root, "{{root}}", --no-systemd, --broker, web, --vamd, "{{vamd}}"]
+      root: { same: true }
+      exec: bin/vam
+      cwd: root
+      cleanupBrokers: [vam.web]
+      as: org-admin
+      exit: ok
+      contains: ["ok (unchanged)"]
+  - cli:
+      args: [node, init, --root, "{{root}}", --no-systemd, --broker, web, --vamd, "{{vamd}}"]
+      root: { same: true }
+      exec: bin/vam
+      cwd: root
+      exit: ok
+      unchanged: true
+      contains: ["vam.web", "register"]
+      absent: ["registered"]
+guards:
+  - vam:crates/vam-cli/src/main.rs
+  - vam:crates/vam-cli/src/cmd/node_install.rs
+status: pending
+expectFail: { step: when.0, class: product }

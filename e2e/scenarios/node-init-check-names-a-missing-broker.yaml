@@ -1,0 +1,23 @@
+id: node-init-check-names-a-missing-broker
+title: Checking for a broker names the broker binary that is not beside vam
+description: >
+  `vam node init --check --broker web` on a host with no `vam-web-broker` beside the `vam` it runs
+  exits non-zero and prints `missing broker vam-web-broker`, then `fix:`. The tree is byte-for-byte
+  what it was before. The command needs no host and no key.
+tags: [release]
+needs: process
+given: []
+when:
+  - cli:
+      args: [node, init, --check, --broker, web, --root, "{{root}}", --vamd, "{{vamd}}"]
+      root: { from: node-init/bare }
+      copyCli: bin/vam
+      exit: fail
+      unchanged: true
+      contains:
+        - "missing broker vam-web-broker"
+        - "fix:"
+guards:
+  - vam:crates/vam-cli/src/main.rs
+status: pending
+expectFail: { step: when.0, class: product }
