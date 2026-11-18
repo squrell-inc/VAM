@@ -127,6 +127,10 @@ pub struct PutDraft {
     pub status: u16,
     /// A substring the response body must contain.
     pub contains: Option<String>,
+    /// Alias of an `org` piece: the body's URN is the one an earlier `put-draft` of this piece as
+    /// that identity wrote, so this identity aims at another's agent.
+    #[serde(rename = "urnOf")]
+    pub urn_of: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -484,7 +488,8 @@ impl Engine {
     /// check never decides the answer.
     pub(super) fn put_draft(&mut self, p: &PutDraft, scenario_id: &str) -> Result<(), Fail> {
         let key = self.key_of(p.as_.as_deref())?;
-        let (kind, body) = self.draft_body(&p.piece, p.as_.as_deref(), scenario_id)?;
+        let (kind, body) =
+            self.draft_body_of(&p.piece, p.as_.as_deref(), p.urn_of.as_deref(), scenario_id)?;
         let coll = match kind {
             PieceKind::Playbook => "playbooks",
             PieceKind::Agent => "agents",
@@ -617,6 +622,12 @@ mod tests {
         );
         assert!(serde_yaml::from_str::<PutDraft>("{ as: m, status: 200 }").is_err());
         assert!(serde_yaml::from_str::<PutDraft>("{ piece: p, status: 200, lacks: x }").is_err());
+        let p: PutDraft =
+            serde_yaml::from_str("{ piece: probe, as: m2, urnOf: m1, status: 400 }").unwrap();
+        assert_eq!(p.urn_of.as_deref(), Some("m1"));
+        let p: PutDraft = serde_yaml::from_str("{ piece: probe, status: 200 }").unwrap();
+        assert_eq!(p.urn_of, None);
+        assert!(serde_yaml::from_str::<PutDraft>("{ piece: p, status: 200, urn_of: m1 }").is_err());
 
         let r: SetRole = serde_yaml::from_str("{ as: m, role: publisher }").unwrap();
         assert_eq!(r.role, RoleChange::Publisher);

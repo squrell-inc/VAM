@@ -616,3 +616,94 @@ fn identity_steps_need_org_aliases_and_sane_arguments() {
         f.errors()
     );
 }
+
+const DRAFT_AGENT: &str = "piece: agent-draft\nkind: agent\ndeferred: true\nbody:\n  spec:\n    resourceId: { urn: \"urn:vam:agent:x/{{ns}}/{{name}}\" }\n";
+const SKILL_DRAFT: &str = "piece: skill-draft\nkind: skill\ndeferred: true\nbody:\n  spec:\n    resourceId: { urn: \"urn:vam:skill:x/e2e/{{name}}\" }\n";
+const MEMBER_DRAFTS: &str = "id: chat-replies
+title: Members save drafts
+tags: [members]
+needs: process
+given:
+  - org-admin
+  - { piece: org-member, as: m1 }
+  - { piece: org-member, as: m2 }
+  - agent-draft
+  - skill-draft
+when:
+  - put-draft: { piece: agent-draft, as: m1, status: 200 }
+  - put-draft: { piece: agent-draft, as: m2, urnOf: m1, status: 400, contains: namespace }
+  - publish-skill: { piece: skill-draft, as: m1, release: false }
+status: active
+";
+
+fn drafts_fx(scenario: &str) -> Fx {
+    let f = flood_fx(scenario);
+    f.write("world/agent-draft.yaml", DRAFT_AGENT);
+    f.write("world/skill-draft.yaml", SKILL_DRAFT);
+    f
+}
+
+#[test]
+fn member_draft_steps_catalog_is_clean() {
+    let f = drafts_fx(MEMBER_DRAFTS);
+    assert!(f.errors().is_empty(), "{:#?}", f.errors());
+}
+
+#[test]
+fn ns_belongs_only_to_a_piece_a_step_writes() {
+    let f = drafts_fx(MEMBER_DRAFTS);
+    // A released agent is written at `given`, before any identity could name a namespace.
+    f.write(
+        "world/agent-draft.yaml",
+        &DRAFT_AGENT.replace("deferred: true", "release: true"),
+    );
+    f.expect_error(
+        "piece-body",
+        "`{{ns}}` belongs only to a piece a step writes",
+    );
+    // A deferred agent that is released at `given` is written there as well.
+    f.write(
+        "world/agent-draft.yaml",
+        &DRAFT_AGENT.replace("deferred: true", "deferred: true\nrelease: true"),
+    );
+    f.expect_error(
+        "piece-body",
+        "`{{ns}}` belongs only to a piece a step writes",
+    );
+    // A skill is published as a package, never through a namespace.
+    f.write("world/agent-draft.yaml", DRAFT_AGENT);
+    f.write(
+        "world/skill-draft.yaml",
+        &SKILL_DRAFT.replace("e2e/{{name}}", "{{ns}}/{{name}}"),
+    );
+    f.expect_error(
+        "piece-body",
+        "`{{ns}}` belongs only to a piece a step writes",
+    );
+}
+
+#[test]
+fn urn_of_needs_another_org_identity_that_wrote_the_piece_first() {
+    let f = drafts_fx(&MEMBER_DRAFTS.replace("urnOf: m1", "urnOf: nobody"));
+    f.expect_error("step-alias", "`as: nobody` is not an org piece");
+    let f = drafts_fx(&MEMBER_DRAFTS.replace("urnOf: m1", "urnOf: m2"));
+    f.expect_error("put-draft", "`urnOf` names another identity than `as`");
+    // No `put-draft` of the piece as `m1` before this step.
+    let f = drafts_fx(&MEMBER_DRAFTS.replace("as: m1, status: 200", "as: m2, status: 200"));
+    f.expect_error(
+        "put-draft",
+        "`urnOf: m1` needs an earlier `put-draft` of `agent-draft` as `m1`",
+    );
+}
+
+#[test]
+fn publish_skill_as_needs_an_org_alias_and_release_false_is_not_a_refusal() {
+    let f =
+        drafts_fx(&MEMBER_DRAFTS.replace("as: m1, release: false", "as: nobody, release: false"));
+    f.expect_error("step-alias", "`as: nobody` is not an org piece");
+    let f = drafts_fx(&MEMBER_DRAFTS.replace("release: false", "release: false, refused: true"));
+    f.expect_error(
+        "publish-skill",
+        "`release: false` and `refused: true` do not combine",
+    );
+}

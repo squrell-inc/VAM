@@ -1,0 +1,27 @@
+id: member-draft-agent-refuses-a-skill-that-is-not-released
+title: A member's agent that names a skill with no release is refused with the same answer whether the skill is missing or only someone's draft, and nothing is saved
+description: >
+  The skill URN exists nowhere yet, and the save is refused with 400 saying the skill has no released
+  version. A publisher then publishes that skill as a draft and the same save gets the same answer. The
+  admin, who sees every draft, finds no agent under the member's URN.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - skill-draft-probe
+  - agent-member-draft-with-draft-probe
+when:
+  - put-draft: { piece: agent-member-draft-with-draft-probe, as: member, status: 400, contains: "released" }
+  - publish-skill: { piece: skill-draft-probe, as: pub, release: false }
+  - put-draft: { piece: agent-member-draft-with-draft-probe, as: member, status: 400, contains: "released" }
+then:
+  - identity-request: { as: admin, credential: key, path: "/v1/agents/{{urn:agent-member-draft-with-draft-probe:member}}", status: 404 }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/permissions.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/keys.rs
+status: pending
+expectFail: { step: when.0, class: product }

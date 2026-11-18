@@ -1,0 +1,42 @@
+id: member-draft-agent-uses-a-connector-skill-through-the-members-connection
+title: A member's draft agent with a connector skill parks until the member connects, then reads mail through the member's own connection
+description: >
+  The administrator has enabled Microsoft 365 with consent. The member saves a draft agent that pins the
+  released probe skill, which needs the connector, and chats with it. The search parks and asks the member
+  to connect, and nothing reaches Graph. After the member connects, the same run resumes and the search
+  reaches Graph once, with the member's current token.
+tags: [members, connectors, egress]
+needs: process
+given:
+  - org-member
+  - org-administrator
+  - mock-microsoft-login
+  - mock-microsoft-graph
+  - skill-m365-probe
+  - agent-member-draft-with-m365-probe
+when:
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-administrator }
+  - put-draft: { piece: agent-member-draft-with-m365-probe, as: org-member, status: 200 }
+  - chat: { agent: agent-member-draft-with-m365-probe, draft: true, as: org-member, text: "e2e-step:ask Search my mail", wait: false }
+  - expect: { run: paused }
+  - expect: { approval: pending, tool: m365_probe_search }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: "*", count: 0 } }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }
+then:
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages, method: GET, count: 1, has: [bearer=current] } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/permissions.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/keys.rs
+  - vam:crates/vam-orchestrator/src/connector_park.rs
+mock:
+  - when: { afterTool: m365_probe_search }
+    reply: { text: Found two messages. }
+  - when: { step: ask, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_search, args: { method: GET, path: /v1.0/me/messages } } }
+  - when: { step: ask, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-member-draft-agent-uses-a-connector-skill-through-the-members-connection } } }
+status: pending
+expectFail: { step: when.1, class: product }

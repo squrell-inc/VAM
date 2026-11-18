@@ -394,6 +394,24 @@ status is class `product`.
   substring. The probe writes a playbook because that route stays on `catalog:write` for good. The step remembers
   the URN it wrote (or tried) per piece and identity; `chat: { agent: <deferred agent piece>, as }` runs that URN
   (class `scenario` when no `put-draft` wrote one as that identity), and `identity-request` can name it.
+- `{{ns}}` in the body of a piece that a `put-draft` (or a `chat` with `inline`) writes: the writer's
+  `defaultNamespace` from `GET /v1/me`, asked with the writer's key (the bootstrap key's own when `as` is omitted)
+  and kept per identity for the scenario. It is the value a member's agent URN must start with
+  (`urn:vam:agent:local.vam.dev/{{ns}}/{{name}}`). `check` refuses `{{ns}}` in a piece that `given` writes or
+  publishes (a released or `deferred`-and-`release` agent, a skill, a released playbook).
+- `put-draft: { urnOf: <org alias> }`: the body's URN is the one an earlier `put-draft` of the same piece as that
+  identity wrote or tried (class `scenario` when none), so a second identity aims at the first one's agent. The step
+  records the URN for its own identity too, so `{{urn:<piece>:<as>}}` names it. `check` needs `urnOf` to be an org
+  piece other than `as`, with such a `put-draft` earlier in the scenario.
+- `start-playbook: { agent: <deferred agent piece>, draft: true, as }` runs the URN a `put-draft` as `as` wrote
+  (class `scenario` when none), the rule `chat` has; the playbook may be a released piece with its inputs.
+- `publish-skill: { piece, as, release: false }`: `as` publishes (and releases) as that identity, the bootstrap key
+  when omitted; `release: false` publishes the package as a draft only and releases nothing (`check` refuses it
+  with `refused: true`). Pieces: `skill-host-echo` (released at `given`, one `host_echo` tool), `skill-draft-probe`
+  (`deferred`, the same body), and the agents `agent-member-draft-with-host-echo`,
+  `agent-member-draft-with-draft-probe` and `agent-member-draft-with-m365-probe` (each `deferred`, saved by a
+  `put-draft` under the writer's namespace; the first two name their skill with a floating ref, the third pins
+  `skill-m365-probe` at 1.0.0).
 - `{{urn:<piece>:<as>}}` in an `identity-request`'s `path` (percent-encoded), `contains` and `lacks`: the URN a
   `put-draft`, or a `chat` with `inline` or `inlinePlaybook`, as `<as>` wrote or tried for `<piece>`. None yet:
   class `scenario`. `check` needs `<piece>` in `given` and `<as>` an `org` piece.
@@ -794,7 +812,7 @@ Scenarios for a skill whose tools name a card (`ui.show` for a result, `ui.ask` 
   failure while the world is built. An agent piece that `requires` a deferred skill is also `deferred: true` (it is saved at `given` time
   and released by the `publish-skill` step that releases the skill, since vamd refuses to release an agent whose skill is
   not released).
-- `publish-skill: { piece, refused, contains }`: packs the deferred skill piece (its `files:` included, as for any
+- `publish-skill: { piece, refused, contains, as, release }` (`as` and `release: false`: see "Roles and drafts"): packs the deferred skill piece (its `files:` included, as for any
   skill piece), publishes it and, when accepted, releases it as 1.0.0. With `refused: true` the answer must be 4xx and
   its body must contain `contains` (a tool name, a card file path or a JSON pointer).
 - `approve: { amend: { <field>: <value> }, refused, as, via }`: decides AMENDED with `amendedArgs`. With

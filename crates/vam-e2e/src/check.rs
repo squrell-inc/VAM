@@ -182,6 +182,15 @@ pub fn check(root: &Path) -> Vec<CheckError> {
                 ));
             }
         }
+        // `{{ns}}` is the namespace of the identity that writes the piece: only a `put-draft` (or an
+        // inline `chat`) knows it, so a piece that `given` writes or publishes cannot carry it.
+        if text.contains("{{ns}}") && !w.written_by_step() {
+            errors.push(CheckError::new(
+                &p,
+                "piece-body",
+                "`{{ns}}` belongs only to a piece a step writes (a `deferred` playbook, or a `deferred` agent without `release`)",
+            ));
+        }
         for r in &w.requires {
             if cat.piece(r).is_none() {
                 errors.push(CheckError::new(
@@ -353,6 +362,8 @@ fn check_scenario(
 
     // Steps: expect families, alias references, chat labels.
     let mut chat_labels = BTreeSet::new();
+    // (piece, identity) pairs an earlier `put-draft` wrote, for `urnOf`.
+    let mut put_drafts: BTreeSet<(String, String)> = BTreeSet::new();
     for (pos, step) in s.steps() {
         match step {
             Step::Chat(c) => {
@@ -684,7 +695,16 @@ fn check_scenario(
                     errors.push(CheckError::new(p, "step", format!("{pos}: {m}")));
                 }
             }
-            Step::PublishSkill(_) => {}
+            Step::PublishSkill(x) => {
+                refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
+                if !x.release && x.refused {
+                    errors.push(CheckError::new(
+                        p,
+                        "publish-skill",
+                        format!("{pos}: `release: false` and `refused: true` do not combine (a refused publish releases nothing)"),
+                    ));
+                }
+            }
             Step::Cli(x) => {
                 if x.args.is_empty() {
                     errors.push(CheckError::new(
@@ -798,6 +818,26 @@ fn check_scenario(
             Step::PutDraft(x) => {
                 refer(errors, p, &pos, &aliases, Some(&x.piece));
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
+                if let Some(other) = x.urn_of.as_deref() {
+                    refer_org(errors, p, &pos, &org_aliases, Some(other));
+                    if x.as_.as_deref() == Some(other) {
+                        errors.push(CheckError::new(
+                            p,
+                            "put-draft",
+                            format!("{pos}: `urnOf` names another identity than `as`"),
+                        ));
+                    }
+                    if !put_drafts.contains(&(x.piece.clone(), other.to_string())) {
+                        errors.push(CheckError::new(
+                            p,
+                            "put-draft",
+                            format!("{pos}: `urnOf: {other}` needs an earlier `put-draft` of `{}` as `{other}`", x.piece),
+                        ));
+                    }
+                }
+                if let Some(who) = x.as_.as_deref() {
+                    put_drafts.insert((x.piece.clone(), who.to_string()));
+                }
                 if !(100..600).contains(&x.status) {
                     errors.push(CheckError::new(
                         p,
