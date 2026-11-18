@@ -20,5 +20,4 @@ when:
         - '^vamd \d+\.\d+\.\d+(-rc\.\d+)?(\+dev(\.\d+)?)? \([0-9a-f]{7,}(\+dirty)?( \d{4}-\d{2}-\d{2})?\)$'
 guards:
   - vam:crates/vam-orchestrator/src/bin/vamd.rs
-status: pending
-expectFail: { step: when.0, class: product }
+status: active

@@ -1,0 +1,71 @@
+name: Release
+
+# Starts a release. `workflow_dispatch` only, from `main` (guard 1): there is no tag-on-merge and no
+# schedule. Design: design/release-artifacts.md §4; locked decisions in
+# .cursor/workstreams/release-artifacts.md (2, 4, 5, 6, 7, 8, 9).
+#
+# This skeleton has the `validate` job only. Later waves add the build jobs (a reusable
+# release-build.yml) and the `publish` job behind the protected `release` environment; until
+# then a dispatch checks the guards and stops. scripts/release/check-workflow.sh (run by
+# scripts/release/test/run.sh) holds the rules this file must keep: every action pinned by full
+# SHA, no caches, inputs reach shell only through `env:`, top-level `permissions: {}`, and write
+# permissions only in `publish`.
+run-name: "release ${{ inputs.version }} (dry run: ${{ inputs.dry_run }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release: 0.2.0 or 0.2.0-rc.1 (Cargo.toml at the commit must already say it)"
+        type: string
+        required: true
+      commit:
+        description: "Full 40-hex SHA to release; blank means the head of main"
+        type: string
+        required: false
+        default: ""
+      dry_run:
+        description: "Build and check only; never touch tags or releases"
+        type: boolean
+        required: true
+        default: true
+
+# Nothing is granted by default; each job asks for what it needs.
+permissions: {}
+
+# One release at a time; a second dispatch waits, it never cancels a run that may be publishing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # Read-only: the guards of design §4.2. Inputs reach the script only through `env:`.
+  validate:
+    name: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      commit: ${{ steps.guards.outputs.commit }}
+      version: ${{ steps.guards.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      # A pinned binary checked by sha256 (scripts/release/tools.pins): nothing is compiled.
+      - name: Install cargo-deny
+        run: scripts/release/install-tool.sh cargo-deny
+      - name: Guards
+        id: guards
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/guards.sh

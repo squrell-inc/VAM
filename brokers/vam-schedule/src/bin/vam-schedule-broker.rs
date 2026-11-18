@@ -16,6 +16,7 @@ use vam_schedule::{ScheduleBroker, SystemClock};
 #[derive(Debug, Parser)]
 #[command(
     name = "vam-schedule-broker",
+    version = vam_spec::build_info!().leaked_version_line(),
     about = "HSP schedule broker: schedule_create, schedule_list, schedule_get, schedule_update, schedule_delete, schedule_run_now.",
     args_conflicts_with_subcommands = true
 )]

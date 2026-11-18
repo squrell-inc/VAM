@@ -112,6 +112,9 @@ pub async fn run(host: Option<String>, token: Option<String>, cmd: NodeCmd) -> R
         NodeCmd::Status => {
             let body = c.get("/v1/node").await?;
             if !crate::output::is_json() {
+                for line in version_lines(&body, &vam_spec::build_info!()) {
+                    println!("{line}");
+                }
                 if let Some(line) = isolation_line(&body) {
                     println!("isolation: {line}");
                 }
@@ -194,6 +197,43 @@ pub fn keys_document(body: &str) -> Result<String> {
     Ok(serde_json::to_string_pretty(
         &serde_json::json!({ "signingKeys": keys }),
     )?)
+}
+
+/// The `node:` and `cli:` lines of `vam node status`, then a warning when the node's and the
+/// CLI's major or minor version differ. A node that reports no `build` is an older `vamd`.
+pub fn version_lines(body: &str, cli: &vam_spec::build_info::BuildInfo) -> Vec<String> {
+    use vam_spec::build_info::BuildInfo;
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let build = &v["status"]["build"];
+    let text = |k: &str| build[k].as_str().unwrap_or_default();
+    let mut lines = Vec::new();
+    let node_version = text("version");
+    if node_version.is_empty() {
+        lines.push("node: version unknown (older vamd)".to_string());
+    } else {
+        let channel = if text("channel").is_empty() {
+            String::new()
+        } else {
+            format!(" {}", text("channel"))
+        };
+        lines.push(format!(
+            "node: vamd {node_version} ({}){channel}",
+            text("commit")
+        ));
+    }
+    lines.push(format!("cli: vam {}", cli.version_line()));
+    if let (Some(n), Some(c)) = (
+        BuildInfo::major_minor(node_version),
+        BuildInfo::major_minor(&cli.version),
+    ) {
+        if n != c {
+            lines.push(format!(
+                "warning: the node runs {}.{}, this vam is {}.{}: minor versions differ",
+                n.0, n.1, c.0, c.1
+            ));
+        }
+    }
+    lines
 }
 
 /// The node's isolation line from a `GET /v1/node` body; `None` for an older node.
@@ -355,6 +395,7 @@ pub fn notify_lines(body: &str) -> Vec<String> {
 mod tests {
     use super::{
         base_line, isolation_line, keys_document, merge_notify, models_lines, notify_lines,
+        version_lines,
     };
 
     #[test]
@@ -452,6 +493,50 @@ mod tests {
             isolation_line(b).as_deref(),
             Some("firecracker microVM, jailer off")
         );
+    }
+
+    fn cli_build(version: &str) -> vam_spec::build_info::BuildInfo {
+        vam_spec::build_info::BuildInfo::new(version, "9be41d0", "", "dev")
+    }
+
+    fn node_body(version: &str) -> String {
+        format!(
+            r#"{{"status":{{"build":{{"version":"{version}","commit":"abc1234","channel":"dev"}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn version_lines_same_version_has_no_warning() {
+        assert_eq!(
+            version_lines(&node_body("0.1.0+dev"), &cli_build("0.1.0+dev")),
+            vec![
+                "node: vamd 0.1.0+dev (abc1234) dev".to_string(),
+                "cli: vam 0.1.0+dev (9be41d0)".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn version_lines_warn_when_minor_differs() {
+        let lines = version_lines(&node_body("0.2.0"), &cli_build("0.1.0+dev"));
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(
+            lines[2],
+            "warning: the node runs 0.2, this vam is 0.1: minor versions differ"
+        );
+    }
+
+    #[test]
+    fn version_lines_patch_difference_is_quiet() {
+        let lines = version_lines(&node_body("0.1.3"), &cli_build("0.1.0+dev.2"));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+    }
+
+    #[test]
+    fn version_lines_for_a_node_without_build() {
+        let lines = version_lines(r#"{"status":{"guestMode":"vm"}}"#, &cli_build("0.1.0+dev"));
+        assert_eq!(lines[0], "node: version unknown (older vamd)");
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
