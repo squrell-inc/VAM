@@ -145,7 +145,9 @@ secret or token is in any answer or error. For such a connector the app-path rou
 `PUT /v1/mcp/connections/:id/oauth/tokens` answers 400 (use the code exchange), a connect that names another
 token endpoint or client id is refused, and a `clientSecret` is refused for any connector-backed row. A refresh
 and the revoke on disconnect use the node's endpoints, client id and the org secret, read at that moment (a
-replaced secret is used by the next refresh); a row whose client id or endpoint differs from the node's is
+replaced secret is used by the next refresh); the revoke authenticates the way the provider's
+`revocation_endpoint_auth_methods_supported` says (the same choice as for the token endpoint), or as the token
+endpoint does when the provider lists nothing there; a row whose client id or endpoint differs from the node's is
 marked `needs_reauth` without a request, and `invalid_client` on a refresh marks it `needs_reauth` naming the
 admin's client, unless the admin saved the client again while the provider was answering: then the refusal was
 of a secret no longer saved, nothing is recorded, and the next call refreshes with the saved one. A refresh the

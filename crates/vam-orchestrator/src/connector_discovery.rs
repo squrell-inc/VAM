@@ -51,6 +51,12 @@ pub struct Discovered {
     /// `token_endpoint_auth_methods_supported` means `client_secret_basic`). Without a secret there
     /// is nothing to authenticate and this is the default, unused.
     pub token_auth_method: TokenAuthMethod,
+    /// How the secret authenticates at the revocation endpoint, when the provider lists
+    /// `revocation_endpoint_auth_methods_supported` (RFC 8414 §2) with a method this node can use,
+    /// chosen by the rule of [`Self::token_auth_method`]. `None` when it lists nothing (or only
+    /// methods this node cannot use), when there is no revocation endpoint, or when no secret is
+    /// kept: the revoke then uses the token method, as it did before the field was read.
+    pub revocation_auth_method: Option<TokenAuthMethod>,
 }
 
 /// Why discovery failed. `Unreachable` may heal on a retry; `Unsuitable` is the provider's (or the
@@ -265,6 +271,30 @@ fn authorization_server_metadata(
     Err(last)
 }
 
+/// The method a `*_auth_methods_supported` list picks: POST when listed, else Basic when listed,
+/// else `None` (nothing this node can use).
+fn pick_listed_method(listed: &[Value]) -> Option<TokenAuthMethod> {
+    let listed: Vec<&str> = listed.iter().filter_map(Value::as_str).collect();
+    if listed.contains(&"client_secret_post") {
+        Some(TokenAuthMethod::ClientSecretPost)
+    } else if listed.contains(&"client_secret_basic") {
+        Some(TokenAuthMethod::ClientSecretBasic)
+    } else {
+        None
+    }
+}
+
+/// The revocation-endpoint authentication method, when the provider publishes one this node can
+/// use (`revocation_endpoint_auth_methods_supported`, RFC 8414 §2), by the token method's rule.
+/// Revocation is best effort, so a list with nothing usable refuses nothing: it reads as `None`
+/// and the revoke keeps the token method.
+fn choose_revocation_auth_method(meta: &Value) -> Option<TokenAuthMethod> {
+    match meta.get("revocation_endpoint_auth_methods_supported") {
+        Some(Value::Array(listed)) => pick_listed_method(listed),
+        _ => None,
+    }
+}
+
 /// The token-endpoint authentication method a connector that keeps a secret will use (RFC 8414 §2).
 fn choose_auth_method(meta: &Value) -> Result<TokenAuthMethod, DiscoveryError> {
     let refuse = || {
@@ -275,16 +305,7 @@ fn choose_auth_method(meta: &Value) -> Result<TokenAuthMethod, DiscoveryError> {
     match meta.get("token_endpoint_auth_methods_supported") {
         // Omitted: RFC 8414 says `client_secret_basic`.
         None | Some(Value::Null) => Ok(TokenAuthMethod::ClientSecretBasic),
-        Some(Value::Array(listed)) => {
-            let listed: Vec<&str> = listed.iter().filter_map(Value::as_str).collect();
-            if listed.contains(&"client_secret_post") {
-                Ok(TokenAuthMethod::ClientSecretPost)
-            } else if listed.contains(&"client_secret_basic") {
-                Ok(TokenAuthMethod::ClientSecretBasic)
-            } else {
-                Err(refuse())
-            }
-        }
+        Some(Value::Array(listed)) => pick_listed_method(listed).ok_or_else(refuse),
         Some(_) => Err(refuse()),
     }
 }
@@ -325,6 +346,10 @@ fn pin_endpoints(
         issuer: issuer.to_string(),
         authorize_endpoint: authorize.to_string(),
         token_endpoint: token.to_string(),
+        revocation_auth_method: revocation
+            .as_ref()
+            .filter(|_| keeps_secret)
+            .and_then(|_| choose_revocation_auth_method(meta)),
         revocation_endpoint: revocation.map(|r| r.to_string()),
         token_auth_method,
     })
@@ -772,6 +797,59 @@ mod tests {
         ] {
             assert_eq!(method(listed, false).unwrap(), Post);
         }
+    }
+
+    #[test]
+    fn the_revocation_authentication_method_is_read_on_its_own_and_falls_back_to_the_token_one() {
+        use TokenAuthMethod::{ClientSecretBasic as Basic, ClientSecretPost as Post};
+        let method = |listed: Option<Value>, keeps: bool, revocation: bool| {
+            let mut meta = asm();
+            if let Some(v) = listed {
+                meta["revocation_endpoint_auth_methods_supported"] = v;
+            }
+            if !revocation {
+                meta.as_object_mut().unwrap().remove("revocation_endpoint");
+            }
+            let d = discover(MCP, keeps, &with(fake(), AS_URL, meta)).unwrap();
+            assert_eq!(
+                d.token_auth_method, Post,
+                "the token method is the token list's"
+            );
+            d.revocation_auth_method
+        };
+        // The token endpoint takes POST; the revocation endpoint may say otherwise.
+        assert_eq!(
+            method(Some(json!(["client_secret_basic"])), true, true),
+            Some(Basic)
+        );
+        // The same rule as the token method: POST when listed, else Basic.
+        assert_eq!(
+            method(
+                Some(json!(["client_secret_basic", "client_secret_post"])),
+                true,
+                true
+            ),
+            Some(Post)
+        );
+        // Nothing listed, or nothing usable: `None`, the revoke keeps the token method. Revocation
+        // is best effort, so this refuses nothing.
+        for listed in [
+            None,
+            Some(json!(["private_key_jwt"])),
+            Some(json!([])),
+            Some(json!("client_secret_basic")),
+        ] {
+            assert_eq!(method(listed, true, true), None);
+        }
+        // No revocation endpoint, or no secret kept: nothing to pin.
+        assert_eq!(
+            method(Some(json!(["client_secret_basic"])), true, false),
+            None
+        );
+        assert_eq!(
+            method(Some(json!(["client_secret_basic"])), false, true),
+            None
+        );
     }
 
     #[test]

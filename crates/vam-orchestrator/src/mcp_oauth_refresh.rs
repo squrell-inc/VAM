@@ -748,10 +748,15 @@ pub(crate) fn prepare_oauth_refresh_revoke(
             },
             _ => None,
         };
+        // The revocation endpoint's own pinned method when the provider listed one, else the
+        // token endpoint's (a provider that lists nothing, or a client saved before it was read).
         let method = org
             .client
             .as_ref()
-            .map(|node| node.token_auth_method)
+            .map(|node| {
+                node.revocation_auth_method
+                    .unwrap_or(node.token_auth_method)
+            })
             .unwrap_or_default();
         return Ok(PreparedRevoke {
             oauth: oauth.clone(),

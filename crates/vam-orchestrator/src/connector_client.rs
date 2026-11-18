@@ -91,7 +91,8 @@ where
 
 /// How the node authenticates the org's client secret at the token and revocation endpoints (RFC 6749
 /// §2.3.1). Pinned at Enable from the provider's metadata and used by the code exchange, refresh and
-/// revoke alike: the secret never moves from one method to another on its own.
+/// revoke (the revoke uses its own pinned method when the provider lists one): the secret never
+/// moves from one method to another on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TokenAuthMethod {
     /// `client_id` and `client_secret` in the form body.
@@ -137,6 +138,10 @@ pub struct NodeClient {
     pub revocation_endpoint: Option<String>,
     /// Pinned at Enable (the provider's metadata decides); only used when a secret is kept.
     pub token_auth_method: TokenAuthMethod,
+    /// Pinned at Enable from `revocation_endpoint_auth_methods_supported`; `None` (the provider
+    /// listed none it can use, or a client saved before it was read) means the revoke uses
+    /// [`Self::token_auth_method`].
+    pub revocation_auth_method: Option<TokenAuthMethod>,
     pub secret_set: bool,
     pub updated_at: i64,
     pub updated_by: String,
@@ -349,6 +354,7 @@ pub fn plan_client(
                 token_endpoint: d.token_endpoint,
                 revocation_endpoint: d.revocation_endpoint,
                 token_auth_method: d.token_auth_method,
+                revocation_auth_method: d.revocation_auth_method,
                 secret_set: keeps
                     && (req.client_secret.is_some() || existing.is_some_and(|e| e.secret_set)),
                 updated_at: now,
@@ -424,7 +430,8 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
             updated_at INTEGER NOT NULL,
             updated_by TEXT NOT NULL,
             token_auth_method TEXT NOT NULL DEFAULT 'client_secret_post',
-            revision INTEGER NOT NULL DEFAULT 0
+            revision INTEGER NOT NULL DEFAULT 0,
+            revocation_auth_method TEXT
         );
         -- The last client revision a connector was given. Kept when its client is removed, so a
         -- client saved again later never reuses a revision a sign-in or a refresh captured.
@@ -461,6 +468,19 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
             [],
         )?;
     }
+    // A store from before the revocation method was read: NULL, the revoke keeps the token method.
+    let has_revocation_method: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('node_connector_clients')
+         WHERE name = 'revocation_auth_method'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_revocation_method == 0 {
+        connection.execute(
+            "ALTER TABLE node_connector_clients ADD COLUMN revocation_auth_method TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -484,7 +504,7 @@ fn next_client_revision(c: &Connection, connector_id: &str) -> Result<i64, Orche
 
 const COLUMNS: &str = "connector_id, client_id, issuer, authorize_endpoint, token_endpoint, \
                        revocation_endpoint, secret_set, updated_at, updated_by, token_auth_method, \
-                       revision";
+                       revision, revocation_auth_method";
 
 fn row_to_client(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeClient> {
     Ok(NodeClient {
@@ -499,6 +519,10 @@ fn row_to_client(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeClient> {
         updated_by: r.get(8)?,
         token_auth_method: TokenAuthMethod::parse(&r.get::<_, String>(9)?),
         revision: r.get(10)?,
+        revocation_auth_method: r
+            .get::<_, Option<String>>(11)?
+            .as_deref()
+            .map(TokenAuthMethod::parse),
     })
 }
 
@@ -638,7 +662,7 @@ impl SqliteWorkflowStore {
                 tx.execute(
                     &format!(
                         "INSERT INTO node_connector_clients ({COLUMNS})
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                          ON CONFLICT(connector_id) DO UPDATE SET client_id = excluded.client_id,
                              issuer = excluded.issuer,
                              authorize_endpoint = excluded.authorize_endpoint,
@@ -647,7 +671,8 @@ impl SqliteWorkflowStore {
                              secret_set = excluded.secret_set,
                              updated_at = excluded.updated_at, updated_by = excluded.updated_by,
                              token_auth_method = excluded.token_auth_method,
-                             revision = excluded.revision"
+                             revision = excluded.revision,
+                             revocation_auth_method = excluded.revocation_auth_method"
                     ),
                     params![
                         client.connector_id,
@@ -660,7 +685,8 @@ impl SqliteWorkflowStore {
                         client.updated_at,
                         client.updated_by,
                         client.token_auth_method.as_str(),
-                        revision
+                        revision,
+                        client.revocation_auth_method.map(TokenAuthMethod::as_str)
                     ],
                 )?;
                 if let (Some(sealed), Some(host)) = (&sealed, client.token_host()) {
@@ -954,6 +980,7 @@ mod tests {
             token_endpoint: token.into(),
             revocation_endpoint: None,
             token_auth_method: TokenAuthMethod::ClientSecretPost,
+            revocation_auth_method: None,
         }
     }
 
@@ -966,6 +993,7 @@ mod tests {
             token_endpoint: "https://auth.filebox.example/token".into(),
             revocation_endpoint: None,
             token_auth_method: TokenAuthMethod::ClientSecretPost,
+            revocation_auth_method: None,
             secret_set: secret,
             updated_at: 1,
             updated_by: "olga".into(),
@@ -1090,6 +1118,8 @@ mod tests {
         initialize_schema(&c).unwrap();
         let saved = client_in(&c, "filebox").unwrap().unwrap();
         assert_eq!(saved.token_auth_method, TokenAuthMethod::ClientSecretPost);
+        // No revocation method was read for it: the revoke keeps the token method.
+        assert_eq!(saved.revocation_auth_method, None);
         assert_eq!(saved.client_id, "c1");
         // And at revision 0: the first save that changes it moves it on.
         assert_eq!(saved.revision, 0);
@@ -1380,6 +1410,7 @@ pub(crate) mod test_support {
             token_endpoint: format!("https://auth.{tag}.example/token"),
             revocation_endpoint: Some(format!("https://auth.{tag}.example/revoke")),
             token_auth_method: TokenAuthMethod::ClientSecretPost,
+            revocation_auth_method: None,
             secret_set: true,
             updated_at: 1,
             updated_by: "olga".into(),
@@ -1468,6 +1499,7 @@ mod exchange_tests {
             token_endpoint: format!("https://auth.{tag}.example/token"),
             revocation_endpoint: Some(format!("https://auth.{tag}.example/revoke")),
             token_auth_method: method,
+            revocation_auth_method: None,
         }
     }
 

@@ -3231,6 +3231,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_revoke_authenticates_the_way_the_revocation_endpoint_says() {
+        let n = xchg_node("xchg-revoke-basic");
+        // The token endpoint lists POST; the revocation endpoint only Basic.
+        crate::connector_discovery::test_seam::answer(
+            "https://auth.xchg-revoke-basic.example/.well-known/oauth-authorization-server",
+            Some(serde_json::json!({
+                "issuer": "https://auth.xchg-revoke-basic.example",
+                "authorization_endpoint": "https://auth.xchg-revoke-basic.example/authorize",
+                "token_endpoint": "https://auth.xchg-revoke-basic.example/token",
+                "revocation_endpoint": "https://auth.xchg-revoke-basic.example/revoke",
+                "code_challenge_methods_supported": ["S256"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post"],
+                "revocation_endpoint_auth_methods_supported": ["client_secret_basic"]
+            })),
+        );
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let client = n.store.node_client("filebox").unwrap().unwrap();
+        assert_eq!(
+            client.token_auth_method,
+            connector_client::TokenAuthMethod::ClientSecretPost
+        );
+        assert_eq!(
+            client.revocation_auth_method,
+            Some(connector_client::TokenAuthMethod::ClientSecretBasic)
+        );
+        // The exchange posts the secret, as the token endpoint says.
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let seen = n.token.requests();
+        assert_eq!(seen[0].form["client_secret"], SECRET);
+        assert!(seen[0].authorization.is_none());
+        // The revoke on disconnect uses Basic, as the revocation endpoint says.
+        n.token.reply(200, serde_json::Value::Null);
+        let (s, b) = call(
+            &n.app,
+            "DELETE",
+            "/v1/mcp/connections/filebox",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let expected = {
+            use base64::Engine as _;
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("c-1:{SECRET}"))
+            )
+        };
+        let seen = n.token.requests();
+        let revoke = seen.last().unwrap();
+        assert_eq!(revoke.path, "/revoke");
+        assert_eq!(revoke.authorization.as_deref(), Some(expected.as_str()));
+        assert!(
+            !revoke.form.contains_key("client_secret"),
+            "{:?}",
+            revoke.form
+        );
+        assert_eq!(revoke.form["token"], NEW_REFRESH);
+    }
+
+    #[tokio::test]
     async fn a_body_that_fails_to_parse_never_quotes_what_it_held() {
         let (app, store, _vault) = app_world();
         install_filebox(&store, "xchg-parse");
