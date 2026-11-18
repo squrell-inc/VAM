@@ -85,8 +85,7 @@ impl Api {
                     ))
                 })?;
                 let client = base_builder()
-                    .tls_built_in_root_certs(false)
-                    .add_root_certificate(cert)
+                    .tls_certs_only([cert])
                     .build()
                     .map_err(|e| ConnError(format!("http client: {e}")))?;
                 *self.http.borrow_mut() = client;

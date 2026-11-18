@@ -17,7 +17,7 @@ htmd = "=0.5.5"
 markup5ever_rcdom = "0.38"
 prost-types = "0.12"
 # gzip: the body cap counts decoded bytes, so a compression bomb stops at the cap.
-reqwest = { version = "0.11", features = ["json", "rustls-tls", "gzip"], default-features = false }
+reqwest = { workspace = true, features = ["json", "gzip"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
 sha2.workspace = true

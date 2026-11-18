@@ -22,6 +22,7 @@
 
 use std::fmt;
 use std::time::Duration;
+use vam_security::tls_roots::BundledRoots;
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -84,6 +85,7 @@ impl LiveTransport {
 
     fn build(api_base: String, allow_insecure_ws: bool) -> Self {
         let http = reqwest::Client::builder()
+            .bundled_roots()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             // Never follow a redirect: a 3xx could send the bearer token to another host.
