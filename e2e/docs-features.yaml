@@ -832,3 +832,34 @@ features:
       - tool-declared-as-a-read-cannot-send-mail
       - revoked-microsoft-connection-parks-the-call-and-tells-the-member
     pending_page: true
+  - id: member-draft-agents
+    area: "Agents and specs"
+    surface: "scope agents:draft; API PUT /v1/agents and PUT /v1/agents/{urn}/permissions as a member; config VAMD_MEMBER_DRAFT_AGENTS_MAX"
+    dev: [orchestrator/member-agents]
+    arch: [orchestrator/member-agents, orchestrator/catalog]
+    proves:
+      - member-builds-and-runs-own-draft-agent-from-a-released-skill
+      - member-draft-agent-refuses-a-skill-that-is-not-released
+      - demoted-publishers-draft-agent-stops-using-their-draft-skill
+      - member-draft-agent-is-private-and-in-the-members-namespace
+      - member-draft-agent-uses-a-connector-skill-through-the-members-connection
+      - crates/vam-orchestrator/tests/member_draft_agents_tests.rs
+  - id: api-keys-follow-the-live-role
+    area: "Auth and users"
+    surface: "API keys: scope_mode, effective scopes, GET /v1/me scopes"
+    dev: [getting-started/users-and-roles]
+    arch: [orchestrator/user-isolation]
+    proves:
+      - promotion-widens-a-default-key-but-not-a-narrowed-one
+      - demotion-takes-catalog-writes-from-a-publisher-key
+      - member-key-minted-with-catalog-write-cannot-write-the-catalog
+      - crates/vam-orchestrator/tests/key_scope_mode_tests.rs
+  - id: run-route-refuses-inline-agents-and-playbooks
+    area: "Agents and specs"
+    surface: "API POST /v1/runs inlineAgent and inlinePlaybook (400); CLI vam run --file saves then runs by ref"
+    dev: [getting-started/cli]
+    arch: [orchestrator/session]
+    proves:
+      - a-run-with-an-inline-agent-is-refused-and-writes-nothing
+      - a-run-with-an-inline-playbook-is-refused-and-writes-nothing
+      - a-publisher-saves-a-draft-agent-and-runs-it-by-ref

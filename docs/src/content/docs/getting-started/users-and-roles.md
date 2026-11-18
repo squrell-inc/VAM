@@ -6,6 +6,8 @@ proves:
   - promotion-widens-a-default-key-but-not-a-narrowed-one
   - demotion-takes-catalog-writes-from-a-publisher-key
   - member-key-minted-with-catalog-write-cannot-write-the-catalog
+  - member-builds-and-runs-own-draft-agent-from-a-released-skill
+  - crates/vam-orchestrator/tests/key_scope_mode_tests.rs
   - crates/vam-orchestrator/tests/login_tests.rs
   - member-chats-with-a-released-agent
   - member-changes-own-password-and-signs-in-with-the-new-one
@@ -19,7 +21,7 @@ proves:
 
 Isolation is always on. Every durable row has an owner. This page is how to create people on a fresh node and which login to use next.
 
-Architecture stays on [User Isolation](/orchestrator/user-isolation/). Role and scope tables stay on [Control plane security](/orchestrator/user-isolation/). Env names stay on [Daemon](/orchestrator/overview/).
+Architecture stays on [User Isolation](/orchestrator/user-isolation/). Role and scope tables stay on [Users, keys and ownership](/orchestrator/user-isolation/#roles-and-default-scopes). Env names stay on [Daemon](/orchestrator/overview/).
 
 ## Create the first loginable admin
 
@@ -62,12 +64,12 @@ Exactly one role per user.
 |---|---|---|
 | `operator` | Bootstrap key / seeded `operator` | Host, keys, brokers. Not a tenant persona. |
 | `org_admin` | First `VAMD_BOOTSTRAP_ADMIN` user, later tenant admins | Create users, reset passwords, grant publish, org secrets, reassign catalog. Org settings in the VAM app. |
-| `publisher` | Member who received `publish:grant` | Write catalog and **release**. Draft + released workspaces. |
-| `member` | Default, including seeded `local` | Run **released** agents. Own sessions, runs, user-scope secrets. No catalog write. |
+| `publisher` | Member who received `publish:grant` | Write catalog and **release**. Save own draft agents with no member rules. Draft + released workspaces. |
+| `member` | Default, including seeded `local` | Run released agents, and save and run **own draft agents** built from released parts (`agents:draft`, see [Member agents](/orchestrator/member-agents/)). Own sessions, runs, user-scope secrets. No skill, playbook or policy write, no release. |
 
-A key's scopes follow the live role of its user. A key minted with no scope list gets the role's scopes, so promoting the user widens it and demoting the user narrows it. A key minted with a list is capped by the role and never widened past that list. The bootstrap key keeps its scopes. The key listing shows the list the key was minted with; `GET /v1/me` shows the scopes it has now. Releasing an agent needs `publish:grant` on the key. A queued message starts with the live scopes of its sender.
+A key's scopes follow the live role of its user. A key minted with no scope list gets the role's scopes, so promoting the user widens it and demoting the user narrows it. A key minted with a list is capped by the role and never widened past that list. The bootstrap key keeps its scopes. The key listing shows the list the key was minted with; `GET /v1/me` shows the scopes it has now. The scope `agents:draft` is in every role's defaults and lets a key save the owner's own draft agents. Releasing an agent needs `catalog:write` and `publish:grant` on the key, and the key's user must own the agent. For example, a key minted with no list for a member gets the member scopes, and the same key gets the publisher scopes after a promotion. A key minted with `["agents:draft", "runs:write"]` keeps those two scopes whatever the role, and a demotion can only remove from them. A queued message starts with the live scopes of its sender.
 
-Proved by `promotion-widens-a-default-key-but-not-a-narrowed-one`, `demotion-takes-catalog-writes-from-a-publisher-key` and `member-key-minted-with-catalog-write-cannot-write-the-catalog`.
+Proved by `promotion-widens-a-default-key-but-not-a-narrowed-one`, `demotion-takes-catalog-writes-from-a-publisher-key` and `member-key-minted-with-catalog-write-cannot-write-the-catalog`. A member saving their own draft is proved by `member-builds-and-runs-own-draft-agent-from-a-released-skill`.
 
 ## Who can change a password
 
@@ -134,5 +136,6 @@ Proved by `member-changes-own-password-and-signs-in-with-the-new-one`, `password
 | Install CLI and `--bootstrap-admin` | [Installation](/getting-started/installation/) |
 | `vam login` / keys | [CLI reference](/getting-started/cli/) |
 | Full `VAMD_*` table | [Daemon](/orchestrator/overview/) |
-| Role and scope tables | [Control plane security](/orchestrator/user-isolation/) |
+| Role and scope tables | [Users, keys and ownership](/orchestrator/user-isolation/#roles-and-default-scopes) |
+| Member draft agents | [Member agents](/orchestrator/member-agents/) |
 | Isolation invariants | [User Isolation](/orchestrator/user-isolation/) |

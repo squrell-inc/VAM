@@ -38,7 +38,7 @@ request and response shapes, is the OpenAPI file the node serves.
 | Group | Routes |
 |---|---|
 | Identity | `/v1/login`, `/v1/login/refresh`, `/v1/logout`, `/v1/me`, `/v1/keys`, `/v1/users` |
-| Catalog | `/v1/agents`, `/v1/skills`, `/v1/playbooks`, `/v1/policies`, `/v1/agent-checks` |
+| Catalog | `/v1/agents`, `/v1/skills`, `/v1/playbooks`, `/v1/policies`, `/v1/agent-checks`. `PUT /v1/agents` takes `catalog:write` or `agents:draft`; the rest of the writes take `catalog:write` (see [Member agents](/orchestrator/member-agents/)) |
 | Sessions | `/v1/sessions`, and `pause`, `resume`, `terminate`, `snapshots` under `/v1/sessions/{id}` |
 | Runs | `/v1/runs` (an agent or playbook by reference only: `inlineAgent` and `inlinePlaybook` are refused with 400, so save with `PUT /v1/agents` or `PUT /v1/playbooks` first), and `messages`, `stop`, `cancel`, `events` under `/v1/runs/{id}` |
 | Approvals | `/v1/approvals`, `/v1/approvals/{id}/decide` |
@@ -89,7 +89,7 @@ page (tests `sessions_page_newest_first_and_a_new_session_does_not_shift_the_nex
 ## Errors
 
 Each error type maps to one status in `api/error.rs:40-234`: 400 bad request, 401 and 403 auth,
-404 missing or foreign row, 409 conflict, 412 failed precondition, 502 upstream failure, 503
+404 missing or foreign row, 409 conflict (it also answers a member past the draft agent cap, see [Member agents](/orchestrator/member-agents/#error-messages)), 412 failed precondition, 502 upstream failure, 503
 node cannot take the call, 504 a stop still settling.
 
 ## Change your own password

@@ -149,6 +149,7 @@ export default defineConfig({
 									{ label: 'Workspace Files Upload', slug: 'orchestrator/workspace-files-upload' },
 									{ label: 'Sessions and runs', slug: 'orchestrator/session' },
 									{ label: 'Catalog', slug: 'orchestrator/catalog' },
+									{ label: 'Member agents', slug: 'orchestrator/member-agents' },
 									{ label: 'Users, keys and ownership', slug: 'orchestrator/user-isolation' },
 									{ label: 'Notifications', slug: 'orchestrator/notifications' },
 								],

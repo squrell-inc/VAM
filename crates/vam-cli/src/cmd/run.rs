@@ -407,14 +407,24 @@ fn draft_ref(urn: &str) -> ResourceRef {
     }
 }
 
+/// What `--file` needs to save `file`, for the hint after vamd refuses the save.
+fn save_needs(file: &str) -> &'static str {
+    if file == "agent.json" {
+        "agents:draft (an agent in your namespace, built from released parts) or catalog:write"
+    } else {
+        "catalog:write"
+    }
+}
+
 /// vamd's refusal of a save, with one line saying what `--file` needs. The exit code and
 /// HTTP status stay vamd's.
 fn save_refused(err: anyhow::Error, file: &str) -> anyhow::Error {
     match err.downcast::<output::CliError>() {
         Ok(mut cli) => {
             cli.message = format!(
-                "{}\nHint: {file} is saved as your draft, which needs catalog:write; run a released agent with `vam run <agent> -p ...`.",
-                cli.message
+                "{}\nHint: {file} is saved as your draft, which needs {}; run a released agent with `vam run <agent> -p ...`.",
+                cli.message,
+                save_needs(file)
             );
             cli.into()
         }
@@ -953,11 +963,30 @@ fn is_terminal_run_state(state: &str) -> bool {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
+    #[test]
+    fn save_refused_hint_names_the_scope_each_file_needs() {
+        let hint = |file: &str| {
+            let err = anyhow::Error::new(output::CliError {
+                code: ExitCode::Auth,
+                message: "refused".into(),
+                http_status: Some(403),
+            });
+            save_refused(err, file).to_string()
+        };
+        let agent = hint("agent.json");
+        assert!(agent.contains("needs agents:draft"), "{agent}");
+        assert!(agent.contains("or catalog:write"), "{agent}");
+        let playbook = hint("playbook.json");
+        assert!(playbook.contains("needs catalog:write;"), "{playbook}");
+        assert!(!playbook.contains("agents:draft"), "{playbook}");
+    }
+
     use super::{
         classify_run_target, direct_launch, extract_payload_text, is_terminal_event_type,
         is_terminal_run_state, json_run_state, json_to_i64, launch_from_start,
-        resolve_installed_agent, spec_for_agent, spec_for_continue, step_progress_delta_lines,
-        ClassifiedTarget, InstalledAgent, LaunchSource, RunArgs, StepFingerprint,
+        resolve_installed_agent, save_refused, spec_for_agent, spec_for_continue,
+        step_progress_delta_lines, ClassifiedTarget, InstalledAgent, LaunchSource, RunArgs,
+        StepFingerprint,
     };
     use crate::output::{self, ExitCode};
     use clap::{CommandFactory, Parser};
