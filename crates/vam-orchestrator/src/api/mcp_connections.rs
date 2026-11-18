@@ -813,15 +813,22 @@ async fn refresh(
     };
     // A sign-in whose tools could not be read is finished here: the vetted tools are adopted (the
     // same first pin the connect makes), and only then is the connection `connected` again.
-    if let Some(policy) = pending_tools_policy(&state, &existing)? {
-        let credentials = credential_generation(&state, &existing).await?;
-        let conn = adopt_tools_and_reconnect(&state, &existing, &policy, &credentials).await?;
-        let has_refresh = refresh_binding_exists(&state.vault, &conn)?;
-        return Ok(respond(serde_json::json!({
-            "connection": connection_value(&conn, has_refresh)?,
-            "drift": "adopted",
-            "removedTools": Vec::<String>::new(),
-        })));
+    let mut existing = existing;
+    if pending_tools_policy(&state, &existing)?.is_some() {
+        // The generation first, and the row read under the same gate: a sign-in that commits
+        // between the two reads moves the generation, so the row and the generation always
+        // belong to the same sign-in (the write checks both).
+        let (current, credentials) = row_with_generation(&state, &existing).await?;
+        existing = current;
+        if let Some(policy) = pending_tools_policy(&state, &existing)? {
+            let conn = adopt_tools_and_reconnect(&state, &existing, &policy, &credentials).await?;
+            let has_refresh = refresh_binding_exists(&state.vault, &conn)?;
+            return Ok(respond(serde_json::json!({
+                "connection": connection_value(&conn, has_refresh)?,
+                "drift": "adopted",
+                "removedTools": Vec::<String>::new(),
+            })));
+        }
     }
     let listed = snapshot_connection(&state, &existing).await?;
     let decided = decide_pinned_snapshot_with_instructions(
@@ -1129,16 +1136,13 @@ pub(crate) async fn adopt_connector_tools(
 ) -> Result<McpConnection, ApiError> {
     let listed = snapshot_connection(state, conn).await?;
     let Some(gate) = credentials.lock_if_unchanged().await else {
-        return Err(OrchestratorError::Conflict(format!(
-            "the connection to `{}` changed while its tools were being read; connect again",
-            conn.connection_id
-        ))
-        .into());
+        return Err(crate::mcp_registry::tools_read_superseded(&conn.connection_id).into());
     };
     let adopted = state.store.adopt_connector_tools_if_present(
         conn.scope,
         &conn.owner_user_id,
         policy,
+        conn.oauth.as_ref(),
         &listed.tools,
         listed.instructions.as_deref(),
     )?;
@@ -1146,15 +1150,20 @@ pub(crate) async fn adopt_connector_tools(
     Ok(adopted)
 }
 
-/// The credential generation of a connection right now.
-async fn credential_generation(
+/// A connection's row and its credential generation, read together under the credential gate: no
+/// credential write lands between the two.
+async fn row_with_generation(
     state: &AppState,
     conn: &McpConnection,
-) -> Result<crate::host_tools::CredentialGeneration, OrchestratorError> {
+) -> Result<(McpConnection, crate::host_tools::CredentialGeneration), OrchestratorError> {
     let gate = crate::host_tools::lock_mcp_credentials(&state.store, conn)
         .await
         .map_err(|_| OrchestratorError::CorruptState("mcp credential lock unavailable".into()))?;
-    Ok(gate.generation_handle())
+    let current =
+        state
+            .store
+            .get_mcp_connection(conn.scope, &conn.owner_user_id, &conn.connection_id)?;
+    Ok((current, gate.generation_handle()))
 }
 
 /// A sign-in is stored; now its tools are adopted and the member's reconnect is done: the
@@ -1177,11 +1186,11 @@ pub(crate) async fn adopt_tools_and_reconnect(
             connector_row_reconnected(state, &adopted).await?;
             Ok(adopted)
         }
-        Err(failure) => {
+        // A conflict means the row is no longer the sign-in this adoption was for (removed, or
+        // rewritten by another sign-in, refresh or save): it is not marked.
+        Err(failure) if failure.status == StatusCode::CONFLICT => Err(failure),
+        Err(_) => {
             mark_tools_pending(state, conn, credentials).await;
-            if failure.status == StatusCode::CONFLICT {
-                return Err(failure);
-            }
             Err(OrchestratorError::Mcp(
                 "you are signed in, but the connector's tools could not be read yet: refresh the connection to finish connecting"
                     .into(),

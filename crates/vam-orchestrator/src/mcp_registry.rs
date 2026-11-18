@@ -2310,6 +2310,17 @@ fn delete_bindings_in(
 pub(crate) const TOOLS_PENDING_REASON: &str =
     "signed in but the tool list could not be read: refresh the connection";
 
+/// The 409 when a connector row changed while its tools were being read: a later sign-in, a
+/// disconnect, a refresh or an admin save rewrote or removed it. Whatever was signed in for this
+/// request is already stored (and then replaced or removed): the caller reads the connection's
+/// state again, and does not repeat a request that carried a single-use code.
+pub(crate) fn tools_read_superseded(id: &str) -> OrchestratorError {
+    OrchestratorError::Conflict(format!(
+        "the connection to `{id}` changed while its tools were being read (a later sign-in or a disconnect): \
+         read the connection's state again; do not repeat this sign-in with the same code"
+    ))
+}
+
 /// What one member's code exchange commits (CN-5.3): the row, both tokens, and the end of a
 /// previous server's row, all in one transaction.
 pub(crate) struct ConnectorConnectionCommit<'a> {
@@ -2864,14 +2875,17 @@ impl SqliteWorkflowStore {
     }
 
     /// Writes the vetted tool list, the server's instructions and the connector's risk classes onto a
-    /// connector row that is still there and still on `expected_url`: a row a disconnect removed in
-    /// the meantime is NOT brought back (`Conflict`, nothing written). A row that carries
+    /// connector row that is still there, still on the policy's URL and still the sign-in the caller
+    /// read (`observed`, its OAuth metadata, compared exactly): a row a disconnect removed in the
+    /// meantime is NOT brought back, and a row another sign-in, refresh or admin save rewrote is
+    /// not given tools read for the old one (`Conflict`, nothing written). A row that carries
     /// [`TOOLS_PENDING_REASON`] goes back to `connected` in the same write: its tools are adopted.
     pub(crate) fn adopt_connector_tools_if_present(
         &self,
         scope: SecretScope,
         owner_user_id: &str,
         policy: &crate::connectors::McpPolicy,
+        observed: Option<&McpOauthMetadata>,
         tools: &[McpTool],
         instructions: Option<&str>,
     ) -> Result<McpConnection, OrchestratorError> {
@@ -2882,11 +2896,7 @@ impl SqliteWorkflowStore {
             .map_err(|e| OrchestratorError::InvalidContract(e.to_string()))?;
         let (effects_json, ask_json) = policy_columns(policy, &tools)?;
         let owner = vault_owner_user_id(scope, owner_user_id).to_string();
-        let gone = || {
-            OrchestratorError::Conflict(format!(
-                "the connection to `{id}` was removed or changed while its tools were being read; connect again"
-            ))
-        };
+        let gone = || tools_read_superseded(id);
         {
             let mut connection = self
                 .connection
@@ -2903,6 +2913,10 @@ impl SqliteWorkflowStore {
                 .optional()?
                 .ok_or_else(gone)?;
             if url != policy.url {
+                return Err(gone());
+            }
+            let stored = serde_json::from_str::<McpOauthMetadata>(&raw).ok();
+            if stored.as_ref() != observed {
                 return Err(gone());
             }
             let mut oauth_json = raw;
@@ -2931,13 +2945,19 @@ impl SqliteWorkflowStore {
                     id
                 ],
             )?;
-            if let Some(text) = instructions.and_then(sanitize_mcp_instructions) {
-                tx.execute(
-                    "UPDATE mcp_connections SET instructions = ?1
-                     WHERE scope = ?2 AND owner_user_id = ?3 AND connection_id = ?4",
-                    params![text, scope.as_str(), owner, id],
-                )?;
-            }
+            // `instructions` is what a successful `initialize` presented: `None` (the field was
+            // absent) and an empty text both mean the server has none now, and the snapshot type
+            // does not tell them apart (`sanitize_snapshot` folds both to `None`). So the stored
+            // value is replaced either way, with "" for none, as `set_mcp_instructions` stores it:
+            // a server that dropped its instructions does not keep the stale ones in the prompt.
+            let text = instructions
+                .and_then(sanitize_mcp_instructions)
+                .unwrap_or_default();
+            tx.execute(
+                "UPDATE mcp_connections SET instructions = ?1
+                 WHERE scope = ?2 AND owner_user_id = ?3 AND connection_id = ?4",
+                params![text, scope.as_str(), owner, id],
+            )?;
             tx.commit()?;
         }
         self.get_mcp_connection(scope, &owner, id)

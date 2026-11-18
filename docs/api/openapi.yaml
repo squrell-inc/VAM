@@ -1388,7 +1388,15 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "409":
-          description: The admin has saved no client or secret yet, the provider refused the client id or secret the admin entered, or the admin changed the client (or turned the connector off) while the provider was answering, so the sign-in is not stored and the member signs in again. Nothing was written.
+          description: |
+            Before the sign-in is stored: the admin has saved no client or secret yet, the provider
+            refused the client id or secret the admin entered, or the admin changed the client (or
+            turned the connector off) while the provider was answering. Nothing was written, and the
+            member signs in again.
+            After the sign-in is stored: the connection changed while its tools were being read (a
+            later sign-in or a disconnect of the same connection). This sign-in was saved and then
+            replaced or removed; the code is spent. Read the connection's state again
+            (`GET /v1/connectors`) and do not repeat this request with the same code.
           content:
             application/json:
               schema:
@@ -6460,7 +6468,10 @@ components:
           $ref: "#/components/schemas/McpConnectionView"
         drift:
           type: string
-          enum: [identical, shrunk, reapproved, upgraded]
+          description: >
+            `adopted`: the connection was a stored sign-in whose tools could not be read
+            yet; its vetted tools are now adopted and it is `connected` again.
+          enum: [identical, shrunk, reapproved, upgraded, adopted]
         removedTools:
           type: array
           items:
