@@ -129,7 +129,7 @@ marketplace import can write a released row.
 the PUT's refusal (CLI tests and the team checklist; the `cli` scenario step
 has no host or key, so it cannot prove this).
 
-- [ ] Wave 0: scenarios and harness
+- [x] Wave 0: scenarios and harness
 - [ ] Wave 1: run route refuses inline parts; writers test-only; CLI and
   bench save-then-run; test fallout; proto, OpenAPI and docs lines (one PR)
 
@@ -237,7 +237,7 @@ The three new scenarios guard `api/run_start.rs`, `catalog.rs`,
 
 **Items** (each names the scenarios it turns green)
 
-- [ ] `MD-2.0` — Wave 0 above. Files: `e2e/scenarios/` (3 new),
+- [x] `MD-2.0` — Wave 0 above. Files: `e2e/scenarios/` (3 new),
   `e2e/world/agent-inline-probe.yaml`,
   `crates/vam-e2e/src/{scenario.rs,engine.rs,identity.rs,world.rs,check.rs}`,
   `e2e/README.md`. **Accept:** `cargo run -p vam-e2e -- check` clean;
@@ -477,3 +477,4 @@ team has the handoff (`design/member-draft-agents.md` §9) on the docs site.
 | 2026-11-17 | 1 | **Phase 1 closed.** Merged #22, #24, #25 into `feat/member-draft-agents` (Actions green on each). Scoreboard: 3 scenarios green, 0 red; 0 scenario fix cycles. Next: Phase 2 breakdown (the run route never writes released rows). |
 | 2026-11-17 | 2 | Phase 2 breakdown drafted (3 new scenarios, 3 waves); waiting for owner approval |
 | 2026-11-18 | 2 | Owner chose option B (the run route refuses inline agents and playbooks; `vam run --file` saves then runs by ref) and two waves. Decisions 5 and 7 amended; Phase 2 rewritten (3 scenarios: 2 pending, 1 guard; waves 0 and 1). Plan approved; wave 0 next. |
+| 2026-11-18 | 2 W0 | Wave 0 on `feat/member-draft-agents-scenarios-inline`: 3 scenarios (2 `pending`, 1 active guard), world piece `agent-inline-probe`, harness: deferred agent not written at `given`, `chat` `inline`/`inlinePlaybook`/`inputs` (with `refused`), `expect` `status`, `put-draft` URN per identity, `{{urn:<piece>:<as>}}`. Scoreboard: 1 green (guard), 2 red (right reason, class `product`, both at `when.0`: 202 today), 2 fix cycles (request shape; playbook inputs so the red is the inline rule), ~50 min. Local smoke: 9 Microsoft-mock scenarios fail the same on the base (container sandbox denies the guest's python under the `--out` path); Actions is the gate. |
