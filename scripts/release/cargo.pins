@@ -1,0 +1,7 @@
+# Release tools built with `cargo install --locked --version` where tools.pins has no prebuilt
+# binary for the platform (arm64 Linux and macOS, tracker open question 10). One line per tool:
+#   name  version
+# crates.io verifies each crate's checksum; the lockfile in the crate's package pins its
+# dependencies. scripts/release/install-tool.sh reads this file.
+cargo-auditable 0.7.2
+cargo-audit 0.23.0
