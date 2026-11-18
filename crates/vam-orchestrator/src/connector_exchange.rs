@@ -9,19 +9,24 @@
 //!
 //! Nothing is written unless the provider accepted the code. From then on the writes run to the end
 //! on a blocking worker that owns the connection's credential gate, so a caller that goes away
-//! cannot leave a spent single-use code or refresh token unstored.
+//! cannot leave a spent single-use code or refresh token unstored. The member's row, both tokens and
+//! the end of a previous server's row are ONE transaction (`commit_connector_connection`), and the
+//! transaction first checks that the admin's client, the connector's server and the enable are still
+//! the ones the code was exchanged for: a client replaced while the provider was answering stores
+//! nothing and the member signs in again.
 
-use crate::connector_client::{org_client_secret, CodeExchangeRequest, NodeClient, OrgConnector};
+use crate::connector_client::{
+    client_in, org_client_secret, CodeExchangeRequest, NodeClient, OrgConnector,
+};
 use crate::connectors::now_secs;
 use crate::error::OrchestratorError;
-use crate::host_tools::McpCredentialWriteGuard;
+use crate::host_tools::{CredentialGeneration, McpCredentialWriteGuard};
 use crate::mcp_oauth_refresh::{
-    exchange_authorization_code, purge_disconnected_mcp_connection, CodeGrant, RefreshFailure,
+    best_effort_revoke_oauth_refresh, exchange_authorization_code, CodeGrant, RefreshFailure,
     RefreshFailureKind,
 };
 use crate::mcp_registry::{
-    delete_replaced_auth_mode_bindings, mcp_oauth_client_secret_binding_id,
-    store_refreshed_mcp_tokens, McpAuthMode, McpConnection, McpOauthMetadata,
+    ConnectorConnectionCommit, McpAuthMode, McpConnection, McpOauthMetadata,
     McpOauthRegistrationMethod, McpOauthStatus,
 };
 use crate::secrets::{SecretScope, SecretsVault};
@@ -62,19 +67,35 @@ pub(crate) fn exchange_failure(connector_id: &str, failure: &RefreshFailure) -> 
     }
 }
 
+/// What a committed exchange leaves: the member's row, and the credential gate's generation after
+/// the write (the tool adoption that follows is conditional on it).
+pub(crate) struct Connected {
+    pub(crate) conn: McpConnection,
+    pub(crate) credentials: CredentialGeneration,
+}
+
+/// The 409 when the node's state moved while the provider was answering.
+fn superseded(connector_id: &str) -> OrchestratorError {
+    OrchestratorError::Conflict(format!(
+        "the OAuth client for `{connector_id}` was changed or the connector was turned off while you were signing in: sign in again"
+    ))
+}
+
 /// Exchanges the code and connects the member, all under `gate` (the connection's credential
 /// gate). Blocking.
 ///
 /// 1. every refusal that needs no network: the row of another server under the connector's id;
 /// 2. the org secret, host-checked, and the one POST to the pinned token endpoint;
-/// 3. only then the writes: the row (client, endpoints and resource are the node's), the refresh
-///    token, the access token, the gate's generation bump.
+/// 3. only then the write, one transaction: it re-checks the client, the enable and the connector's
+///    server, replaces the row and both tokens (and removes a previous server's row), and the
+///    gate's generation is bumped after the commit. A failure to save after the provider spent the
+///    code says to sign in again.
 pub(crate) fn exchange_and_connect(
     store: &SqliteWorkflowStore,
     vault: &SecretsVault,
     c: &CodeConnect<'_>,
     gate: &mut McpCredentialWriteGuard,
-) -> Result<McpConnection, OrchestratorError> {
+) -> Result<Connected, OrchestratorError> {
     let id = c.connector_id;
     let existing = match store.get_mcp_connection(SecretScope::User, c.owner, id) {
         Ok(row) => Some(row),
@@ -82,10 +103,12 @@ pub(crate) fn exchange_and_connect(
         Err(e) => return Err(e),
     };
     // A row on another URL is a server the member added by hand under this id: the connector cannot
-    // take it. The one exception is the row of a connector update that moved its server.
+    // take it. The one exception is the row of a connector update that moved its server: it is
+    // eligible for replacement, and goes only once the new credentials are valid, in the commit.
+    let mut stale: Option<McpConnection> = None;
     if let Some(row) = existing.as_ref().filter(|r| r.url != c.org.mcp_url) {
         if crate::connectors::is_stale_installed_row(store, row, &c.org.mcp_url)? {
-            purge_disconnected_mcp_connection(vault, store, row)?;
+            stale = Some(row.clone());
         } else {
             crate::connectors::gate_mcp_write(store, id, None, Some(&row.url))?;
             return Err(OrchestratorError::InvalidContract(format!(
@@ -104,6 +127,7 @@ pub(crate) fn exchange_and_connect(
         code: &c.request.code,
         code_verifier: &c.request.code_verifier,
         redirect_uri: &c.request.redirect_uri,
+        auth_method: c.client.token_auth_method,
     };
     let tokens = exchange_authorization_code(&grant, &secret)
         .map_err(|failure| exchange_failure(id, &failure))?;
@@ -131,45 +155,65 @@ pub(crate) fn exchange_and_connect(
         last_refresh_at: Some(now),
         last_refresh_error: None,
     };
-    if let Some(prior) = existing
+    let oauth_prior = existing
         .as_ref()
-        .filter(|r| r.auth_mode != McpAuthMode::Oauth)
-    {
-        delete_replaced_auth_mode_bindings(vault, prior, McpAuthMode::Oauth, &[])?;
-    }
-    let (tools, bindings) = match existing
-        .as_ref()
-        .filter(|r| r.auth_mode == McpAuthMode::Oauth)
-    {
+        .filter(|r| r.auth_mode == McpAuthMode::Oauth);
+    let (tools, bindings) = match oauth_prior {
         Some(prior) => (prior.tools.clone(), prior.header_bindings.clone()),
         None => (Vec::new(), Vec::new()),
     };
-    let conn = store.upsert_mcp_connection(
-        SecretScope::User,
-        c.owner,
-        id,
-        &c.org.mcp_url,
-        "",
-        &bindings,
-        &tools,
-        McpAuthMode::Oauth,
-        Some(&oauth),
-    )?;
-    // The refresh token first, then the access token (the order a refresh uses): a member whose
-    // access write failed refreshes on the first call; one whose refresh write failed would not.
-    store_refreshed_mcp_tokens(vault, &conn, &tokens.access_token, Some(refresh_token))?;
-    // The org's client has one secret, the org's. A per-row secret never belongs to this row.
-    match vault.delete_secret_at(
-        SecretScope::User,
-        c.owner,
-        &mcp_oauth_client_secret_binding_id(id),
-    ) {
-        Ok(_) | Err(OrchestratorError::NotFound(_)) => {}
-        Err(e) => return Err(e),
+    // The previous server's refresh token is revoked (best effort) now that the new grant is good;
+    // its row and credentials go in the commit below, not before.
+    if let Some(row) = stale.as_ref() {
+        let _attempt = best_effort_revoke_oauth_refresh(vault, row);
     }
-    let conn = store.note_mcp_connection_creator(SecretScope::User, c.owner, id, c.creator)?;
+    let commit = ConnectorConnectionCommit {
+        owner: c.owner,
+        creator: c.creator,
+        connection_id: id,
+        url: &c.org.mcp_url,
+        oauth: &oauth,
+        header_bindings: &bindings,
+        tools: &tools,
+        access_token: &tokens.access_token,
+        refresh_token,
+        stale: stale.as_ref(),
+        replaced_auth: existing
+            .as_ref()
+            .filter(|r| r.auth_mode != McpAuthMode::Oauth),
+    };
+    // Inside the transaction: the node's client, the enable and the connector's server are still
+    // what this code was exchanged for. The admin's own write marked the member's old row
+    // `needs_reauth` when it replaced the client, so a refused commit leaves that mark as it is.
+    let still_current = |tx: &rusqlite::Connection| -> Result<(), OrchestratorError> {
+        let same_client = client_in(tx, id)?.is_some_and(|n| {
+            n.client_id == c.client.client_id && n.token_endpoint == c.client.token_endpoint
+        });
+        let enabled = crate::connectors::node_enabled_in(tx, id)?;
+        let same_server =
+            crate::connectors::mcp_policy_in(tx, id)?.is_some_and(|p| p.url == c.org.mcp_url);
+        if same_client && enabled && same_server {
+            Ok(())
+        } else {
+            Err(superseded(id))
+        }
+    };
+    let conn = match store.commit_connector_connection(vault, &commit, &still_current) {
+        Ok(conn) => conn,
+        Err(e @ OrchestratorError::Conflict(_)) => return Err(e),
+        Err(e) => {
+            tracing::warn!(connection_id = id, error = %e, "connector connection not saved after the code was spent");
+            return Err(OrchestratorError::Mcp(
+                "the provider accepted the sign-in, but the connection could not be saved and the code cannot be used again: sign in again"
+                    .into(),
+            ));
+        }
+    };
     // Callers that began with the replaced tokens retry with these (and do not refresh with the old
     // single-use refresh token).
     gate.credentials_replaced();
-    Ok(conn)
+    Ok(Connected {
+        conn,
+        credentials: gate.generation_handle(),
+    })
 }

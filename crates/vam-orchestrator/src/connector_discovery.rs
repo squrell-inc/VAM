@@ -12,8 +12,11 @@
 //!   (`PinnedUrl`), so a name that answers differently later cannot reach an internal host;
 //! - no redirects, no environment proxy, 8 s per request and 20 s for the whole discovery, at most
 //!   64 KiB per answer, JSON only;
-//! - the result is checked before it is used: the authorization server's `issuer` is the one
-//!   asked for, S256 is offered, and the endpoints pass [`check_endpoint`].
+//! - the result is checked before it is used: the protected-resource document names the resource
+//!   its well-known URL was built from (RFC 9728 §3.3), the authorization server's `issuer` is the
+//!   one asked for, S256 is offered, a connector that keeps a secret finds a token-endpoint
+//!   authentication method it can use (pinned, see [`Discovered::token_auth_method`]), and the
+//!   endpoints pass [`check_endpoint`].
 //!
 //! Errors carry fixed text and a host name, never a response body. The secret is not known here.
 //!
@@ -26,6 +29,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use url::{Host, Url};
 use vam_security::ssrf_guard::{is_restricted_ip_strict, PinError, PinnedUrl, SystemResolver};
+
+use crate::connector_client::TokenAuthMethod;
 
 const MAX_BODY_BYTES: u64 = 64 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -41,6 +46,11 @@ pub struct Discovered {
     pub token_endpoint: String,
     /// Only when it is on the token endpoint's host (the secret is sent there and nowhere else).
     pub revocation_endpoint: Option<String>,
+    /// How the org's client secret authenticates at the token and revocation endpoints: POST when
+    /// the provider lists it, else Basic when it lists it or says nothing (RFC 8414 §2: an omitted
+    /// `token_endpoint_auth_methods_supported` means `client_secret_basic`). Without a secret there
+    /// is nothing to authenticate and this is the default, unused.
+    pub token_auth_method: TokenAuthMethod,
 }
 
 /// Why discovery failed. `Unreachable` may heal on a retry; `Unsuitable` is the provider's (or the
@@ -102,18 +112,18 @@ pub fn host_of(raw: &str) -> Option<String> {
         .and_then(|u| u.host_str().map(str::to_string))
 }
 
-/// Discovers the endpoints for `mcp_url`. `needs_secret_post`: the connector keeps a client
-/// secret, so the provider must accept `client_secret_post` when it says which methods it takes.
+/// Discovers the endpoints for `mcp_url`. `keeps_secret`: the connector keeps a client secret, so
+/// the provider must take it by `client_secret_post` or `client_secret_basic` (and one is pinned).
 pub fn discover(
     mcp_url: &str,
-    needs_secret_post: bool,
+    keeps_secret: bool,
     fetcher: &dyn MetadataFetcher,
 ) -> Result<Discovered, DiscoveryError> {
     let started = Instant::now();
     let mcp = check_endpoint(mcp_url, "connector's MCP URL")?;
     let issuer = protected_resource_issuer(&mcp, fetcher, started)?;
     let meta = authorization_server_metadata(&issuer, fetcher, started)?;
-    let found = pin_endpoints(&issuer, &meta, needs_secret_post)?;
+    let found = pin_endpoints(&issuer, &meta, keeps_secret)?;
     // Fail now, with the secret not yet stored, if the token host is not a public one.
     let token = check_endpoint(&found.token_endpoint, "token endpoint")?;
     fetcher.check_public_host(&token)?;
@@ -138,21 +148,37 @@ fn well_known(base: &Url, suffix: &str, path: &str) -> Result<Url, DiscoveryErro
 }
 
 /// RFC 9728: the protected-resource metadata names the authorization server. Tries the path
-/// suffixed form first (`/.well-known/oauth-protected-resource/mcp`), then the root.
+/// suffixed form first (`/.well-known/oauth-protected-resource/mcp`), then the root. Each candidate
+/// carries the resource identifier its URL was built from, and the document must name exactly that
+/// one (RFC 9728 §3.3): a document for another path, another server or no resource at all is not
+/// this server's metadata. A trailing `/` is the one difference tolerated, the same one the
+/// well-known path ignores.
 fn protected_resource_issuer(
     mcp: &Url,
     fetcher: &dyn MetadataFetcher,
     started: Instant,
 ) -> Result<String, DiscoveryError> {
-    let mut candidates = vec![well_known(mcp, "oauth-protected-resource", mcp.path())?];
+    let identifier = {
+        let mut u = mcp.clone();
+        u.set_query(None);
+        u.as_str().to_string()
+    };
+    let root_identifier = format!("{}://{}", mcp.scheme(), mcp.host_str().unwrap_or_default());
+    let mut candidates = vec![(
+        well_known(mcp, "oauth-protected-resource", mcp.path())?,
+        identifier,
+    )];
     if !mcp.path().trim_end_matches('/').is_empty() {
-        candidates.push(well_known(mcp, "oauth-protected-resource", "")?);
+        candidates.push((
+            well_known(mcp, "oauth-protected-resource", "")?,
+            root_identifier,
+        ));
     }
     let mut last = DiscoveryError::Unreachable(format!(
         "{} publishes no OAuth protected-resource metadata",
         mcp.host_str().unwrap_or("the MCP server")
     ));
-    for url in candidates {
+    for (url, expected) in candidates {
         out_of_time(started)?;
         let doc = match fetcher.get_json(&url) {
             Ok(d) => d,
@@ -161,17 +187,11 @@ fn protected_resource_issuer(
                 continue;
             }
         };
-        if let Some(resource) = doc.get("resource").and_then(Value::as_str) {
-            let same_origin = Url::parse(resource).ok().is_some_and(|r| {
-                r.scheme() == mcp.scheme()
-                    && r.host_str() == mcp.host_str()
-                    && r.port_or_known_default() == mcp.port_or_known_default()
-            });
-            if !same_origin {
-                return Err(unsuitable(
-                    "the MCP server's protected-resource metadata names a different server",
-                ));
-            }
+        let named = doc.get("resource").and_then(Value::as_str);
+        if named.map(|r| r.trim_end_matches('/')) != Some(expected.trim_end_matches('/')) {
+            return Err(unsuitable(
+                "the MCP server's protected-resource metadata does not name this server as its resource",
+            ));
         }
         let first = doc
             .get("authorization_servers")
@@ -182,7 +202,9 @@ fn protected_resource_issuer(
         if issuer.query().is_some() {
             return Err(unsuitable("the authorization server must not hold a query"));
         }
-        return Ok(issuer.as_str().trim_end_matches('/').to_string());
+        // The identifier as the provider named it, not as a URL parser spells it: RFC 8414 compares
+        // the metadata's `issuer` to it exactly (a trailing `/` is part of a tenant's identifier).
+        return Ok(first.to_string());
     }
     Err(last)
 }
@@ -213,7 +235,7 @@ fn authorization_server_metadata(
         match fetcher.get_json(&url) {
             Ok(doc) => {
                 let said = doc.get("issuer").and_then(Value::as_str).unwrap_or("");
-                if said.trim_end_matches('/') != issuer {
+                if said != issuer {
                     last =
                         unsuitable("the authorization server's metadata names a different issuer");
                     continue;
@@ -228,10 +250,34 @@ fn authorization_server_metadata(
     Err(last)
 }
 
+/// The token-endpoint authentication method a connector that keeps a secret will use (RFC 8414 §2).
+fn choose_auth_method(meta: &Value) -> Result<TokenAuthMethod, DiscoveryError> {
+    let refuse = || {
+        unsuitable(
+            "the provider's token endpoint accepts neither client_secret_post nor client_secret_basic",
+        )
+    };
+    match meta.get("token_endpoint_auth_methods_supported") {
+        // Omitted: RFC 8414 says `client_secret_basic`.
+        None | Some(Value::Null) => Ok(TokenAuthMethod::ClientSecretBasic),
+        Some(Value::Array(listed)) => {
+            let listed: Vec<&str> = listed.iter().filter_map(Value::as_str).collect();
+            if listed.contains(&"client_secret_post") {
+                Ok(TokenAuthMethod::ClientSecretPost)
+            } else if listed.contains(&"client_secret_basic") {
+                Ok(TokenAuthMethod::ClientSecretBasic)
+            } else {
+                Err(refuse())
+            }
+        }
+        Some(_) => Err(refuse()),
+    }
+}
+
 fn pin_endpoints(
     issuer: &str,
     meta: &Value,
-    needs_secret_post: bool,
+    keeps_secret: bool,
 ) -> Result<Discovered, DiscoveryError> {
     let strings = |key: &str| -> Option<Vec<&str>> {
         meta.get(key)
@@ -243,14 +289,11 @@ fn pin_endpoints(
             "the provider does not offer PKCE with S256, which every sign-in here requires",
         ));
     }
-    if needs_secret_post
-        && strings("token_endpoint_auth_methods_supported")
-            .is_some_and(|m| !m.contains(&"client_secret_post"))
-    {
-        return Err(unsuitable(
-            "the provider's token endpoint does not accept client_secret_post",
-        ));
-    }
+    let token_auth_method = if keeps_secret {
+        choose_auth_method(meta)?
+    } else {
+        TokenAuthMethod::default()
+    };
     let field = |key: &str, what: &str| -> Result<Url, DiscoveryError> {
         let raw = meta.get(key).and_then(Value::as_str).unwrap_or("");
         check_endpoint(raw, what)
@@ -268,6 +311,7 @@ fn pin_endpoints(
         authorize_endpoint: authorize.to_string(),
         token_endpoint: token.to_string(),
         revocation_endpoint: revocation.map(|r| r.to_string()),
+        token_auth_method,
     })
 }
 
@@ -491,15 +535,72 @@ mod tests {
 
     #[test]
     fn the_root_metadata_is_the_fallback_for_a_resource_with_a_path() {
+        // The root document names the root identifier its URL was built from, not the MCP URL.
+        let mut root = prm();
+        root["resource"] = json!("https://mcp.box.example");
         let f = Fake::new(&[
             (
                 "https://mcp.box.example/.well-known/oauth-protected-resource",
-                prm(),
+                root,
             ),
             (AS_URL, asm()),
         ]);
         assert!(discover(MCP, true, &f).is_ok());
         assert_eq!(f.asked.borrow().len(), 3);
+    }
+
+    const PRM_URL: &str = "https://mcp.box.example/.well-known/oauth-protected-resource/mcp";
+    const PRM_ROOT_URL: &str = "https://mcp.box.example/.well-known/oauth-protected-resource";
+
+    #[test]
+    fn the_protected_resource_must_name_the_resource_its_url_was_built_from() {
+        // RFC 9728 §3.3: a missing or non-string `resource`, another path on the same host, another
+        // server, and (for the root fallback) the MCP URL instead of the root identifier are refused.
+        for resource in [
+            None,
+            Some(json!(42)),
+            Some(json!(null)),
+            Some(json!("https://mcp.box.example/other")),
+            Some(json!("https://mcp.box.example")),
+            Some(json!("https://other.example/mcp")),
+            Some(json!("http://mcp.box.example/mcp")),
+        ] {
+            let mut doc = prm();
+            match &resource {
+                Some(v) => doc["resource"] = v.clone(),
+                None => {
+                    doc.as_object_mut().unwrap().remove("resource");
+                }
+            }
+            let f = with(fake(), PRM_URL, doc);
+            let e = discover(MCP, true, &f).unwrap_err();
+            assert!(
+                matches!(e, DiscoveryError::Unsuitable(_)),
+                "{resource:?}: {e}"
+            );
+            assert!(e.to_string().contains("resource"), "{e}");
+            // The authorization server's metadata was never asked for.
+            assert_eq!(f.asked.borrow().len(), 1, "{resource:?}");
+        }
+        // Exactly the identifier (a trailing slash aside) passes.
+        for resource in [MCP, "https://mcp.box.example/mcp/"] {
+            let mut doc = prm();
+            doc["resource"] = json!(resource);
+            let f = with(fake(), PRM_URL, doc);
+            assert!(discover(MCP, true, &f).is_ok(), "{resource}");
+        }
+        // The root fallback is checked against the identifier it was built from.
+        for (resource, ok) in [
+            ("https://mcp.box.example", true),
+            ("https://mcp.box.example/", true),
+            (MCP, false),
+            ("https://other.example", false),
+        ] {
+            let mut root = prm();
+            root["resource"] = json!(resource);
+            let f = Fake::new(&[(PRM_ROOT_URL, root), (AS_URL, asm())]);
+            assert_eq!(discover(MCP, true, &f).is_ok(), ok, "{resource}");
+        }
     }
 
     #[test]
@@ -535,12 +636,57 @@ mod tests {
     }
 
     #[test]
-    fn a_token_endpoint_that_wants_basic_auth_is_refused_only_when_a_secret_is_kept() {
-        let mut meta = asm();
-        meta["token_endpoint_auth_methods_supported"] = json!(["client_secret_basic"]);
-        let f = with(fake(), AS_URL, meta);
-        assert!(discover(MCP, true, &f).is_err());
-        assert!(discover(MCP, false, &f).is_ok());
+    fn the_token_authentication_method_is_chosen_and_pinned_for_a_connector_that_keeps_a_secret() {
+        use TokenAuthMethod::{ClientSecretBasic as Basic, ClientSecretPost as Post};
+        let method = |listed: Option<Value>, keeps: bool| {
+            let mut meta = asm();
+            match listed {
+                Some(v) => meta["token_endpoint_auth_methods_supported"] = v,
+                None => {
+                    meta.as_object_mut()
+                        .unwrap()
+                        .remove("token_endpoint_auth_methods_supported");
+                }
+            }
+            discover(MCP, keeps, &with(fake(), AS_URL, meta)).map(|d| d.token_auth_method)
+        };
+        // POST is preferred when listed, alone or beside Basic.
+        assert_eq!(
+            method(Some(json!(["client_secret_post"])), true).unwrap(),
+            Post
+        );
+        assert_eq!(
+            method(
+                Some(json!(["client_secret_basic", "client_secret_post"])),
+                true
+            )
+            .unwrap(),
+            Post
+        );
+        // Basic when it is the one listed, or when the provider says nothing (RFC 8414 §2).
+        assert_eq!(
+            method(Some(json!(["client_secret_basic"])), true).unwrap(),
+            Basic
+        );
+        assert_eq!(method(None, true).unwrap(), Basic);
+        // Neither is a refusal that names both.
+        for listed in [
+            json!(["private_key_jwt"]),
+            json!([]),
+            json!("client_secret_post"),
+        ] {
+            let e = method(Some(listed), true).unwrap_err();
+            assert!(matches!(e, DiscoveryError::Unsuitable(_)), "{e}");
+            assert!(e.to_string().contains("client_secret_basic"), "{e}");
+        }
+        // No secret kept: nothing to authenticate, whatever the provider lists or omits.
+        for listed in [
+            None,
+            Some(json!(["private_key_jwt"])),
+            Some(json!(["client_secret_basic"])),
+        ] {
+            assert_eq!(method(listed, false).unwrap(), Post);
+        }
     }
 
     #[test]
@@ -550,6 +696,30 @@ mod tests {
         let f = with(fake(), AS_URL, meta);
         let e = discover(MCP, true, &f).unwrap_err();
         assert!(e.to_string().contains("different issuer"), "{e}");
+    }
+
+    #[test]
+    fn the_issuer_is_compared_exactly_and_stored_as_named() {
+        // A tenant issuer ends in `/`: that is part of its identifier. A document that drops it
+        // names another identifier and is refused (RFC 8414 §3.3).
+        let tenant = "https://auth.box.example/tenant/";
+        let as_url = "https://auth.box.example/.well-known/oauth-authorization-server/tenant";
+        let mut doc = prm();
+        doc["authorization_servers"] = json!([tenant]);
+        let with_tenant = |issuer: &str| {
+            let mut meta = asm();
+            meta["issuer"] = json!(issuer);
+            with(with(fake(), PRM_URL, doc.clone()), as_url, meta)
+        };
+        let e = discover(MCP, true, &with_tenant("https://auth.box.example/tenant")).unwrap_err();
+        assert!(e.to_string().contains("different issuer"), "{e}");
+        let found = discover(MCP, true, &with_tenant(tenant)).unwrap();
+        assert_eq!(found.issuer, tenant);
+        // An origin-only issuer is stored without the slash a URL parser would add.
+        assert_eq!(
+            discover(MCP, true, &fake()).unwrap().issuer,
+            "https://auth.box.example"
+        );
     }
 
     #[test]

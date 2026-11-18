@@ -89,6 +89,42 @@ where
     Option::<ClientRequest>::deserialize(d).map(Some)
 }
 
+/// How the node authenticates the org's client secret at the token and revocation endpoints (RFC 6749
+/// §2.3.1). Pinned at Enable from the provider's metadata and used by the code exchange, refresh and
+/// revoke alike: the secret never moves from one method to another on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TokenAuthMethod {
+    /// `client_id` and `client_secret` in the form body.
+    #[default]
+    ClientSecretPost,
+    /// HTTP Basic with the form-urlencoded client id and secret (RFC 8414's default when the
+    /// provider's metadata does not say).
+    ClientSecretBasic,
+}
+
+impl TokenAuthMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientSecretPost => "client_secret_post",
+            Self::ClientSecretBasic => "client_secret_basic",
+        }
+    }
+
+    /// An unknown stored value reads as the method every row had before the column existed.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "client_secret_basic" => Self::ClientSecretBasic,
+            _ => Self::ClientSecretPost,
+        }
+    }
+}
+
+/// The reason a member's row carries after a refresh the provider refused for the admin's client
+/// (`invalid_client`). An admin saving a corrected secret for the same client clears exactly the
+/// rows that carry it; a revoked grant (`invalid_grant`) never does.
+pub(crate) const CLIENT_REFUSED_REASON: &str =
+    "the provider refused the client id or secret your admin entered";
+
 /// The stored, public half of an admin-supplied client. No secret is here, only whether one is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeClient {
@@ -99,6 +135,8 @@ pub struct NodeClient {
     pub token_endpoint: String,
     /// Only when it is on the token endpoint's host.
     pub revocation_endpoint: Option<String>,
+    /// Pinned at Enable (the provider's metadata decides); only used when a secret is kept.
+    pub token_auth_method: TokenAuthMethod,
     pub secret_set: bool,
     pub updated_at: i64,
     pub updated_by: String,
@@ -159,8 +197,10 @@ fn check_secret(id: &str, value: &str) -> Result<(), OrchestratorError> {
 ///
 /// - a client on a connector that uses the publisher's own client: 400 (names the client);
 /// - enabling an `org` connector with no client stored or given: 409 (names the client id);
-/// - `org_vault` with no secret stored or given: 400 (names the secret). A stored secret is kept
-///   only for the same client id: a secret belongs to the client it was registered with, so a new
+/// - `org_vault` with no secret stored or given: 400 (names the secret), also when the body has no
+///   `client` at all and the connector is being enabled (the saved client has no secret, e.g. after
+///   an update turned `none` into `org_vault`). A stored secret is kept
+///   only for the same (trimmed) client id: a secret belongs to the client it was registered with, so a new
 ///   client id needs its secret again (400). A secret on a connector that keeps none: 400;
 /// - `client: null` only with `enabled: false`.
 pub fn check_request(
@@ -173,11 +213,24 @@ pub fn check_request(
     let org = client_kind(def) == ClientKind::Org;
     match field {
         None => {
-            if enabled && org && existing.is_none() {
-                return Err(OrchestratorError::Conflict(format!(
-                    "`{id}` needs your organization's OAuth client id before it can be enabled: \
-                     register a client with the provider and send `client: {{ clientId, clientSecret }}`"
-                )));
+            if enabled && org {
+                match existing {
+                    None => {
+                        return Err(OrchestratorError::Conflict(format!(
+                            "`{id}` needs your organization's OAuth client id before it can be enabled: \
+                             register a client with the provider and send `client: {{ clientId, clientSecret }}`"
+                        )));
+                    }
+                    // A marketplace update can turn a connector with no secret into one that keeps
+                    // one while the saved client stays: members would sign in and the exchange
+                    // would refuse them. A public client and a disable need no secret.
+                    Some(e) if secret_kind(def) == ClientSecret::OrgVault && !e.secret_set => {
+                        return Err(invalid(format!(
+                            "`{id}` needs the client secret you registered with the provider: send `client.clientSecret`"
+                        )));
+                    }
+                    Some(_) => {}
+                }
             }
             Ok(ClientIntent::Keep)
         }
@@ -197,11 +250,12 @@ pub fn check_request(
             })
         }
         Some(Some(c)) => {
-            check_client_id(&id, &c.client_id)?;
+            // The id as `plan_client` stores it, so a padded repeat of the saved id is the same id.
+            let client_id = check_client_id(&id, &c.client_id)?;
             match (secret_kind(def), &c.client_secret) {
                 (ClientSecret::OrgVault, Some(s)) => check_secret(&id, s)?,
                 (ClientSecret::OrgVault, None)
-                    if existing.is_some_and(|e| e.secret_set && e.client_id == c.client_id) => {}
+                    if existing.is_some_and(|e| e.secret_set && e.client_id == client_id) => {}
                 (ClientSecret::OrgVault, None) => {
                     return Err(invalid(format!(
                         "`{id}` needs the client secret you registered with the provider: send `client.clientSecret`"
@@ -287,6 +341,7 @@ pub fn plan_client(
                 authorize_endpoint: d.authorize_endpoint,
                 token_endpoint: d.token_endpoint,
                 revocation_endpoint: d.revocation_endpoint,
+                token_auth_method: d.token_auth_method,
                 secret_set: keeps
                     && (req.client_secret.is_some() || existing.is_some_and(|e| e.secret_set)),
                 updated_at: now,
@@ -359,15 +414,30 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
             revocation_endpoint TEXT,
             secret_set INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
-            updated_by TEXT NOT NULL
+            updated_by TEXT NOT NULL,
+            token_auth_method TEXT NOT NULL DEFAULT 'client_secret_post'
         );
         ",
     )?;
+    // A store from before the method was pinned: every saved client posts its secret, as it did.
+    let has_method: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('node_connector_clients')
+         WHERE name = 'token_auth_method'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_method == 0 {
+        connection.execute(
+            "ALTER TABLE node_connector_clients
+             ADD COLUMN token_auth_method TEXT NOT NULL DEFAULT 'client_secret_post'",
+            [],
+        )?;
+    }
     Ok(())
 }
 
 const COLUMNS: &str = "connector_id, client_id, issuer, authorize_endpoint, token_endpoint, \
-                       revocation_endpoint, secret_set, updated_at, updated_by";
+                       revocation_endpoint, secret_set, updated_at, updated_by, token_auth_method";
 
 fn row_to_client(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeClient> {
     Ok(NodeClient {
@@ -380,6 +450,7 @@ fn row_to_client(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeClient> {
         secret_set: r.get::<_, i64>(6)? != 0,
         updated_at: r.get(7)?,
         updated_by: r.get(8)?,
+        token_auth_method: TokenAuthMethod::parse(&r.get::<_, String>(9)?),
     })
 }
 
@@ -401,18 +472,51 @@ pub(crate) fn clear_client_in(
     Ok(removed > 0)
 }
 
+/// A connector's saved client, read on a connection the caller already holds.
+pub(crate) fn client_in(c: &Connection, id: &str) -> Result<Option<NodeClient>, OrchestratorError> {
+    Ok(c.query_row(
+        &format!("SELECT {COLUMNS} FROM node_connector_clients WHERE connector_id = ?1"),
+        params![id],
+        row_to_client,
+    )
+    .optional()?)
+}
+
+/// What a save's plan assumed about the stored state when it was made: the connector's definition
+/// and the client the plan kept the secret of (or replaced). [`put_node_with_client`] checks both
+/// again inside its transaction: discovery, between the plan and the write, can take seconds, and
+/// another admin's save can commit in that time.
+pub(crate) struct PlanBasis<'a> {
+    pub def: &'a Connector,
+    pub client: Option<&'a NodeClient>,
+}
+
+/// The text of the 409 when the state moved under a save.
+pub(crate) const CLIENT_CHANGED_WHILE_SAVING: &str = "the client changed while saving; save again";
+
+/// Whether two reads of a connector's client are the same state for a plan: the id, the token
+/// endpoint, whether a secret is set and when it was saved (a new secret under the same id moves
+/// `updated_at`, and a plan that keeps "the stored secret" must keep that one).
+fn same_client_state(a: Option<&NodeClient>, b: Option<&NodeClient>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.client_id == b.client_id
+                && a.token_endpoint == b.token_endpoint
+                && a.secret_set == b.secret_set
+                && a.updated_at == b.updated_at
+        }
+        _ => false,
+    }
+}
+
 impl SqliteWorkflowStore {
     pub fn node_client(&self, id: &str) -> Result<Option<NodeClient>, OrchestratorError> {
         let c = self
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        Ok(c.query_row(
-            &format!("SELECT {COLUMNS} FROM node_connector_clients WHERE connector_id = ?1"),
-            params![id],
-            row_to_client,
-        )
-        .optional()?)
+        client_in(&c, id)
     }
 
     pub fn node_clients(&self) -> Result<Vec<NodeClient>, OrchestratorError> {
@@ -433,6 +537,15 @@ impl SqliteWorkflowStore {
     /// one transaction: all of it, or none. The secret is sealed before the transaction opens (so
     /// an encryption failure writes nothing) and written last inside it.
     ///
+    /// The transaction first checks that the connector's definition and its stored client are what
+    /// `basis` says the plan was made from; if either moved, nothing is written and the answer is a
+    /// 409 ([`CLIENT_CHANGED_WHILE_SAVING`]).
+    ///
+    /// A save of a corrected secret for the unchanged client also clears the rows a refresh the
+    /// provider refused for that client (`invalid_client`) put into `needs_reauth`, and only those:
+    /// a revoked grant still needs a sign-in. The owners of the cleared rows are returned so the
+    /// caller can continue their parked runs.
+    ///
     /// This is the only code that writes `connector/<id>/oauth/client-secret`.
     pub(crate) fn put_node_with_client(
         &self,
@@ -440,7 +553,8 @@ impl SqliteWorkflowStore {
         node: &crate::connectors::NodeConnector,
         plan: &ClientPlan,
         mcp_url: &str,
-    ) -> Result<(), OrchestratorError> {
+        basis: &PlanBasis<'_>,
+    ) -> Result<Vec<String>, OrchestratorError> {
         let sealed = match &plan.write {
             ClientWrite::Set {
                 secret: Some(s), ..
@@ -452,6 +566,14 @@ impl SqliteWorkflowStore {
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         let tx = c.transaction()?;
+        let def_now = crate::connectors::entry_in(&tx, &node.connector_id)?.map(|e| e.def);
+        if def_now.as_ref() != Some(basis.def)
+            || !same_client_state(client_in(&tx, &node.connector_id)?.as_ref(), basis.client)
+        {
+            return Err(OrchestratorError::Conflict(
+                CLIENT_CHANGED_WHILE_SAVING.into(),
+            ));
+        }
         crate::connectors::put_node_connector_in(&tx, node)?;
         match &plan.write {
             ClientWrite::Keep => {}
@@ -462,14 +584,15 @@ impl SqliteWorkflowStore {
                 tx.execute(
                     &format!(
                         "INSERT INTO node_connector_clients ({COLUMNS})
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                          ON CONFLICT(connector_id) DO UPDATE SET client_id = excluded.client_id,
                              issuer = excluded.issuer,
                              authorize_endpoint = excluded.authorize_endpoint,
                              token_endpoint = excluded.token_endpoint,
                              revocation_endpoint = excluded.revocation_endpoint,
                              secret_set = excluded.secret_set,
-                             updated_at = excluded.updated_at, updated_by = excluded.updated_by"
+                             updated_at = excluded.updated_at, updated_by = excluded.updated_by,
+                             token_auth_method = excluded.token_auth_method"
                     ),
                     params![
                         client.connector_id,
@@ -480,7 +603,8 @@ impl SqliteWorkflowStore {
                         client.revocation_endpoint,
                         client.secret_set as i64,
                         client.updated_at,
-                        client.updated_by
+                        client.updated_by,
+                        client.token_auth_method.as_str()
                     ],
                 )?;
                 if let (Some(sealed), Some(host)) = (&sealed, client.token_host()) {
@@ -499,6 +623,7 @@ impl SqliteWorkflowStore {
                 }
             }
         }
+        let mut cleared = Vec::new();
         if plan.reauth {
             crate::mcp_registry::mark_connector_rows_need_reauth(
                 &tx,
@@ -506,9 +631,32 @@ impl SqliteWorkflowStore {
                 &[mcp_url],
                 "the admin changed the client: reconnect",
             )?;
+        } else if matches!(
+            &plan.write,
+            ClientWrite::Set {
+                secret: Some(_),
+                ..
+            }
+        ) {
+            // The same client with a new secret: a refresh the old secret failed is worth another
+            // try, so the rows it parked are back (the next call refreshes with the new secret).
+            cleared = crate::mcp_registry::clear_refused_client_rows(
+                &tx,
+                &node.connector_id,
+                &[mcp_url],
+                CLIENT_REFUSED_REASON,
+            )?;
+            for owner in &cleared {
+                crate::notifications::resolve_connection_needs_reauth(
+                    &tx,
+                    owner,
+                    &node.connector_id,
+                    "acted",
+                )?;
+            }
         }
         tx.commit()?;
-        Ok(())
+        Ok(cleared)
     }
 }
 
@@ -610,21 +758,23 @@ pub(crate) fn org_client_secret(
         ));
     }
     let binding = client_secret_binding_id(id);
-    let meta = match vault.get_metadata_at(SecretScope::Org, ORG_OWNER_USER_ID, &binding) {
-        Ok(meta) => meta,
-        Err(OrchestratorError::StorageUnavailable) => {
-            return Err(OrchestratorError::StorageUnavailable)
+    // The row's destination is judged on the same stored state the ciphertext is read from: a
+    // secret an admin save replaced in between is never decrypted against the old host's check.
+    let accept = |meta: &crate::secrets::HostSecretMetadata| {
+        let pinned_to_host = meta.allowed_destinations.len() == 1
+            && meta.allowed_destinations[0].eq_ignore_ascii_case(&host);
+        if meta.kind != SecretKind::Connection || meta.scope != SecretScope::Org || !pinned_to_host
+        {
+            return Err(OrchestratorError::PermissionDenied(
+                "the client secret is not pinned to the token endpoint's host".into(),
+            ));
         }
-        Err(_) => return Err(not_saved()),
+        Ok(())
     };
-    let pinned_to_host = meta.allowed_destinations.len() == 1
-        && meta.allowed_destinations[0].eq_ignore_ascii_case(&host);
-    if meta.kind != SecretKind::Connection || meta.scope != SecretScope::Org || !pinned_to_host {
-        return Err(OrchestratorError::PermissionDenied(
-            "the client secret is not pinned to the token endpoint's host".into(),
-        ));
+    match vault.decrypt_secret_at_checked(SecretScope::Org, ORG_OWNER_USER_ID, &binding, accept) {
+        Err(OrchestratorError::NotFound(_)) => Err(not_saved()),
+        other => other,
     }
-    vault.decrypt_secret_at(SecretScope::Org, ORG_OWNER_USER_ID, &binding)
 }
 
 /// The body of `POST /v1/connectors/{id}/connection/oauth/code`: what the app got from the browser
@@ -741,6 +891,7 @@ mod tests {
             authorize_endpoint: "https://auth.filebox.example/authorize".into(),
             token_endpoint: token.into(),
             revocation_endpoint: None,
+            token_auth_method: TokenAuthMethod::ClientSecretPost,
         }
     }
 
@@ -752,6 +903,7 @@ mod tests {
             authorize_endpoint: "https://auth.filebox.example/authorize".into(),
             token_endpoint: "https://auth.filebox.example/token".into(),
             revocation_endpoint: None,
+            token_auth_method: TokenAuthMethod::ClientSecretPost,
             secret_set: secret,
             updated_at: 1,
             updated_by: "olga".into(),
@@ -803,6 +955,87 @@ mod tests {
         assert!(check_request(&none, None, true, &req("c1", None)).is_ok());
         let e = check_request(&none, None, true, &req("c1", Some("s"))).unwrap_err();
         assert!(e.to_string().contains("no client secret"), "{e}");
+    }
+
+    #[test]
+    fn enabling_a_kept_client_that_has_no_secret_is_refused_naming_the_secret() {
+        // A marketplace update can turn `clientSecret: none` into `org_vault` while the saved client
+        // stays: it has no secret, and members would sign in only to be refused at the exchange.
+        let e = check_request(&org(), Some(&stored(false)), true, &None).unwrap_err();
+        assert!(matches!(e, OrchestratorError::InvalidContract(_)), "{e}");
+        assert!(e.to_string().contains("secret"), "{e}");
+        // A kept client with its secret enables; a disable needs none.
+        assert_eq!(
+            check_request(&org(), Some(&stored(true)), true, &None).unwrap(),
+            ClientIntent::Keep
+        );
+        assert_eq!(
+            check_request(&org(), Some(&stored(false)), false, &None).unwrap(),
+            ClientIntent::Keep
+        );
+        // A public client (`org` with no secret kept) needs none either.
+        assert_eq!(
+            check_request(&def("org", "none"), Some(&stored(false)), true, &None).unwrap(),
+            ClientIntent::Keep
+        );
+    }
+
+    #[test]
+    fn a_padded_repeat_of_the_saved_client_id_keeps_its_secret_and_another_id_does_not() {
+        // The first save stored the id trimmed, so a padded repeat is the same id.
+        assert!(check_request(&org(), Some(&stored(true)), true, &req("  c1\t", None)).is_ok());
+        let e = check_request(&org(), Some(&stored(true)), true, &req(" c2 ", None)).unwrap_err();
+        assert!(e.to_string().contains("secret"), "{e}");
+        // The plan stores the trimmed id, and a same-id repeat does not mark members for reconnect.
+        let tok = "https://auth.filebox.example/token";
+        let padded = ClientIntent::Set(ClientRequest {
+            client_id: "  c1 ".into(),
+            client_secret: None,
+        });
+        let plan = plan_client(
+            &org(),
+            Some(&stored(true)),
+            padded,
+            Some(found(tok)),
+            5,
+            "o",
+        )
+        .unwrap();
+        assert!(!plan.reauth);
+        match plan.write {
+            ClientWrite::Set { client, .. } => assert_eq!(client.client_id, "c1"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_store_from_before_the_method_was_pinned_reads_every_saved_client_as_post() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE node_connector_clients (
+                connector_id TEXT PRIMARY KEY, client_id TEXT NOT NULL, issuer TEXT NOT NULL,
+                authorize_endpoint TEXT NOT NULL, token_endpoint TEXT NOT NULL,
+                revocation_endpoint TEXT, secret_set INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL);
+             INSERT INTO node_connector_clients VALUES
+                ('filebox', 'c1', 'https://auth.filebox.example', 'https://auth.filebox.example/a',
+                 'https://auth.filebox.example/token', NULL, 1, 1, 'olga');",
+        )
+        .unwrap();
+        initialize_schema(&c).unwrap();
+        // Running it again is fine, and the saved client now says what it always did.
+        initialize_schema(&c).unwrap();
+        let saved = client_in(&c, "filebox").unwrap().unwrap();
+        assert_eq!(saved.token_auth_method, TokenAuthMethod::ClientSecretPost);
+        assert_eq!(saved.client_id, "c1");
+        assert_eq!(
+            TokenAuthMethod::parse("client_secret_basic").as_str(),
+            "client_secret_basic"
+        );
+        assert_eq!(
+            TokenAuthMethod::parse("anything else"),
+            TokenAuthMethod::ClientSecretPost
+        );
     }
 
     #[test]
@@ -1080,6 +1313,7 @@ pub(crate) mod test_support {
             authorize_endpoint: format!("https://auth.{tag}.example/authorize"),
             token_endpoint: format!("https://auth.{tag}.example/token"),
             revocation_endpoint: Some(format!("https://auth.{tag}.example/revoke")),
+            token_auth_method: TokenAuthMethod::ClientSecretPost,
             secret_set: true,
             updated_at: 1,
             updated_by: "olga".into(),
@@ -1100,15 +1334,48 @@ pub(crate) mod test_support {
             },
             reauth: false,
         };
+        write_node(store, vault, &node, &plan, tag);
+        client
+    }
+
+    /// Pins `method` on the saved client of `filebox`, the way an Enable against a provider that
+    /// asks for it does.
+    pub(crate) fn pin_token_auth_method(store: &SqliteWorkflowStore, method: TokenAuthMethod) {
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE node_connector_clients SET token_auth_method = ?1
+                 WHERE connector_id = 'filebox'",
+                [method.as_str()],
+            )
+            .unwrap();
+    }
+
+    /// `put_node_with_client` against the state as it is now, the way a save with no other admin in
+    /// the way does it.
+    pub(crate) fn write_node(
+        store: &SqliteWorkflowStore,
+        vault: &SecretsVault,
+        node: &NodeConnector,
+        plan: &ClientPlan,
+        tag: &str,
+    ) -> Vec<String> {
+        let def = store.connector_entry("filebox").unwrap().unwrap().def;
+        let current = store.node_client("filebox").unwrap();
         store
             .put_node_with_client(
                 vault,
-                &node,
-                &plan,
+                node,
+                plan,
                 &format!("https://mcp.{tag}.example/mcp"),
+                &PlanBasis {
+                    def: &def,
+                    client: current.as_ref(),
+                },
             )
-            .unwrap();
-        client
+            .unwrap()
     }
 }
 
@@ -1125,6 +1392,231 @@ mod exchange_tests {
         install_filebox_rows(&store, tag);
         let client = enable_filebox(&store, &vault, tag, "c-1", "ORG-SECRET-value");
         (store, vault, client)
+    }
+
+    fn discovered(tag: &str, method: TokenAuthMethod) -> Discovered {
+        Discovered {
+            issuer: format!("https://auth.{tag}.example"),
+            authorize_endpoint: format!("https://auth.{tag}.example/authorize"),
+            token_endpoint: format!("https://auth.{tag}.example/token"),
+            revocation_endpoint: Some(format!("https://auth.{tag}.example/revoke")),
+            token_auth_method: method,
+        }
+    }
+
+    fn node(enabled: bool) -> crate::connectors::NodeConnector {
+        crate::connectors::NodeConnector {
+            connector_id: "filebox".into(),
+            enabled,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            updated_at: 2,
+            updated_by: "olga".into(),
+        }
+    }
+
+    fn set(
+        def: &Connector,
+        existing: Option<&NodeClient>,
+        tag: &str,
+        id: &str,
+        secret: Option<&str>,
+    ) -> ClientPlan {
+        let request = Some(Some(ClientRequest {
+            client_id: id.into(),
+            client_secret: secret.map(Into::into),
+        }));
+        let intent = check_request(def, existing, true, &request).unwrap();
+        plan_client(
+            def,
+            existing,
+            intent,
+            Some(discovered(tag, TokenAuthMethod::ClientSecretPost)),
+            5,
+            "olga",
+        )
+        .unwrap()
+    }
+
+    fn org_secret_of(vault: &SecretsVault) -> String {
+        vault
+            .decrypt_secret_at(
+                SecretScope::Org,
+                ORG_OWNER_USER_ID,
+                &client_secret_binding_id("filebox"),
+            )
+            .unwrap()
+            .expose_secret()
+            .clone()
+    }
+
+    #[test]
+    fn a_save_planned_before_another_admins_save_commits_nothing() {
+        let tag = "save-race";
+        let (store, vault, _c1) = world(tag);
+        let mcp_url = format!("https://mcp.{tag}.example/mcp");
+        let def = store.connector_entry("filebox").unwrap().unwrap().def;
+        // Admin A reads the saved client (c-1) and plans "save c-1, keep the stored secret".
+        let read_by_a = store.node_client("filebox").unwrap();
+        let plan_a = set(&def, read_by_a.as_ref(), tag, "c-1", None);
+        assert!(matches!(
+            &plan_a.write,
+            ClientWrite::Set { secret: None, .. }
+        ));
+        // Admin B saves c-2 with its own secret while A's discovery is running, and commits first.
+        let plan_b = set(&def, read_by_a.as_ref(), tag, "c-2", Some("B-SECRET"));
+        write_node(&store, &vault, &node(true), &plan_b, tag);
+        assert_eq!(org_secret_of(&vault), "B-SECRET");
+
+        // A commits last, with what it read: refused, and nothing of A's is written (A's plan would
+        // have restored c-1 beside B's secret).
+        let basis = PlanBasis {
+            def: &def,
+            client: read_by_a.as_ref(),
+        };
+        let e = store
+            .put_node_with_client(&vault, &node(true), &plan_a, &mcp_url, &basis)
+            .unwrap_err();
+        assert!(matches!(e, OrchestratorError::Conflict(_)), "{e}");
+        assert!(
+            e.to_string().contains("changed while saving; save again"),
+            "{e}"
+        );
+        let now = store.node_client("filebox").unwrap().unwrap();
+        assert_eq!(now.client_id, "c-2");
+        assert_eq!(org_secret_of(&vault), "B-SECRET");
+
+        // The same holds when the connector's definition moved under the plan (an update installed).
+        let read_now = store.node_client("filebox").unwrap();
+        let plan_c = set(&def, read_now.as_ref(), tag, "c-2", None);
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE connector_releases
+                 SET spec_bytes = CAST(REPLACE(CAST(spec_bytes AS TEXT), 'Files.', 'Other files.') AS BLOB)",
+                [],
+            )
+            .unwrap();
+        let basis = PlanBasis {
+            def: &def,
+            client: read_now.as_ref(),
+        };
+        let e = store
+            .put_node_with_client(&vault, &node(true), &plan_c, &mcp_url, &basis)
+            .unwrap_err();
+        assert!(e.to_string().contains("changed while saving"), "{e}");
+        // With the state it now has, the same save goes through.
+        let def_now = store.connector_entry("filebox").unwrap().unwrap().def;
+        let basis = PlanBasis {
+            def: &def_now,
+            client: read_now.as_ref(),
+        };
+        store
+            .put_node_with_client(&vault, &node(true), &plan_c, &mcp_url, &basis)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_corrected_secret_for_the_same_client_clears_only_the_rows_a_refused_client_parked() {
+        let tag = "fix-secret";
+        let (store, vault, client) = world(tag);
+        let member = |who: &str| member_row(&store, &vault, tag, who, "c-1", None);
+        let (ada, bob, _cy) = (member("ada"), member("bob"), member("cy"));
+        // ada's refresh was refused for the admin's client; bob's grant was revoked; cy is fine.
+        store
+            .record_mcp_oauth_refresh_failure(&ada, true, CLIENT_REFUSED_REASON)
+            .unwrap();
+        store
+            .record_mcp_oauth_refresh_failure(&bob, true, "invalid_grant")
+            .unwrap();
+        let open_notice = |who: &str| -> i64 {
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM notifications WHERE kind = 'connection.needs_reauth'
+                     AND user_id = ?1 AND resolved_at IS NULL",
+                    [who],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!((open_notice("ada"), open_notice("bob")), (1, 1));
+
+        // The admin saves a corrected secret for the same client.
+        let def = store.connector_entry("filebox").unwrap().unwrap().def;
+        let plan = set(&def, Some(&client), tag, "c-1", Some("CORRECTED"));
+        assert!(!plan.reauth);
+        let cleared = write_node(&store, &vault, &node(true), &plan, tag);
+        assert_eq!(cleared, ["ada"]);
+        let status = |who: &str| {
+            let row = store
+                .get_mcp_connection(SecretScope::User, who, "filebox")
+                .unwrap();
+            let oauth = row.oauth.unwrap();
+            (oauth.status, oauth.last_refresh_error)
+        };
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        assert_eq!(status("ada"), (Connected, None));
+        assert_eq!(status("cy"), (Connected, None));
+        // A revoked grant still needs a sign-in, whatever the admin saves.
+        assert_eq!(
+            status("bob"),
+            (NeedsReauth, Some("invalid_grant".to_string()))
+        );
+        assert_eq!((open_notice("ada"), open_notice("bob")), (0, 1));
+        assert_eq!(org_secret_of(&vault), "CORRECTED");
+
+        // A save of a different client id is not a correction: it marks everyone, clears no one.
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-2", Some("OTHER"));
+        assert!(plan.reauth);
+        assert!(write_node(&store, &vault, &node(true), &plan, tag).is_empty());
+        assert_eq!(status("cy").0, NeedsReauth);
+    }
+
+    #[test]
+    fn the_pinned_token_auth_method_is_stored_with_the_client() {
+        let tag = "method-kept";
+        let (store, vault, _c) = world(tag);
+        let def = store.connector_entry("filebox").unwrap().unwrap().def;
+        let read = store.node_client("filebox").unwrap();
+        assert_eq!(
+            read.as_ref().unwrap().token_auth_method,
+            TokenAuthMethod::ClientSecretPost
+        );
+        let intent = check_request(
+            &def,
+            read.as_ref(),
+            true,
+            &Some(Some(ClientRequest {
+                client_id: "c-1".into(),
+                client_secret: Some("S".into()),
+            })),
+        )
+        .unwrap();
+        let plan = plan_client(
+            &def,
+            read.as_ref(),
+            intent,
+            Some(discovered(tag, TokenAuthMethod::ClientSecretBasic)),
+            6,
+            "olga",
+        )
+        .unwrap();
+        write_node(&store, &vault, &node(true), &plan, tag);
+        assert_eq!(
+            store
+                .node_client("filebox")
+                .unwrap()
+                .unwrap()
+                .token_auth_method,
+            TokenAuthMethod::ClientSecretBasic
+        );
     }
 
     fn exchange(code: &str, verifier: &str, redirect: &str) -> CodeExchangeRequest {
@@ -1191,6 +1683,39 @@ mod exchange_tests {
                 "{dests:?}: {e}"
             );
         }
+    }
+
+    #[test]
+    fn a_secret_replaced_after_the_destination_check_is_not_the_one_that_is_read() {
+        let (_store, vault, _client) = world("secret-swap");
+        let binding = client_secret_binding_id("filebox");
+        // The check sees the row as it is; an admin's save then replaces it (other value, another
+        // host) before the caller reads on. What is decrypted is still the row that was checked.
+        let mut checked_for = Vec::new();
+        let got = vault
+            .decrypt_secret_at_checked(SecretScope::Org, ORG_OWNER_USER_ID, &binding, |meta| {
+                checked_for = meta.allowed_destinations.clone();
+                vault
+                    .put_secret(
+                        &binding,
+                        "REPLACEMENT-SECRET",
+                        SecretKind::Connection,
+                        &["auth.elsewhere.example".to_string()],
+                        None,
+                    )
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(checked_for, ["auth.secret-swap.example"]);
+        assert_eq!(got.expose_secret(), "ORG-SECRET-value");
+        // A row the check refuses is never decrypted.
+        let e = vault
+            .decrypt_secret_at_checked(SecretScope::Org, ORG_OWNER_USER_ID, &binding, |_| {
+                Err(OrchestratorError::PermissionDenied("no".into()))
+            })
+            .unwrap_err();
+        assert!(matches!(e, OrchestratorError::PermissionDenied(_)));
     }
 
     #[test]

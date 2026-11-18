@@ -811,6 +811,18 @@ async fn refresh(
         serde_json::from_str(&body)
             .map_err(|_| OrchestratorError::InvalidContract("invalid request body".into()))?
     };
+    // A sign-in whose tools could not be read is finished here: the vetted tools are adopted (the
+    // same first pin the connect makes), and only then is the connection `connected` again.
+    if let Some(policy) = pending_tools_policy(&state, &existing)? {
+        let credentials = credential_generation(&state, &existing).await?;
+        let conn = adopt_tools_and_reconnect(&state, &existing, &policy, &credentials).await?;
+        let has_refresh = refresh_binding_exists(&state.vault, &conn)?;
+        return Ok(respond(serde_json::json!({
+            "connection": connection_value(&conn, has_refresh)?,
+            "drift": "adopted",
+            "removedTools": Vec::<String>::new(),
+        })));
+    }
     let listed = snapshot_connection(&state, &existing).await?;
     let decided = decide_pinned_snapshot_with_instructions(
         &id,
@@ -1075,11 +1087,16 @@ async fn upsert_oauth_tokens(
         Some(&oauth),
     )?;
     credentials.credentials_replaced();
+    let generation = credentials.generation_handle();
     drop(credentials);
-    // A connector's tools are listed once its tokens are in, and only the vetted ones stay.
+    // A connector's tools are listed once its tokens are in, and only the vetted ones stay; the
+    // reconnect (notification, parked runs) is done once they are.
     let conn = match &policy {
-        Some(p) => adopt_connector_tools(&state, &conn, p).await?,
-        None => conn,
+        Some(p) => adopt_tools_and_reconnect(&state, &conn, p, &generation).await?,
+        None => {
+            connector_row_reconnected(&state, &conn).await?;
+            conn
+        }
     };
     let mut bindings_json = serde_json::json!({
         "accessToken": bindings.access_token_binding_id,
@@ -1089,7 +1106,6 @@ async fn upsert_oauth_tokens(
         bindings_json["clientSecret"] = serde_json::Value::String(client_secret_binding_id);
     }
     let has_refresh = refresh_binding_exists(&state.vault, &conn)?;
-    connector_row_reconnected(&state, &conn).await?;
     Ok(respond(serde_json::json!({
         "connection": connection_value(&conn, has_refresh)?,
         "bindings": bindings_json,
@@ -1097,36 +1113,128 @@ async fn upsert_oauth_tokens(
 }
 
 /// Lists a connector's tools with the row's stored tokens and keeps the vetted ones, the
-/// definition's instructions and risk classes. Shared by the app's token upsert and the node's code
-/// exchange.
+/// definition's instructions and risk classes. Shared by the app's token upsert, the node's code
+/// exchange and the tools-refresh route.
+///
+/// The listing is a network call and runs without the credential gate. The write does not: it takes
+/// the gate, and goes ahead only if the credential generation is still `expected_generation` (the
+/// one the caller's own write left) and the row is still there. A member who disconnected while
+/// `tools/list` was in flight has removed the row and moved the generation: nothing is written, and
+/// the row is not brought back.
 pub(crate) async fn adopt_connector_tools(
     state: &AppState,
     conn: &McpConnection,
     policy: &connectors::McpPolicy,
+    credentials: &crate::host_tools::CredentialGeneration,
 ) -> Result<McpConnection, ApiError> {
-    let (scope, owner, id) = (
-        conn.scope,
-        conn.owner_user_id.clone(),
-        conn.connection_id.clone(),
-    );
     let listed = snapshot_connection(state, conn).await?;
-    state.store.upsert_mcp_connection(
-        scope,
-        &owner,
-        &id,
-        &conn.url,
-        "",
-        &conn.header_bindings,
+    let Some(gate) = credentials.lock_if_unchanged().await else {
+        return Err(OrchestratorError::Conflict(format!(
+            "the connection to `{}` changed while its tools were being read; connect again",
+            conn.connection_id
+        ))
+        .into());
+    };
+    let adopted = state.store.adopt_connector_tools_if_present(
+        conn.scope,
+        &conn.owner_user_id,
+        policy,
         &listed.tools,
-        McpAuthMode::Oauth,
-        conn.oauth.as_ref(),
+        listed.instructions.as_deref(),
     )?;
-    if listed.instructions.is_some() {
+    drop(gate);
+    Ok(adopted)
+}
+
+/// The credential generation of a connection right now.
+async fn credential_generation(
+    state: &AppState,
+    conn: &McpConnection,
+) -> Result<crate::host_tools::CredentialGeneration, OrchestratorError> {
+    let gate = crate::host_tools::lock_mcp_credentials(&state.store, conn)
+        .await
+        .map_err(|_| OrchestratorError::CorruptState("mcp credential lock unavailable".into()))?;
+    Ok(gate.generation_handle())
+}
+
+/// A sign-in is stored; now its tools are adopted and the member's reconnect is done: the
+/// `needs_reauth` notification resolved and the runs parked on the connection resumed, in that order
+/// and only after the tools are in.
+///
+/// If the tools cannot be read (the provider is down, `tools/list` is refused), the sign-in is not
+/// lost, and not announced either: no path re-adopts tools on its own and the code is spent, so the
+/// row is put in a state the member can retry. It is `needs_reauth` with [`TOOLS_PENDING_REASON`]
+/// (calls fail fast and parked runs stay parked, as for any connection that needs attention) until
+/// `POST /v1/mcp/connections/{id}/refresh` lists the tools and puts it back to `connected`.
+pub(crate) async fn adopt_tools_and_reconnect(
+    state: &AppState,
+    conn: &McpConnection,
+    policy: &connectors::McpPolicy,
+    credentials: &crate::host_tools::CredentialGeneration,
+) -> Result<McpConnection, ApiError> {
+    match adopt_connector_tools(state, conn, policy, credentials).await {
+        Ok(adopted) => {
+            connector_row_reconnected(state, &adopted).await?;
+            Ok(adopted)
+        }
+        Err(failure) => {
+            mark_tools_pending(state, conn, credentials).await;
+            if failure.status == StatusCode::CONFLICT {
+                return Err(failure);
+            }
+            Err(OrchestratorError::Mcp(
+                "you are signed in, but the connector's tools could not be read yet: refresh the connection to finish connecting"
+                    .into(),
+            )
+            .into())
+        }
+    }
+}
+
+/// Leaves a stored sign-in whose tools were not adopted in the retryable state, if the connection is
+/// still the one that was written (same generation, row present). Best effort.
+async fn mark_tools_pending(
+    state: &AppState,
+    conn: &McpConnection,
+    credentials: &crate::host_tools::CredentialGeneration,
+) {
+    let Some(_gate) = credentials.lock_if_unchanged().await else {
+        return;
+    };
+    let Ok(current) =
         state
             .store
-            .set_mcp_instructions(scope, &owner, &id, listed.instructions.as_deref())?;
+            .get_mcp_connection(conn.scope, &conn.owner_user_id, &conn.connection_id)
+    else {
+        return;
+    };
+    if let Err(e) = state.store.record_mcp_oauth_refresh_failure(
+        &current,
+        true,
+        crate::mcp_registry::TOOLS_PENDING_REASON,
+    ) {
+        tracing::warn!(connection_id = %conn.connection_id, error = %e, "tools-pending state not recorded");
     }
-    Ok(state.store.apply_connector_policy(scope, &owner, policy)?)
+}
+
+/// The connector policy of a row whose sign-in is stored but whose tools are not adopted yet.
+fn pending_tools_policy(
+    state: &AppState,
+    conn: &McpConnection,
+) -> Result<Option<connectors::McpPolicy>, OrchestratorError> {
+    let pending = conn.scope == SecretScope::User
+        && conn.oauth.as_ref().is_some_and(|o| {
+            o.status == McpOauthStatus::NeedsReauth
+                && o.last_refresh_error.as_deref()
+                    == Some(crate::mcp_registry::TOOLS_PENDING_REASON)
+        });
+    if !pending {
+        return Ok(None);
+    }
+    Ok(state
+        .store
+        .mcp_policy(&conn.connection_id)?
+        .filter(|p| p.url == conn.url))
 }
 
 /// A connected row is back: a connector-backed row's reconnect notification is done, and runs

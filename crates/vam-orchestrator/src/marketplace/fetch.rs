@@ -548,6 +548,26 @@ impl Fetcher {
         )
     }
 
+    /// `git ls-remote` of the tags only (peeled to commits): no branch is asked for, so none has to
+    /// exist.
+    pub fn ls_remote_tags(&self, remote: &Remote) -> Result<BTreeMap<String, String>, FetchError> {
+        let out = self.run(Call {
+            git_dir: None,
+            remote: Some(remote),
+            args: vec![
+                "ls-remote".into(),
+                "--".into(),
+                remote.url().into(),
+                "refs/tags/*".into(),
+            ],
+            timeout: self.limits.ls_remote,
+            what: "ls-remote",
+            max_stdout: self.limits.max_ls_bytes,
+            watch: None,
+        })?;
+        Ok(scan_ls_remote(&String::from_utf8_lossy(&out), self.limits.max_tags, "HEAD")?.1)
+    }
+
     /// Makes the bare cache of `id` if it is not there yet.
     pub fn ensure_repo(&self, id: &str) -> Result<PathBuf, FetchError> {
         let dir = self.cache_dir(id)?;
@@ -592,6 +612,23 @@ impl Fetcher {
         tags: &[String],
     ) -> Result<(), FetchError> {
         let head_name = head_ref_name(index_ref)?;
+        self.fetch_refs(id, remote, Some(&head_name), tags)
+    }
+
+    /// Fetches only `tags`, each into its own ref: the index ref is not touched, so a remote whose
+    /// `HEAD` does not resolve (or whose index branch is gone) still serves the tags a listing is
+    /// pinned to.
+    pub fn fetch_tags(&self, id: &str, remote: &Remote, tags: &[String]) -> Result<(), FetchError> {
+        self.fetch_refs(id, remote, None, tags)
+    }
+
+    fn fetch_refs(
+        &self,
+        id: &str,
+        remote: &Remote,
+        head_name: Option<&str>,
+        tags: &[String],
+    ) -> Result<(), FetchError> {
         for t in tags {
             check_git_ref(t).map_err(|why| FetchError::Invalid(format!("tag `{t}` {why}")))?;
         }
@@ -604,8 +641,10 @@ impl Fetcher {
             "--force".into(),
             "--".into(),
             remote.url().into(),
-            format!("+{head_name}:{HEAD_REF}").into(),
         ];
+        if let Some(head_name) = head_name {
+            args.push(format!("+{head_name}:{HEAD_REF}").into());
+        }
         for t in tags {
             args.push(format!("+refs/tags/{t}:{}", tag_ref(t)).into());
         }
@@ -941,6 +980,20 @@ pub(crate) fn parse_ls_remote_at(
     max_tags: usize,
     head_name: &str,
 ) -> Result<RemoteRefs, FetchError> {
+    let (head, tags) = scan_ls_remote(out, max_tags, head_name)?;
+    let head = head.ok_or_else(|| match head_name.strip_prefix("refs/heads/") {
+        Some(b) => FetchError::Invalid(format!("the repository has no branch `{b}`")),
+        None => FetchError::Invalid("the repository has no default branch (is it empty?)".into()),
+    })?;
+    Ok(RemoteRefs { head, tags })
+}
+
+/// The head named `head_name` (when listed) and the tags of `git ls-remote` output.
+fn scan_ls_remote(
+    out: &str,
+    max_tags: usize,
+    head_name: &str,
+) -> Result<(Option<String>, BTreeMap<String, String>), FetchError> {
     let mut head: Option<String> = None;
     let mut direct: BTreeMap<String, String> = BTreeMap::new();
     let mut peeled: BTreeMap<String, String> = BTreeMap::new();
@@ -972,15 +1025,11 @@ pub(crate) fn parse_ls_remote_at(
             }
         }
     }
-    let head = head.ok_or_else(|| match head_name.strip_prefix("refs/heads/") {
-        Some(b) => FetchError::Invalid(format!("the repository has no branch `{b}`")),
-        None => FetchError::Invalid("the repository has no default branch (is it empty?)".into()),
-    })?;
     let mut tags = direct;
     for (t, c) in peeled {
         tags.insert(t, c);
     }
-    Ok(RemoteRefs { head, tags })
+    Ok((head, tags))
 }
 
 /// Parses `git ls-tree -z --long` output: `<mode> <type> <oid> <size>\t<path>\0`.

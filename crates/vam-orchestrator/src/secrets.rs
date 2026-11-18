@@ -655,6 +655,29 @@ impl SecretsVault {
         Ok(SecretString::new(plaintext))
     }
 
+    /// [`Self::decrypt_secret_at`] for a value that may only be used if its own stored state passes
+    /// `accept` (a destination check, say). The metadata `accept` judges and the ciphertext that is
+    /// decrypted come from one read: a row replaced after the check is never the one decrypted, and
+    /// a ciphertext `accept` refused is never decrypted.
+    pub(crate) fn decrypt_secret_at_checked(
+        &self,
+        scope: SecretScope,
+        owner_user_id: &str,
+        binding_id: &str,
+        accept: impl FnOnce(&HostSecretMetadata) -> Result<(), OrchestratorError>,
+    ) -> Result<SecretString, OrchestratorError> {
+        let owner = vault_owner_user_id(scope, owner_user_id);
+        let (meta, nonce, ciphertext) = self
+            .store
+            .load_host_secret_with_metadata(scope, owner, binding_id)?;
+        accept(&meta)?;
+        let plaintext = decrypt_value(&self.master_key, &nonce, &ciphertext)
+            .map_err(|_| OrchestratorError::SecretDecryptFailed(binding_id.to_string()))?;
+        self.store
+            .touch_host_secret_used(scope, owner, binding_id)?;
+        Ok(SecretString::new(plaintext))
+    }
+
     pub fn has_binding(&self, binding_id: &str) -> Result<bool, OrchestratorError> {
         self.has_binding_at(SecretScope::Org, ORG_OWNER_USER_ID, binding_id)
     }
@@ -1135,6 +1158,32 @@ impl SqliteWorkflowStore {
                  WHERE scope = ?1 AND owner_user_id = ?2 AND binding_id = ?3",
                 params![scope.as_str(), owner, binding_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| secret_not_found(e, scope, owner, binding_id))
+    }
+
+    /// One read of a row's metadata and its ciphertext (a single statement, so they are one stored
+    /// state), for a caller that must judge the metadata before it may decrypt.
+    pub(crate) fn load_host_secret_with_metadata(
+        &self,
+        scope: SecretScope,
+        owner_user_id: &str,
+        binding_id: &str,
+    ) -> Result<(HostSecretMetadata, Vec<u8>, Vec<u8>), OrchestratorError> {
+        let owner = vault_owner_user_id(scope, owner_user_id);
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        connection
+            .query_row(
+                "SELECT binding_id, kind, fingerprint, allowed_destinations_json,
+                        created_at, updated_at, last_used_at, owner_user_id, scope,
+                        nonce, ciphertext
+                 FROM host_secrets
+                 WHERE scope = ?1 AND owner_user_id = ?2 AND binding_id = ?3",
+                params![scope.as_str(), owner, binding_id],
+                |row| Ok((parse_metadata_row(row)?, row.get(9)?, row.get(10)?)),
             )
             .map_err(|e| secret_not_found(e, scope, owner, binding_id))
     }

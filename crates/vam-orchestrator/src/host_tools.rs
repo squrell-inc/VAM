@@ -1695,6 +1695,7 @@ type McpRefresher = fn(
     &crate::mcp_registry::McpOauthMetadata,
     &secrecy::SecretString,
     Option<&secrecy::SecretString>,
+    crate::connector_client::TokenAuthMethod,
 ) -> Result<
     crate::mcp_oauth_refresh::RefreshedToken,
     crate::mcp_oauth_refresh::RefreshFailure,
@@ -1741,8 +1742,31 @@ struct McpRefreshState {
 /// in-flight refresh cannot finish afterwards and overwrite the reconnected
 /// status with a stale `needs_reauth`.
 pub(crate) struct McpCredentialWriteGuard {
-    _gate: Arc<McpRefreshGate>,
+    gate: Arc<McpRefreshGate>,
     state: tokio::sync::OwnedMutexGuard<McpRefreshState>,
+}
+
+/// A connection's credential generation as one write left it, with the gate kept alive (a gate with
+/// no holder is dropped, and its generation with it). A later write that must not outlive a
+/// disconnect, a reconnect or a refresh takes the gate through [`Self::lock_if_unchanged`].
+pub(crate) struct CredentialGeneration {
+    gate: Arc<McpRefreshGate>,
+    generation: u64,
+}
+
+impl CredentialGeneration {
+    /// The gate, locked, if no credential write has happened since this generation was taken;
+    /// `None` when one has (the caller then writes nothing).
+    pub(crate) async fn lock_if_unchanged(&self) -> Option<McpCredentialWriteGuard> {
+        let state = Arc::clone(&self.gate.state).lock_owned().await;
+        if state.generation != self.generation {
+            return None;
+        }
+        Some(McpCredentialWriteGuard {
+            gate: Arc::clone(&self.gate),
+            state,
+        })
+    }
 }
 
 impl McpCredentialWriteGuard {
@@ -1751,6 +1775,15 @@ impl McpCredentialWriteGuard {
     pub(crate) fn credentials_replaced(&mut self) {
         self.state.generation = self.state.generation.wrapping_add(1);
         self.state.failure = None;
+    }
+
+    /// The generation this guard sees, kept past the guard: it moves whenever credentials are
+    /// replaced, a refresh stores a new token or a disconnect removes them.
+    pub(crate) fn generation_handle(&self) -> CredentialGeneration {
+        CredentialGeneration {
+            gate: Arc::clone(&self.gate),
+            generation: self.state.generation,
+        }
     }
 }
 
@@ -1771,7 +1804,7 @@ pub(crate) async fn lock_mcp_credentials_for(
 ) -> Result<McpCredentialWriteGuard, String> {
     let gate = mcp_refresh_gate_for(store, scope, owner_user_id, connection_id)?;
     let state = Arc::clone(&gate.state).lock_owned().await;
-    Ok(McpCredentialWriteGuard { _gate: gate, state })
+    Ok(McpCredentialWriteGuard { gate, state })
 }
 
 fn mcp_refresh_gate(
@@ -3145,6 +3178,7 @@ fn exchange_and_store_mcp_tokens(
     let org_metadata: crate::mcp_registry::McpOauthMetadata;
     let row_client = store.row_client(&conn).map_err(vault_error)?;
     let org_client = matches!(row_client, crate::connector_client::RowClient::Org(_));
+    let mut auth_method = crate::connector_client::TokenAuthMethod::default();
     let (metadata, client_secret) = match row_client {
         crate::connector_client::RowClient::Own => {
             let client_secret_id = mcp_oauth_client_secret_binding_id(&conn.connection_id);
@@ -3177,6 +3211,7 @@ fn exchange_and_store_mcp_tokens(
                 ));
             }
             let client_secret = if org.keeps_secret {
+                auth_method = node.token_auth_method;
                 Some(
                     crate::connector_client::org_client_secret(vault, node, &node.token_endpoint)
                         .map_err(|_| RefreshFailure::transient("OAuth client secret unavailable"))?,
@@ -3193,17 +3228,20 @@ fn exchange_and_store_mcp_tokens(
             (&org_metadata, client_secret)
         }
     };
-    let refreshed =
-        refresh(metadata, &refresh_token, client_secret.as_ref()).map_err(|failure| {
-            // A refused org client names the client, not the member's grant (open question 8).
-            if org_client && failure.reason == "invalid_client" {
-                RefreshFailure::needs_reauth(
-                    "the provider refused the client id or secret your admin entered",
-                )
-            } else {
-                failure
-            }
-        })?;
+    let refreshed = refresh(
+        metadata,
+        &refresh_token,
+        client_secret.as_ref(),
+        auth_method,
+    )
+    .map_err(|failure| {
+        // A refused org client names the client, not the member's grant (open question 8).
+        if org_client && failure.reason == "invalid_client" {
+            RefreshFailure::needs_reauth(crate::connector_client::CLIENT_REFUSED_REASON)
+        } else {
+            failure
+        }
+    })?;
     crate::mcp_registry::store_refreshed_mcp_tokens(
         vault,
         &conn,
@@ -5521,6 +5559,7 @@ permit (
         _: &crate::mcp_registry::McpOauthMetadata,
         _: &secrecy::SecretString,
         _: Option<&secrecy::SecretString>,
+        _: crate::connector_client::TokenAuthMethod,
     ) -> Result<crate::mcp_oauth_refresh::RefreshedToken, crate::mcp_oauth_refresh::RefreshFailure>
     {
         REFRESH_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -5533,6 +5572,7 @@ permit (
         _: &crate::mcp_registry::McpOauthMetadata,
         _: &secrecy::SecretString,
         _: Option<&secrecy::SecretString>,
+        _: crate::connector_client::TokenAuthMethod,
     ) -> Result<crate::mcp_oauth_refresh::RefreshedToken, crate::mcp_oauth_refresh::RefreshFailure>
     {
         Err(crate::mcp_oauth_refresh::RefreshFailure::transient(
@@ -5544,6 +5584,7 @@ permit (
         _: &crate::mcp_registry::McpOauthMetadata,
         _: &secrecy::SecretString,
         _: Option<&secrecy::SecretString>,
+        _: crate::connector_client::TokenAuthMethod,
     ) -> Result<crate::mcp_oauth_refresh::RefreshedToken, crate::mcp_oauth_refresh::RefreshFailure>
     {
         Ok(crate::mcp_oauth_refresh::RefreshedToken {
@@ -5557,6 +5598,7 @@ permit (
         _: &crate::mcp_registry::McpOauthMetadata,
         _: &secrecy::SecretString,
         _: Option<&secrecy::SecretString>,
+        _: crate::connector_client::TokenAuthMethod,
     ) -> Result<crate::mcp_oauth_refresh::RefreshedToken, crate::mcp_oauth_refresh::RefreshFailure>
     {
         panic!("refresh must not run for this connection");
@@ -10461,6 +10503,7 @@ mod org_client_refresh_tests {
             oauth: &crate::mcp_registry::McpOauthMetadata,
             rt: &SecretString,
             secret: Option<&SecretString>,
+            _method: crate::connector_client::TokenAuthMethod,
         ) -> Result<RefreshedToken, RefreshFailure> {
             SEEN.lock().unwrap().push((
                 oauth.token_endpoint.clone(),
@@ -10514,12 +10557,46 @@ mod org_client_refresh_tests {
     }
 
     #[test]
+    fn a_refresh_authenticates_the_org_secret_the_way_the_node_pinned_at_enable() {
+        use crate::connector_client::TokenAuthMethod;
+        static METHODS: Mutex<Vec<TokenAuthMethod>> = Mutex::new(Vec::new());
+        fn refresher(
+            _: &crate::mcp_registry::McpOauthMetadata,
+            _: &SecretString,
+            _: Option<&SecretString>,
+            method: TokenAuthMethod,
+        ) -> Result<RefreshedToken, RefreshFailure> {
+            METHODS.lock().unwrap().push(method);
+            Ok(RefreshedToken {
+                access_token: "A-new".into(),
+                expires_in: Some(3600),
+                refresh_token: Some("R-new".into()),
+            })
+        }
+        let (store, vault, conn) = world("refresh-basic");
+        refresh_mcp_connection(&store, &vault, &conn, refresher).unwrap();
+        crate::connector_client::test_support::pin_token_auth_method(
+            &store,
+            TokenAuthMethod::ClientSecretBasic,
+        );
+        refresh_mcp_connection(&store, &vault, &conn, refresher).unwrap();
+        assert_eq!(
+            METHODS.lock().unwrap().as_slice(),
+            [
+                TokenAuthMethod::ClientSecretPost,
+                TokenAuthMethod::ClientSecretBasic
+            ]
+        );
+    }
+
+    #[test]
     fn a_row_that_disagrees_with_the_node_is_not_refreshed_and_needs_a_reconnect() {
         static CALLS: AtomicUsize = AtomicUsize::new(0);
         fn refresher(
             _: &crate::mcp_registry::McpOauthMetadata,
             _: &SecretString,
             _: Option<&SecretString>,
+            _: crate::connector_client::TokenAuthMethod,
         ) -> Result<RefreshedToken, RefreshFailure> {
             CALLS.fetch_add(1, Ordering::SeqCst);
             Err(RefreshFailure::transient("must not be called"))
@@ -10558,6 +10635,7 @@ mod org_client_refresh_tests {
             _: &crate::mcp_registry::McpOauthMetadata,
             _: &SecretString,
             _: Option<&SecretString>,
+            _: crate::connector_client::TokenAuthMethod,
         ) -> Result<RefreshedToken, RefreshFailure> {
             Err(RefreshFailure::needs_reauth("invalid_client"))
         }
@@ -10613,6 +10691,7 @@ mod org_client_refresh_tests {
             oauth: &crate::mcp_registry::McpOauthMetadata,
             rt: &SecretString,
             secret: Option<&SecretString>,
+            _method: crate::connector_client::TokenAuthMethod,
         ) -> Result<RefreshedToken, RefreshFailure> {
             let start = std::time::Instant::now();
             while REFUSED.load(Ordering::SeqCst) < 2 && start.elapsed() < Duration::from_secs(5) {

@@ -112,21 +112,33 @@ A connection uses one of two auth modes: `static` (the default) or `oauth`.
 A connector with `provider.client: "org"` and `clientSecret: "org_vault"` uses the OAuth client its org admin
 registered with the provider. The client id, the pinned authorization, token and revocation endpoints and the
 secret are saved at Enable (`PUT /v1/connectors/{id}/node`); the secret is an org-scope `connection` vault row
-pinned to the token endpoint's host, and no route, listing, event or receipt returns it. The app cannot hold
+pinned to the token endpoint's host. Discovery at Enable also pins how the secret authenticates
+(RFC 6749 §2.3.1): `client_secret_post` when the provider's metadata lists it, else `client_secret_basic` when it
+lists that or says nothing (RFC 8414 §2 makes it the default), and the save is refused (409) when it lists neither.
+The method is used by the code exchange, the refresh and the revoke alike. The app cannot hold
 that secret, so it does not exchange the code. It runs the browser sign-in with PKCE against the pinned
 authorization endpoint and the admin's client id, then posts what it got to
 `POST /v1/connectors/{id}/connection/oauth/code` with `{ code, codeVerifier, redirectUri }` (no endpoint and no
 client field; any other field is a 400). `redirectUri` must be the app's own, `squrell://oauth` or
 `http://127.0.0.1:<port>/<path>`. `vamd` posts the code, the verifier, the redirect URI, the client id, the
-`resource` and the secret (`client_secret_post`) to the pinned token endpoint, over the same DNS-pinned public
-address, no redirects and no proxy as a refresh (`mcp_oauth_refresh.rs`). The secret is read at org scope
-only when that host is the one it is pinned to (`connector_client.rs`, `org_client_secret`). Then it writes
-the member's connection from the connector and the node's client (client id and endpoints are the node's), stores
-the refresh token and then the access token, lists the vetted tools and answers the member's connector entry.
+`resource` and the secret (in the body, or as HTTP Basic, as pinned) to the pinned token endpoint, over the same
+DNS-pinned public address, no redirects and no proxy as a refresh (`mcp_oauth_refresh.rs`). The secret is read at
+org scope only when that host is the one it is pinned to (`connector_client.rs`, `org_client_secret`). Once the
+provider accepts the code, the member's connection (the connector and the node's client: client id and endpoints
+are the node's), the refresh token and the access token are one transaction, which first checks that the admin's
+client, the enable and the connector's server are still what the code was exchanged for. The tools are listed
+next, and the member's connector entry is the answer.
 
-Every refusal is decided before the request and writes nothing. A provider that refuses the client
+The local checks (body, redirect URI, code and verifier syntax, the connector, the enable, the saved client and
+secret) run before the request and write nothing. After the provider has accepted the code it cannot be used again,
+so what can still fail says so: a client replaced, or the connector turned off, while the provider was answering is
+a 409 and nothing is stored; a failure to save is a 502 that replaces nothing and says to sign in again; tools that
+cannot be read leave the sign-in stored but the connection `needsReconnect`, with the notification open and parked
+runs parked, until `POST /v1/mcp/connections/{id}/refresh` lists them. A provider that refuses the client
 (`invalid_client`) is a 409 saying the client id or secret the admin entered was refused; a refused or
-spent code is a 400; an unreachable provider, or an answer with no refresh token, is a 502. No code, verifier,
+spent code is a 400; an unreachable provider, or an answer with no refresh token, is a 502. When the admin saves a
+corrected secret for the same client, a member whose refresh the provider had refused for the client
+(`invalid_client`) is connected again; a revoked grant still needs a sign-in. No code, verifier,
 secret or token is in any answer or error. For such a connector the app-path routes are closed:
 `PUT /v1/mcp/connections/:id/oauth/tokens` answers 400 (use the code exchange), a connect that names another
 token endpoint or client id is refused, and a `clientSecret` is refused for any connector-backed row. A refresh
@@ -168,9 +180,37 @@ through the per-tool permission decision. Proved by `guest-cannot-use-an-mcp-tok
 placeholder is not substituted) and `broker-cannot-be-given-an-mcp-credential` (a broker whose
 manifest names the token gets nothing), plus the tests in `mcp_credentials_stay_host_side.rs`.
 
+### What proves the admin's client
+
+- The secret is in no connector, MCP or secrets listing (admin, member or operator), no exchange or save answer,
+  no thread, event, receipt or workspace file the scenarios read: `admin-supplied-client-is-set-only-by-an-org-admin-and-never-read-back`
+  and `admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node` (`secret-absent`), and the route
+  tests in `api/connectors.rs` (`assert_no_value` over every answer and listing).
+- It is sent only to the pinned token host and the revocation endpoint on that host, never to another host or a row
+  not pinned to exactly that host: `connector_client.rs` (`the_secret_is_read_only_for_the_pinned_token_host`,
+  `a_row_not_pinned_to_exactly_the_token_host_is_never_read`) and `mcp_oauth_refresh.rs` (the exchange, refresh and
+  revoke tests, `the_exchange_never_leaves_the_public_https_rules`, the `client_secret_basic` wire test).
+- A refresh token is spent once under overlapping calls, and the rotated one is stored first:
+  `rotating-refresh-token-is-spent-once-when-two-tasks-call-at-once` and the gate tests in `host_tools.rs`.
+- A corrected or rotated secret keeps members connected, and a changed client id does not:
+  `admin-corrects-the-client-secret-and-members-stay-connected`, and for a client the provider refused,
+  `a_corrected_secret_for_the_same_client_brings_back_members_a_refused_client_parked` in `api/connectors.rs`.
+- The commit rules (one transaction, a client replaced mid-exchange stores nothing, a moved connector's old row goes
+  only after the new grant, a disconnect during `tools/list` is not undone, a stored sign-in whose tools cannot be read
+  is retried by the tools-refresh route): `api/connectors.rs` route tests
+  `an_exchange_for_a_client_the_admin_replaced_meanwhile_stores_nothing`,
+  `a_save_that_fails_after_the_code_was_spent_replaces_nothing_and_says_to_sign_in_again`,
+  `a_row_of_a_moved_connector_is_replaced_only_once_the_new_grant_is_valid`,
+  `a_disconnect_while_tools_are_listed_does_not_bring_the_row_back` and
+  `a_sign_in_whose_tools_cannot_be_read_stays_retryable_and_is_not_announced`; two admins' saves racing is
+  `a_save_planned_before_another_admins_save_commits_nothing` in `connector_client.rs`.
+
 ## Not proved
 
 - The confinement of tool processes (Landlock, uid 1000, limits).
+- That the DNS pin, the no-redirect rule and the no-proxy rule hold against a real resolver and network: the tests use
+  loopback stand-ins for the hosts, and the real-tenant run (CN-5.7) is the check.
+- That a refresh token the provider spends but `vamd` fails to store is recoverable: the member signs in again.
 - Calls to a live MCP server and the token refresh against a real provider (the exchange and refresh with the admin's client are proved against a mock provider).
 
 ## Design notes

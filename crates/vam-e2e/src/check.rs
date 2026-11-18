@@ -298,6 +298,7 @@ fn check_scenario(
     let mut org_aliases = BTreeSet::new();
     let mut secret_aliases = BTreeSet::new();
     let mut mock_aliases = BTreeSet::new();
+    let mut filebox_aliases = BTreeSet::new();
     let mut mkt_aliases = BTreeSet::new();
     for g in &s.given {
         let (piece, alias) = (g.piece(), g.alias());
@@ -321,6 +322,21 @@ fn check_scenario(
             .is_some_and(|w| w.kind == PieceKind::MockProvider)
         {
             mock_aliases.insert(alias.to_string());
+            if cat
+                .piece(piece)
+                .is_some_and(|w| w.provider.as_deref() == Some("filebox"))
+            {
+                if !filebox_aliases.is_empty() {
+                    errors.push(CheckError::new(
+                        p,
+                        "given",
+                        format!(
+                            "`{alias}` is a second filebox mock-provider piece: one listener holds one provider state"
+                        ),
+                    ));
+                }
+                filebox_aliases.insert(alias.to_string());
+            }
             // A connection to Microsoft 365 made with the login mock holds tokens the runner made.
             if cat
                 .piece(piece)
@@ -670,7 +686,14 @@ fn check_scenario(
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
                 check_connector_id(errors, p, &pos, &x.id);
                 if let Some(s) = x.client.as_ref().and_then(|c| c.client_secret.as_ref()) {
-                    refer_mock(errors, p, &pos, &mock_aliases, Some(&s.piece));
+                    refer_filebox(
+                        errors,
+                        p,
+                        &pos,
+                        &filebox_aliases,
+                        &s.piece,
+                        "clientSecret.piece",
+                    );
                 }
             }
             Step::ConnectorConnect(x) => {
@@ -694,7 +717,9 @@ fn check_scenario(
                         format!("{pos}: `api-call.path` must start with `/`"),
                     ));
                 }
-                refer_mock(errors, p, &pos, &mock_aliases, x.absent.as_deref());
+                if let Some(a) = x.absent.as_deref() {
+                    refer_filebox(errors, p, &pos, &filebox_aliases, a, "api-call.absent");
+                }
             }
             Step::ConnectorCheck(x) => {
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
@@ -1094,6 +1119,25 @@ fn refer_mkt(
 }
 
 /// A `mock-provider` alias named by a step must be in `given`.
+/// `alias` must be a filebox mock-provider piece in `given`: only its secret and tokens are kept
+/// under the alias the runner searches for.
+fn refer_filebox(
+    errors: &mut Vec<CheckError>,
+    p: &str,
+    pos: &str,
+    filebox: &BTreeSet<String>,
+    alias: &str,
+    what: &str,
+) {
+    if !filebox.contains(alias) {
+        errors.push(CheckError::new(
+            p,
+            "refs",
+            format!("{pos}: `{what}` names `{alias}`, which is not a filebox mock-provider piece in `given`"),
+        ));
+    }
+}
+
 fn refer_mock(
     errors: &mut Vec<CheckError>,
     p: &str,
