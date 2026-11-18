@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: user-identity
-current_phase: 3 (one namespace per user) breakdown and wave 0 drafted 2026-11-18, waiting for the owner; 1 and 2 released to main
+current_phase: 3 (one namespace per user) approved 2026-11-18; wave 0 done, wave 1 in progress; 1 and 2 released to main
 base_branch: claude/wizardly-feynman-d5ch88 (phase 3; carries feat/member-draft-agents merged into main)
 design_docs:
   - design/user-identity.md
@@ -68,6 +68,27 @@ Do not re-litigate without editing this list. Owner decisions, 2026-11-12.
     case-insensitively (owner, 2026-11-14). If existing usernames clash once compared
     case-insensitively, the migration refuses to run and reports the clashing usernames; an admin
     resolves them first. No automatic renaming.
+
+Phase 3, one namespace per user (owner, 2026-11-18: proposals locked as drafted, open questions
+    1–5 on their defaults; design §6.2):
+
+17. A user's namespace is stored in `users.namespace`, unique, set once at create; a rename, a
+    restart or a role change never changes it. `GET /v1/me` keeps the field name
+    `defaultNamespace` and reports the stored value.
+18. Assignment: base from the username (email: local part without `+tag`; lowercased; characters
+    outside `[a-z0-9._-]` become `-`; ends trimmed of `.`, `-`, `_`; at most 254, the username limit,
+    so a slug name is never cut (changed from 48 on 2026-11-18 in wave 1: the cut changed long slug
+    names that keep their value today, `new-user-gets-a-generated-id-it-cannot-choose`; nothing
+    limits a URN segment's length); empty is `user`).
+    Taken (another user holds it, it is reserved: `default`, `local`, `operator`, `bootstrap`, or
+    a catalog row under it is owned by another user): `<base>-<6 of [a-z2-7] from a SHA-256 of the
+    user id>`, then 10, then 16 characters. No counter. Never `default` for a new user.
+19. Seed rows keep today's values (`operator`, `local`); marketplace owner rows get none.
+20. Migration on every open, idempotent, never refuses a start: backfill in order of the earliest
+    catalog row each user owns under their old derived namespace, then by `created_at`; first
+    claimant keeps the old value, the others get the suffix; one log line per user moved.
+21. Existing drafts do not move. A member who lost a shared namespace keeps and edits the drafts
+    they own there; new drafts go under the new namespace.
 
 ## Status legend
 
@@ -400,8 +421,9 @@ users are migrated without moving a draft.
 (41af8b0; 16 conflict hunks in `crates/vam-e2e` and four docs pages, both sides kept). It lands
 after that release, or the owner releases both together.  
 **Plan:** drafted 2026-11-18 (design `design/user-identity.md` §6); wave 0 written and proven red
-in the same session at the owner's request. **Waiting for the owner** to lock decisions 17–21 and
-approve the waves.  
+in the same session at the owner's request. **Approved 2026-11-18**: decisions 17–21 locked, open
+questions on their defaults, wave 1 built on this branch. Decision 18 edited in wave 1 (base cap 48
+→ 254), for the owner to confirm.  
 **Exit:** the three new scenarios `active` and green and the changed one green; the migration and
 rule tests below pass; `scripts/ci/local.sh --full` green on the base;
 `orchestrator/member-agents.md` has no "Known limitation" section and says how namespaces are
@@ -409,26 +431,11 @@ assigned and migrated.
 
 - [x] Design §6 and this breakdown (W0 docs)
 - [x] Scenarios land pending, red for the right reason (W0)
-- [ ] Stored namespace, assignment at create, migration of existing users (W1)
-- [ ] `/v1/me` and the member draft rule read the stored namespace (W1)
+- [x] Stored namespace, assignment at create, migration of existing users (W1)
+- [x] `/v1/me` and the member draft rule read the stored namespace (W1)
 - [ ] Docs drop the limitation; OpenAPI, proto comments, docs-features row (W2)
 
-**Proposed decisions** (owner to lock; numbered to follow the list above; design §6.2)
-
-17. A user's namespace is stored in `users.namespace`, unique, set once at create; a rename, a
-    restart or a role change never changes it. `GET /v1/me` keeps the field name
-    `defaultNamespace` and reports the stored value.
-18. Assignment: base from the username (email: local part without `+tag`; lowercased; characters
-    outside `[a-z0-9._-]` become `-`; ends trimmed of `.`, `-`, `_`; at most 48; empty is `user`).
-    Taken (another user holds it, it is reserved: `default`, `local`, `operator`, `bootstrap`, or
-    a catalog row under it is owned by another user): `<base>-<6 of [a-z2-7] from a SHA-256 of the
-    user id>`, then 10, then 16 characters. No counter. Never `default` for a new user.
-19. Seed rows keep today's values (`operator`, `local`); marketplace owner rows get none.
-20. Migration on every open, idempotent, never refuses a start: backfill in order of the earliest
-    catalog row each user owns under their old derived namespace, then by `created_at`; first
-    claimant keeps the old value, the others get the suffix; one log line per user moved.
-21. Existing drafts do not move. A member who lost a shared namespace keeps and edits the drafts
-    they own there; new drafts go under the new namespace.
+Decisions 17–21 are locked (owner, 2026-11-18): see "Locked decisions".
 
 **Scenario delta**
 
@@ -469,12 +476,12 @@ two concurrent creates with one base get two namespaces (`api_tests.rs`); the ba
   Accept: `cargo run -p vam-e2e -- check`; `scripts/e2e/run.sh --scenarios <four> ` gives three
   red at the `urnOf` step with 403 `only the artifact owner may version this agent`, class
   `product`, and the changed one green. Turns green: none.
-- [ ] `UI-3.1` — Base rule in `vam-spec` (`origin.rs`): `namespace_base(username)` and
+- [x] `UI-3.1` — Base rule in `vam-spec` (`origin.rs`): `namespace_base(username)` and
   `namespace_suffixed(base, user_id, len)`; keep `default_namespace` (callers outside the rule)
   or make it the base rule's caller. Accept: `cargo test -p vam-spec`, every row of design §6.1,
   every name in `default_namespace_rules` gives the same value as today when it is a slug.
   Turns green: none alone.
-- [ ] `UI-3.2` — Store (`users.rs`, `catalog*.rs` read only): column `namespace`, unique partial
+- [x] `UI-3.2` — Store (`users.rs`, `catalog*.rs` read only): column `namespace`, unique partial
   index `idx_users_namespace`, assignment inside the create transaction for `create_user*`,
   `bootstrap_first_admin` and seeds (decisions 18, 19), migration in `initialize_users_schema`
   (decision 20; never an `open` error, §4.2 row 27), log lines from `bin/vamd.rs`,
@@ -482,7 +489,7 @@ two concurrent creates with one base get two namespaces (`api_tests.rs`); the ba
   taken by a user, taken by another owner's catalog row, suffix lengths, idempotent migration,
   order rule, seed values); `tests/user_identity_migration_tests.rs` rows above; concurrent create
   API test. Turns green: with UI-3.3, all three new scenarios.
-- [ ] `UI-3.3` — Readers: `api/me.rs` reports `UserRecord.namespace` (fallback to today's
+- [x] `UI-3.3` — Readers: `api/me.rs` reports `UserRecord.namespace` (fallback to today's
   derivation for a principal with no row); `member_draft.rs` `require_own_namespace` reads the
   column on the locked connection; `UserAccount.namespace` on `GET /v1/users` (open question 2);
   proto comments on `GetMeResponse.default_namespace`. Accept: `tests/me_tests.rs`,
@@ -507,7 +514,7 @@ two concurrent creates with one base get two namespaces (`api_tests.rs`); the ba
 |---|---|---|---|---|---|---|---|---|---|
 | 0 docs | design §6 + this breakdown | — | vam | orchestrator | 30 min | — | none | [x] | this branch |
 | 0 | `UI-3.0` | — (pending, red for the right reason) | vam | Sonnet 5.5 low (YAML and world pieces only) | 45 min | 0 docs | none | [x] | this branch |
-| 1 | `UI-3.1`, `UI-3.2`, `UI-3.3` | the three new scenarios | vam | Sonnet 5.5 high (schema migration of existing users and the member write boundary) | 120 min | 0, owner approval, member-draft-agents released or synced | none | [ ] | |
+| 1 | `UI-3.1`, `UI-3.2`, `UI-3.3` | the three new scenarios | vam | Sonnet 5.5 high (schema migration of existing users and the member write boundary) | 120 min | 0, owner approval, member-draft-agents released or synced | none | [x] | this branch |
 | 2 | `UI-3.4` | — (keeps them green) | vam | Sonnet 5.5 medium (OpenAPI test in `vam-spec` plus docs) | 60 min | 1 | none | [ ] | |
 
 **Open questions** (each with a default)

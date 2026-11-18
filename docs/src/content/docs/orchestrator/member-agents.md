@@ -21,7 +21,7 @@ proves:
   - crates/vam-orchestrator/tests/me_tests.rs
   - crates/vam-orchestrator/tests/hsp_grants.rs::a_members_grant_naming_a_draft_playbook_is_refused_and_a_publishers_is_not
   - crates/vam-orchestrator/src/member_draft.rs::each_refused_field_is_a_400_naming_it
-  - crates/vam-orchestrator/src/member_draft.rs::namespace_new_inside_ok_outside_400_non_slug_username_uses_default
+  - crates/vam-orchestrator/src/member_draft.rs::namespace_new_inside_ok_outside_400_non_slug_username_gets_its_own
   - crates/vam-orchestrator/src/member_draft.rs::a_urn_in_my_namespace_owned_by_a_publisher_is_403
   - crates/vam-orchestrator/src/member_draft.rs::the_cap_counts_drafts_only_and_refuses_a_new_row_not_an_edit
   - crates/vam-orchestrator/src/member_draft.rs::cap_parses_a_positive_number_else_the_default
@@ -106,7 +106,7 @@ object. Both need an `Idempotency-Key`. In member mode, `vamd` checks these in o
 4. **Namespace.** A new URN must be under
    `urn:vam:agent:<registryDomain>/<defaultNamespace>/`. Both values are on `GET /v1/me`. The
    check runs when the caller owns no row of that URN, so an edit of your own draft skips it
-   (`namespace_new_inside_ok_outside_400_non_slug_username_uses_default`, and
+   (`namespace_new_inside_ok_outside_400_non_slug_username_gets_its_own`, and
    `member_put_own_agent_draft_is_200_outside_namespace_is_400`).
 5. **Owner.** A URN another user owns is a 403
    (`a_urn_in_my_namespace_owned_by_a_publisher_is_403`).

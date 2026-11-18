@@ -147,24 +147,29 @@ pub(crate) fn require_no_refused_fields(spec: &AgentSpec) -> Result<(), Orchestr
 }
 
 /// Decision 9: a new agent URN is under `urn:vam:agent:<registry domain>/<namespace>/`. The
-/// namespace is `default_namespace(username)`, the value `GET /v1/me` reports. A user row
-/// that is missing reads the user id as the username, as `/v1/me` does. Runs on the locked
+/// namespace is the caller's own, stored on their user row (user-identity decision 17), the value
+/// `GET /v1/me` reports. No two users hold one, so another member's URN is refused here whether
+/// that member saved it or not. A row without a stored namespace derives it from the username, and
+/// a missing user row reads the user id as the username, as `/v1/me` does. Runs on the locked
 /// connection.
 pub(crate) fn require_own_namespace(
     connection: &Connection,
     owner: &str,
     urn: &str,
 ) -> Result<(), OrchestratorError> {
-    let username: String = connection
+    let row: Option<(String, Option<String>)> = connection
         .query_row(
-            "SELECT username FROM users WHERE user_id = ?1",
+            "SELECT username, namespace FROM users WHERE user_id = ?1",
             [owner],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
-        .map_err(OrchestratorError::Database)?
-        .unwrap_or_else(|| owner.to_string());
-    let namespace = vam_spec::default_namespace(&username);
+        .map_err(OrchestratorError::Database)?;
+    let namespace = match row {
+        Some((_, Some(stored))) => stored,
+        Some((username, None)) => vam_spec::default_namespace(&username),
+        None => vam_spec::default_namespace(owner),
+    };
     let domains = crate::registry::registry_domains();
     let prefix = format!("urn:vam:agent:{}/{namespace}/", domains.registry_domain());
     if urn.len() > prefix.len() && urn.starts_with(&prefix) {
@@ -526,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn namespace_new_inside_ok_outside_400_non_slug_username_uses_default() {
+    fn namespace_new_inside_ok_outside_400_non_slug_username_gets_its_own() {
         let store = store();
         save(&store, "alice", &agent(ALICE)).expect("inside");
         let err = message(
@@ -548,14 +553,18 @@ mod tests {
             )
             .expect_err("domain"),
         );
-        // A username that is not a slug uses `default`.
+        // A username that is not a slug gets a readable namespace of its own, never `default`
+        // (user-identity decision 18).
         store.create_user("u-9", "_odd").expect("odd username");
-        save(
-            &store,
-            "u-9",
-            &agent("urn:vam:agent:local.vam.dev/default/odd"),
-        )
-        .expect("default namespace");
+        save(&store, "u-9", &agent("urn:vam:agent:local.vam.dev/odd/odd")).expect("own namespace");
+        message(
+            save(
+                &store,
+                "u-9",
+                &agent("urn:vam:agent:local.vam.dev/default/odd"),
+            )
+            .expect_err("`default` is nobody's namespace"),
+        );
         message(
             save(&store, "u-9", &agent("urn:vam:agent:local.vam.dev/u-9/odd"))
                 .expect_err("user id is not the namespace"),

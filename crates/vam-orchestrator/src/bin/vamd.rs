@@ -442,6 +442,11 @@ async fn main() {
         Ok(_) => {}
         Err(e) => tracing::warn!("could not check existing usernames: {e}"),
     }
+    // One line per user the namespace backfill moved off a namespace they shared (user-identity
+    // decision 20). Their existing drafts stay where they are and stay theirs.
+    for moved in store.namespace_moves() {
+        tracing::warn!("{}", moved.log_line());
+    }
 
     let bootstrap_admin_password =
         std::env::var(vam_orchestrator::BOOTSTRAP_ADMIN_PASSWORD_ENV).ok();

@@ -27,5 +27,4 @@ guards:
   - vam:crates/vam-orchestrator/src/users.rs
   - vam:crates/vam-orchestrator/src/member_draft.rs
   - vam:crates/vam-orchestrator/src/bin/vamd.rs
-status: pending
-expectFail: { step: when.5, class: product }
+status: active

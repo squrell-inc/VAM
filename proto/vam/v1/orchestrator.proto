@@ -588,6 +588,9 @@ message UserAccount {
   int64 created_at = 5;
   int64 deactivated_at = 6;
   bool deactivated = 7;
+  // The user's own URN namespace: unique on the node, set once at create, kept across renames.
+  // Read only; the value `GET /v1/me` reports to that user as `defaultNamespace`.
+  string namespace = 8;
 }
 
 message CreateUserRequest {
@@ -656,7 +659,10 @@ message GetMeResponse {
   repeated string scopes = 4;
   // This node's registry domain (the org's URN domain). `local.vam.dev` when unconfigured.
   string registry_domain = 5;
-  // The caller's default URN namespace: the username lowercased, else `default`.
+  // The caller's own URN namespace: unique on the node, set once when the user was created and
+  // kept across renames and restarts (made from the username; a short suffix only when that base
+  // was taken). A member's new agent URN must be under it. A principal with no user row gets the
+  // old derivation from its id.
   string default_namespace = 6;
   // Squrell marketplace domain. Empty (omitted in JSON) when none is set.
   string marketplace_domain = 7;

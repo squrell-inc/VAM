@@ -405,7 +405,7 @@ user (`vamd --rename-user`) moves their namespace and their existing drafts are 
   added only when the base is not free:
   1. Base: for an email-shaped name, the local part with any `+tag` dropped; else the whole name.
      Lowercased. Every character outside `[a-z0-9._-]` becomes `-`, runs of `.`, `-` and `_` at
-     the ends are trimmed, and the result is cut to 48 characters (then trimmed again). Empty
+     the ends are trimmed, and the result is cut to 254 characters, the username limit (then trimmed again), so a slug name is never cut. Empty
      gives `user`. So `_Ann-x@X.test` gives `ann-x`, never `default`. For every name that is a
      slug today, the base equals today's `default_namespace`, so no existing value changes unless
      it collides.
@@ -431,7 +431,9 @@ user (`vamd --rename-user`) moves their namespace and their existing drafts are 
   2. Backfill rows whose `namespace` is `NULL`, in this order: users who own catalog rows under
      their old derived namespace first, ordered by their earliest such row's `created_at`; then the
      rest by `users.created_at`, then `user_id`. Each takes its old derived value when it is free
-     (rule 18.2, counting the rows already backfilled), else the suffixed value. So the first
+     (rule 18.2, counting the rows already backfilled; for a user who owns rows under it, other
+     users' old rows there do not count, since they stay where they are, decision 21), else the
+     suffixed value. So the first
      user to have used a shared namespace keeps it, and everyone else's existing drafts stay owned
      by them.
   3. Create `idx_users_namespace` (unique, `WHERE namespace IS NOT NULL`).
