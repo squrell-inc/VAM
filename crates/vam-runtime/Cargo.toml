@@ -22,8 +22,8 @@ bytes = "1.5"
 ed25519-dalek.workspace = true
 libc = "0.2"
 once_cell = "1.18"
-prost = "0.12"
-prost-types = "0.12"
+prost = "0.14"
+prost-types = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 sha2.workspace = true
@@ -39,7 +39,7 @@ walkdir = "2"
 glob = "0.3"
 
 [dev-dependencies]
-prost-types = "0.12"
+prost-types = "0.14"
 # Tests run the guest side over the Unix-socket transport (test builds only).
 vam-vsock = { path = "../vam-vsock", features = ["guest", "host", "uds-transport"] }
 vam-inference = { path = "../vam-inference" }

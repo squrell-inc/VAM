@@ -22,8 +22,8 @@ const WRITE_SCOPE: &str = "notifications:write";
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/me/contacts", get(list).post(start))
-        .route("/v1/me/contacts/:id", delete(unlink))
-        .route("/v1/me/contacts/:id/unlink", post(unlink))
+        .route("/v1/me/contacts/{id}", delete(unlink))
+        .route("/v1/me/contacts/{id}/unlink", post(unlink))
 }
 
 fn user(auth: &AuthContext) -> String {

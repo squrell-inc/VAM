@@ -492,7 +492,7 @@ pub async fn execute_tool_subprocess_with_token(
 
     let envelope = claims_opt
         .as_ref()
-        .and_then(|c| c.resource_envelope.clone())
+        .and_then(|c| c.resource_envelope)
         .unwrap_or(default_envelope);
 
     let max_wall_ms = envelope.max_wall_time_ms.max(100);

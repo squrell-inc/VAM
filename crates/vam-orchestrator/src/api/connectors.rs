@@ -29,17 +29,17 @@ const CONNECTION_SCOPE: &str = "secrets:write";
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/connectors", get(list_connectors))
-        .route("/v1/connectors/:id/node", put(put_node))
+        .route("/v1/connectors/{id}/node", put(put_node))
         .route(
-            "/v1/connectors/:id/connection",
+            "/v1/connectors/{id}/connection",
             put(put_connection).delete(delete_connection),
         )
         .route(
-            "/v1/connectors/:id/connection/check",
+            "/v1/connectors/{id}/connection/check",
             post(check_connection),
         )
         .route(
-            "/v1/connectors/:id/connection/oauth/code",
+            "/v1/connectors/{id}/connection/oauth/code",
             post(exchange_code),
         )
 }
@@ -506,8 +506,9 @@ mod tests {
     use crate::error::OrchestratorError;
     use crate::secrets::SecretScope;
     use crate::{connector_client, connector_exchange};
-    use axum::body::{Body, HttpBody as _};
+    use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt as _;
     use tower::ServiceExt;
 
     use crate::api::auth::ControlPlanePdp;
