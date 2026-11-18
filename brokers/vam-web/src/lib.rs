@@ -10,6 +10,7 @@
 pub mod broker;
 pub mod error;
 pub mod fetch;
+pub mod manifest;
 pub mod provider;
 pub mod serve;
 pub mod tools;

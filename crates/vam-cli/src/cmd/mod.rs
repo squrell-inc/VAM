@@ -14,6 +14,7 @@ pub mod login;
 pub mod marketplace;
 pub mod mcp;
 pub mod node;
+mod node_broker;
 mod node_init;
 mod node_install;
 pub mod notifications;

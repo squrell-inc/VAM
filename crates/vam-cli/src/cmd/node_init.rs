@@ -477,11 +477,17 @@ pub fn render(lines: &[Line]) -> String {
 }
 
 /// `vam node init --check`. Exit 1 when anything is missing or wrong.
-pub fn run_check(root: Option<PathBuf>, vamd: Option<PathBuf>, kit: Option<PathBuf>) -> Result<()> {
+pub fn run_check(
+    root: Option<PathBuf>,
+    vamd: Option<PathBuf>,
+    kit: Option<PathBuf>,
+    brokers: &[super::node_broker::Broker],
+) -> Result<()> {
     let root = root.unwrap_or_else(|| PathBuf::from("/"));
     let mut lines = run_checks(&root, vamd.as_deref());
     // A kit line only when a kit is in play (`--kit` or a bundle's `share/vam/base/`).
     lines.extend(super::node_install::kit_line(kit.as_deref()));
+    lines.extend(super::node_broker::requested_check_lines(brokers));
     let failing = lines.iter().filter(|l| l.status.needs_attention()).count();
     if output::is_json() {
         println!("{}", serde_json::to_string(&lines)?);

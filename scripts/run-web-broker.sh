@@ -37,7 +37,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-MANIFEST="$HERE/web-broker/manifest.json"
+# The one source of the manifest is the crate (`vam-web-broker manifest` prints the same text).
+MANIFEST="$REPO/brokers/vam-web/manifest.json"
 SOCKET="${VAM_WEB_SOCKET:-/tmp/vam-web.sock}"
 STATE_DIR="${VAM_WEB_STATE_DIR:-/tmp/vam-web-broker}"
 VAMD_URL="${VAMD_URL:-http://127.0.0.1:8080}"
@@ -60,7 +61,7 @@ done
 command -v jq >/dev/null 2>&1 || { echo "run-web-broker.sh: jq is required" >&2; exit 2; }
 
 request_body() {
-  jq --arg path "$SOCKET" '.unixPath = $path' "$MANIFEST"
+  jq --arg path "$SOCKET" '{manifest: ., unixPath: $path}' "$MANIFEST"
 }
 
 if [ "$dry" = 1 ]; then

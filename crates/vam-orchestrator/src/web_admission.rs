@@ -582,16 +582,14 @@ mod tests {
         assert!(check_warnings(&store, &AgentSpec::default()).is_empty());
     }
 
-    /// `scripts/web-broker/manifest.json` is what `scripts/run-web-broker.sh` registers.
+    /// `brokers/vam-web/manifest.json` is what `vam-web-broker manifest` prints and registration sends.
     #[test]
     fn web_broker_manifest_file_decodes_validates_and_is_a_web_broker() {
-        use vam_spec::v1::{PutHostedBrokerRequest, ToolDestination};
-        let text = include_str!("../../../scripts/web-broker/manifest.json");
-        let req: PutHostedBrokerRequest =
-            vam_spec::encoding::json_to_proto("vam.v1.PutHostedBrokerRequest", text)
-                .expect("the manifest file decodes as a PutHostedBrokerRequest");
-        assert!(!req.unix_path.is_empty());
-        let manifest = req.manifest.expect("manifest");
+        use vam_spec::v1::{CapabilityManifest, ToolDestination};
+        let text = include_str!("../../../brokers/vam-web/manifest.json");
+        let manifest: CapabilityManifest =
+            vam_spec::encoding::json_to_proto("vam.v1.CapabilityManifest", text)
+                .expect("the manifest file decodes as a CapabilityManifest");
         assert_eq!(manifest.broker_id, "vam.web");
         assert_eq!(manifest.trust_tier, 2, "FIRST_PARTY");
         assert_eq!(manifest.egress_domains, ["api.search.brave.com"]);
