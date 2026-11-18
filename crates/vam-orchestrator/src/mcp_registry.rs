@@ -2310,6 +2310,12 @@ fn delete_bindings_in(
 pub(crate) const TOOLS_PENDING_REASON: &str =
     "signed in but the tool list could not be read: refresh the connection";
 
+/// Whether a row's OAuth state is a stored sign-in whose tools are not adopted yet.
+pub(crate) fn is_tools_pending(oauth: &McpOauthMetadata) -> bool {
+    oauth.status == McpOauthStatus::NeedsReauth
+        && oauth.last_refresh_error.as_deref() == Some(TOOLS_PENDING_REASON)
+}
+
 /// The 409 when a connector row changed while its tools were being read: a later sign-in, a
 /// disconnect, a refresh or an admin save rewrote or removed it. Whatever was signed in for this
 /// request is already stored (and then replaced or removed): the caller reads the connection's
@@ -2984,9 +2990,12 @@ impl SqliteWorkflowStore {
         let mut oauth: McpOauthMetadata = serde_json::from_str(&raw)
             .map_err(|_| OrchestratorError::InvalidContract("invalid oauth metadata".into()))?;
         let now = now_secs();
-        oauth.status = McpOauthStatus::Connected;
+        // A sign-in whose tools are not adopted yet stays pending: only the adoption connects it.
+        if !is_tools_pending(&oauth) {
+            oauth.status = McpOauthStatus::Connected;
+            oauth.last_refresh_error = None;
+        }
         oauth.last_refresh_at = Some(now);
-        oauth.last_refresh_error = None;
         // A new token without expires_in has unknown expiry. Do not carry
         // the old access token's expiry onto its replacement.
         oauth.expires_at = expires_in
@@ -3050,11 +3059,13 @@ impl SqliteWorkflowStore {
         let mut current: McpOauthMetadata = serde_json::from_str(&raw)
             .map_err(|_| OrchestratorError::InvalidContract("invalid oauth metadata".into()))?;
         let node = crate::connector_client::client_in(&tx, &conn.connection_id)?;
+        // A tools-pending row is `needs_reauth` for its tools, not because a save marked it.
+        let pending = is_tools_pending(&current);
         let still_used = node.as_ref().is_some_and(|n| {
             n.revision == used.revision
                 || (n.client_id == used.client_id
                     && n.token_endpoint == used.token_endpoint
-                    && current.status != McpOauthStatus::NeedsReauth)
+                    && (pending || current.status != McpOauthStatus::NeedsReauth))
         });
         if !still_used {
             if current.status != McpOauthStatus::NeedsReauth {
@@ -3090,9 +3101,12 @@ impl SqliteWorkflowStore {
             )?;
         }
         let now = now_secs();
-        current.status = McpOauthStatus::Connected;
+        // A sign-in whose tools are not adopted yet stays pending: only the adoption connects it.
+        if !pending {
+            current.status = McpOauthStatus::Connected;
+            current.last_refresh_error = None;
+        }
         current.last_refresh_at = Some(now);
-        current.last_refresh_error = None;
         current.expires_at = expires_in
             .map(|seconds| now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)));
         let json = oauth_metadata_json(Some(&current))?;

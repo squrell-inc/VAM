@@ -2828,6 +2828,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pending_sign_in_whose_access_token_expired_is_renewed_before_its_tools_are_read() {
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        let tools_ok = Arc::new(AtomicBool::new(false));
+        let n = xchg_node_with("xchg-pending-expired", tools_ok.clone());
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // The sign-in is stored, its tools could not be read, and its access token has expired
+        // by the time the member retries.
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": NEW_ACCESS, "refresh_token": NEW_REFRESH, "expires_in": 0 }),
+        );
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // The provider is down: nothing is recorded, the row stays pending and retryable.
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        assert_eq!(b["retryable"], true, "{b}");
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(
+            oauth.last_refresh_error.as_deref(),
+            Some(crate::mcp_registry::TOOLS_PENDING_REASON)
+        );
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            NEW_REFRESH
+        );
+
+        // The provider answers: the node's client and the org secret renew the token and the
+        // rotated tokens are stored. The tools are down again: the renewal alone does not connect
+        // the row, it stays pending.
+        tools_ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "FRESH-A", "refresh_token": "FRESH-R", "expires_in": 3600 }),
+        );
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(
+            oauth.last_refresh_error.as_deref(),
+            Some(crate::mcp_registry::TOOLS_PENDING_REASON)
+        );
+        // The tools are back: listed with the new access token (not renewed again), adopted.
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(
+            n.token.requests().len(),
+            3,
+            "exchange, failed renewal, renewal"
+        );
+        assert_eq!(b["drift"], "adopted", "{b}");
+        assert_no_value("the adoption", &b.to_string());
+        let grant = n.token.requests().last().cloned().unwrap();
+        assert_eq!(grant.form["grant_type"], "refresh_token");
+        assert_eq!(grant.form["refresh_token"], NEW_REFRESH);
+        assert_eq!(grant.form["client_id"], "c-1");
+        assert!(
+            grant.form.get("client_secret").map(String::as_str) == Some(SECRET)
+                || grant.authorization.is_some(),
+            "the org secret authenticates the refresh"
+        );
+        assert_eq!(token_of(&n, "ada", "filebox/oauth/access-token"), "FRESH-A");
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            "FRESH-R"
+        );
+        {
+            let seen = n.mcp_seen.lock().unwrap();
+            let last_list = seen
+                .methods
+                .iter()
+                .rposition(|m| m == "tools/list")
+                .unwrap();
+            assert_eq!(seen.auth[last_list].as_deref(), Some("Bearer FRESH-A"));
+        }
+        let row = row_of(&n, "ada");
+        let oauth = row.oauth.unwrap();
+        assert_eq!((oauth.status, oauth.last_refresh_error), (Connected, None));
+        assert!(oauth.expires_at.unwrap() > crate::connectors::now_secs() + 3000);
+        assert_eq!(
+            row.tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["search_files"]
+        );
+    }
+
+    #[tokio::test]
     async fn a_sign_in_whose_tools_cannot_be_read_stays_retryable_and_is_not_announced() {
         use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
         let tools_ok = Arc::new(AtomicBool::new(true));

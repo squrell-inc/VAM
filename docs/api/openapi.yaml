@@ -3547,7 +3547,13 @@ paths:
         `upgraded` without approval. An empty body defaults to
         `approveDrift: false`.
         This refreshes only the tool snapshot, not OAuth tokens; it does not
-        implement refresh-on-401. The `connection` object uses the same OAuth
+        implement refresh-on-401. One exception: a connector sign-in whose tools
+        are pending (`drift: adopted` on success) whose stored access token has
+        expired is renewed first, under the connection's refresh gate, with the
+        node's client and the org secret for an admin-supplied client; the
+        rotated tokens are stored and the row stays pending until its tools are
+        adopted. A refused renewal is a 409 (sign in again); an unreachable
+        provider is a 502 and the row stays pending. The `connection` object uses the same OAuth
         status contract as list: `oauth.status`, `oauth.expiresAt` when known,
         sanitized `oauth.lastRefreshError` when set, and `oauth.hasRefreshBinding`.
         Static connections keep `oauth: null`.

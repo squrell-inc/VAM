@@ -815,10 +815,10 @@ async fn refresh(
     // same first pin the connect makes), and only then is the connection `connected` again.
     let mut existing = existing;
     if pending_tools_policy(&state, &existing)?.is_some() {
-        // The generation first, and the row read under the same gate: a sign-in that commits
-        // between the two reads moves the generation, so the row and the generation always
-        // belong to the same sign-in (the write checks both).
-        let (current, credentials) = row_with_generation(&state, &existing).await?;
+        // The row and the generation are read together under the credential gate (a sign-in that
+        // commits between two separate reads would pair an old row with its new generation; the
+        // write checks both), after the stored access token is refreshed if it has expired.
+        let (current, credentials) = pending_row_with_fresh_token(&state, &existing).await?;
         existing = current;
         if let Some(policy) = pending_tools_policy(&state, &existing)? {
             let conn = adopt_tools_and_reconnect(&state, &existing, &policy, &credentials).await?;
@@ -1150,20 +1150,35 @@ pub(crate) async fn adopt_connector_tools(
     Ok(adopted)
 }
 
-/// A connection's row and its credential generation, read together under the credential gate: no
-/// credential write lands between the two.
-async fn row_with_generation(
+/// A tools-pending row and its credential generation, read together under the credential gate, its
+/// access token refreshed first when the stored one has expired
+/// ([`crate::host_tools::prepare_pending_tools_row`]).
+async fn pending_row_with_fresh_token(
     state: &AppState,
     conn: &McpConnection,
 ) -> Result<(McpConnection, crate::host_tools::CredentialGeneration), OrchestratorError> {
-    let gate = crate::host_tools::lock_mcp_credentials(&state.store, conn)
-        .await
-        .map_err(|_| OrchestratorError::CorruptState("mcp credential lock unavailable".into()))?;
-    let current =
-        state
-            .store
-            .get_mcp_connection(conn.scope, &conn.owner_user_id, &conn.connection_id)?;
-    Ok((current, gate.generation_handle()))
+    use crate::host_tools::PendingRefreshError;
+    use crate::mcp_oauth_refresh::RefreshFailureKind;
+    crate::host_tools::prepare_pending_tools_row(
+        &state.store,
+        &state.vault,
+        conn,
+        crate::mcp_oauth_refresh::refresh_access_token,
+    )
+    .await
+    .map_err(|e| match e {
+        PendingRefreshError::Store(e) => e,
+        PendingRefreshError::Refresh(f) if f.kind == RefreshFailureKind::NeedsReauth => {
+            OrchestratorError::Conflict(format!(
+                "the provider refused to renew the sign-in stored for `{}`: sign in again",
+                conn.connection_id
+            ))
+        }
+        PendingRefreshError::Refresh(f) => OrchestratorError::Mcp(format!(
+            "could not renew the stored sign-in before reading its tools: {}",
+            f.reason
+        )),
+    })
 }
 
 /// A sign-in is stored; now its tools are adopted and the member's reconnect is done: the
