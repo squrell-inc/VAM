@@ -3979,6 +3979,26 @@ components:
         guestMode:
           type: string
           description: 'How session guests run: `vm` (Firecracker microVMs, every normal node) or `process` (host processes with no isolation; E9 test nodes only).'
+        build:
+          $ref: "#/components/schemas/NodeBuild"
+
+    NodeBuild:
+      type: object
+      description: The build this node runs (`vamd --version`, as data).
+      properties:
+        version:
+          type: string
+          description: '`0.3.0` on a release build; `0.3.0+dev.14` or `0.3.0+dev` on any other.'
+        commit:
+          type: string
+          description: Short commit, with `+dirty` when the tree had changes, or `unknown`.
+        commitDate:
+          type: string
+          description: Commit date (`YYYY-MM-DD`). Omitted when unknown.
+        channel:
+          type: string
+          enum: [release, dev]
+          description: '`release` only for builds made by the release workflow.'
 
     GetNodeStatusResponse:
       type: object

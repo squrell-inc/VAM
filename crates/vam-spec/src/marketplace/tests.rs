@@ -260,3 +260,12 @@ fn a_symlinked_index_or_artifact_directory_is_refused() {
         r.findings
     );
 }
+
+#[test]
+fn node_requirement_accepts_dev_and_rc_builds_of_the_required_version() {
+    let r = NodeRequirement::parse(">=0.1.0").unwrap();
+    for v in ["0.1.0+dev", "0.1.0+dev.14", "0.1.0-rc.1"] {
+        assert!(r.matches(v), "{v}");
+    }
+    assert!(!r.matches("0.0.9+dev.3"));
+}

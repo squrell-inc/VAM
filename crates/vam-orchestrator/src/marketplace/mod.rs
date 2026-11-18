@@ -103,7 +103,7 @@ impl MarketplaceConfig {
                 Limits::default(),
             ),
             refresh_every,
-            node_version: env!("CARGO_PKG_VERSION").to_string(),
+            node_version: vam_spec::build_info!().version,
         }
     }
 }
