@@ -1969,7 +1969,7 @@ fn encode_run_path(run_id: &str) -> String {
 
 async fn response_body(response: axum::response::Response) -> String {
     String::from_utf8(
-        hyper::body::to_bytes(response.into_body())
+        axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap()
             .to_vec(),
@@ -2988,8 +2988,12 @@ async fn put_secret_overwrites_same_binding_id() {
         .await
         .unwrap();
     assert_eq!(first.status(), StatusCode::OK);
-    let first_json: serde_json::Value =
-        serde_json::from_slice(&hyper::body::to_bytes(first.into_body()).await.unwrap()).unwrap();
+    let first_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let fp1 = first_json["secret"]["fingerprint"]
         .as_str()
         .unwrap()
@@ -2997,8 +3001,12 @@ async fn put_secret_overwrites_same_binding_id() {
 
     let second = app.oneshot(put("idem-b", "second-value")).await.unwrap();
     assert_eq!(second.status(), StatusCode::OK);
-    let second_json: serde_json::Value =
-        serde_json::from_slice(&hyper::body::to_bytes(second.into_body()).await.unwrap()).unwrap();
+    let second_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let fp2 = second_json["secret"]["fingerprint"]
         .as_str()
         .unwrap()
@@ -9663,7 +9671,11 @@ mod gateway {
                 .unwrap()
                 .connect_with_connector(tower::service_fn(move |_u: http::Uri| {
                     let p = p.clone();
-                    async move { tokio::net::UnixStream::connect(p).await }
+                    async move {
+                        tokio::net::UnixStream::connect(p)
+                            .await
+                            .map(hyper_util::rt::TokioIo::new)
+                    }
                 }))
                 .await
                 .unwrap();

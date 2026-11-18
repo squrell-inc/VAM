@@ -105,7 +105,8 @@ check_release() { # <json>: the dispatch workflow
   jq -e '.jobs | has("build")' <<< "$j" >/dev/null || { err "no build job (it calls release-build.yml)"; return; }
   jq -e '.jobs.build.uses == "./.github/workflows/release-build.yml"' <<< "$j" >/dev/null || err "build must call ./.github/workflows/release-build.yml"
   jq -e '.jobs.build.with.channel == "release"' <<< "$j" >/dev/null || err "build must pass channel: release (only the release workflow builds a release)"
-  jq -e '.jobs.build.permissions == {"contents": "read"}' <<< "$j" >/dev/null || err "build permissions must be exactly contents: read"
+  # pull-requests: read is the cap for release-build.yml's `assemble` job (it reads PR bodies for the notes)
+  jq -e '.jobs.build.permissions == {"contents": "read", "pull-requests": "read"}' <<< "$j" >/dev/null || err "build permissions must be exactly contents: read, pull-requests: read (the called workflow's assemble job reads pull requests; nothing else)"
   jq -e '(.jobs.build | has("secrets") | not) and (.jobs.build | has("environment") | not)' <<< "$j" >/dev/null || err "build passes no secrets (no secrets: inherit) and has no environment"
 }
 
@@ -115,7 +116,16 @@ check_release_build() { # <json>: the reusable build workflow
   jq -e '[.jobs[] | select(has("environment"))] | length == 0' <<< "$j" >/dev/null || err "release-build.yml has no job in an environment (publishing is release.yml's publish job)"
   jq -e '.on.workflow_call.inputs | (.version.type == "string") and (.commit.type == "string") and (.channel.type == "string")' <<< "$j" >/dev/null || err "workflow_call must take string inputs version, commit and channel"
   jq -e '(.on | has("pull_request") | not) or ((.on.pull_request.paths? // []) | (type == "array") and length > 0)' <<< "$j" >/dev/null || err "the pull_request trigger needs a paths filter (build only when the release path changes)"
-  jq -e '[.jobs[] | select(has("uses") | not) | .permissions] | all(. == {"contents": "read"})' <<< "$j" >/dev/null || err "every build job's permissions must be exactly contents: read"
+  jq -e '[.jobs | to_entries[] | select(.key != "assemble") | select(.value | has("uses") | not) | .value.permissions] | all(. == {"contents": "read"})' <<< "$j" >/dev/null || err "every build job's permissions must be exactly contents: read"
+  # assemble: the one job that also reads pull requests (release notes); it never writes
+  jq -e '.jobs | has("assemble")' <<< "$j" >/dev/null || { err "no assemble job (SHA256SUMS, notes and scans)"; return; }
+  jq -e '.jobs.assemble.permissions == {"contents": "read", "pull-requests": "read"}' <<< "$j" >/dev/null || err "assemble permissions must be exactly contents: read, pull-requests: read"
+  jq -e '.jobs.assemble.needs | (if type == "string" then [.] else . end) | (index("meta") != null) and (index("guest") != null) and (index("node-x86_64") != null) and (index("cli-linux") != null) and (index("cli-macos") != null)' <<< "$j" >/dev/null 2>&1 || err "assemble must need meta and every build job (guest, node-x86_64, cli-linux, cli-macos)"
+  jq -e '[.jobs.assemble.steps[] | select(.run? != null) | .run | contains("assemble.sh")] | any' <<< "$j" >/dev/null || err "assemble does not run scripts/release/assemble.sh"
+  jq -e '[.jobs.assemble.steps[] | select((.uses? // "") | startswith("actions/download-artifact@")) | .with.pattern] | any(. == "asset-*")' <<< "$j" >/dev/null || err "assemble must download the asset-* artifacts (download-artifact with pattern: asset-*)"
+  jq -e '[.jobs.assemble.steps[] | select((.uses? // "") | startswith("actions/upload-artifact@")) | .with.name | tostring | startswith("release-")] | any' <<< "$j" >/dev/null || err "assemble must upload the release-<version> artifact"
+  # only assemble holds a token for pull requests; the other jobs never see pull-requests
+  jq -e '[.jobs | to_entries[] | select(.key != "assemble") | .value | .. | strings | select(test("github\\.token"))] | length == 0' <<< "$j" >/dev/null || err "only assemble gets github.token in this workflow (the build jobs take no token at all)"
   jq -e '[.jobs[] | .container? // empty | (if type == "string" then . else .image end) | select(test("@sha256:[0-9a-f]{64}$") | not)] | length == 0' <<< "$j" >/dev/null || err "a job container image must be pinned by digest (image@sha256:<64 hex>), never by tag"
   jq -e '[.jobs[] | .container? // empty | (if type == "object" then (.credentials? != null or .env? != null or .options? != null) else false end)] | any | not' <<< "$j" >/dev/null || err "a job container takes no credentials, env or options (no secrets in builds, no privileged flags)"
   jq -e '[.jobs[] | .steps[]? | select((.uses? // "") | startswith("actions/upload-artifact@")) | select((.with["retention-days"]? == null) or (.with["retention-days"] > 30))] | length == 0' <<< "$j" >/dev/null || err "upload-artifact needs retention-days, 30 at most (build-only runs leave short-lived artifacts)"

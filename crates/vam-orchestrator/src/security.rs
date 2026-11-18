@@ -1909,7 +1909,7 @@ impl SessionSecurityContext {
                     arguments_digest: computed_digest,
                     script_digest: observed_script_digest,
                     call_id: journal_call_id.unwrap_or_else(|| request.call_id.clone()),
-                    resource_envelope: Some(resource_envelope.clone()),
+                    resource_envelope: Some(resource_envelope),
                     expires_at: now_secs + 30,
                     nonce,
                 };

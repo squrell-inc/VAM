@@ -56,3 +56,23 @@ workspace_version() {
       v = $0; sub(/^[^=]*=[[:space:]]*"/, "", v); sub(/".*$/, "", v); print v; exit
     }'
 }
+
+# release_assets <version>: the file names a release of this version holds besides SHA256SUMS and
+# RELEASE_NOTES.md, one per line. The one list `assemble` (and later `publish`) checks the built
+# assets against, so a missing or stray file fails loudly. Phase B adds install.sh here.
+release_assets() {
+  local v="$1"
+  printf '%s\n' \
+    "vam-node-$v-x86_64-unknown-linux-gnu.tar.gz" \
+    "vam-$v-x86_64-unknown-linux-gnu.tar.gz" \
+    "vam-$v-aarch64-unknown-linux-gnu.tar.gz" \
+    "vam-$v-aarch64-apple-darwin.tar.gz" \
+    "vam-$v-x86_64-apple-darwin.tar.gz" \
+    "vam-runtime-$v-x86_64-unknown-linux-musl"
+}
+
+# sha256_of <file>: the hex digest (sha256sum, or shasum on macOS).
+sha256_of() { if command -v sha256sum >/dev/null; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+
+# file_size <file>: bytes.
+file_size() { wc -c < "$1" | tr -d ' '; }

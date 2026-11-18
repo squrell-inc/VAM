@@ -18,11 +18,11 @@ async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
 # Wave 6: Socket Mode stream handling.
 futures-util = "0.3"
-http = "0.2"
+http = "1"
 libc = "0.2"
-prost-types = "0.12"
+prost-types = "0.14"
 # Wave 6: Slack Web API client. Same stack as vam-web (rustls, no OpenSSL).
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { workspace = true, features = ["json"] }
 # Wave 4: the delivery log (ids, Slack channel and ts only; no secret column).
 rusqlite.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -30,14 +30,18 @@ serde_json = "1.0"
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.34", features = ["full"] }
-# Wave 6: Socket Mode WSS. 0.21 shares tokio-rustls 0.24 and webpki-roots 0.25 with reqwest 0.11.
-tokio-tungstenite = { version = "=0.21.0", features = ["rustls-tls-webpki-roots"] }
+# Wave 6: Socket Mode WSS over rustls 0.23 with the bundled Mozilla roots (webpki-roots), the
+# same trust as the Slack Web API client (vam_security::tls_roots).
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tonic = { version = "0.10", features = ["transport"] }
-tower = "0.4"
+tonic = { version = "0.14", features = ["transport"] }
+# tonic 0.14 dials Unix sockets through hyper 1, which wants the stream wrapped in TokioIo.
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url = "2.5"
+vam-security = { workspace = true, features = ["tls-roots"] }
 vam-spec.workspace = true
 
 [features]

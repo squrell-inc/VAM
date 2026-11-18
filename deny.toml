@@ -34,40 +34,19 @@ crate = "webpki-roots"
 # The RustSec database. A yanked crate fails; a known vulnerability fails unless it is ignored below.
 yanked = "deny"
 # Each ignore names the id, why it cannot be fixed now, and a date by which it is reviewed again.
-# 2026-11-18: the entries below were present on the base when this policy was added; every one is
-# listed in the PR that added it for the owner. The fixes that exist as semver-compatible patch
-# releases (rustls, rustls-webpki, webpki-roots, quinn-proto, quinn-udp, tokio, rustix) were taken
-# with `cargo update -p`; these remain because the fixed release is on another major line.
+# 2026-11-18: the TLS, h2 and SQLite advisories this policy first ignored were fixed by the
+# reqwest / axum / tonic / tokio-tungstenite / rusqlite upgrade (#37); what remains are crates with
+# no fixed release.
 ignore = [
-    # TLS: the 0.21 and 0.22 rustls lines (and their webpki 0.101 and 0.102) are pulled in by
-    # reqwest 0.11 (vamd, vam-cli, the brokers, vam-inference and vam-network, outbound HTTPS),
-    # hyper-rustls 0.24, axum-server 0.5 (the vamd API listener) and tokio-tungstenite 0.21 (the
-    # notify broker). The fixed releases are on the 0.103 / 0.23 lines: the fix is upgrading
-    # reqwest, axum-server, tonic and tokio-tungstenite, which is its own piece of work.
-    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8 via rustls 0.22 (tokio-tungstenite 0.21); fixed only on 0.103.x. Review by 2026-12-18" },
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101.7 and 0.102.8 (reqwest 0.11, axum-server 0.5, tokio-tungstenite 0.21); fixed only on 0.103.x. Review by 2026-12-18" },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101.7 and 0.102.8 (same dependents); fixed only on 0.103.x. Review by 2026-12-18" },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101.7 and 0.102.8 (same dependents); fixed only on 0.103.x. Review by 2026-12-18" },
-    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.101.7 and 0.102.8 (same dependents); fixed only on 0.103.x. Review by 2026-12-18" },
-    { id = "RUSTSEC-2026-0346", reason = "rustls 0.21.12 and 0.22.4 (reqwest 0.11, axum-server 0.5, tokio-tungstenite 0.21); fixed only on 0.23.x. Review by 2026-12-18" },
-    { id = "RUSTSEC-2026-0349", reason = "rustls 0.21.12 and 0.22.4 (same dependents); fixed only on 0.23.x. Review by 2026-12-18" },
-    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.25.4 (reqwest 0.11 rustls-tls); fixed only on 1.0.x. Review by 2026-12-18" },
-    # h2 0.3 comes from tonic 0.10, axum 0.6 and hyper 0.14 (the HSP and orchestrator gRPC); fixed in h2 0.4.
-    { id = "RUSTSEC-2026-0258", reason = "h2 0.3.27 via hyper 0.14 / axum 0.6 / tonic 0.10; fixed only in h2 0.4. Review by 2026-12-18" },
-    # SQLite: rusqlite 0.31 bundles the C library through libsqlite3-sys 0.28; the fix is rusqlite 0.39 or later.
-    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.28.0 (bundled SQLite via rusqlite 0.31); fixed in libsqlite3-sys 0.39, which needs a rusqlite upgrade. Review by 2026-12-18" },
     # Unmaintained crates: no fixed release exists. Each is a dependency we choose to keep for now.
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained (vam-firecracker, proc-macro only). Review by 2027-02-18" },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained (serde_yaml 0.9 in vam-spec, vam-e2e, vam-schedule). Review by 2027-02-18" },
-    { id = "RUSTSEC-2025-0052", reason = "async-std is discontinued (dev-dependency httpmock only, never shipped). Review by 2027-02-18" },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 1 is unmaintained (vamd reads PEM, reqwest 0.11). Review by 2027-02-18" },
-    { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained (dev-dependency httpmock only, never shipped). Review by 2027-02-18" },
     { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (vamd and the schedule broker; no fixed release). Review by 2027-02-18" },
     { id = "RUSTSEC-2026-0555", reason = "chrono-tz is unmaintained (vamd and the schedule broker; pinned to =0.10.4). Review by 2027-02-18" },
 ]
 
 [bans]
-# Multiple versions are common (reqwest 0.11 beside 0.13, rustls 0.21/0.22/0.23); warn, do not fail.
+# Multiple versions are common in a graph this size; warn, do not fail.
 multiple-versions = "warn"
 # Path dependencies between the workspace crates carry no version; they are not wildcards for us.
 # Registry dependencies with a `*` requirement are reported (a warning, not an error, for now).

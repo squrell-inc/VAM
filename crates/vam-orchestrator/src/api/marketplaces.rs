@@ -34,17 +34,17 @@ pub fn routes() -> Router<AppState> {
             get(list_marketplaces).post(add_marketplace),
         )
         .route(
-            "/v1/marketplaces/:id",
+            "/v1/marketplaces/{id}",
             axum::routing::put(put_marketplace).delete(delete_marketplace),
         )
-        .route("/v1/marketplaces/:id/refresh", post(refresh_marketplace))
-        .route("/v1/marketplaces/:id/listings", get(list_listings))
+        .route("/v1/marketplaces/{id}/refresh", post(refresh_marketplace))
+        .route("/v1/marketplaces/{id}/listings", get(list_listings))
         .route(
-            "/v1/marketplaces/:id/listings/:listing/install",
+            "/v1/marketplaces/{id}/listings/{listing}/install",
             post(install_listing),
         )
         .route(
-            "/v1/marketplaces/:id/listings/:listing/update",
+            "/v1/marketplaces/{id}/listings/{listing}/update",
             post(update_listing),
         )
 }
