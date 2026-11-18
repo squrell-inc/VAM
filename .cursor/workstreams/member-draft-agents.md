@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: member-draft-agents
-current_phase: 3 (breakdown drafted 2026-11-18, waiting for owner approval)
+current_phase: 3 (approved 2026-11-18, wave 0 next)
 base_branch: feat/member-draft-agents
 design_docs:
   - design/member-draft-agents.md
@@ -84,6 +84,10 @@ wave 0 starts. Rationale and evidence: `design/member-draft-agents.md` §4.
    *Amended 2026-11-18 (follows decision 5, option B):* the clause "and an
    inline agent with no row run by such a caller" is dropped; no run carries an
    inline agent.
+   *Amended 2026-11-18 by the product owner (Phase 3 open question 1):* a
+   Member's explicit `-draft` ref (on a run, or on a run grant) to a playbook,
+   skill or policy is refused even when the member owns that draft; a Member
+   never runs draft parts.
 8. A restricted save refuses `capabilityPolicy`, `hitlPolicy`,
    `instructionArtifact`, `extends`, `overlay` and `completionPolicy.evaluatorRefs`.
 9. A restricted save may create a new agent URN only under
@@ -123,7 +127,7 @@ skills, playbooks and policies are released; the save refuses anything else
 with a message naming the ref; the run resolves released-only even for a former
 publisher's old drafts; drafts stay private and in the member's namespace.  
 **Depends on:** Phase 1, Phase 2  
-**Plan:** drafted 2026-11-18, waiting for owner approval  
+**Plan:** approved by the owner 2026-11-18 (open-question defaults accepted)  
 **Exit:** the five new scenarios below `active` and green, the re-run list
 green; `catalog_read_authorize_tests::member_put_agent_is_403` replaced by the
 owner-approved spec change (a member's PUT of an own draft in their namespace is
@@ -603,3 +607,4 @@ team has the handoff (`design/member-draft-agents.md` §9) on the docs site.
 | 2026-11-18 | 2 | Owner chose option B (the run route refuses inline agents and playbooks; `vam run --file` saves then runs by ref) and two waves. Decisions 5 and 7 amended; Phase 2 rewritten (3 scenarios: 2 pending, 1 guard; waves 0 and 1). Plan approved; wave 0 next. |
 | 2026-11-18 | 2 | **Phase 2 closed.** Merged #27, #35 (plan #26). Scoreboard: 2 scenarios green, 1 guard green, 0 red; 5 fix cycles across both waves. Next: Phase 3 breakdown (members create, edit and run their own draft agents from released parts). |
 | 2026-11-18 | 3 | Phase 3 breakdown drafted (5 new scenarios, waves 0–2); waiting for owner approval |
+| 2026-11-18 | 3 | Owner approved the Phase 3 breakdown with the open-question defaults (close a Member's explicit `-draft` refs, decision 7 amended; `local` is released-only; cap answers 409; one 400 message per kind; advanced policy pins recorded in every mode). |
