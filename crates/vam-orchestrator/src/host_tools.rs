@@ -3258,6 +3258,17 @@ fn refresh_pending_connection(
     }
 }
 
+/// [`refresh_mcp_connection`] for tests outside this module.
+#[cfg(test)]
+pub(crate) fn refresh_connection_for_tests(
+    store: &SqliteWorkflowStore,
+    vault: &SecretsVault,
+    conn: &crate::mcp_registry::McpConnection,
+    refresh: McpRefresher,
+) -> Result<(), crate::mcp_oauth_refresh::RefreshFailure> {
+    refresh_mcp_connection(store, vault, conn, refresh)
+}
+
 /// What a refresh attempt leaves for its failure record.
 #[derive(Default)]
 struct RefreshAttempt {
@@ -3350,6 +3361,17 @@ fn exchange_and_store_mcp_tokens(
             {
                 return Err(RefreshFailure::needs_reauth(
                     "the admin changed the OAuth client",
+                ));
+            }
+            // A row a save (or a refusal) parked is not refreshed: the request would spend the
+            // member's refresh token for a commit that refuses to clear the mark. A tools-pending
+            // row is the one `needs_reauth` row that is refreshed (`prepare_pending_tools_row`).
+            if metadata.status == crate::mcp_registry::McpOauthStatus::NeedsReauth
+                && !crate::mcp_registry::is_tools_pending(metadata)
+            {
+                attempt.recorded = true;
+                return Err(RefreshFailure::needs_reauth(
+                    "the connection needs a new sign-in",
                 ));
             }
             attempt.org_client = Some(node.clone());

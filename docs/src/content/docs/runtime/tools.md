@@ -152,8 +152,15 @@ marked `needs_reauth` without a request, and `invalid_client` on a refresh marks
 admin's client, unless the admin saved the client again while the provider was answering: then the refusal was
 of a secret no longer saved, nothing is recorded, and the next call refreshes with the saved one. A refresh the
 provider accepts after the admin changed the client id or token endpoint stores nothing and leaves the member
-`needs_reauth`; one accepted after a secret-only save is stored. A corrected secret reconnects only members whose
-tokens are of the current client id and token endpoint. Providers whose refresh tokens are single-use are safe: the refresh gate below makes
+`needs_reauth`; one accepted after a secret-only save is stored. A corrected secret reconnects a member
+automatically only while their grant still belongs to the current client: the refusal was of this client id and
+token endpoint, and no save changed either since. A save that changes the client id or the token endpoint replaces
+the recoverable mark with "the admin changed the client", so the row stays `needs_reauth` and the member signs in
+again, even if the admin later returns to the earlier client (A, then B, then A) and corrects its secret. A
+parked row is not refreshed at all, and a refresh never clears a mark a save left. If the provider rotated the
+refresh token and the node then fails to store the access token, the rotated refresh token is still kept (the
+next call refreshes with it). The client and its secret are read at one revision: an admin save between the two
+reads sends nothing. Providers whose refresh tokens are single-use are safe: the refresh gate below makes
 concurrent calls spend the token once.
 
 `vamd` stores the access and refresh tokens as `connection` vault rows, each pinned to one host

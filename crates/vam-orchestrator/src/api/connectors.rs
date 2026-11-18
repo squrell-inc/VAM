@@ -2157,23 +2157,20 @@ mod tests {
             token_of(&n, "ada", "filebox/oauth/refresh-token"),
         );
 
-        // The admin replaces the client while ada's next sign-in is at the provider: her old row is
-        // marked, and the provider still accepts the code it had issued for the old client.
+        // The admin replaces the client after the route read it for ada's next sign-in: her old
+        // row is marked, and the exchange made with the old client's read sends nothing (the
+        // secret now stored is c-2's).
         let (s, b) = put_client(&n, "c-2", Some("C2-SECRET-wwwwwwwwwwww")).await;
         assert_eq!(s, StatusCode::OK, "{b}");
-        n.token.reply(
-            200,
-            serde_json::json!({ "access_token": "LATE-A", "refresh_token": "LATE-R" }),
-        );
         let e = exchange_made_with(&n, "ada", c1.clone())
             .await
             .err()
             .unwrap();
         assert_eq!(e.status, StatusCode::CONFLICT, "{}", e.message);
         assert!(e.message.contains("sign in again"), "{}", e.message);
-        // The code was spent at the provider (two requests), and nothing of it was stored: the row
-        // still needs a sign-in, with the tokens it had.
-        assert_eq!(n.token.requests().len(), 2);
+        // No request was sent (only the first sign-in's), and nothing was stored: the row still
+        // needs a sign-in, with the tokens it had.
+        assert_eq!(n.token.requests().len(), 1);
         let row = row_of(&n, "ada");
         assert_eq!(
             row.oauth.as_ref().unwrap().status,
@@ -2190,10 +2187,6 @@ mod tests {
         assert_no_value("the refusal", &e.message);
 
         // A member who had no row gets none, and no vault row.
-        n.token.reply(
-            200,
-            serde_json::json!({ "access_token": "LATE-A", "refresh_token": "LATE-R" }),
-        );
         let e = exchange_made_with(&n, "olga", c1).await.err().unwrap();
         assert!(e.message.contains("sign in again"), "{}", e.message);
         assert!(n
@@ -2256,10 +2249,6 @@ mod tests {
             (&c1.client_id, &c1.token_endpoint)
         );
         assert!(back.revision > c1.revision, "{back:?} {c1:?}");
-        n.token.reply(
-            200,
-            serde_json::json!({ "access_token": "LATE-A", "refresh_token": "LATE-R" }),
-        );
         let e = exchange_made_with(&n, "ada", c1).await.err().unwrap();
         assert_eq!(e.status, StatusCode::CONFLICT, "{}", e.message);
         assert!(e.message.contains("sign in again"), "{}", e.message);
@@ -2555,14 +2544,16 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
-        let committed = token_of(&n, "ada", "filebox/oauth/refresh-token") == "RE-R";
-        let moved = before.lock_if_unchanged().await.is_none();
+        // The failure rolled the whole write back: the generation is the one the first sign-in
+        // left, and its tokens are still the ones (exactly).
         assert!(
-            !committed || moved,
-            "new tokens committed but the credential generation did not move"
+            before.lock_if_unchanged().await.is_some(),
+            "a reported failure moved the credential generation"
         );
-        // The failure rolled the whole write back: the first sign-in's tokens are still the ones.
-        assert!(!committed, "a reported failure left the new tokens on disk");
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            NEW_REFRESH
+        );
         assert_eq!(
             token_of(&n, "ada", "filebox/oauth/access-token"),
             NEW_ACCESS
@@ -3156,6 +3147,131 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::OK, "{b}");
         assert_eq!(row_of(&n, "olga").oauth.unwrap().status, NeedsReauth);
+    }
+
+    /// `ada` signed in under `c-1` (connected, tools adopted).
+    async fn signed_in_node(tag: &str) -> Node {
+        let n = xchg_node(tag);
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n
+    }
+
+    #[tokio::test]
+    async fn a_rotated_refresh_token_survives_a_failed_access_token_write() {
+        let n = signed_in_node("xchg-rotate-keep").await;
+        let row = row_of(&n, "ada");
+        let used = n.store.node_client("filebox").unwrap().unwrap();
+        // The provider rotated the refresh token (the old one is spent); the access-token write
+        // then fails.
+        n.store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER no_access_token BEFORE INSERT ON host_secrets
+                 WHEN NEW.binding_id = 'filebox/oauth/access-token'
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        let r = n.store.commit_org_client_refresh(
+            &n.vault,
+            &row,
+            &used,
+            "ROTATED-A",
+            Some("ROTATED-R"),
+            Some(3600),
+        );
+        assert!(r.is_err(), "{r:?}");
+        // The new refresh token is kept (the next refresh uses it); the rest is as it was.
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            "ROTATED-R"
+        );
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/access-token"),
+            NEW_ACCESS
+        );
+        assert_eq!(row_of(&n, "ada").oauth, row.oauth);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_at_the_new_revision_of_a_client_changed_back_does_not_clear_the_mark() {
+        use crate::mcp_registry::McpOauthStatus::NeedsReauth;
+        let n = signed_in_node("xchg-refresh-aba").await;
+        let row = row_of(&n, "ada");
+        // c-1 → c-2 (ada's row is marked) → c-1 again, at a new revision.
+        let (s, b) = put_client(&n, "c-2", Some("C2-SECRET-wwwwwwwwwwww")).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let marked = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(marked.status, NeedsReauth);
+        // A refresh that read c-1 at that revision stores nothing and leaves the mark.
+        let used = n.store.node_client("filebox").unwrap().unwrap();
+        let stored = n
+            .store
+            .commit_org_client_refresh(&n.vault, &row, &used, "LATE-A", Some("LATE-R"), None)
+            .unwrap();
+        assert!(!stored);
+        assert_eq!(row_of(&n, "ada").oauth.unwrap(), marked);
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            NEW_REFRESH
+        );
+        // And a parked row is not refreshed at all: no request reaches the provider.
+        let before = n.token.requests().len();
+        let (store, vault, parked) = (n.store.clone(), n.vault.clone(), row_of(&n, "ada"));
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::host_tools::refresh_connection_for_tests(
+                &store,
+                &vault,
+                &parked,
+                crate::mcp_oauth_refresh::refresh_access_token,
+            )
+        })
+        .await
+        .unwrap();
+        assert!(outcome.is_err());
+        assert_eq!(n.token.requests().len(), before);
+        assert_eq!(row_of(&n, "ada").oauth.unwrap(), marked);
+    }
+
+    #[tokio::test]
+    async fn a_refused_client_mark_does_not_come_back_through_a_client_changed_and_back() {
+        use crate::mcp_registry::McpOauthStatus::NeedsReauth;
+        let n = signed_in_node("xchg-refused-aba").await;
+        n.store
+            .record_mcp_oauth_refresh_failure(
+                &row_of(&n, "ada"),
+                true,
+                connector_client::CLIENT_REFUSED_REASON,
+            )
+            .unwrap();
+        // c-1 → c-2 → c-1, then the admin corrects c-1's secret: ada's tokens are of c-1, but
+        // the client changed in between, so only a new sign-in brings her back.
+        let (s, b) = put_client(&n, "c-2", Some("C2-SECRET-wwwwwwwwwwww")).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let (s, b) = put_client(&n, "c-1", Some("CORRECTED-SECRET-qqqqqqqq")).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_ne!(
+            oauth.last_refresh_error.as_deref(),
+            Some(connector_client::CLIENT_REFUSED_REASON)
+        );
+        assert_eq!(open_notices(&n, "ada"), 1);
     }
 
     #[tokio::test]

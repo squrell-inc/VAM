@@ -814,6 +814,11 @@ impl SqliteWorkflowStore {
     }
 }
 
+/// The text of the 409 when the admin saved the client again between the read of the client and the
+/// read of its secret (after the connector id).
+pub(crate) const SECRET_READ_SUPERSEDED: &str =
+    "was saved again while its secret was being read: try again";
+
 /// The org's client secret, for one request to `endpoint`. **The only place the secret is read for
 /// sending.** It is read at org scope with [`SecretsVault::decrypt_secret_at`] (never a lookup that
 /// falls back across scopes), and only when the endpoint's host is the token endpoint's host the
@@ -859,10 +864,26 @@ pub(crate) fn org_client_secret(
         }
         Ok(())
     };
-    match vault.decrypt_secret_at_checked(SecretScope::Org, ORG_OWNER_USER_ID, &binding, accept) {
-        Err(OrchestratorError::NotFound(_)) => Err(not_saved()),
-        other => other,
+    let secret = match vault.decrypt_secret_at_checked(
+        SecretScope::Org,
+        ORG_OWNER_USER_ID,
+        &binding,
+        accept,
+    ) {
+        Err(OrchestratorError::NotFound(_)) => return Err(not_saved()),
+        other => other?,
+    };
+    // The client and its secret are two reads: a save between them could pair `client`'s id with
+    // the next client's secret. Every save moves the revision and the revision never goes back, so
+    // the client still at `client.revision` after the secret was read means the secret is that
+    // client's. Otherwise nothing is sent.
+    let current = vault.workflow_store().node_client(id)?;
+    if current.as_ref().map(|c| c.revision) != Some(client.revision) {
+        return Err(OrchestratorError::Conflict(format!(
+            "the OAuth client for `{id}` {SECRET_READ_SUPERSEDED}"
+        )));
     }
+    Ok(secret)
 }
 
 /// The body of `POST /v1/connectors/{id}/connection/oauth/code`: what the app got from the browser
@@ -1925,6 +1946,21 @@ mod exchange_tests {
             })
             .unwrap_err();
         assert!(matches!(e, OrchestratorError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn a_secret_saved_after_the_client_was_read_is_not_paired_with_it() {
+        let (store, vault, client) = world("secret-revision");
+        // An admin saves the client again (a new secret) after `client` was read: the secret now
+        // stored belongs to the newer revision and is not sent with the older read.
+        let newer = enable_filebox(&store, &vault, "secret-revision", "c-2", "NEWER-SECRET-v");
+        assert!(newer.revision > client.revision);
+        let e = org_client_secret(&vault, &client, &client.token_endpoint).unwrap_err();
+        assert!(matches!(e, OrchestratorError::Conflict(_)), "{e}");
+        assert!(!e.to_string().contains("NEWER-SECRET"), "{e}");
+        // The current read gets its own secret.
+        let got = org_client_secret(&vault, &newer, &newer.token_endpoint).unwrap();
+        assert_eq!(got.expose_secret(), "NEWER-SECRET-v");
     }
 
     #[test]

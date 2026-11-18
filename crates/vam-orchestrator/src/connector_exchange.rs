@@ -138,7 +138,18 @@ pub(crate) fn exchange_and_connect(
     let existing = existing.filter(|r| r.url == c.org.mcp_url);
 
     // The secret is read and sent here, to the one host it is pinned to, and nowhere else.
-    let secret = org_client_secret(vault, c.client, &c.client.token_endpoint)?;
+    // A client the admin saved again after the route read it is not this sign-in's: nothing is
+    // sent, and the member signs in again (the commit makes the same check if the save lands
+    // while the provider answers).
+    let secret =
+        org_client_secret(vault, c.client, &c.client.token_endpoint).map_err(|e| match e {
+            OrchestratorError::Conflict(msg)
+                if msg.ends_with(crate::connector_client::SECRET_READ_SUPERSEDED) =>
+            {
+                superseded(id)
+            }
+            e => e,
+        })?;
     let grant = CodeGrant {
         token_endpoint: &c.client.token_endpoint,
         client_id: &c.client.client_id,
