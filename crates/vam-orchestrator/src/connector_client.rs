@@ -227,7 +227,7 @@ pub fn keeps_secret(def: &Connector) -> bool {
 pub enum ClientWrite {
     Keep,
     Set {
-        client: NodeClient,
+        client: Box<NodeClient>,
         /// The new secret to seal into the vault row; `None` keeps the stored one.
         secret: Option<String>,
     },
@@ -297,7 +297,7 @@ pub fn plan_client(
             });
             Ok(ClientPlan {
                 write: ClientWrite::Set {
-                    client,
+                    client: Box::new(client),
                     secret: req.client_secret,
                 },
                 reauth,
