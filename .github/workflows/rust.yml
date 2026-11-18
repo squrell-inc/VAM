@@ -123,7 +123,7 @@ jobs:
       - name: Install cargo-deny and actionlint
         run: scripts/release/install-tool.sh cargo-deny actionlint
       # Offline: prepare.sh, the release guards against a fixture repository, install-tool.sh, the
-      # release workflow lint and actionlint over every workflow.
+      # release workflow lint and actionlint over the release workflows.
       - name: Release script tests
         env:
           REQUIRE_ACTIONLINT: "1"

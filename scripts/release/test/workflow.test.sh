@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # check-workflow.sh on the real workflows and on mutated copies (one forbidden line each), plus
-# actionlint over every workflow when the binary is available (CI installs it and sets
-# REQUIRE_ACTIONLINT=1; a session without it prints a skip line).
+# actionlint over the release workflows (release*.yml) when the binary is available (CI installs
+# it and sets REQUIRE_ACTIONLINT=1; a session without it prints a skip line). The other workflows
+# are left alone (owner, 2026-11-18): their shellcheck findings predate this workstream.
 set -uo pipefail
 . "$(dirname "$0")/helpers.sh"
 
@@ -187,7 +188,7 @@ echo "actionlint"
 actionlint_bin="${ACTIONLINT:-$(command -v actionlint || true)}"
 [ -n "$actionlint_bin" ] || { [ -x "$HOME/.local/bin/actionlint" ] && actionlint_bin="$HOME/.local/bin/actionlint"; }
 if [ -n "$actionlint_bin" ]; then
-  expect_ok "actionlint is clean on every workflow" "$actionlint_bin" "$wf"/*.yml
+  expect_ok "actionlint is clean on the release workflows" "$actionlint_bin" "$wf"/release*.yml
 elif [ "${REQUIRE_ACTIONLINT:-0}" = 1 ]; then
   bad "actionlint is required here (REQUIRE_ACTIONLINT=1) but not installed: scripts/release/install-tool.sh actionlint"
 else
