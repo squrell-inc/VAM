@@ -17,8 +17,10 @@
 #      COMMIT             full SHA to build (default HEAD; HEAD must be it)
 #      RUST_TOOLCHAIN     default 1.97.0 (CLIPPY_TOOLCHAIN in scripts/ci/local.sh)
 #      SKIP_AUDIT=1       skip `cargo audit bin` (offline tests)
-# CARGO_TARGET_DIR is honoured. Linux gnu targets build with cargo-zigbuild at glibc 2.34 and the
-# highest GLIBC_ symbol of every binary is checked and printed (to $GITHUB_STEP_SUMMARY too).
+# CARGO_TARGET_DIR is honoured. Linux gnu targets must be built on a glibc 2.34 host (locked
+# decision 8: the AlmaLinux 9 container of release-build.yml, native gcc, no zig; cargo-zigbuild
+# cannot link `cargo auditable` binaries). The highest GLIBC_ symbol of every binary is checked
+# and printed (to $GITHUB_STEP_SUMMARY too).
 #
 # Reproducibility (design §6.1): --locked, CARGO_INCREMENTAL=0, SOURCE_DATE_EPOCH from the commit,
 # the checkout, $CARGO_HOME and $RUSTUP_HOME remapped, host binaries stripped. The promise is same
@@ -99,7 +101,7 @@ rustup toolchain install "$toolchain" --profile minimal >&2
 rustup target add --toolchain "$toolchain" "$target" >&2
 case "$target" in
   *-linux-gnu)
-    cargo "+$toolchain" auditable zigbuild --release --locked --target "$target.$GLIBC_FLOOR" "${pkgs[@]}" >&2 ;;
+    cargo "+$toolchain" auditable build --release --locked --target "$target" "${pkgs[@]}" >&2 ;;
   *-apple-darwin)
     cargo "+$toolchain" auditable build --release --locked --target "$target" "${pkgs[@]}" >&2 ;;
 esac
@@ -128,7 +130,7 @@ case "$target" in
       echo "build.sh: $b highest GLIBC_$top" >&2
       summary "- \`$b\`: GLIBC_$top"
       if [ "$(printf '%s\n%s\n' "$top" "$GLIBC_FLOOR" | sort -V | tail -n 1)" != "$GLIBC_FLOOR" ]; then
-        die "$b needs GLIBC_$top, above the floor $GLIBC_FLOOR"
+        die "$b needs GLIBC_$top, above the floor $GLIBC_FLOOR (Linux gnu builds belong in the AlmaLinux 9 container)"
       fi
     done ;;
 esac

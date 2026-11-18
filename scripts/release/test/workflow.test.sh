@@ -224,17 +224,9 @@ rb_fails "a missing channel input" "string inputs version, commit and channel" "
         type: string" "      channel_x:
         description: \"release or dev (dev when blank)\"
         type: string"
-rb_fails "write permission in the node job" "write permissions; only publish may" "  node-x86_64:
-    name: node bundle (x86_64 linux gnu)
-    needs: meta
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+rb_fails "write permission in the node job" "write permissions; only publish may" "    timeout-minutes: 90
     permissions:
-      contents: read" "  node-x86_64:
-    name: node bundle (x86_64 linux gnu)
-    needs: meta
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+      contents: read" "    timeout-minutes: 90
     permissions:
       contents: write"
 rb_fails "an id-token in a build job" "permissions must be exactly contents: read" "    timeout-minutes: 10
@@ -260,9 +252,9 @@ rb_fails "an artifact kept for 90 days" "retention-days, 30 at most" "          
           path: dist/*
           if-no-files-found: error
           retention-days: 90"
-rb_fails "an artifact that tolerates missing files" "if-no-files-found: error" "          name: asset-vam-\${{ matrix.target }}
+rb_fails "an artifact that tolerates missing files" "if-no-files-found: error" "          name: asset-runtime-x86_64-unknown-linux-musl
           path: dist/*
-          if-no-files-found: error" "          name: asset-vam-\${{ matrix.target }}
+          if-no-files-found: error" "          name: asset-runtime-x86_64-unknown-linux-musl
           path: dist/*
           if-no-files-found: warn"
 rb_fails "a cache action" "no caches" "      - name: Install musl-tools" "      - uses: actions/cache@$SHA # v4.2.0
@@ -275,13 +267,26 @@ rb_fails "an unpinned upload-artifact" "not pinned by a full 40-hex" "actions/up
           name: asset-node" "actions/upload-artifact@v6 # v6.0.0
         with:
           name: asset-node"
-rb_fails "the version input inside run:" "inputs.version.*inside run:" "          scripts/release/install-zig.sh
-          scripts/release/install-tool.sh cargo-zigbuild cargo-auditable cargo-audit
-      - name: Build the host" "          scripts/release/install-zig.sh
-          echo \${{ inputs.version }}
-          scripts/release/install-tool.sh cargo-zigbuild cargo-auditable cargo-audit
-      - name: Build the host"
-rb_fails "a matrix value inside run:" "matrix.target.*inside run:" "        run: scripts/release/build.sh \"\$TARGET\" --set cli --out \"\$RUNNER_TEMP/bin\"" "        run: scripts/release/build.sh \${{ matrix.target }} --set cli --out \"\$RUNNER_TEMP/bin\""
+rb_fails "the version input inside run:" "inputs.version.*inside run:" "        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools" "        run: echo \${{ inputs.version }}"
+rb_fails "a container image pinned by tag" "pinned by digest" "    container:
+      image: almalinux@sha256:02df05719ef287ebd0df0a1eedb9172a00bd70703aed7b25660e426b8e0d6047
+    timeout-minutes: 90" "    container:
+      image: almalinux:9
+    timeout-minutes: 90"
+rb_fails "a container image with a short digest" "pinned by digest" "    container:
+      image: almalinux@sha256:02df05719ef287ebd0df0a1eedb9172a00bd70703aed7b25660e426b8e0d6047
+    timeout-minutes: 90" "    container:
+      image: almalinux@sha256:02df0571
+    timeout-minutes: 90"
+rb_fails "a container with options" "takes no credentials, env or options" "    container:
+      image: almalinux@sha256:02df05719ef287ebd0df0a1eedb9172a00bd70703aed7b25660e426b8e0d6047
+    timeout-minutes: 90" "    container:
+      image: almalinux@sha256:02df05719ef287ebd0df0a1eedb9172a00bd70703aed7b25660e426b8e0d6047
+      options: --privileged
+    timeout-minutes: 90"
+rb_fails "a matrix value inside run:" "matrix.target.*inside run:" "      - name: Build vam (native gcc, glibc 2.34)
+        run: scripts/release/build.sh \"\$TARGET\" --set cli --out \"\$RUNNER_TEMP/bin\"" "      - name: Build vam (native gcc, glibc 2.34)
+        run: scripts/release/build.sh \${{ matrix.target }} --set cli --out \"\$RUNNER_TEMP/bin\""
 rb_fails "a job without a timeout" "no timeout-minutes" "    timeout-minutes: 90
 " ""
 

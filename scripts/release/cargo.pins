@@ -3,6 +3,5 @@
 #   name  version
 # crates.io verifies each crate's checksum; the lockfile in the crate's package pins its
 # dependencies. scripts/release/install-tool.sh reads this file.
-cargo-zigbuild 0.20.1
 cargo-auditable 0.7.2
 cargo-audit 0.23.0

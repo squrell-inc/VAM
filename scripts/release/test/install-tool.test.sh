@@ -69,16 +69,13 @@ expect_ok "a tools.pins tool installs when wc pads its count (macOS)" env PATH="
 
 # The real pins file: one line per tool, https from the tool's own release page, 64-hex hashes.
 real="$release_dir/tools.pins"
-for tool in cargo-deny actionlint cargo-zigbuild cargo-auditable cargo-audit; do
+for tool in cargo-deny actionlint cargo-auditable cargo-audit; do
   line="$(awk -v t="$tool" '$1 == t' "$real")"
   expect_match "tools.pins pins $tool with an https release URL and a sha256" "^$tool [0-9]+\.[0-9]+\.[0-9]+ https://github\.com/[^ ]+/releases/download/[^ ]+ [0-9a-f]{64} [^ ]+\$" "$line"
 done
 # every tool the build workflows install is pinned for linux-x86_64 or in cargo.pins
-for tool in cargo-zigbuild cargo-auditable cargo-audit; do
+for tool in cargo-auditable cargo-audit; do
   expect_match "cargo.pins has $tool for the platforms with no prebuilt binary" "^$tool [0-9]+\.[0-9]+\.[0-9]+\$" "$(grep "^$tool " "$release_dir/cargo.pins")"
   expect_eq "$tool: cargo.pins and tools.pins name the same version" "$(awk -v t="$tool" '$1==t {print $2}' "$release_dir/cargo.pins")" "$(awk -v t="$tool" '$1==t {print $2}' "$real")"
 done
-# zig comes from a hash-pinned PyPI wheel
-expect_match "zig.requirements.txt pins ziglang by sha256" "--hash=sha256:[0-9a-f]{64}" "$(cat "$release_dir/zig.requirements.txt")"
-expect_match "…at one version" "^ziglang==[0-9]+\.[0-9]+\.[0-9]+ " "$(grep '^ziglang==' "$release_dir/zig.requirements.txt")"
 finish
