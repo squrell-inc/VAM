@@ -1,0 +1,43 @@
+id: members-with-the-same-email-local-part-get-their-own-namespaces
+title: Two members whose email addresses differ only in the domain each get a namespace of their own
+description: >
+  Two members sign up as ann.lee at two different domains. Each saves a draft agent under the
+  namespace their own GET /v1/me reports, and both namespaces start with ann.lee. When the second
+  member aims at the first member's agent, the save is refused with 400 for being outside the
+  second member's namespace, the answer a free name gets, and never with the owner check's 403,
+  which would tell them the name is taken. The second member cannot read the first one's agent.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-member-same-local-part-north, as: north }
+  - { piece: org-member-same-local-part-south, as: south }
+  - skill-host-echo
+  - agent-member-draft-with-host-echo
+when:
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: north, status: 200 }
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: south, status: 200 }
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: south, urnOf: north, status: 400, contains: "(your namespace)" }
+then:
+  - identity-request:
+      as: north
+      credential: key
+      path: /v1/me
+      status: 200
+      fields:
+        defaultNamespace: { matches: '^ann\.lee(-[a-z2-7]{6})?$' }
+  - identity-request:
+      as: south
+      credential: key
+      path: /v1/me
+      status: 200
+      fields:
+        defaultNamespace: { matches: '^ann\.lee(-[a-z2-7]{6})?$' }
+  - identity-request: { as: south, credential: key, path: "/v1/agents/{{urn:agent-member-draft-with-host-echo:north}}", status: 404 }
+guards:
+  - vam:crates/vam-orchestrator/src/users.rs
+  - vam:crates/vam-orchestrator/src/member_draft.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/me.rs
+  - vam:crates/vam-spec/src/origin.rs
+status: pending
+expectFail: { step: when.2, class: product }

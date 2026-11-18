@@ -18,7 +18,7 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | `notifications` | Notifications (E12 lane, row 7): one per-user record, many surfaces (app, CLI, agent tool; Slack in slice 2) | shipped | slices 1 and 2 shipped (records, API, CLI, agent tool, `vam.notify` with Slack); slice 3 (email, push, digests) backlog; docs: `orchestrator/notifications`, `hosted/notify` |
 | `connectors` | Connectors: connectivity, admin enable and consent, per-user connect; Microsoft 365 and Linear first (`design/connectors.md`) | active | 5 (admin-supplied client, Box) defined 2026-11-18, breakdown pending; 1 released to `main` 2026-11-08, checklist out; 0 done 2026-11-07 |
 | `machine-base` | Machine base (E7 Phase 1 + install slice, launch row 14): Debian slim default base with Python and git, `requiresRuntime` check, `vam node init` | active | 1 closed in base 2026-11-10 (W0-W5, 5/5 scenarios active); release PR into `main` open |
-| `user-identity` | User identity: self-service password change (`POST /v1/me/password`, `vam passwd`), then opaque user IDs and email usernames | active | 1 released to `main` 2026-11-14 (self-service password change); 2 closed in base 2026-11-17 (generated `usr_` ids, case-insensitive email login names); release PR into `main` open |
+| `user-identity` | User identity: self-service password change, opaque user IDs and email usernames, then one namespace per user | active | 3 (one namespace per user) drafted 2026-11-18 with wave 0 red for the right reason, waiting for the owner; needs member-draft-agents released; 1 and 2 released to `main` |
 | `release-artifacts` | Release artifacts: one workspace version chosen at release time, manual owner-approved release workflow, immutable `v*` tags, an x86_64 node bundle and `vam` for Linux/macOS with SHA256SUMS and attestations, `vam dock` and `vam upgrade`. Phases A, B, Final; Lima and Windows in the next release (`v0.2.0`) | active | A (restructured 2026-11-18; breakdown waiting for the owner) |
 
 ## Backlog (no tracker)
@@ -30,7 +30,7 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | Member `resourceRequirements` cap | Cap a member's `resourceRequirements` once the host honours it. |
 | Member `extends` / `overlay` | Open these fields to members once the run-time merge is wired; refused on a member save today. |
 | Old-repo branch names | Rename `isolation-verify-closeout` decision 9's branch names (`feat/improving-the-vam`); deferred by the owner 2026-11-18. |
-| Member namespace collisions | `Alice` / `alice` and non-slug usernames on `default` share a namespace (documented on `orchestrator/member-agents`); fix with `user-identity` Phase 2's namespace derivation. |
+| Member namespace collisions | Now `user-identity` Phase 3 (one stored namespace per user). This row goes when that phase's docs wave lands. |
 | Agent permissions in OpenAPI | `GET` / `PUT /v1/agents/{urn}/permissions` are missing from `docs/api/openapi.yaml`. |
 | E11 Jig, the larger plan | Queries and mutations, composed components, jig packages and a registry, agent-written `.jig`, Slack and A2UI adapters. The basics are shipped (`docs/src/content/docs/runtime/jig.md`); the earlier plan is in git history. |
 | Primary agent | One default agent per user that asks the other agents the user may run (a delegate broker, depth one). Not started; the earlier proposal is in git history. |

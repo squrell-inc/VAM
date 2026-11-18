@@ -1,14 +1,15 @@
-# Workstream: User identity (self-service password, then opaque user IDs)
+# Workstream: User identity (self-service password, opaque user IDs, one namespace per user)
 
 ```yaml
 status: active
 slug: user-identity
-current_phase: 2 closed in base 2026-11-17; release PR into main
-base_branch: feat/user-identity-phase2
+current_phase: 3 (one namespace per user) breakdown and wave 0 drafted 2026-11-18, waiting for the owner; 1 and 2 released to main
+base_branch: claude/wizardly-feynman-d5ch88 (phase 3; carries feat/member-draft-agents merged into main)
 design_docs:
   - design/user-identity.md
   - docs/src/content/docs/getting-started/users-and-roles.md
   - docs/src/content/docs/orchestrator/api.md
+  - docs/src/content/docs/orchestrator/member-agents.md
 ```
 
 ## Goal
@@ -17,7 +18,9 @@ Every user with a password session can change their own password without an
 admin (`POST /v1/me/password`, `vam passwd`), with every session signed out and
 API keys kept; then new users get opaque generated IDs and usernames become
 case-insensitive login names that may be email addresses, while existing users
-keep their IDs.
+keep their IDs; then every user holds a URN namespace no other user holds, kept
+across renames, so a member's draft agent can never land in, or reveal, another
+member's namespace.
 
 ## Out of scope
 
@@ -386,10 +389,165 @@ into `feat/user-identity-phase2`. W2 touches no file W3 does; W1 and W2 share
 
 Report: "Phase 2 pass", or the step number with the error text.
 
+### Phase 3 — One namespace per user
+
+**Goal:** every user has one stored URN namespace, unique on the node, assigned once (from the
+username, with a fixed suffix only when the readable base is taken) and kept across renames and
+restarts; `GET /v1/me` `defaultNamespace` reports it; the member draft rule enforces it; existing
+users are migrated without moving a draft.  
+**Depends on:** Phase 2 (released to `main`, #20) and `member-draft-agents` (closed 2026-11-18,
+**not yet released to `main`**). The phase branch merges `feat/member-draft-agents` into `main`
+(41af8b0; 16 conflict hunks in `crates/vam-e2e` and four docs pages, both sides kept). It lands
+after that release, or the owner releases both together.  
+**Plan:** drafted 2026-11-18 (design `design/user-identity.md` §6); wave 0 written and proven red
+in the same session at the owner's request. **Waiting for the owner** to lock decisions 17–21 and
+approve the waves.  
+**Exit:** the three new scenarios `active` and green and the changed one green; the migration and
+rule tests below pass; `scripts/ci/local.sh --full` green on the base;
+`orchestrator/member-agents.md` has no "Known limitation" section and says how namespaces are
+assigned and migrated.
+
+- [x] Design §6 and this breakdown (W0 docs)
+- [x] Scenarios land pending, red for the right reason (W0)
+- [ ] Stored namespace, assignment at create, migration of existing users (W1)
+- [ ] `/v1/me` and the member draft rule read the stored namespace (W1)
+- [ ] Docs drop the limitation; OpenAPI, proto comments, docs-features row (W2)
+
+**Proposed decisions** (owner to lock; numbered to follow the list above; design §6.2)
+
+17. A user's namespace is stored in `users.namespace`, unique, set once at create; a rename, a
+    restart or a role change never changes it. `GET /v1/me` keeps the field name
+    `defaultNamespace` and reports the stored value.
+18. Assignment: base from the username (email: local part without `+tag`; lowercased; characters
+    outside `[a-z0-9._-]` become `-`; ends trimmed of `.`, `-`, `_`; at most 48; empty is `user`).
+    Taken (another user holds it, it is reserved: `default`, `local`, `operator`, `bootstrap`, or
+    a catalog row under it is owned by another user): `<base>-<6 of [a-z2-7] from a SHA-256 of the
+    user id>`, then 10, then 16 characters. No counter. Never `default` for a new user.
+19. Seed rows keep today's values (`operator`, `local`); marketplace owner rows get none.
+20. Migration on every open, idempotent, never refuses a start: backfill in order of the earliest
+    catalog row each user owns under their old derived namespace, then by `created_at`; first
+    claimant keeps the old value, the others get the suffix; one log line per user moved.
+21. Existing drafts do not move. A member who lost a shared namespace keeps and edits the drafts
+    they own there; new drafts go under the new namespace.
+
+**Scenario delta**
+
+| Scenario | Change | Layer | Given | Why |
+|---|---|---|---|---|
+| `members-with-the-same-email-local-part-get-their-own-namespaces` | new | process | `org-member-same-local-part-north`, `org-member-same-local-part-south` (new), `skill-host-echo`, `agent-member-draft-with-host-echo` | the brief: two colliding usernames each get their own namespace; the second member's save on the first one's URN is the namespace 400, never the owner 403 |
+| `members-whose-names-are-not-slugs-get-namespaces-of-their-own` | new | process | `org-member-name-not-a-slug`, `org-member-name-not-a-slug-other` (new), same agent pieces | decision 18: non-slug names no longer share `default`; each namespace is readable (`ann-…`, `bob-…`) |
+| `member-namespaces-stay-apart-across-a-restart` | new | process | north and south pieces, `agent-member-draft-second` (new) | decisions 17 and 20: the assignment survives a restart (a new URN under the namespace cached before it is still 200) |
+| `email-username-signs-in-in-any-letter-case` | changed: `then.0` `defaultNamespace: ada.lovelace` → `{ matches: '^ada\.lovelace(-[a-z2-7]{6})?$' }` | process | `org-member-email` | **spec change for the owner**: one `vamd` serves the whole run and four scenarios create an `ada.lovelace…` user, so only the first keeps the plain value. Green before and after the phase |
+
+Must stay green: `member-draft-agent-is-private-and-in-the-members-namespace` (its two members
+already have distinct names), `new-user-gets-a-generated-id-it-cannot-choose` (`defaultNamespace`
+equals a unique default username), and every scenario whose piece body uses `{{ns}}`
+(`member-builds-and-runs-own-draft-agent-from-a-released-skill`,
+`member-draft-agent-refuses-a-skill-that-is-not-released`,
+`demoted-publishers-draft-agent-stops-using-their-draft-skill`,
+`member-draft-agent-uses-a-connector-skill-through-the-members-connection`,
+`a-publisher-saves-a-draft-agent-and-runs-it-by-ref`); `--smoke` is the regression guard, because
+every `org` piece now gets a stored namespace.
+
+Proven in Rust, not as scenarios (the harness cannot seed a database, §4.3, and cannot write into
+another identity's namespace under a free name): the migration of an old-schema database
+(`tests/user_identity_migration_tests.rs`: `ann@north` and `ann@south`, `_x` and `-y` on
+`default`, a publisher row under `bob`; first claimant keeps it, the other is suffixed, the log
+line, existing drafts still editable, new drafts under the new value); a free and a taken name in
+another member's namespace give the same 400 (`member_draft.rs`); a rename keeps the namespace;
+two concurrent creates with one base get two namespaces (`api_tests.rs`); the base rule
+(`vam-spec`).
+
+**Benchmark delta:** none.
+
+**Items** (each names the pending scenarios it turns green)
+
+- [x] `UI-3.0` — Wave 0: world pieces `org-member-same-local-part-north`, `…-south`,
+  `org-member-name-not-a-slug`, `…-other`, `agent-member-draft-second`; the three new scenarios as
+  `pending` with `expectFail`; the changed `then` in `email-username-signs-in-in-any-letter-case`.
+  No harness code (`put-draft` `urnOf`, `{{ns}}`, `fields` `matches` and `restart-vamd` exist).
+  Accept: `cargo run -p vam-e2e -- check`; `scripts/e2e/run.sh --scenarios <four> ` gives three
+  red at the `urnOf` step with 403 `only the artifact owner may version this agent`, class
+  `product`, and the changed one green. Turns green: none.
+- [ ] `UI-3.1` — Base rule in `vam-spec` (`origin.rs`): `namespace_base(username)` and
+  `namespace_suffixed(base, user_id, len)`; keep `default_namespace` (callers outside the rule)
+  or make it the base rule's caller. Accept: `cargo test -p vam-spec`, every row of design §6.1,
+  every name in `default_namespace_rules` gives the same value as today when it is a slug.
+  Turns green: none alone.
+- [ ] `UI-3.2` — Store (`users.rs`, `catalog*.rs` read only): column `namespace`, unique partial
+  index `idx_users_namespace`, assignment inside the create transaction for `create_user*`,
+  `bootstrap_first_admin` and seeds (decisions 18, 19), migration in `initialize_users_schema`
+  (decision 20; never an `open` error, §4.2 row 27), log lines from `bin/vamd.rs`,
+  `update_username` leaves it alone, `UserRecord.namespace`. Accept: unit tests (free, reserved,
+  taken by a user, taken by another owner's catalog row, suffix lengths, idempotent migration,
+  order rule, seed values); `tests/user_identity_migration_tests.rs` rows above; concurrent create
+  API test. Turns green: with UI-3.3, all three new scenarios.
+- [ ] `UI-3.3` — Readers: `api/me.rs` reports `UserRecord.namespace` (fallback to today's
+  derivation for a principal with no row); `member_draft.rs` `require_own_namespace` reads the
+  column on the locked connection; `UserAccount.namespace` on `GET /v1/users` (open question 2);
+  proto comments on `GetMeResponse.default_namespace`. Accept: `tests/me_tests.rs`,
+  `member_draft_agents_tests.rs`, `member_draft.rs` tests (free and taken names alike; rename
+  keeps it). Turns green: `members-with-the-same-email-local-part-get-their-own-namespaces`,
+  `members-whose-names-are-not-slugs-get-namespaces-of-their-own`,
+  `member-namespaces-stay-apart-across-a-restart`.
+- [ ] `UI-3.4` — Docs and contract: `orchestrator/member-agents.md` (drop "Known limitation" and
+  its "Not proved here" line; "Saving" step 4 and "Building a client" point 3 say the namespace
+  is the user's own and stable; a "Namespaces" section on assignment and migration, with the log
+  line), `authoring/model.md` namespace paragraph, `orchestrator/user-isolation.md` `/v1/me` row,
+  `getting-started/users-and-roles.md`, `docs/api/openapi.yaml` (`GetMeResponse.defaultNamespace`,
+  `UserAccount.namespace`) and `crates/vam-spec/tests/openapi_yaml.rs`; `proves:` naming the three
+  scenarios and the Rust tests; a `docs-features.yaml` row; `.cursor/workstreams/README.md`
+  backlog row "Member namespace collisions" removed. Accept: `cargo test -p vam-spec`,
+  `cargo run -p vam-e2e -- check`, `pnpm build` in `docs/` when available. Turns green: none
+  (keeps all green).
+
+**Waves**
+
+| Wave | Items | Turns green | Repo | Model | Budget | Depends on | Actions | Status | PR |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 docs | design §6 + this breakdown | — | vam | orchestrator | 30 min | — | none | [x] | this branch |
+| 0 | `UI-3.0` | — (pending, red for the right reason) | vam | Sonnet 5.5 low (YAML and world pieces only) | 45 min | 0 docs | none | [x] | this branch |
+| 1 | `UI-3.1`, `UI-3.2`, `UI-3.3` | the three new scenarios | vam | Sonnet 5.5 high (schema migration of existing users and the member write boundary) | 120 min | 0, owner approval, member-draft-agents released or synced | none | [ ] | |
+| 2 | `UI-3.4` | — (keeps them green) | vam | Sonnet 5.5 medium (OpenAPI test in `vam-spec` plus docs) | 60 min | 1 | none | [ ] | |
+
+**Open questions** (each with a default)
+
+1. Does the suffix ever apply to a user whose base is free, so every namespace looks alike?
+   Default: no; most users keep the readable value they have today.
+2. Show `namespace` to admins on `UserAccount` (`GET /v1/users`)? Default: yes, read only; it is
+   how an admin answers "where are this member's agents".
+3. Should a publisher (`catalog:write`) be refused a new URN under another user's namespace?
+   Default: not in this phase (design §6.3); listed under "Explicitly later".
+4. Who keeps a shared namespace in the migration? Default: the user who owns the earliest catalog
+   row under it, else the oldest user (decision 20). Alternative: nobody keeps it, everyone gets
+   a suffix (simpler, but moves every colliding user, including the one whose drafts are there).
+5. A log line per moved user, or also a notification to the user? Default: the log line only; the
+   member sees the new value on `GET /v1/me`, and their old drafts keep working.
+
+**Phase close:** the three new scenarios active and green, the changed one green; `--full` green
+on the base; release with (or after) member-draft-agents; team checklist out.
+
+**Team checklist — Phase 3** (on a node running the release, as an org admin)
+
+1. Create `ann.lee@north.test` and `ann.lee@south.test` (members). **See:** both 200; as each,
+   `GET /v1/me` `defaultNamespace` is `ann.lee` for the first and `ann.lee-<6 letters or digits>`
+   for the second.
+2. As the second, `PUT /v1/agents` with a new URN under the first one's namespace, then under a
+   name the first one already saved. **See:** both 400 `... (your namespace)`, the same message.
+3. Create `_x@example.test`. **See:** `defaultNamespace` is `x` (or `x-…`), not `default`.
+4. Restart `vamd`, then `vamd --rename-user <id> other@example.test` for the second user and start
+   again. **See:** each `defaultNamespace` unchanged.
+5. On an upgraded node with users that shared a namespace before: start-up log. **See:** one
+   `namespace for user … is now …` line per moved user; their old drafts still open and save.
+
+Report: "Phase 3 pass", or the step number with the error text.
+
 ## Explicitly later
 
 - Must-change-password-on-first-login.
 - Email or SMTP reset; OIDC.
+- Refusing a publisher a new URN under another user's namespace (Phase 3 open question 3).
+- A user-facing rename of one's namespace.
 
 ## Progress log
 
@@ -407,3 +565,4 @@ Report: "Phase 2 pass", or the step number with the error text.
 | 2026-11-14 | 2 | Owner: Q8 yes, Q1–7 defaults. UI-2.5 built from `main` as hotfix #16 (operator only for key id `bootstrap`, `bootstrap` reserved, upgrade revokes keys the old backfill made operator-owned); `--full --release` and all 9 Actions green; awaits the owner's merge. W2 dropped. |
 | 2026-11-14 | 2 | W3 (#17): email-username namespace, OpenAPI, docs, feature row; email scenario active. Scoreboard: 5 green, 0 red, 0 fix cycles. Note: an agent's wait-for-free-build loop matched its own command line and stalled about 2 h; the wait script must not run in the same shell line as `cargo`. |
 | 2026-11-17 | 2 | Owner merged hotfix #16 into `main` (a8cf6ab). `main` merged back (#18): one conflict in `update_username` (kept the base validator); the hotfix's reserved check removed from `validate_user_id` where the merge put it; new test for a first admin with a legacy `usr_` name. `--full` green, 4532 tests, smoke 145/145. **Phase 2 closed in base**: 5/5 scenarios active and green, 0 fix cycles in the phase. Release PR into `main` next. |
+| 2026-11-18 | 3 | Phase 3 opened (one namespace per user, from the member-draft-agents backlog row): design §6, breakdown, proposed decisions 17–21. Branch merges `feat/member-draft-agents` into `main` (41af8b0; 16 hunks in `crates/vam-e2e` and four docs pages; `vam-e2e` tests and `check` green). W0: five world pieces, three new scenarios pending, one `then` changed (spec change for the owner). `run.sh --scenarios` six: 3 red (right reason: 403 `only the artifact owner may version this agent` at the `urnOf` step), 3 pass. Scoreboard: 0 green, 3 red (right reason), 0 fix cycles, about 2 h (disk allowance ran out twice; a full `cargo test -p vam-orchestrator` and the e2e build do not fit together in `target/debug`). |
