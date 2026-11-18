@@ -51,9 +51,9 @@ pub const FILEBOX_MCP_URL: &str = "https://mcp.filebox.example/mcp";
 /// The origin of the `filebox` authorization server (its metadata names it).
 pub const FILEBOX_AUTH_ORIGIN: &str = "https://auth.filebox.example";
 /// Add the `oauth:<https origin>` key to the seam: the discovery fetch, the code exchange and the
-/// refresh at `https://auth.filebox.example` are answered by the filebox mock. Held out until CN-5
-/// wave 2 makes vamd accept the key (a default vamd refuses the whole variable).
-pub const PASS_OAUTH_SEAM: bool = false;
+/// refresh at `https://auth.filebox.example` are answered by the filebox mock. On since CN-5.2 (a
+/// default vamd refuses the whole variable).
+pub const PASS_OAUTH_SEAM: bool = true;
 /// The client ids the filebox provider has registered start with this.
 const FILEBOX_CLIENT_PREFIX: &str = "e2e-filebox-client";
 /// The redirect URI the runner uses when it plays the app.

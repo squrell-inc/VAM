@@ -20,6 +20,7 @@ use crate::error::OrchestratorError;
 use crate::keys::USERS_ADMIN_SCOPE;
 use crate::mcp_registry::mcp_oauth_refresh_token_binding_id;
 use crate::secrets::{vault_owner_user_id, SecretScope};
+use crate::{connector_client, connector_discovery};
 use vam_spec::v1::VamErrorCode;
 
 /// The scope of the connection routes: a member manages their own connection like a secret.
@@ -47,6 +48,7 @@ async fn list_connectors(
     state.pdp.authorize(&auth, "ListConnectors", "node:read")?;
     let cfg = connectors::config();
     let nodes = state.store.node_connectors()?;
+    let clients = state.store.node_clients()?;
     let admin = auth.has_users_admin();
     let list: Vec<Value> = state
         .store
@@ -64,6 +66,8 @@ async fn list_connectors(
                 account.as_deref(),
             );
             connectors::annotate_source(&mut entry, e, admin);
+            let client = clients.iter().find(|c| c.connector_id == id);
+            connector_client::annotate_client(&mut entry, def, client, admin);
             entry
         })
         .collect();
@@ -135,6 +139,8 @@ fn entry_for(
         account.as_deref(),
     );
     connectors::annotate_source(&mut entry, e, auth.has_users_admin());
+    let client = state.store.node_client(&id)?;
+    connector_client::annotate_client(&mut entry, def, client.as_ref(), auth.has_users_admin());
     Ok(entry)
 }
 
@@ -152,20 +158,54 @@ async fn put_node(
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let found = entry_or_404(&state, &id)?;
     let def = found.def.clone();
-    let req: PutNodeRequest = serde_json::from_str(&body)
-        .map_err(|e| OrchestratorError::InvalidContract(format!("connector node body: {e}")))?;
+    let req = parse_put_node(&body)?;
     let cfg = connectors::config();
     let existing = state.store.node_connector(&id)?;
-    // Validated before anything is written: a refused body leaves the state as it was.
+    let existing_client = state.store.node_client(&id)?;
+    let now = connectors::now_secs();
+    // Everything is decided before anything is written: a refused body leaves the state as it was.
     let row = connectors::plan_put(
         &def,
         &cfg,
         existing.as_ref(),
         &req,
-        connectors::now_secs(),
+        now,
         auth.owner_user_id(),
     )?;
-    state.store.put_node_connector(&row)?;
+    let intent =
+        connector_client::check_request(&def, existing_client.as_ref(), req.enabled, &req.client)?;
+    let mcp_url = def.mcp.as_ref().map(|m| m.url.clone()).unwrap_or_default();
+    let discovered = match &intent {
+        connector_client::ClientIntent::Set(_) => {
+            // The node's first fetch of URLs a connector file names: guarded, pinned, bounded.
+            let (url, keeps) = (mcp_url.clone(), connector_client::keeps_secret(&def));
+            let found = tokio::task::spawn_blocking(move || {
+                connector_discovery::discover(&url, keeps, &connector_discovery::GuardedFetcher)
+            })
+            .await
+            .map_err(|_| OrchestratorError::Core("provider discovery task failed".into()))?;
+            Some(found.map_err(|e| match e {
+                connector_discovery::DiscoveryError::Unreachable(why) => OrchestratorError::Mcp(
+                    format!("could not read the provider's OAuth metadata: {why}"),
+                ),
+                connector_discovery::DiscoveryError::Unsuitable(why) => {
+                    OrchestratorError::Conflict(why)
+                }
+            })?)
+        }
+        _ => None,
+    };
+    let plan = connector_client::plan_client(
+        &def,
+        existing_client.as_ref(),
+        intent,
+        discovered,
+        now,
+        auth.owner_user_id(),
+    )?;
+    state
+        .store
+        .put_node_with_client(&state.vault, &row, &plan, &mcp_url)?;
     let (mine, account) = caller_connection_state(&state, &auth, &id, Some(&row));
     let mut entry = connectors::list_entry(&def, &cfg, Some(&row), mine, true);
     connectors::show_account(
@@ -174,7 +214,28 @@ async fn put_node(
         account.as_deref(),
     );
     connectors::annotate_source(&mut entry, &found, true);
+    let client = state.store.node_client(&id)?;
+    connector_client::annotate_client(&mut entry, &def, client.as_ref(), true);
     Ok(json_http_response(StatusCode::OK, entry.to_string()))
+}
+
+/// Parses the body of `PUT /v1/connectors/{id}/node`. A body that carries a `client` may carry the
+/// client secret, and a serde error can quote the value it rejected, so such a body gets a fixed
+/// message.
+fn parse_put_node(body: &str) -> Result<PutNodeRequest, OrchestratorError> {
+    serde_json::from_str(body).map_err(|e| {
+        let has_client = serde_json::from_str::<Value>(body)
+            .ok()
+            .is_some_and(|v| v.get("client").is_some());
+        if has_client {
+            OrchestratorError::InvalidContract(
+                "connector node body must be { enabled[, consent][, client: { clientId[, clientSecret] } | null] }"
+                    .into(),
+            )
+        } else {
+            OrchestratorError::InvalidContract(format!("connector node body: {e}"))
+        }
+    })
 }
 
 fn entry_or_404(
@@ -380,7 +441,7 @@ mod tests {
             ("ada", "member-secret", UserRole::Member),
             ("olga", "orgadmin-secret", UserRole::OrgAdmin),
         ] {
-            store.create_user(user, user).unwrap();
+            store.create_user_with_role(user, user, role).unwrap();
             store
                 .create_api_key_owned(
                     &format!("{user}-key"),
@@ -802,5 +863,376 @@ mod tests {
             .connector_connection("olga", "microsoft-365")
             .unwrap()
             .is_some());
+    }
+    // ---- CN-5.2: Enable with the admin's client ------------------------------------------------
+
+    const SECRET: &str = "ORG-CLIENT-SECRET-zzzzzzzzzzzz";
+
+    /// The `filebox` listing's connector file, on hosts of this test's own (`tag`), installed as a
+    /// marketplace would, with the provider's metadata answered by the discovery test seam.
+    fn install_filebox(store: &SqliteWorkflowStore, tag: &str) {
+        let json = serde_json::json!({
+            "urn": "urn:vam:connector:connectors.community.example/community/filebox",
+            "version": "1.0.0", "displayName": "Filebox", "publisher": "Community Tools Ltd",
+            "description": "Files.", "icon": "filebox",
+            "provider": { "kind": "oauth2", "profile": "discover", "client": "org",
+                          "clientSecret": "org_vault", "scopes": ["read"], "orgConsent": "none" },
+            "connection": { "holder": "user", "multiAccount": false, "label": "whoami.email" },
+            "mcp": { "url": format!("https://mcp.{tag}.example/mcp"),
+                     "tools": [ { "remote": "search_files", "sideEffect": "READ_ONLY" } ] }
+        });
+        let urn = json["urn"].as_str().unwrap().to_string();
+        let c = store.connection.lock().unwrap();
+        c.execute(
+            "INSERT INTO connector_releases (urn, major, minor, patch, digest, spec_bytes, created_at,
+                 updated_at, owner_user_id) VALUES (?1, 1, 0, 0, 'd', ?2, 1, 1, 'system')",
+            rusqlite::params![urn, json.to_string().as_bytes()],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO catalog_origins (kind, urn, major, minor, patch, marketplace_id, listing_id,
+                 git_ref, commit_sha, package_digest, installed_at)
+             VALUES ('connector', ?1, 1, 0, 0, 'm-1', 'filebox-connector', 'filebox-v1', 'c', 'd', 1)",
+            [urn],
+        )
+        .unwrap();
+        crate::connector_discovery::test_seam::answer(
+            &format!("https://mcp.{tag}.example/.well-known/oauth-protected-resource/mcp"),
+            Some(serde_json::json!({
+                "resource": format!("https://mcp.{tag}.example/mcp"),
+                "authorization_servers": [format!("https://auth.{tag}.example")]
+            })),
+        );
+        crate::connector_discovery::test_seam::answer(
+            &format!("https://auth.{tag}.example/.well-known/oauth-authorization-server"),
+            Some(serde_json::json!({
+                "issuer": format!("https://auth.{tag}.example"),
+                "authorization_endpoint": format!("https://auth.{tag}.example/authorize"),
+                "token_endpoint": format!("https://auth.{tag}.example/token"),
+                "revocation_endpoint": format!("https://auth.{tag}.example/revoke"),
+                "code_challenge_methods_supported": ["S256"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post"]
+            })),
+        );
+    }
+
+    fn client_body(id: &str, secret: Option<&str>) -> serde_json::Value {
+        let mut client = serde_json::json!({ "clientId": id });
+        if let Some(s) = secret {
+            client["clientSecret"] = serde_json::json!(s);
+        }
+        serde_json::json!({ "enabled": true, "client": client })
+    }
+
+    fn org_rows(vault: &SecretsVault) -> Vec<crate::secrets::HostSecretMetadata> {
+        vault
+            .list_metadata()
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.binding_id == "connector/filebox/oauth/client-secret")
+            .collect()
+    }
+
+    fn assert_no_secret(what: &str, text: &str) {
+        for needle in [SECRET, &SecretsVault::fingerprint(SECRET)] {
+            assert!(!text.contains(needle), "{needle} in {what}: {text}");
+        }
+    }
+
+    fn org_secret_value(vault: &SecretsVault) -> String {
+        secrecy::ExposeSecret::expose_secret(
+            &vault
+                .decrypt_secret_at(
+                    crate::secrets::SecretScope::Org,
+                    crate::secrets::ORG_OWNER_USER_ID,
+                    "connector/filebox/oauth/client-secret",
+                )
+                .unwrap(),
+        )
+        .clone()
+    }
+
+    fn entry_of<'a>(list: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+        list["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_admin_enables_with_a_client_and_the_secret_is_one_org_connection_row_never_read_back(
+    ) {
+        let (app, store, vault) = app_world();
+        install_filebox(&store, "enable-ok");
+        let put = |who: &'static str, b: serde_json::Value| {
+            let app = app.clone();
+            async move { call(&app, "PUT", "/v1/connectors/filebox/node", who, Some(b)).await }
+        };
+        // Refusals write nothing: no client, no secret, a member, a connector with the
+        // publisher's own client.
+        let (s, b) = put("orgadmin-secret", serde_json::json!({ "enabled": true })).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("client id"), "{b}");
+        let (s, b) = put("orgadmin-secret", client_body("c-1", None)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(b.to_string().contains("secret"), "{b}");
+        let (s, _) = put("member-secret", client_body("c-1", Some(SECRET))).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        let (s, b) = call(
+            &app,
+            "PUT",
+            "/v1/connectors/linear/node",
+            "orgadmin-secret",
+            Some(client_body("c-1", Some(SECRET))),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(b.to_string().contains("client"), "{b}");
+        assert_no_secret("a refusal", &b.to_string());
+        assert_eq!(store.node_connector("filebox").unwrap(), None);
+        assert_eq!(store.node_client("filebox").unwrap(), None);
+        assert!(org_rows(&vault).is_empty());
+
+        // The admin enables: the entry carries the client and the pinned endpoints, no secret.
+        let (s, b) = put("orgadmin-secret", client_body("c-1", Some(SECRET))).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_no_secret("the enable answer", &b.to_string());
+        assert_eq!(b["provider"]["client"], "org");
+        assert_eq!(b["provider"]["clientId"], "c-1");
+        assert_eq!(b["node"]["client"]["clientId"], "c-1");
+        assert_eq!(b["node"]["client"]["secretSet"], true);
+        assert_eq!(
+            b["node"]["client"]["authorizeEndpoint"],
+            "https://auth.enable-ok.example/authorize"
+        );
+        assert_eq!(
+            b["node"]["client"]["tokenEndpoint"],
+            "https://auth.enable-ok.example/token"
+        );
+        assert_eq!(b["node"]["client"]["updatedBy"], "olga");
+        assert_eq!(b["node"]["configured"], true);
+        assert_eq!(b["state"], "connect");
+
+        // Exactly one vault row: org scope, connection kind, pinned to the token endpoint's host.
+        let rows = org_rows(&vault);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].scope, crate::secrets::SecretScope::Org);
+        assert_eq!(rows[0].kind, crate::secrets::SecretKind::Connection);
+        assert_eq!(rows[0].allowed_destinations, ["auth.enable-ok.example"]);
+        assert_eq!(org_secret_value(&vault), SECRET);
+
+        // It is in no listing, for the admin or a member, and the secrets API refuses the row.
+        for who in ["orgadmin-secret", "member-secret", "operator-secret"] {
+            for uri in ["/v1/connectors", "/v1/secrets", "/v1/secrets?scope=org"] {
+                let (s, b) = call(&app, "GET", uri, who, None).await;
+                assert_eq!(s, StatusCode::OK, "{uri} {b}");
+                assert_no_secret(uri, &b.to_string());
+                assert!(!b.to_string().contains("client-secret"), "{uri}: {b}");
+            }
+        }
+        let (s, b) = call(&app, "GET", "/v1/org/secrets", "orgadmin-secret", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_no_secret("/v1/org/secrets", &b.to_string());
+        assert!(!b.to_string().contains("client-secret"), "{b}");
+        let row = "connector/filebox/oauth/client-secret";
+        for (method, uri) in [
+            ("GET", format!("/v1/secrets/{row}")),
+            ("DELETE", format!("/v1/secrets/{row}")),
+            ("DELETE", format!("/v1/secrets/{row}?scope=org")),
+            ("DELETE", format!("/v1/org/secrets/{row}")),
+        ] {
+            let (s, b) = call(&app, method, &uri, "orgadmin-secret", None).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{method} {uri} {b}");
+            assert_no_secret(&uri, &b.to_string());
+        }
+        for uri in ["/v1/secrets", "/v1/org/secrets"] {
+            let (s, b) = call(
+                &app,
+                "PUT",
+                uri,
+                "orgadmin-secret",
+                Some(serde_json::json!({
+                    "bindingId": row, "value": "overwritten", "kind": 2, "scope": 1
+                })),
+            )
+            .await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{uri} {b}");
+        }
+        assert_eq!(org_rows(&vault).len(), 1, "the row survived every attempt");
+        assert_eq!(org_secret_value(&vault), SECRET);
+
+        // A member sees the client but not who saved it.
+        let (_, l) = call(&app, "GET", "/v1/connectors", "member-secret", None).await;
+        let e = entry_of(&l, "filebox");
+        assert_eq!(e["node"]["client"]["clientId"], "c-1");
+        assert_eq!(e["node"]["client"]["secretSet"], true);
+        assert!(e["node"]["client"].get("updatedBy").is_none(), "{e}");
+
+        // Disabled, then enabled again with no client in the request: the client and secret stay.
+        let (s, b) = put("orgadmin-secret", serde_json::json!({ "enabled": false })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["node"]["client"]["secretSet"], true);
+        let (_, l) = call(&app, "GET", "/v1/connectors", "member-secret", None).await;
+        let e = entry_of(&l, "filebox");
+        assert_eq!(e["state"], "askAdmin");
+        assert!(e["node"].get("client").is_none(), "{e}");
+        let (s, b) = put("orgadmin-secret", serde_json::json!({ "enabled": true })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["node"]["client"]["secretSet"], true);
+        assert_eq!(org_rows(&vault).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_discovery_or_an_unusable_answer_writes_nothing() {
+        let (app, store, vault) = app_world();
+        install_filebox(&store, "discover-bad");
+        let put = |b: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                call(
+                    &app,
+                    "PUT",
+                    "/v1/connectors/filebox/node",
+                    "orgadmin-secret",
+                    Some(b),
+                )
+                .await
+            }
+        };
+        let meta_url = "https://auth.discover-bad.example/.well-known/oauth-authorization-server";
+        let good = crate::connector_discovery::test_seam::lookup(meta_url)
+            .unwrap()
+            .unwrap();
+        // The provider does not answer: 502, nothing stored.
+        crate::connector_discovery::test_seam::answer(meta_url, None);
+        crate::connector_discovery::test_seam::answer(
+            "https://auth.discover-bad.example/.well-known/openid-configuration",
+            None,
+        );
+        let (s, b) = put(client_body("c-1", Some(SECRET))).await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        assert_no_secret("an unreachable provider", &b.to_string());
+        // The provider does not offer S256: 409.
+        let mut no_pkce = good.clone();
+        no_pkce["code_challenge_methods_supported"] = serde_json::json!(["plain"]);
+        crate::connector_discovery::test_seam::answer(meta_url, Some(no_pkce));
+        let (s, b) = put(client_body("c-1", Some(SECRET))).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("S256"), "{b}");
+        // A token endpoint on a plain-http or an internal address: 409.
+        for bad in [
+            "http://auth.discover-bad.example/token",
+            "https://127.0.0.1/token",
+        ] {
+            let mut meta = good.clone();
+            meta["token_endpoint"] = serde_json::json!(bad);
+            crate::connector_discovery::test_seam::answer(meta_url, Some(meta));
+            let (s, b) = put(client_body("c-1", Some(SECRET))).await;
+            assert_eq!(s, StatusCode::CONFLICT, "{bad}: {b}");
+        }
+        // A malformed body never echoes the secret it carries.
+        let (s, b) = put(serde_json::json!({
+            "enabled": true, "client": { "clientId": 7, "clientSecret": SECRET }
+        }))
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert_no_secret("a malformed body", &b.to_string());
+        let (s, b) = put(serde_json::json!({ "enabled": true, "client": SECRET })).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert_no_secret("a client that is a string", &b.to_string());
+        assert_eq!(store.node_connector("filebox").unwrap(), None);
+        assert_eq!(store.node_client("filebox").unwrap(), None);
+        assert!(org_rows(&vault).is_empty());
+        assert!(vault.list_metadata().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_new_secret_keeps_members_connected_and_a_new_client_id_or_removal_does_not() {
+        use crate::mcp_registry::{
+            McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
+        };
+        let (app, store, vault) = app_world();
+        install_filebox(&store, "reauth");
+        let put = |b: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                call(
+                    &app,
+                    "PUT",
+                    "/v1/connectors/filebox/node",
+                    "orgadmin-secret",
+                    Some(b),
+                )
+                .await
+            }
+        };
+        let (s, b) = put(client_body("c-1", Some(SECRET))).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // A member is connected.
+        let meta = McpOauthMetadata {
+            resource: "https://mcp.reauth.example/mcp".into(),
+            authorization_server: "https://auth.reauth.example".into(),
+            token_endpoint: "https://auth.reauth.example/token".into(),
+            revocation_endpoint: None,
+            client_id: "c-1".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: None,
+            status: McpOauthStatus::Connected,
+            last_refresh_at: None,
+            last_refresh_error: None,
+        };
+        store
+            .upsert_mcp_connection(
+                crate::secrets::SecretScope::User,
+                "ada",
+                "filebox",
+                "https://mcp.reauth.example/mcp",
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&meta),
+            )
+            .unwrap();
+        let status = || {
+            store
+                .get_mcp_connection(crate::secrets::SecretScope::User, "ada", "filebox")
+                .unwrap()
+                .oauth
+                .unwrap()
+                .status
+        };
+        // A new secret alone, and the same client again: the member stays connected.
+        let (s, b) = put(client_body("c-1", Some("A-NEW-SECRET-yyyyyyyy"))).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(status(), McpOauthStatus::Connected);
+        assert_eq!(org_rows(&vault).len(), 1);
+        let (s, _) = put(client_body("c-1", None)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(status(), McpOauthStatus::Connected);
+        // The row holds the new secret (replaced in place).
+        assert_eq!(org_secret_value(&vault), "A-NEW-SECRET-yyyyyyyy");
+        // A new client id: members must connect again.
+        let (s, b) = put(client_body("c-2", None)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["node"]["client"]["clientId"], "c-2");
+        assert_eq!(status(), McpOauthStatus::NeedsReauth);
+        // Removal: only with a disable; the row goes.
+        let (s, b) = put(serde_json::json!({ "enabled": true, "client": null })).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert_eq!(org_rows(&vault).len(), 1);
+        let (s, b) = put(serde_json::json!({ "enabled": false, "client": null })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(b["node"].get("client").is_none(), "{b}");
+        assert_eq!(b["node"]["configured"], false);
+        assert!(org_rows(&vault).is_empty());
+        assert_eq!(store.node_client("filebox").unwrap(), None);
+        // With no client, Enable is refused again.
+        let (s, b) = put(serde_json::json!({ "enabled": true })).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("client id"), "{b}");
     }
 }
