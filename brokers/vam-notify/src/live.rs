@@ -270,9 +270,11 @@ where
                         // Ack first, before anything slow: Slack resends after 3 s.
                         if let Some(id) = env.get("envelope_id").and_then(Value::as_str) {
                             let ack = json!({ "envelope_id": id }).to_string();
-                            let sent =
-                                tokio::time::timeout(ACK_DEADLINE, ws.send(Message::Text(ack)))
-                                    .await;
+                            let sent = tokio::time::timeout(
+                                ACK_DEADLINE,
+                                ws.send(Message::Text(ack.into())),
+                            )
+                            .await;
                             if !matches!(sent, Ok(Ok(()))) {
                                 tracing::warn!("slack envelope ack failed; closing");
                                 break;
