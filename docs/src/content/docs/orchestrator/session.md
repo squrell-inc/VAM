@@ -11,6 +11,11 @@ proves:
   - oversize-response-with-a-secret-never-reaches-the-guest
   - crates/vam-orchestrator/tests/api_tests.rs
   - crates/vam-orchestrator/tests/workspace_pin_tests.rs
+  - crates/vam-orchestrator/tests/workspace_pin_tests.rs::member_can_pin_own_draft
+  - member-builds-and-runs-own-draft-agent-from-a-released-skill
+  - a-run-with-an-inline-agent-is-refused-and-writes-nothing
+  - a-run-with-an-inline-playbook-is-refused-and-writes-nothing
+  - a-publisher-saves-a-draft-agent-and-runs-it-by-ref
 ---
 
 A **session** is the environment a task runs in: a VM, or a process in process mode. A **run**
@@ -49,7 +54,7 @@ catalog. Proved by `a-run-with-an-inline-agent-is-refused-and-writes-nothing`,
 ## A workspace pins its agent version
 
 A workspace remembers the agent version of its first run, and later runs on it use that version
-(`api/mod.rs:1292-1296`, `catalog_resolve.rs`). Proved by `workspace_pin_tests.rs`.
+(`api/mod.rs:1292-1296`, `catalog_resolve.rs`). A member may pin their own draft; another user's draft is a 404 (`member_can_pin_own_draft`). A draft run of a member's agent uses released parts only; see [Member agents](/orchestrator/member-agents/#running-it). Proved by `workspace_pin_tests.rs` and `member-builds-and-runs-own-draft-agent-from-a-released-skill`.
 
 ## Stop, terminate and cancel
 

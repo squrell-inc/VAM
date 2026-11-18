@@ -1,6 +1,12 @@
 ---
 title: Run Specifications (run.json)
 description: Complete guide to authoring RunSpec files, managing workspaces and threads, and executing multi-turn agent runs.
+status: shipped
+proves:
+  - plain-chat-gets-a-reply
+  - a-run-with-an-inline-agent-is-refused-and-writes-nothing
+  - a-run-with-an-inline-playbook-is-refused-and-writes-nothing
+  - member-builds-and-runs-own-draft-agent-from-a-released-skill
 ---
 
 Read [Authoring model](/authoring/model/) for which agent and playbook a run resolves, and which input keys the host owns. This page is the run file.
@@ -87,11 +93,13 @@ VAM does **not** keep long-running VMs alive between conversation turns. Each ru
 ### 1. Agent Reference (`agentRef`)
 - **`resourceId.urn`**: The URN of the registered `AgentSpec` executing this task.
 - **`version`**: Optional run selection. Set it to run one release of the agent. Omit it to run the agent by the rule in section 1b. Do not write a `digest`. The server records the frozen digest on the run.
+- **Draft agent.** To run your saved draft, set `version` to `{"major": 1, "minor": 0, "patch": 0, "prerelease": "draft"}` (`1.0.0-draft`).
+- **No inline parts.** `POST /v1/runs` refuses `inlineAgent` and `inlinePlaybook` with a 400. Save with `PUT /v1/agents` or `PUT /v1/playbooks` first, then run by reference (`a-run-with-an-inline-agent-is-refused-and-writes-nothing`).
 
 ### 1b. Resolving unversioned refs
 A skill, playbook, policy, or agent `ResourceRef` that **omits `version`** resolves by run type:
 
-- **Draft run.** The ref resolves to the agent owner's draft of that dependency if one exists. Otherwise it resolves to the latest release.
+- **Draft run.** The ref resolves to the agent owner's draft of that dependency if one exists and the owner authors by live role (publisher or above). Otherwise it resolves to the latest release. A member-owned draft uses released parts only; an `X.Y.Z` with no release and any `-draft` ref are a 400. See [Member agents](/orchestrator/member-agents/#running-it).
 - **Release.** Every ref is frozen to a version and digest. A release that depends on a draft-only dependency fails, because a draft cannot be frozen. Publish the dependency first.
 
 A ref with `version` names that release and stays on it. The resolved version and digest are recorded on `resolvedRefs` on the stored run. If nothing can be resolved, run create fails closed.

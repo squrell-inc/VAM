@@ -1,6 +1,11 @@
 ---
 title: Authoring model
 description: The concepts a use-case author needs to write agents, skills, playbooks, and policies that match the catalog VAM actually runs.
+status: shipped
+proves:
+  - crates/vam-orchestrator/tests/api_tests.rs
+  - member-draft-agent-is-private-and-in-the-members-namespace
+  - crates/vam-orchestrator/src/catalog_resolve.rs::member_owned_draft_run_pins_the_latest_release_not_the_owners_draft
 ---
 
 This page is the map for people who write use cases: agents, skills, playbooks, and the policies those agents run under. Field-by-field pages are linked at the end. What follows is the model the catalog enforces today.
@@ -47,7 +52,7 @@ Any other domain is **Other**: it is accepted for agents, playbooks and policies
 
 A node that has not set `VAMD_REGISTRY_DOMAIN` uses `local.vam.dev`, so everything on it is Local. The domain is part of an artifact's identity: changing it later does not rename existing artifacts.
 
-The namespace defaults to your username, lowercased. If that is not a valid URN segment, it is `default`. `GET /v1/me` returns it as `defaultNamespace`. It is a default, not a rule: you may still choose another namespace.
+The namespace defaults to your username, lowercased. If that is not a valid URN segment, it is `default`. `GET /v1/me` returns it as `defaultNamespace`. For an agent a **member** creates, it is the rule: a new agent URN outside it is a 400. A member's edit of their own draft skips the check. Anyone who can write the catalog (`catalog:write`) may choose another namespace. See [Member agents](/orchestrator/member-agents/#saving).
 
 Write use cases on a **local** domain, or on your org's registry domain. `local.vam.dev` is the one the examples use. Restrictions that are enforced:
 
@@ -108,7 +113,7 @@ A digest without a version is rejected.
 
 Resolution:
 
-- **Draft run.** A floating reference uses the agent owner's draft of that dependency when one exists. Otherwise it uses the latest release. Another user's draft is never used.
+- **Draft run.** A floating reference uses the agent owner's draft of that dependency when one exists and the owner authors by live role (publisher, org admin, operator, or the bootstrap key). Otherwise it uses the latest release. Another user's draft is never used. When a member owns the agent, the run uses released parts only: a floating ref is the latest release, an `X.Y.Z` with no release and any `-draft` ref are refused. See [Member agents](/orchestrator/member-agents/#running-it).
 - **Release.** Every reference is frozen to a version and a digest inside the released spec. A draft-only dependency cannot be frozen, so release fails.
 - **A run of a released version** uses those frozen pins.
 

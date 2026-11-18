@@ -8,6 +8,8 @@ proves:
   - member-key-minted-with-catalog-write-cannot-write-the-catalog
   - crates/vam-orchestrator/src/inbox.rs::queued_publisher_key_starts_with_member_scopes_after_demotion
   - member-chats-with-a-released-agent
+  - member-builds-and-runs-own-draft-agent-from-a-released-skill
+  - crates/vam-orchestrator/tests/key_scope_mode_tests.rs
   - a-run-with-an-inline-agent-is-refused-and-writes-nothing
   - a-run-with-an-inline-playbook-is-refused-and-writes-nothing
   - a-publisher-saves-a-draft-agent-and-runs-it-by-ref
@@ -26,7 +28,7 @@ the owner filter covers.
 ## Users and roles
 
 The database starts with two users: `operator` (the bootstrap key) and `local` (the implicit
-owner when there is one user). Each user has one role: `operator`, `org_admin`, `publisher` or
+owner when there is one user). `local` is a member, so its draft agents run on released parts only. Each user has one role: `operator`, `org_admin`, `publisher` or
 `member`; member is the default. A role sets the scopes of the user's sessions and keys, and a key follows the user's live
 role: a key minted with no scope list follows it up and down, a key minted with a list is capped
 by it (and never widened past the list), and the bootstrap key keeps its scopes. A queued
@@ -35,13 +37,32 @@ The first admin is created from the command line, with `vamd --bootstrap-admin` 
 `VAMD_BOOTSTRAP_ADMIN_PASSWORD`; there is no sign-up route and no OIDC. For the steps, read
 [Users and roles](/getting-started/users-and-roles/).
 
+## Roles and default scopes
+
+A key minted with no scope list gets these (`keys.rs:41-95`). The bootstrap key has the operator list.
+Only a catalog writer has `catalog:write`, and `catalog:write` never implies `publish:grant`.
+
+| Scope | operator | org_admin | publisher | member |
+|---|---|---|---|---|
+| `keys:admin`, `brokers:admin` | yes | no | no | no |
+| `users:admin` | yes | yes | no | no |
+| `catalog:write` | yes | yes | yes | no |
+| `publish:grant` | yes | yes | yes | no |
+| `agents:draft` | yes | yes | yes | yes |
+| `sessions:write`, `runs:write`, `approvals:write`, `notifications:read`, `notifications:write`, `node:read`, `secrets:write` | yes | yes | yes | yes |
+
+The bootstrap key also holds all of the above. A draft agent runs on released parts only when
+the agent row's owner is a member; the operator bootstrap owner always authors. The member rules
+are on [Member agents](/orchestrator/member-agents/). Proved by
+`member-builds-and-runs-own-draft-agent-from-a-released-skill` and `key_scope_mode_tests.rs`.
+
 ## Login and keys
 
 | Call | Route | Notes |
 |---|---|---|
 | Login | `POST /v1/login`, `/v1/login/refresh`, `/v1/logout` | Username and password give a short session token and a refresh token (`api/mod.rs:98-100`). |
-| Who am I | `GET /v1/me` | Any authenticated caller gets `userId`, `username`, `role` and the bearer's scopes. A deactivated user or revoked key is a 401 (`api/me.rs`). |
-| API keys | `POST`, `GET /v1/keys`, `DELETE /v1/keys/{id}` | Keys bind to a user when minted. A key's scopes follow the user's live role (see Users and roles); the listing shows the list the key was minted with and `GET /v1/me` the effective one. Release needs `publish:grant` on the key. List and revoke are per user; `keys:admin` sees every `http` key. A grant issued to a broker (`?holder=broker\|all`) is listed and revoked by its owner only, and an HTTP bearer never accepts one (401). |
+| Who am I | `GET /v1/me` | Any authenticated caller gets `userId`, `username`, `role`, `registryDomain`, `defaultNamespace`, `marketplaceDomain` and the bearer's effective scopes (the live role applied). A deactivated user or revoked key is a 401 (`api/me.rs`). |
+| API keys | `POST`, `GET /v1/keys`, `DELETE /v1/keys/{id}` | Keys bind to a user when minted. A key's scopes follow the user's live role (see Users and roles); the listing shows the list the key was minted with and `GET /v1/me` the effective one. Release needs `catalog:write`, `publish:grant` and ownership of the row. List and revoke are per user; `keys:admin` sees every `http` key. A grant issued to a broker (`?holder=broker\|all`) is listed and revoked by its owner only, and an HTTP bearer never accepts one (401). |
 | Users | `POST`, `GET /v1/users`, `deactivate`, `password`, `keys` under `/v1/users/{id}` | Scope `users:admin`. A password reset revokes session tokens and keeps API keys; deactivate revokes both. |
 | Publish grant | `DELETE /v1/users/{id}/publish-grant` | Moves a publisher back to member. |
 | Reassign | `POST /v1/catalog/reassign-owner` | Moves catalog ownership; released versions stay released. |

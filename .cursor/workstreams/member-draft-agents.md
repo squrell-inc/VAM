@@ -204,7 +204,7 @@ Phase 1's (`promotion-widens-a-default-key-but-not-a-narrowed-one`,
 
 **Items**
 
-- [ ] `MD-4.1` — **New page `orchestrator/member-agents.md` ("Member agents"),
+- [x] `MD-4.1` — **New page `orchestrator/member-agents.md` ("Member agents"),
   the frontend handoff in it.** Sidebar: `docs/astro.config.mjs:151`, one
   entry `{ label: 'Member agents', slug: 'orchestrator/member-agents' }` after
   Catalog. Frontmatter `status: shipped`, `proves:` the 11 scenarios above and
@@ -301,7 +301,7 @@ Phase 1's (`promotion-widens-a-default-key-but-not-a-narrowed-one`,
   otherwise request bodies and the message table, no pasted answers.
   **Accept:** `vam-e2e check` clean, `pnpm build` green, the page in the
   sidebar. `Decide: NOW — proof 3 (launch proof "a member builds their own agent" needs its client), cost 1.`
-- [ ] `MD-4.2` — **Roles, scopes and keys.** `getting-started/users-and-roles.md`:
+- [x] `MD-4.2` — **Roles, scopes and keys.** `getting-started/users-and-roles.md`:
   profile rows for publisher and member (`:65-66`), the key paragraph (`:68`:
   `agents:draft`, role-mode vs explicit keys with one example each, release
   needs `catalog:write` + `publish:grant` + ownership), the two "Control plane
@@ -313,7 +313,7 @@ Phase 1's (`promotion-widens-a-default-key-but-not-a-narrowed-one`,
   their `proves:` and add `member-builds-and-runs-own-draft-agent-from-a-released-skill`,
   `crates/vam-orchestrator/tests/key_scope_mode_tests.rs`.
   **Accept:** `vam-e2e check` clean. `Decide: NOW — proof 2, cost 0.`
-- [ ] `MD-4.3` — **Catalog, sessions, permissions, API, daemon.**
+- [x] `MD-4.3` — **Catalog, sessions, permissions, API, daemon.**
   `orchestrator/catalog.md` (routes table gains a "Who writes" column; the
   drafts paragraph says members own draft agents; release needs
   `catalog:write`, `publish:grant`, ownership; link), `orchestrator/session.md`
@@ -326,7 +326,7 @@ Phase 1's (`promotion-widens-a-default-key-but-not-a-narrowed-one`,
   `member_draft.rs::cap_parses_a_positive_number_else_the_default`,
   `member-draft-agent-is-private-and-in-the-members-namespace`).
   **Accept:** `vam-e2e check` clean. `Decide: NOW — proof 2, cost 0.`
-- [ ] `MD-4.4` — **Authoring and CLI pages; each leaves the docs baseline.**
+- [x] `MD-4.4` — **Authoring and CLI pages; each leaves the docs baseline.**
   `authoring/model.md` (`:50` namespace, `:111` resolution),
   `authoring/agent-spec.md` (`:135`, `:225`, `:276`; a member note under
   "Registering an Agent", `:357-375`), `authoring/run-spec.md` (`:94`; inline
@@ -360,14 +360,14 @@ Phase 1's (`promotion-widens-a-default-key-but-not-a-narrowed-one`,
   listed in the PR for the orchestrator, not rewritten (open question 1).
   **Accept:** `vam-e2e check` clean with 24 baseline lines.
   `Decide: NOW — proof 2 (stale security-relevant claims), cost 1.`
-- [ ] `MD-4.5` — **OpenAPI descriptions** (`docs/api/openapi.yaml`, text only,
+- [x] `MD-4.5` — **OpenAPI descriptions** (`docs/api/openapi.yaml`, text only,
   no new path or schema): `PUT /v1/agents` (`:1431-1465`) says who may call
   it, the member rules in one paragraph with a link, and adds 400, 403 and 409
   responses (`ApiError`); `MeResponse.scopes` (`:3923-3926`) and
   `CreateApiKeyRequest.scopes` (`:4094`) say the scopes follow the live role.
   **Accept:** `cargo test -p vam-spec --test openapi_yaml`.
   `Decide: NOW — proof 2 (the frontend reads it), cost 0.`
-- [ ] `MD-4.6` — **Feature register.** Three rows in `e2e/docs-features.yaml`
+- [x] `MD-4.6` — **Feature register.** Three rows in `e2e/docs-features.yaml`
   (rule: a feature gets its row when its lane reaches the base):
   `member-draft-agents` (area "Agents and specs"; surface `agents:draft`,
   `PUT /v1/agents` and `PUT /v1/agents/{urn}/permissions` as a member,
@@ -380,7 +380,7 @@ Phase 1's (`promotion-widens-a-default-key-but-not-a-narrowed-one`,
   ("Agents and specs"; dev `getting-started/cli`, arch `orchestrator/session`;
   proves the three Phase 2 scenarios). **Accept:** `check` prints
   `features: 107`. `Decide: NOW — proof 1, cost 0.`
-- [ ] `MD-4.7` — **Stale mentions outside the site.**
+- [x] `MD-4.7` — **Stale mentions outside the site.**
   `examples/bun-assistant/README.md:48`; and, if open question 2 is taken, the
   hint in `crates/vam-cli/src/cmd/run.rs:412-422` per file (`agent.json`:
   "needs agents:draft (an agent in your namespace from released parts) or
@@ -392,7 +392,7 @@ Phase 1's (`promotion-widens-a-default-key-but-not-a-narrowed-one`,
 
 | Wave | Items | Turns green | Repo | Model | Budget | Depends on | Actions | Status | PR |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | `MD-4.1` … `MD-4.7` | — (no scenario delta; `vam-e2e check` clean with 24 baseline lines and 107 features, `pnpm build` green) | vam | Sonnet 5.5 medium: about 15 files in three areas (site, OpenAPI, feature register, one CLI string); every security sentence names a proof and every message is copied exactly from the code; no behaviour change | 120 min | — | `docs` (`vam-e2e check`, `pnpm build`); with the CLI hint also `rust.yml` fast jobs and smoke (`skip-vm-lane`) | [ ] | |
+| 1 | `MD-4.1` … `MD-4.7` | — (no scenario delta; `vam-e2e check` clean with 24 baseline lines and 107 features, `pnpm build` green) | vam | Sonnet 5.5 medium: about 15 files in three areas (site, OpenAPI, feature register, one CLI string); every security sentence names a proof and every message is copied exactly from the code; no behaviour change | 120 min | — | `docs` (`vam-e2e check`, `pnpm build`); with the CLI hint also `rust.yml` fast jobs and smoke (`skip-vm-lane`) | [x] built on `feat/member-draft-agents-docs`, not pushed | |
 
 Wave checks: `cargo run -p vam-e2e -- check`; `cargo test -p vam-e2e --test docs_check`
 (`repo_docs_are_honest`); `cargo test -p vam-spec --test openapi_yaml`;
@@ -484,3 +484,4 @@ Report: "Phase 4 pass", or the step number with what is missing.
 | 2026-11-18 | 3 W2 | Wave 2 on `feat/member-draft-agents-released-runs`: `ResolveMode::ReleasedOnly` follows the live role (`owner_authors`, `draft_mode_for_owner`, `caller_ref_mode` in `catalog_resolve.rs`; bootstrap owner always authors; missing users row is a Member): a draft run whose agent row's owner (the draft row, not a release row) does not author is released-only in record, session start, explain and check; a Member's caller-supplied refs (run `playbook_ref`, grant playbook) are released-only, a released agent keeps its frozen refs. `permissions.advanced` pins recorded in every mode and loaded by pin; boot refuses a recorded draft pin once released-only (`require_no_draft_pins`, `load_advanced_policy`, legacy pinned policy, `resolve_one_skill_ref`); no-pin policy loads (advanced and legacy) take the latest release outside Draft mode; the permissions view uses `run_resolve_context` and keys `owner_draft_run` on a draft. Test fixtures promoted to Publisher: `store_with_alice_skill` (3 tests) and `foreign_draft_playbook_pin_is_rejected_for_bob_not_alice_or_operator`. Scoreboard: demotion scenario green (flipped `active`), other 4 member-draft and the 11 re-run scenarios green (16/16, the Microsoft-mock ones too); 0 scenario fix cycles, 1 test-fixture fix cycle; unit and integration tests green; ~3h. |
 | 2026-11-18 | 3 | **Phase 3 closed.** Merged #42 (wave 0), #45 (wave 1), #49 (wave 2) into `feat/member-draft-agents` (plan #38). Scoreboard: all 5 scenarios active and green in Actions, 0 red; the re-run list green; 2 scenario fix cycles (W0, W1), 1 test-fixture cycle (W2); ~5h across the three waves. Next: Phase 4 (docs and frontend handoff). |
 | 2026-11-18 | 4 | Phase 4 breakdown drafted: no scenario delta, one docs wave (MD-4.1 to MD-4.7: new page `orchestrator/member-agents` with the frontend handoff, roles and keys, catalog, sessions, permissions, five pages leave the docs baseline, OpenAPI descriptions, three feature-register rows, the CLI hint); waiting for owner approval |
+| 2026-11-18 | 4 W1 | Wave 1 on `feat/member-draft-agents-docs`: new page `orchestrator/member-agents` (rules, message table with code lines, client guide, known limitation, design notes) and sidebar entry; roles and scopes table in `user-isolation`; `users-and-roles`, `catalog`, `session`, `permissions`, `api`, `overview` (`VAMD_MEMBER_DRAFT_AGENTS_MAX` row) updated; five pages (`model`, `agent-spec`, `run-spec`, `playbook-spec`, `cli`) now `status: shipped` with `proves:` and left the baseline; OpenAPI text only (`PUT /v1/agents` auth, member rules, 400/403/409; `MeResponse.scopes`, `CreateApiKeyRequest.scopes`); CLI save-refused hint per file with a unit test; bun-assistant README. Scoreboard: 15 pages touched plus OpenAPI, README and `run.rs`; baseline lines 29 to 24; features 104 to 107; `vam-e2e check`, `docs_check`, `openapi_yaml`, `pnpm build`, fmt, clippy and `cargo test -p vam-cli` green; 1 fix cycle (session page `proves:`), plus one test fix; ~10 min. |

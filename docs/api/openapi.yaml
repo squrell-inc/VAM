@@ -1430,7 +1430,18 @@ paths:
                 $ref: "#/components/schemas/ListAgentsResponse"
     put:
       summary: Register or update an Agent
-      description: Create or update an Agent specification catalog entry.
+      description: |
+        Create or update the caller's draft of an Agent specification.
+
+        Needs `catalog:write` or `agents:draft` in the caller's effective scopes. A caller with
+        `catalog:write` saves with no extra rules. A caller with `agents:draft` and not
+        `catalog:write` (a member) saves under the member rules: the spec may not carry
+        `capabilityPolicy`, `hitlPolicy`, `instructionArtifact`, `extends`, `overlay` or
+        `completionPolicy.evaluatorRefs`; every skill, playbook and policy ref must be a released
+        version; a new URN must be under `urn:vam:agent:<registryDomain>/<defaultNamespace>/` (both
+        from `GET /v1/me`); another user's URN is a 403; and a member keeps at most
+        `VAMD_MEMBER_DRAFT_AGENTS_MAX` (default 50) draft agents. The exact messages
+        are on the Member agents page of the docs site (orchestrator/member-agents).
       parameters:
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
       requestBody:
@@ -1463,6 +1474,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PutAgentResponse"
+        "400":
+          description: The spec is invalid, or it breaks a member rule (a refused field, a ref that is not released, a URN outside the member's namespace).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller holds neither `catalog:write` nor `agents:draft`, or another user owns the URN.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: A member already keeps the most draft agents `VAMD_MEMBER_DRAFT_AGENTS_MAX` allows and this URN is new.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 
   /v1/agents/{urn}:
     get:
@@ -3923,7 +3952,7 @@ components:
           type: array
           items:
             type: string
-          description: Scopes on this bearer (session role defaults, or the API key's minted set)
+          description: The effective scopes of this bearer. They follow the live role of the user (a key's stored list is capped by it).
         registryDomain:
           type: string
           description: This node's registry domain, the org's URN domain. `local.vam.dev` when unconfigured (`VAMD_REGISTRY_DOMAIN`).
@@ -4091,7 +4120,7 @@ components:
           type: array
           items:
             type: string
-          description: "Requested scopes. Empty = owner's role defaults. `catalog:write` does not imply `publish:grant`. Tenant owners never receive keys:admin or brokers:admin."
+          description: "Requested scopes. Empty follows the owner's live role; a list is capped by the live role. `catalog:write` does not imply `publish:grant`. Tenant owners never receive keys:admin or brokers:admin."
           example: ["runs:write", "sessions:write", "catalog:write", "approvals:write", "node:read"]
         idempotencyKey:
           type: string
