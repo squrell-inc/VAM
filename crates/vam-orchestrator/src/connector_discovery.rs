@@ -127,7 +127,7 @@ pub fn discover(
 ) -> Result<Discovered, DiscoveryError> {
     let started = Instant::now();
     let mcp = check_endpoint(mcp_url, "connector's MCP URL")?;
-    let issuer = protected_resource_issuer(&mcp, fetcher, started)?;
+    let issuer = protected_resource_issuer(mcp_url, &mcp, fetcher, started)?;
     let meta = authorization_server_metadata(&issuer, fetcher, started)?;
     let found = pin_endpoints(&issuer, &meta, keeps_secret)?;
     // Fail now, with the secret not yet stored, if the token host is not a public one.
@@ -145,10 +145,19 @@ fn out_of_time(started: Instant) -> Result<(), DiscoveryError> {
     Ok(())
 }
 
+/// The RFC 8414 well-known URL of an issuer with `path`: a terminating `/` of the path is removed
+/// before the suffix is inserted (RFC 8414 §3.1).
 fn well_known(base: &Url, suffix: &str, path: &str) -> Result<Url, DiscoveryError> {
+    well_known_exact(base, suffix, path.trim_end_matches('/'))
+}
+
+/// The well-known URL with `path` inserted unchanged after the suffix. RFC 9728 §3.1 inserts the
+/// suffix between the host and the resource's path as it is: only a path that is just `/` (an
+/// origin) loses its slash, so `/mcp/` stays `/mcp/`.
+fn well_known_exact(base: &Url, suffix: &str, path: &str) -> Result<Url, DiscoveryError> {
     let mut u = base.clone();
     u.set_query(None);
-    let path = path.trim_end_matches('/');
+    let path = if path == "/" { "" } else { path };
     u.set_path(&format!("/.well-known/{suffix}{path}"));
     Ok(u)
 }
@@ -162,14 +171,18 @@ fn well_known(base: &Url, suffix: &str, path: &str) -> Result<Url, DiscoveryErro
 /// difference accepted is an empty path against `/` on an identifier that is only an origin, which
 /// RFC 3986 §6.2.3 makes the same URI for `https` (`https://h` and `https://h/`).
 fn protected_resource_issuer(
+    configured: &str,
     mcp: &Url,
     fetcher: &dyn MetadataFetcher,
     started: Instant,
 ) -> Result<String, DiscoveryError> {
-    // The query is part of the resource identifier (RFC 9728 §3.1): the resource-specific
-    // well-known URL keeps it after the inserted path, and the document must name it.
-    let identifier = mcp.as_str().to_string();
-    let mut specific = well_known(mcp, "oauth-protected-resource", mcp.path())?;
+    // The resource identifier is the connector's MCP URL as configured (and validated), which is
+    // also the `resource` the node sends in token requests (RFC 8707). The parsed URL is only for
+    // the fetch: a parser normalizes it (it drops `:443`, lowercases the host), and the document must
+    // name the identifier itself (RFC 9728 §3.3). The query is part of the identifier (§3.1): the
+    // resource-specific well-known URL keeps it after the inserted path.
+    let identifier = configured.to_string();
+    let mut specific = well_known_exact(mcp, "oauth-protected-resource", mcp.path())?;
     specific.set_query(mcp.query());
     let root_identifier = format!("{}://{}", mcp.scheme(), mcp.host_str().unwrap_or_default());
     let mut candidates = vec![(specific, identifier)];
@@ -662,9 +675,12 @@ mod tests {
             );
             assert_eq!(f.asked.borrow().len(), 1, "{resource}");
         }
-        // A connector configured with the trailing slash must be named with it.
+        // A connector configured with the trailing slash must be named with it, and its metadata
+        // is looked up with the slash kept (RFC 9728 §3.1 inserts the suffix before the path as it
+        // is): only the preserved path is served here.
         let with_slash = "https://mcp.box.example/mcp/";
-        let f = with(fake(), PRM_URL, prm());
+        let slash_url = "https://mcp.box.example/.well-known/oauth-protected-resource/mcp/";
+        let f = Fake::new(&[(slash_url, prm()), (AS_URL, asm())]);
         assert!(
             matches!(
                 discover(with_slash, true, &f),
@@ -674,8 +690,27 @@ mod tests {
         );
         let mut doc = prm();
         doc["resource"] = json!(with_slash);
-        let f = with(fake(), PRM_URL, doc);
+        let f = Fake::new(&[(slash_url, doc), (AS_URL, asm())]);
         assert!(discover(with_slash, true, &f).is_ok());
+        assert_eq!(f.asked.borrow()[0], slash_url);
+    }
+
+    #[test]
+    fn the_resource_is_compared_as_configured_not_as_a_parser_spells_it() {
+        // `:443` is the default port: a URL parser drops it, but it is part of the identifier the
+        // connector names, so the document must name it as configured.
+        let configured = "https://mcp.box.example:443/mcp";
+        let mut doc = prm();
+        doc["resource"] = json!(configured);
+        let f = with(fake(), PRM_URL, doc);
+        assert!(discover(configured, true, &f).is_ok());
+        assert_eq!(f.asked.borrow()[0], PRM_URL);
+        // The parser's spelling is not the configured identifier.
+        let f = with(fake(), PRM_URL, prm());
+        assert!(matches!(
+            discover(configured, true, &f),
+            Err(DiscoveryError::Unsuitable(_))
+        ));
     }
 
     #[test]
