@@ -164,3 +164,22 @@ fn openapi_has_agent_draft_permissions() {
     }
     assert!(doc["components"]["schemas"]["AgentPermissions"].is_mapping());
 }
+
+#[test]
+fn openapi_has_permissions_migrate() {
+    let doc = load();
+    let post = &doc["paths"]["/v1/agents/{urn}/permissions/migrate"]["post"];
+    assert!(post.is_mapping(), "missing POST permissions/migrate");
+    for code in ["200", "400", "403", "404", "409"] {
+        assert!(post["responses"][code].is_mapping(), "missing {code}");
+    }
+    let params = post["parameters"].as_sequence().unwrap();
+    assert!(params
+        .iter()
+        .any(|p| p["$ref"].as_str() == Some("#/components/parameters/IdempotencyKeyHeader")));
+    assert!(params.iter().any(|p| p["name"].as_str() == Some("force")));
+    let report = &doc["components"]["schemas"]["PermissionsMigrationReport"];
+    for field in ["converted", "keptAdvanced", "unmapped", "behaviourChanges"] {
+        assert!(report["properties"][field].is_mapping(), "missing {field}");
+    }
+}

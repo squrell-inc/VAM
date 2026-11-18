@@ -1593,6 +1593,69 @@ paths:
         "503":
           description: The node is not ready or is draining.
 
+  /v1/agents/{urn}/permissions/migrate:
+    post:
+      summary: Migrate a legacy agent draft to permissions
+      description: |
+        Convert the caller's own draft from `capabilityPolicy` and `hitlPolicy`
+        to a `permissions` block, store it as a new draft revision, and drop the
+        two legacy fields. Requires `catalog:write` and an `Idempotency-Key`
+        header, the same as `PUT /v1/agents/{urn}/permissions`. Members do not
+        have `catalog:write` by default and get 403. Only the owner may migrate:
+        another user's draft is 404, including for `users:admin`. The request
+        body is ignored.
+
+        The new block starts from tool default `deny` and internet default
+        `deny`. Each tool the capability Cedar decides becomes a tool rule on
+        its canonical target. A tool in `hitlPolicy.monitoredTools`
+        becomes `ask`, unless it was denied. Hosts the agent's skill secrets
+        already allowed become internet `allow` rules. A capability policy with
+        statements that are not tool-list rules stays attached on
+        `permissions.advanced`. A declared policy missing from the catalog falls
+        back to the builtin defaults and is reported in `behaviourChanges`.
+
+        A legacy tool name that maps to no target is a 409, and nothing is
+        written. With `force=true` (or `1`) those names are dropped and listed
+        in `unmapped`.
+      parameters:
+        - name: urn
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "urn:vam:agent:local.vam.dev/acme/jira"
+        - name: force
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["true", "1"]
+          description: Drop unmapped tool names instead of answering 409. Any other value is false.
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "200":
+          description: Draft migrated. The report says what was converted and what changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionsMigrationReport"
+        "400":
+          description: |
+            No `Idempotency-Key` header, the agent URN is empty, the draft has
+            no `resourceId`, or the capability policy's Cedar does not parse.
+            Nothing is written.
+        "403":
+          description: The caller lacks `catalog:write`.
+        "404":
+          description: No draft of this agent, or the draft belongs to another user.
+        "409":
+          description: |
+            The draft does not use `capabilityPolicy` or `hitlPolicy` (nothing to
+            migrate), or some legacy tool names map to no target and `force` was
+            not set. The message lists the unmapped names. The draft is not changed.
+        "503":
+          description: The node is not ready or is draining.
+
   /v1/agents/{urn}/permissions/effective:
     get:
       summary: Effective permissions of an agent
@@ -4734,6 +4797,35 @@ components:
           type: integer
         permissions:
           $ref: "#/components/schemas/AgentPermissions"
+
+    PermissionsMigrationReport:
+      type: object
+      description: Result of `POST /v1/agents/{urn}/permissions/migrate`.
+      required: [converted, keptAdvanced, unmapped, behaviourChanges]
+      properties:
+        converted:
+          type: array
+          description: Canonical targets that received a tool rule.
+          items:
+            type: string
+        keptAdvanced:
+          type: array
+          description: Capability-policy URNs kept on `permissions.advanced`.
+          items:
+            type: string
+        unmapped:
+          type: array
+          description: Legacy tool names that mapped to no target. Non-empty only with `force`; they were dropped.
+          items:
+            type: string
+        behaviourChanges:
+          type: array
+          description: |
+            Plain-language notes on meaning the rules do not carry by themselves.
+            Always includes the note that internet is limited to the sites the
+            agent's secrets already allowed.
+          items:
+            type: string
 
     ListAgentsResponse:
       type: object
