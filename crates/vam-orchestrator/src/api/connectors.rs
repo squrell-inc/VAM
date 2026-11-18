@@ -3243,6 +3243,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_exchanges_failed_listing_leaves_the_mark_of_a_client_changed_and_changed_back() {
+        use crate::mcp_registry::{McpOauthStatus::NeedsReauth, TOOLS_PENDING_REASON};
+        let tools_ok = Arc::new(AtomicBool::new(false));
+        let n = xchg_node_with("xchg-aba-listing", tools_ok.clone());
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // The exchange commits the sign-in tools-pending; this is the row and the credential
+        // generation its adoption holds while `tools/list` is in flight.
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        let committed = row_of(&n, "ada");
+        assert_eq!(
+            committed
+                .oauth
+                .as_ref()
+                .unwrap()
+                .last_refresh_error
+                .as_deref(),
+            Some(TOOLS_PENDING_REASON)
+        );
+        let generation = crate::host_tools::lock_mcp_credentials(&n.store, &committed)
+            .await
+            .unwrap()
+            .generation_handle();
+        let policy = n.store.mcp_policy("filebox").unwrap().unwrap();
+        // Meanwhile the admin changes c-1 to c-2 and back: the member's credential generation is
+        // unchanged, but the row now carries the admin's reconnect mark.
+        let (s, b) = put_client(&n, "c-2", Some("OTHER-SECRET-qqqqqqqqqqqq")).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let marked = row_of(&n, "ada");
+        assert_eq!(marked.oauth.as_ref().unwrap().status, NeedsReauth);
+        assert_ne!(
+            marked.oauth.as_ref().unwrap().last_refresh_error.as_deref(),
+            Some(TOOLS_PENDING_REASON)
+        );
+        // The exchange's listing fails now: a 409, and the admin's mark is not replaced by the
+        // tools-pending mark the tools-refresh route would finish.
+        let e = super::super::mcp_connections::adopt_tools_and_reconnect(
+            &n.state,
+            &committed,
+            &policy,
+            &generation,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT, "{}", e.message);
+        assert_eq!(row_of(&n, "ada").oauth, marked.oauth);
+        // So the tools-refresh route does not adopt the old sign-in.
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh?scope=user",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{b}");
+        assert_eq!(row_of(&n, "ada").oauth, marked.oauth);
+    }
+
+    #[tokio::test]
     async fn an_adoption_clears_instructions_the_server_no_longer_sends() {
         let n = xchg_node("xchg-instructions");
         let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
