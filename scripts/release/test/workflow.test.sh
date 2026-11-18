@@ -134,6 +134,10 @@ cat > "$t_tmp/m/release-build.yml" <<YAML
 name: Release build
 on:
   workflow_call:
+    inputs:
+      version: {type: string}
+      commit: {type: string}
+      channel: {type: string}
   pull_request:
     paths: ["scripts/release/**"]
   schedule:
@@ -174,6 +178,112 @@ s = open(d + "/rb.yml").read()
 open(d + "/release-build.yml", "w").write(s.replace("      - run: echo build\n", "      - run: echo build\n        env:\n          K: ${{ secrets.K }}\n"))
 PY
 expect_fail "a build job reading a secret" "references secrets" "$check" "$t_tmp/m/release-build.yml"
+
+echo "release.yml calls the reusable build"
+rel_fails "no build job" "no build job" "  build:
+    name: build" "  buildx:
+    name: build"
+rel_fails "a build calling another workflow" "must call ./.github/workflows/release-build.yml" "    uses: ./.github/workflows/release-build.yml" "    uses: ./.github/workflows/rust.yml"
+rel_fails "a build on the dev channel" "must pass channel: release" "      channel: release" "      channel: dev"
+rel_fails "a build with write permissions" "write permissions; only publish may" "    permissions:
+      contents: read
+    uses:" "    permissions:
+      contents: write
+    uses:"
+rel_fails "a build with more than contents: read" "build permissions must be exactly contents: read" "    permissions:
+      contents: read
+    uses:" "    permissions:
+      contents: read
+      actions: read
+    uses:"
+rel_fails "a build passing secrets" "passes no secrets" "      channel: release" "      channel: release
+    secrets: inherit"
+
+echo "release-build.yml (the real file)"
+expect_ok "release-build.yml passes" "$check" "$wf/release-build.yml"
+rb_fails() {
+  local name="$1" pat="$2"; shift 2
+  if ! out="$(mutate release-build.yml "$wf/release-build.yml" "$@" 2>&1)"; then bad "$name (test is stale)" "$out"; return; fi
+  expect_fail "$name" "$pat" "$check" "$t_tmp/m/release-build.yml"
+}
+rb_fails "a push trigger" "may trigger only on workflow_call" "  schedule:
+    - cron:" "  push:
+    branches: [main]
+  schedule:
+    - cron:"
+rb_fails "pull_request_target" "may trigger only on workflow_call" "  schedule:
+    - cron:" "  pull_request_target:
+  schedule:
+    - cron:"
+rb_fails "a pull_request trigger without paths" "needs a paths filter" "    paths:
+      - \"scripts/release/**\"" "    branches: [main]
+    x-paths:
+      - \"scripts/release/**\""
+rb_fails "a missing channel input" "string inputs version, commit and channel" "      channel:
+        description: \"release or dev (dev when blank)\"
+        type: string" "      channel_x:
+        description: \"release or dev (dev when blank)\"
+        type: string"
+rb_fails "write permission in the node job" "write permissions; only publish may" "  node-x86_64:
+    name: node bundle (x86_64 linux gnu)
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read" "  node-x86_64:
+    name: node bundle (x86_64 linux gnu)
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write"
+rb_fails "an id-token in a build job" "permissions must be exactly contents: read" "    timeout-minutes: 10
+    permissions:
+      contents: read" "    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write"
+rb_fails "a build job in an environment" "no job in an environment" "    name: meta
+    runs-on: ubuntu-24.04" "    name: meta
+    environment: release
+    runs-on: ubuntu-24.04"
+rb_fails "an artifact without retention-days" "retention-days, 30 at most" "          name: asset-node-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7" "          name: asset-node-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error"
+rb_fails "an artifact kept for 90 days" "retention-days, 30 at most" "          name: asset-node-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7" "          name: asset-node-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90"
+rb_fails "an artifact that tolerates missing files" "if-no-files-found: error" "          name: asset-vam-\${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error" "          name: asset-vam-\${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: warn"
+rb_fails "a cache action" "no caches" "      - name: Install musl-tools" "      - uses: actions/cache@$SHA # v4.2.0
+        with:
+          path: ~/.cargo
+          key: k
+      - name: Install musl-tools"
+rb_fails "an unpinned upload-artifact" "not pinned by a full 40-hex" "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: asset-node" "actions/upload-artifact@v6 # v6.0.0
+        with:
+          name: asset-node"
+rb_fails "the version input inside run:" "inputs.version.*inside run:" "          scripts/release/install-zig.sh
+          scripts/release/install-tool.sh cargo-zigbuild cargo-auditable cargo-audit
+      - name: Build the host" "          scripts/release/install-zig.sh
+          echo \${{ inputs.version }}
+          scripts/release/install-tool.sh cargo-zigbuild cargo-auditable cargo-audit
+      - name: Build the host"
+rb_fails "a matrix value inside run:" "matrix.target.*inside run:" "        run: scripts/release/build.sh \"\$TARGET\" --set cli --out \"\$RUNNER_TEMP/bin\"" "        run: scripts/release/build.sh \${{ matrix.target }} --set cli --out \"\$RUNNER_TEMP/bin\""
+rb_fails "a job without a timeout" "no timeout-minutes" "    timeout-minutes: 90
+" ""
 
 echo "rust.yml keeps a complete push run on main"
 rust_fails() {

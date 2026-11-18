@@ -1,0 +1,233 @@
+name: Release build
+
+# Builds every v0.1.0 binary asset. Called by release.yml (`workflow_call`) and run build-only on
+# pull requests that touch the release path and weekly, so a broken release build shows up before a
+# release does. No publish job, no environment, no secrets, read-only permissions, no caches
+# (locked decisions 8 and 9; design §5.1 and §6). scripts/release/check-workflow.sh holds the rules.
+#
+# Assets (one workflow artifact each, named asset-<name>):
+#   vam-node-<v>-x86_64-unknown-linux-gnu.tar.gz   node bundle (vamd, vam, three brokers, vam-runtime, base kit)
+#   vam-runtime-<v>-x86_64-unknown-linux-musl      the guest init alone
+#   vam-<v>-<target>.tar.gz                        vam for x86_64/aarch64 Linux gnu and macOS arm64/x86_64
+# Pull request and weekly runs build the Cargo.toml version on channel `dev`; release.yml passes the
+# version being released and channel `release`.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version being built (X.Y.Z or X.Y.Z-rc.N); blank means Cargo.toml's"
+        type: string
+        required: false
+        default: ""
+      commit:
+        description: "Full 40-hex SHA to build; blank means the triggering commit"
+        type: string
+        required: false
+        default: ""
+      channel:
+        description: "release or dev (dev when blank)"
+        type: string
+        required: false
+        default: "dev"
+    outputs:
+      version:
+        description: "The version that was built"
+        value: ${{ jobs.meta.outputs.version }}
+      commit:
+        description: "The commit that was built"
+        value: ${{ jobs.meta.outputs.commit }}
+  pull_request:
+    paths:
+      - "scripts/release/**"
+      - ".github/workflows/release*.yml"
+      - "scripts/build-rootfs.sh"
+      - "scripts/base/**"
+      - "scripts/assets.pins"
+      - "Cargo.lock"
+  schedule:
+    - cron: "41 3 * * 1"
+
+# Nothing is granted by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  group: release-build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # What is built: the version, the commit and the channel, resolved once for every job.
+  meta:
+    name: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      commit: ${{ steps.meta.outputs.commit }}
+      channel: ${{ steps.meta.outputs.channel }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Resolve version, commit and channel
+        id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          . scripts/release/lib.sh
+          cargo_version="$(workspace_version < Cargo.toml)"
+          version="${INPUT_VERSION:-$cargo_version}"
+          channel="${INPUT_CHANNEL:-dev}"
+          commit="$(git rev-parse HEAD)"
+          semver_valid "$version" || { echo "version '$version' is not a release version" >&2; exit 1; }
+          case "$channel" in release|dev) ;; *) echo "channel must be release or dev, got '$channel'" >&2; exit 1 ;; esac
+          if [ -n "$INPUT_COMMIT" ] && [ "$INPUT_COMMIT" != "$commit" ]; then
+            echo "checked out $commit, asked for $INPUT_COMMIT" >&2; exit 1
+          fi
+          if [ "$channel" = release ] && [ "$version" != "$cargo_version" ]; then
+            echo "a release build is of Cargo.toml's version $cargo_version, not $version" >&2; exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "commit=$commit"
+            echo "channel=$channel"
+          } >> "$GITHUB_OUTPUT"
+          echo "building $version ($channel) at $commit" >> "$GITHUB_STEP_SUMMARY"
+
+  # The x86_64 Linux node bundle, plus the guest init as its own asset. Cold build: no cache.
+  node-x86_64:
+    name: node bundle (x86_64 linux gnu)
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+      VERSION: ${{ needs.meta.outputs.version }}
+      VAM_BUILD_CHANNEL: ${{ needs.meta.outputs.channel }}
+      COMMIT: ${{ needs.meta.outputs.commit }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.meta.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      # musl-tools is for the guest init only (the same package the lane installs).
+      - name: Install musl-tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Install the pinned build tools
+        run: |
+          scripts/release/install-zig.sh
+          scripts/release/install-tool.sh cargo-zigbuild cargo-auditable cargo-audit
+      - name: Build the host binaries (zigbuild, glibc 2.34)
+        run: scripts/release/build.sh "$TARGET" --set node --out "$RUNNER_TEMP/bin"
+      - name: Build the guest init (static musl, as build-rootfs.sh builds it)
+        run: scripts/release/build.sh x86_64-unknown-linux-musl --set guest --out "$RUNNER_TEMP/guest"
+      - name: Package
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$COMMIT")"
+          export SOURCE_DATE_EPOCH
+          mkdir -p dist
+          scripts/release/package.sh --kind node --target "$TARGET" --version "$VERSION" \
+            --bins "$RUNNER_TEMP/bin" --runtime "$RUNNER_TEMP/guest/vam-runtime" --out dist
+          scripts/release/package.sh --kind runtime --target x86_64-unknown-linux-musl --version "$VERSION" \
+            --runtime "$RUNNER_TEMP/guest/vam-runtime" --out dist
+          ls -l dist
+      # What a user gets: unpack the bundle and run it.
+      - name: Check the bundle
+        run: |
+          set -euo pipefail
+          mkdir smoke && tar -xzf "dist/vam-node-$VERSION-$TARGET.tar.gz" -C smoke
+          d="smoke/vam-node-$VERSION-$TARGET"
+          "$d/vam" --version
+          "$d/vamd" --version
+          for b in vam-web-broker vam-schedule-broker vam-notify-broker; do "$d/$b" --version; done
+          file "$d/vam-runtime" | grep -q 'statically linked'
+          jq -e --arg v "$VERSION" '.name == "vam/base:2" and .version == $v and (.files | length) > 0' "$d/share/vam/base/manifest.json"
+          (cd "$d/share/vam/base" && jq -r '.files | to_entries[] | "\(.value)  \(.key)"' manifest.json | sha256sum -c -)
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: asset-node-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # `vam` alone for the four CLI targets. zigbuild only on Linux (the glibc floor); macOS builds natively.
+  cli:
+    name: vam (${{ matrix.target }})
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            zig: "true"
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            zig: "true"
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            zig: "false"
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            zig: "false"
+    env:
+      TARGET: ${{ matrix.target }}
+      USE_ZIG: ${{ matrix.zig }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      VAM_BUILD_CHANNEL: ${{ needs.meta.outputs.channel }}
+      COMMIT: ${{ needs.meta.outputs.commit }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.meta.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Install the pinned build tools
+        run: |
+          set -euo pipefail
+          if [ "$USE_ZIG" = true ]; then
+            scripts/release/install-zig.sh
+            scripts/release/install-tool.sh cargo-zigbuild cargo-auditable cargo-audit
+          else
+            scripts/release/install-tool.sh cargo-auditable cargo-audit
+          fi
+      - name: Build vam
+        run: scripts/release/build.sh "$TARGET" --set cli --out "$RUNNER_TEMP/bin"
+      - name: Package
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$COMMIT")"
+          export SOURCE_DATE_EPOCH
+          mkdir -p dist
+          scripts/release/package.sh --kind cli --target "$TARGET" --version "$VERSION" --bins "$RUNNER_TEMP/bin" --out dist
+          ls -l dist
+      - name: Check the archive
+        run: |
+          set -euo pipefail
+          mkdir smoke && tar -xzf "dist/vam-$VERSION-$TARGET.tar.gz" -C smoke
+          "smoke/vam-$VERSION-$TARGET/vam" --version | tee "$RUNNER_TEMP/version.txt"
+          grep -q '^vam ' "$RUNNER_TEMP/version.txt"
+          if [ "$VAM_BUILD_CHANNEL" = release ]; then grep -q "^vam $VERSION (" "$RUNNER_TEMP/version.txt"; else grep -q '+dev' "$RUNNER_TEMP/version.txt"; fi
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: asset-vam-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

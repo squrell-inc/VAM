@@ -101,12 +101,23 @@ check_release() { # <json>: the dispatch workflow
   jq -e '.jobs.validate.permissions == {"contents": "read", "actions": "read"}' <<< "$j" >/dev/null || err "validate permissions must be exactly contents: read, actions: read"
   jq -e '[.jobs.validate.steps[] | select((.uses? // "") | startswith("actions/checkout@")) | .with["fetch-depth"]] | (length > 0) and all(. == 0)' <<< "$j" >/dev/null || err "validate must check out with fetch-depth: 0 (guards read the full history)"
   jq -e '[.jobs.validate.steps[] | select(.run? != null) | .run | contains("guards.sh")] | any' <<< "$j" >/dev/null || err "validate does not run scripts/release/guards.sh"
+  # the builds are the reusable workflow, called with the release channel and nothing secret
+  jq -e '.jobs | has("build")' <<< "$j" >/dev/null || { err "no build job (it calls release-build.yml)"; return; }
+  jq -e '.jobs.build.uses == "./.github/workflows/release-build.yml"' <<< "$j" >/dev/null || err "build must call ./.github/workflows/release-build.yml"
+  jq -e '.jobs.build.with.channel == "release"' <<< "$j" >/dev/null || err "build must pass channel: release (only the release workflow builds a release)"
+  jq -e '.jobs.build.permissions == {"contents": "read"}' <<< "$j" >/dev/null || err "build permissions must be exactly contents: read"
+  jq -e '(.jobs.build | has("secrets") | not) and (.jobs.build | has("environment") | not)' <<< "$j" >/dev/null || err "build passes no secrets (no secrets: inherit) and has no environment"
 }
 
 check_release_build() { # <json>: the reusable build workflow
   local j="$1"
   jq -e '.on | has("workflow_call") and ((keys - ["workflow_call", "pull_request", "schedule"]) == [])' <<< "$j" >/dev/null || err "release-build.yml may trigger only on workflow_call, pull_request and schedule"
   jq -e '[.jobs[] | select(has("environment"))] | length == 0' <<< "$j" >/dev/null || err "release-build.yml has no job in an environment (publishing is release.yml's publish job)"
+  jq -e '.on.workflow_call.inputs | (.version.type == "string") and (.commit.type == "string") and (.channel.type == "string")' <<< "$j" >/dev/null || err "workflow_call must take string inputs version, commit and channel"
+  jq -e '(.on | has("pull_request") | not) or ((.on.pull_request.paths? // []) | (type == "array") and length > 0)' <<< "$j" >/dev/null || err "the pull_request trigger needs a paths filter (build only when the release path changes)"
+  jq -e '[.jobs[] | select(has("uses") | not) | .permissions] | all(. == {"contents": "read"})' <<< "$j" >/dev/null || err "every build job's permissions must be exactly contents: read"
+  jq -e '[.jobs[] | .steps[]? | select((.uses? // "") | startswith("actions/upload-artifact@")) | select((.with["retention-days"]? == null) or (.with["retention-days"] > 30))] | length == 0' <<< "$j" >/dev/null || err "upload-artifact needs retention-days, 30 at most (build-only runs leave short-lived artifacts)"
+  jq -e '[.jobs[] | .steps[]? | select((.uses? // "") | startswith("actions/upload-artifact@")) | select(.with["if-no-files-found"]? != "error")] | length == 0' <<< "$j" >/dev/null || err "upload-artifact must set if-no-files-found: error (a missing asset fails the run)"
 }
 
 check_rust() { # <json>: guard 3 needs a complete push run on every merge into main
