@@ -40,6 +40,7 @@ export default defineConfig({
 									{ label: 'Introduction', slug: 'getting-started/introduction' },
 									{ label: 'Quickstart (5 Min)', slug: 'getting-started/quickstart' },
 									{ label: 'Installation & Setup', slug: 'getting-started/installation' },
+									{ label: 'Releases', slug: 'getting-started/releases' },
 									{ label: 'macOS + Lima', slug: 'getting-started/macos-lima' },
 									{ label: 'Windows + WSL', slug: 'getting-started/windows-wsl' },
 									{ label: 'Users and roles', slug: 'getting-started/users-and-roles' },

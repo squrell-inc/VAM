@@ -13,7 +13,8 @@ the DX-139 security floor).
 Where `main` disagrees with an
 earlier design, `main` is the fact. Nothing in a tracker is edited by this
 doc; amendments to other designs are listed in §12. Tracker slug proposed:
-`connectors`, item prefix `CN`.
+`connectors`, item prefix `CN`. **Owner, 2026-11-18:** D28 to D32 (admin-supplied
+clients, company addresses, marketplace REST connectors) and the phases in §13.4.
 
 ## Decision record
 
@@ -44,6 +45,11 @@ doc; amendments to other designs are listed in §12. Tracker slug proposed:
 | D25 | Trust in 0.1.0 (owner, 2026-11-09) | Listings from non-Squrell marketplaces may install skills, playbooks and agents: read-only, an "Unverified" badge, a capability summary before install. Connectors come only built into `vamd` until Phase 5. Amended 2026-11-09 (owner, Phase 5 folded into Phase 4): a non-Squrell listing may also carry a connector within the limits of D26. |
 | D26 | Installable connectors (owner, 2026-11-09) | Phase 5 makes a connector its own catalog kind (`urn:vam:connector`), installable from any trusted marketplace, so developers ship connectors without a Squrell release. A connector from a non-Squrell marketplace needs the admin's explicit approval of its capability summary (publisher, OAuth app, hosts, scopes, MCP server), shows "Unverified", cannot use a Squrell-reserved id, and an upgrade that widens any of these waits for re-approval. **Amended 2026-11-09 (owner): folded into Phase 4.** Connectors ship as files in marketplace listings, imported with the listing like skills, playbooks and agents, read-only with their origin, and returned by `GET /v1/connectors` beside the built-ins. The admin sees the connector's capabilities (publisher, client id, hosts, scopes, MCP server) before enabling, and again when an update changes them, which needs Enable again. Squrell-reserved ids (`microsoft-365`, `linear`) and unknown profiles are refused. Community connector files are limited to remote MCP with discovery, API-key providers, and the existing OAuth profiles with the publisher's own public client id. No bring-your-own client; a generic OAuth profile is a small follow-up later. |
 | D27 | The org's own catalog (owner, 2026-11-09) | Unchanged. Publishers keep creating drafts and releasing at the org's registry domain, visible to the whole org; marketplace installs land in the same catalog beside them, read-only, with their origin (§9.2). |
+| D28 | Admin-supplied client (owner, 2026-11-18) | A connector may say the org admin supplies the OAuth client (`client: "org"`). At Enable the admin enters the client id, and the client secret when the connector asks for one (`clientSecret: "org_vault"`). The secret is an org-scope `connection` vault row pinned to the token endpoint host: never returned by any route, never sent to the app, never a guest binding. Only an org admin (`users:admin`) writes it. Amends D3 for providers where Squrell has no app and no dynamic registration exists (Box, Salesforce, Zendesk). §13. |
+| D29 | The node exchanges the code when a secret is involved (owner, 2026-11-18) | For a connector with `clientSecret: "org_vault"` the app still runs the browser sign-in with PKCE, then hands the one-time code, the PKCE verifier and the redirect URI to `vamd`. `vamd` exchanges them at the token endpoint pinned at Enable, with the secret from the vault. Without a secret the app keeps exchanging the code itself, as today. Amends "`vamd` never sees the authorization code" (`runtime/tools.md`) for this case only; that page changes when the phase ships. §13. |
+| D30 | Company address (owner, 2026-11-18) | A connector may declare one company-address parameter (`{subdomain}`) under a fixed suffix (`zendesk.com`). The admin enters it once at Enable; it must be one DNS label. It is filled into the sign-in endpoints, the MCP URL and binding hosts once, at Enable; after that every host is exact and the existing pinning applies unchanged. §13. |
+| D31 | REST connectors from marketplaces (owner, 2026-11-18) | A marketplace connector may declare REST `bindings`: exact hosts (after D30), each binding used only by tools whose declared egress shape covers the request (§11 Q8). The admin sees the hosts before Enable. §13. |
+| D32 | First proofs (owner, 2026-11-18) | Box (remote MCP, admin-supplied client with a secret) proves D28–D29; Zendesk (REST with skills, company address, admin-supplied client without a secret) proves D30–D31. The Box listing lives on a branch of `squrell-inc/vam-marketplace` until its phase is released; the team builds and tests it. |
 
 ## 1. The problem
 
@@ -645,7 +651,7 @@ vam-marketplace/
 | **2 The connection behind skills** | A skill reaches Microsoft Graph as the user without holding a token. | Account-kind connection (refresh token pinned to the login host, per-audience access token); bindings from the connector become session egress bindings; refresh-before-swap in the egress provider (reusing `mcp_oauth_refresh.rs`); reauth park for egress calls; `connection.needs_reauth` notification kind (not on `main` yet; once recorded, it reaches the app and, through `vam.notify`, a Slack DM); `requiresConnector` on skills and a "connect to continue" park. **Per-call egress envelope (owner, 2026-11-07):** each code tool that uses a connection binding declares its egress shape (host, methods, path prefixes); the egress provider attaches the user's token only to a request inside the calling tool's declared shape and refuses the rest, so a tool declared as a read cannot POST a send (question 8, finding F8). | Cost 2–3: amends three lines of `docs/src/content/docs/runtime/tools.md` (§12). |
 | **3 Cards from skills** | Tool results render as cards; send and book ask with a richer card. | `ToolSpec.ui`; `List` primitive in `vam/1`; jig sources in skill packages, checked at publish; host attaches cards; app renders them. Can run as a parallel lane with Phase 2 (different files). | Proof: P14. Cost 2. |
 | **4 Microsoft 365 in use** | The walkthrough on a real tenant, enabled from the marketplace. | The Git marketplace (§9.1): trusted marketplace URLs per node, index reading, listing import at a tag, Squrell-domain admission, "update available", the Org settings Marketplace page; `squrell-inc/vam-marketplace` bootstrapped with CI; the `m365-mail` skill, the Executive assistant starter agent, the morning triage playbook on `vam.schedule`. Built-in connectors loaded from every file in `spec/connectors/`; import code generic across artifact kinds. **Phase 5 folded in (owner, 2026-11-09):** connectors ship as files in listings (D26 as amended), the install summary shows a connector's capabilities, an update that changes them needs Enable again. | Cost 3: a new repo, an app page, third-party connector files. |
-| **5 Installable connectors** (folded into Phase 4, owner 2026-11-09; what remains below is later) | Developers ship connectors from any marketplace without a Squrell release (D26). | Connector as a catalog kind (`urn:vam:connector`, draft and release, digest), imported like other artifacts; `GET /v1/connectors` merges built-in and installed; qualified connection ids and Squrell-reserved ids; the admin's approved snapshot of each connector's capability summary, and re-approval for an upgrade that widens it; a generic OAuth profile with "bring your own client" (the admin enters a client id and, if needed, a secret kept in the vault); `vam connector init`, `validate`, `test`. What still needs Squrell: its own OAuth apps, new auth mechanics (profiles, relays, signing, databases), brokers. | Cost 3: third-party connectors are a new trust boundary. About 5–6 waves. |
+| **5 Installable connectors** (folded into Phase 4, owner 2026-11-09; what remains below is later. **Replaced 2026-11-18 (owner) by the phases in §13.4**; the bring-your-own client is §13 Phase 5) | Developers ship connectors from any marketplace without a Squrell release (D26). | Connector as a catalog kind (`urn:vam:connector`, draft and release, digest), imported like other artifacts; `GET /v1/connectors` merges built-in and installed; qualified connection ids and Squrell-reserved ids; the admin's approved snapshot of each connector's capability summary, and re-approval for an upgrade that widens it; a generic OAuth profile with "bring your own client" (the admin enters a client id and, if needed, a secret kept in the vault); `vam connector init`, `validate`, `test`. What still needs Squrell: its own OAuth apps, new auth mechanics (profiles, relays, signing, databases), brokers. | Cost 3: third-party connectors are a new trust boundary. About 5–6 waves. |
 | Later | | Hub and OCI pull, reverse lookup; Teams relay; Google with the secret relay; databases; verified publishers (namespace proof, signing); GitHub. | |
 
 About four phases to the minimal version. With Phases 2 and 3 in parallel
@@ -695,6 +701,10 @@ this work:
   per-audience access tokens and refreshes before swap. "Client
   registration: DCR first, CIMD fallback" gains a profile client id ahead of
   DCR. "No token passthrough" still holds: a token goes only to its audience.
+- `docs/src/content/docs/runtime/tools.md` (D29, when Phase 5 ships): "`vamd`
+  never sees the authorization code" gains the exception for connectors with
+  `clientSecret: "org_vault"`; "Client registration" gains the admin-supplied
+  client ahead of DCR.
 - `.cursor/workstreams/developer-experience.md` D20 ("MCP is a platform
   ability, not marketplace supply"): set aside for connectors by D6.
 - the 0.1.0 launch plan: the marketplace backend stays cut from 0.1.0;
@@ -706,6 +716,83 @@ this work:
 - `design/jig.md`: cards inside skills (D19) is the first use of jig sources
   in a package; jig packages as a separate kind stay in Phase 3 of that
   design.
+
+## 13. Admin-supplied clients and company addresses (D28–D32, owner 2026-11-18)
+
+### 13.1 Where `main` stands (checked in code, 2026-11-18)
+
+Where this differs from the sections above, this is the fact:
+
+- **Marketplace connectors are remote MCP with `discover` only.**
+  `vam_spec::connector_listing` refuses `api_key`, the `entra`, `google` and
+  `slack` profiles, any client secret and any `bindings`. D26's wider list
+  (API-key providers, existing profiles with a publisher's public client id)
+  was never built.
+- **No `{tenant}` templating.** §4 says an MCP URL "may contain {tenant}";
+  no code fills it, a marketplace MCP URL must be a full DNS name, and
+  binding hosts are exact.
+- **`squrell_relay` parses but nothing implements it**; marketplaces refuse it.
+- **A per-user client id and secret already exist on raw MCP connections**:
+  `registrationMethod: manual` with an optional `clientSecret`
+  (`api/mcp_connections.rs`), stored as a `connection` vault row
+  (`mcp_oauth_client_secret_binding_id`) and sent on refresh
+  (`mcp_oauth_refresh.rs`, `RefreshProfile::Mcp`). The app does the code
+  exchange, so that secret passes through the app.
+- **Re-approval on change is done**: an imported connector update whose
+  capabilities change is disabled until the admin enables it again
+  (`marketplace/import.rs`).
+
+### 13.2 What the providers demand (research 2026-11-17; check primary docs before a phase depends on them)
+
+| | Box | Zendesk | Salesforce |
+|---|---|---|---|
+| Client | Admin-created integration credentials: client id **and secret** | Admin-created local client: id, PKCE, no secret (a vendor-wide global client needs Zendesk's approval) | Admin-created External Client App: id, PKCE, no secret |
+| Company address | None (`mcp.box.com`, `api.box.com`) | `{subdomain}.zendesk.com` for sign-in and API | Sign-in at login or My Domain; REST at the per-org `instance_url` |
+| Official MCP | GA at `https://mcp.box.com`; publishes protected-resource and authorization-server metadata; no dynamic registration | Announced 2026; status unconfirmed | GA (Apr 2026) at `api.salesforce.com/platform/mcp/...`; no dynamic registration |
+| Refresh | Single-use, rotating | Rotating | Rotating (External Client Apps) |
+
+Sources: [Box remote MCP server](https://github.com/box/mcp-server-box-remote/),
+[Box refresh tokens](https://developer.box.com/guides/authentication/tokens/refresh),
+[Zendesk OAuth migration](https://developer.zendesk.com/documentation/api-basics/authentication/oauth-migration/),
+[Zendesk global OAuth client](https://developer.zendesk.com/documentation/marketplace/building-a-marketplace-app/set-up-a-global-oauth-client/),
+[Salesforce Hosted MCP GA](https://developer.salesforce.com/blogs/2026/04/salesforce-hosted-mcp-servers-are-now-generally-available),
+[Salesforce Hosted MCP security](https://developer.salesforce.com/docs/platform/hosted-mcp-servers/guide/security-best-practices.html).
+
+The common need: none of them registers apps dynamically, and each expects
+the customer's admin to register one. Only Box needs a secret.
+
+### 13.3 The extension (no new system)
+
+Three additions on top of what runs today:
+
+| Addition | Connector file | Reuses |
+|---|---|---|
+| Admin-supplied client (D28) | `provider.client: "publisher" \| "org"` (default `publisher`: the file's `clientId` or dynamic registration, as today); `clientSecret` gains `"org_vault"`, valid only with `client: "org"` | the manual-registration client id and the vault client-secret row of raw MCP connections; `RefreshProfile::Mcp`, which already sends a secret; single-flight refresh for rotating tokens |
+| Code exchange on the node (D29) | nothing new: implied by `org_vault` | the token request code of `mcp_oauth_refresh.rs`; `connection` rows as today |
+| Company address (D30) | `provider.profile: "oauth"` with fixed `endpoints` (`authorize`, `token`) for providers that publish no metadata; one `tenant: { name: "subdomain", suffix: "zendesk.com", label }`; `{subdomain}` allowed in endpoints, `mcp.url` and binding hosts | after Enable every host is exact: host pinning, egress shapes and token routing unchanged |
+
+Box's connector, for example (the listing lives on a `vam-marketplace` branch):
+
+```jsonc
+"provider": { "kind": "oauth2", "profile": "discover", "client": "org",
+              "clientSecret": "org_vault", "scopes": [], "orgConsent": "none" },
+"mcp": { "url": "https://mcp.box.com", "tools": [ /* vetted, read-only first */ ] }
+```
+
+`discover` still finds Box's endpoints from its metadata; only registration
+is replaced by the admin's client.
+
+### 13.4 Phases
+
+| Phase | Outcome | Proven with |
+|---|---|---|
+| **5 Admin-supplied client** | The admin enters a client id (and secret); members connect; `vamd` exchanges the code with the vault secret; refresh rotates safely; marketplace connectors may use it | Box MCP on a real Box tenant (team), mock provider in scenarios |
+| **6 Company address and REST from marketplaces** | `profile: "oauth"` with fixed endpoints; `{subdomain}` filled at Enable; marketplace REST bindings | Zendesk REST plus a skill |
+| **7 Developer kit and API keys** | `vam connector init/validate/test`, a mock provider for publishers, the API-key connection flow | A third-party connector built from nothing |
+
+Later, unchanged: the connector as its own catalog kind with drafts,
+qualified connection ids, the hub and OCI, verified publishers, the Squrell
+relay (Google, Slack), org-held connections (service accounts).
 
 ## Appendix A. Options considered and set aside
 

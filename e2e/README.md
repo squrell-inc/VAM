@@ -447,7 +447,7 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   (default `v9.9.9`), `prerelease` (then `releases/latest` answers 404) and `tamper: sum` (one
   wrong `SHA256SUMS` line). The runner serves on loopback, with no network, GitHub's
   `/repos/squrell-inc/VAM/releases` (list, `latest`, `tags/<tag>`) and `/assets/<name>` for
-  `vam-<tag>-<host target>.tar.gz` and `SHA256SUMS` (hashed with `sha256sum`, or `shasum -a 256`),
+  `vam-<tag without the v>-<host target>.tar.gz` (as `package.sh` names it) and `SHA256SUMS` (hashed with `sha256sum`, or `shasum -a 256`),
   and counts every request. `{{url:<alias>}}` in a `cli` step is its base URL; the built `vam`
   reaches it only through the `VAM_UPGRADE_API_URL` test seam (a loopback URL, `vam-cli` feature
   `upgrade-seam`).

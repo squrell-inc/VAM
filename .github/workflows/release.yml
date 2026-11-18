@@ -77,8 +77,10 @@ jobs:
   # needs `validate`. The inputs are checked there (guard 1 and 2) and again by the build's `meta` job.
   build:
     name: build
+    # the called workflow cannot hold more than this: its `assemble` job reads pull request bodies
     permissions:
       contents: read
+      pull-requests: read
     uses: ./.github/workflows/release-build.yml
     with:
       version: ${{ inputs.version }}

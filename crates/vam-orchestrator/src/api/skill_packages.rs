@@ -24,7 +24,7 @@ pub fn skill_package_routes() -> axum::Router<AppState> {
             axum::routing::post(publish_skill_package).get(list_skill_packages),
         )
         .route(
-            "/v1/skills/packages/*rest",
+            "/v1/skills/packages/{*rest}",
             axum::routing::get(get_skill_package_wildcard)
                 .post(skill_package_wildcard_post)
                 .delete(delete_skill_package_wildcard),

@@ -349,7 +349,7 @@ jobs:
           scripts/e2e/firecracker-assets.sh --env-file "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/assets.log"
           # Runner disk: the Docker image, layers and the export staging tree are not needed
           # again. The ext4 image is what the lane boots.
-          docker rmi -f $(docker images -q 'vam-base-build' 2>/dev/null) 2>/dev/null || true
+          docker images -q 'vam-base-build' 2>/dev/null | xargs -r docker rmi -f 2>/dev/null || true
           docker image prune -af >/dev/null 2>&1 || true
           docker builder prune -af >/dev/null 2>&1 || true
           sudo rm -rf target/rootfs-staging
@@ -453,7 +453,7 @@ jobs:
         if: always()
         run: |
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/e2e-fc" "$RUNNER_TEMP/e2e-fc-bench" "$RUNNER_TEMP/e2e-fc-bench-toolchain" "$RUNNER_TEMP/vmlogs" 2>/dev/null || true
-          ls -A /srv/jailer/firecracker 2>/dev/null | sed 's/^/jail left: /' || true
+          find /srv/jailer/firecracker -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | sed 's/^/jail left: /' || true
       # The artifact store is not always reachable from review tooling: print the evidence in the log too.
       - name: Scenario diagnostics
         if: always()
@@ -531,11 +531,11 @@ jobs:
             echo "| measure | value |"
             echo "|---|---|"
             for k in HONEST_COLD_BOOT_LATENCY COLD_BOOT_TO_REGISTERED_LATENCY GUEST_RPC_PING_RTT DAEMON_E2E_REAL_BOOT_TO_RUNNING_LATENCY; do
-              grep -ohE "$k[^:]*: [^ ]+" "$RUNNER_TEMP"/vmlogs/*.log 2>/dev/null | sed -E 's/^([^:]+): (.*)$/| \1 | \2 |/' || true
+              grep -ohE "${k}[^:]*: [^ ]+" "$RUNNER_TEMP"/vmlogs/*.log 2>/dev/null | sed -E 's/^([^:]+): (.*)$/| \1 | \2 |/' || true
             done
             echo
             echo "jailer: $(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/e2e-fc/vamd/vamd.log" 2>/dev/null | grep -aE 'jailer on|jailer OFF|node isolation' | head -n 2 | tr '\n' ' ')"
-            echo "jail directories left: $(ls -A /srv/jailer/firecracker 2>/dev/null | wc -l)"
+            echo "jail directories left: $(find /srv/jailer/firecracker -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
             echo
             echo "restore (golden snapshot):"
             log="$RUNNER_TEMP/e2e-fc/vamd/vamd.log"

@@ -65,8 +65,17 @@ for e in "${EXCLUDES[@]}" "${MUST_BE_ABSENT[@]}"; do
 done
 # e2e/world/fixtures/ holds tiny stand-ins with these names (for example an empty rootfs.ext4
 # for the node-init scenarios); they are tracked on purpose.
-stray="$(find "$target" -path "$target/e2e/world/fixtures" -prune -o \
-  \( -name '*.ext4' -o -name 'vmlinux*' -o -name '.env' -o -name '*.log' \) -print)"
+# The refused names are one list, shared with the release scan (scripts/release/scan.sh).
+names_file="$repo/scripts/refused-names.txt"
+[ -f "$names_file" ] || { echo "error: $names_file is missing" >&2; exit 1; }
+name_args=()
+while IFS= read -r glob; do
+  [ -n "$glob" ] || continue
+  [ "${#name_args[@]}" -eq 0 ] || name_args+=(-o)
+  name_args+=(-name "$glob")
+done < <(sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$names_file" | awk 'NF')
+[ "${#name_args[@]}" -gt 0 ] || { echo "error: $names_file lists no names" >&2; exit 1; }
+stray="$(find "$target" -path "$target/e2e/world/fixtures" -prune -o \( "${name_args[@]}" \) -print)"
 if [ -n "$stray" ]; then
   echo "error: build or local files present in export:" >&2
   echo "$stray" >&2

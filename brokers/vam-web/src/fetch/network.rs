@@ -5,6 +5,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant, SystemTime};
+use vam_security::tls_roots::BundledRoots;
 
 use async_trait::async_trait;
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, LOCATION};
@@ -204,6 +205,7 @@ impl NetworkFetcher {
     async fn hop(&self, url: &Url, want: Want, deadline: Instant) -> Result<Hop, HopError> {
         let pin = self.pin(url, deadline).await?;
         let builder = reqwest::Client::builder()
+            .bundled_roots()
             .user_agent(self.user_agent.clone())
             // Ignore HTTP(S)_PROXY and friends: a proxy resolves names itself
             // and would bypass the pinned addresses. An explicit operator

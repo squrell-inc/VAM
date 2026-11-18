@@ -7,6 +7,7 @@ proves:
   - generated-id-and-email-login-survive-a-restart
   - crates/vam-orchestrator/tests/vamd_username_clash.rs
   - plain-chat-gets-a-reply
+  - vamd-prints-its-version-without-starting
   - follow-up-continues-after-vamd-restart
   - work-survives-vamd-restart-mid-task
   - crates/vam-orchestrator/tests/tls_refusals.rs
@@ -29,6 +30,10 @@ SQLite, starts and ends the sessions, and signs the receipts. The code is in
 | 3 | Startup reconciliation runs against the state database. | `bin/vamd.rs:447`, `reconcile.rs:107` |
 | 4 | Receipts missing for finished runs are issued. | `bin/vamd.rs:452` |
 | 5 | The session manager loop, the HTTP server, the telemetry gRPC server and the sweepers start. | `bin/vamd.rs:559-704` |
+
+## Which version runs
+
+`vamd --version` prints one line, `vamd <version> (<commit>)`, and exits. It starts nothing and reads no config, so it works even beside a `.env` that would stop a start. A release build prints its exact version; any other build prints the nearest tag plus `+dev`. Proved by `vamd-prints-its-version-without-starting`.
 
 ## State and listen address
 

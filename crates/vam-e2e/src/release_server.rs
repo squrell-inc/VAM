@@ -6,7 +6,8 @@
 //! `GET /repos/squrell-inc/VAM/releases` (all, newest first), `.../releases/latest` (the newest
 //! release that is not a pre-release, else 404), `.../releases/tags/<tag>`, and
 //! `GET /assets/<name>` (the archive and `SHA256SUMS`). The archive is
-//! `vam-<tag>-<host target>.tar.gz` holding the fixture directory's files (mode 0755 for `vam`);
+//! `vam-<tag without v>-<host target>.tar.gz` (as `package.sh` names it) holding the fixture
+//! directory's files (mode 0755 for `vam`);
 //! `SHA256SUMS` is computed with `sha256sum` (or `shasum -a 256`), and `tamper: sum` changes one
 //! hash digit.
 
@@ -85,7 +86,12 @@ pub fn start(
 ) -> Result<ReleaseServer, String> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let archive = format!("vam-{tag}-{}.tar.gz", host_target());
+    // As `package.sh` names it: the version without the tag's `v` (`vam-0.1.0-<triple>.tar.gz`).
+    let archive = format!(
+        "vam-{}-{}.tar.gz",
+        tag.strip_prefix('v').unwrap_or(tag),
+        host_target()
+    );
     let path = dir.join(&archive);
     {
         let f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
@@ -262,7 +268,7 @@ mod tests {
         assert_eq!(v[0]["tag_name"], "v9.9.9");
         assert_eq!(get(&srv.base, &format!("{api}/latest")).0, 404);
         assert_eq!(get(&srv.base, &format!("{api}/tags/v9.9.9")).0, 200);
-        let name = format!("vam-v9.9.9-{}.tar.gz", host_target());
+        let name = format!("vam-9.9.9-{}.tar.gz", host_target());
         let (c, archive) = get(&srv.base, &format!("/assets/{name}"));
         assert_eq!(c, 200);
         assert_eq!(archive, std::fs::read(dir.join(&name)).unwrap());
@@ -281,7 +287,7 @@ mod tests {
     fn a_tampered_server_lists_a_wrong_hash_and_a_final_is_latest() {
         let (fx, dir) = fixture("bad");
         let srv = start(&fx, &dir, "v9.9.9", false, true).unwrap();
-        let name = format!("vam-v9.9.9-{}.tar.gz", host_target());
+        let name = format!("vam-9.9.9-{}.tar.gz", host_target());
         let (_, sums) = get(&srv.base, "/assets/SHA256SUMS");
         let real = sha256(&dir.join(&name)).unwrap();
         let line = String::from_utf8(sums).unwrap();

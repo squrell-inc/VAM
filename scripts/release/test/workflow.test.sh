@@ -154,7 +154,34 @@ jobs:
         with:
           persist-credentials: false
       - run: echo build
+  assemble:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [meta, guest, node-x86_64, cli-linux, cli-macos]
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/download-artifact@$SHA # v7.0.0
+        with:
+          pattern: asset-*
+          path: assets
+      - run: scripts/release/assemble.sh
+      - uses: actions/upload-artifact@$SHA # v6.0.0
+        with:
+          name: release-1
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
 YAML
+python3 -I - "$t_tmp/m" <<'PY'
+import sys
+p = sys.argv[1] + "/release-build.yml"
+s = open(p).read()
+for j in ("meta", "guest", "node-x86_64", "cli-linux", "cli-macos"):
+    s = s.replace("  assemble:\n", "  %s:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions:\n      contents: read\n    steps:\n      - run: echo %s\n  assemble:\n" % (j, j), 1)
+open(p, "w").write(s)
+PY
 expect_ok "a build-only workflow passes" "$check" "$t_tmp/m/release-build.yml"
 cp "$t_tmp/m/release-build.yml" "$t_tmp/m/rb.yml"
 python3 -I - "$t_tmp/m" <<'PY'
@@ -185,16 +212,19 @@ rel_fails "no build job" "no build job" "  build:
     name: build"
 rel_fails "a build calling another workflow" "must call ./.github/workflows/release-build.yml" "    uses: ./.github/workflows/release-build.yml" "    uses: ./.github/workflows/rust.yml"
 rel_fails "a build on the dev channel" "must pass channel: release" "      channel: release" "      channel: dev"
-rel_fails "a build with write permissions" "write permissions; only publish may" "    permissions:
-      contents: read
-    uses:" "    permissions:
-      contents: write
+rel_fails "a build with write permissions" "write permissions; only publish may" "      pull-requests: read
+    uses:" "      pull-requests: write
     uses:"
-rel_fails "a build with more than contents: read" "build permissions must be exactly contents: read" "    permissions:
-      contents: read
-    uses:" "    permissions:
-      contents: read
+rel_fails "a build without the pull-requests read the assemble job needs" "build permissions must be exactly contents: read, pull-requests: read" "      pull-requests: read
+    uses:" "    uses:"
+rel_fails "a build with more than contents and pull-requests read" "build permissions must be exactly contents: read, pull-requests: read" "      pull-requests: read
+    uses:" "      pull-requests: read
       actions: read
+    uses:"
+rel_fails "a build with contents write" "write permissions; only publish may" "      contents: read
+      pull-requests: read
+    uses:" "      contents: write
+      pull-requests: read
     uses:"
 rel_fails "a build passing secrets" "passes no secrets" "      channel: release" "      channel: release
     secrets: inherit"
@@ -289,6 +319,78 @@ rb_fails "a matrix value inside run:" "matrix.target.*inside run:" "      - name
         run: scripts/release/build.sh \${{ matrix.target }} --set cli --out \"\$RUNNER_TEMP/bin\""
 rb_fails "a job without a timeout" "no timeout-minutes" "    timeout-minutes: 90
 " ""
+
+echo "release-build.yml: the assemble job"
+rb_fails "assemble with write permissions" "write permissions; only publish may" "      contents: read
+      pull-requests: read
+    env:" "      contents: read
+      pull-requests: write
+    env:"
+rb_fails "assemble with more than it needs" "assemble permissions must be exactly" "      contents: read
+      pull-requests: read
+    env:" "      contents: read
+      pull-requests: read
+      packages: read
+    env:"
+rb_fails "assemble without pull-requests read" "assemble permissions must be exactly" "      contents: read
+      pull-requests: read
+    env:" "      contents: read
+    env:"
+rb_fails "assemble with id-token" "assemble permissions must be exactly" "      pull-requests: read
+    env:" "      pull-requests: read
+      id-token: write
+    env:"
+rb_fails "pull-requests read on another job" "every build job's permissions must be exactly contents: read" "    timeout-minutes: 10
+    permissions:
+      contents: read" "    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read"
+rb_fails "no assemble job" "no assemble job" "  assemble:
+    name: assemble" "  assemblex:
+    name: assemble"
+rb_fails "assemble that does not wait for a build job" "assemble must need meta and every build job" "    needs: [meta, guest, node-x86_64, cli-linux, cli-macos]" "    needs: [meta, guest, node-x86_64, cli-linux]"
+rb_fails "assemble that does not run assemble.sh" "does not run scripts/release/assemble.sh" "          scripts/release/assemble.sh --version" "          echo scripts/release/skip.sh --version"
+rb_fails "assemble that downloads a narrower set" "asset-.* artifacts" "          pattern: asset-*" "          pattern: asset-node*"
+rb_fails "assemble uploading something else" "release-<version> artifact" "          name: release-\${{ needs.meta.outputs.version }}" "          name: assembled"
+rb_fails "a token in a build job" "only assemble gets github.token" "      VAM_BUILD_CHANNEL: \${{ needs.meta.outputs.channel }}
+      COMMIT: \${{ needs.meta.outputs.commit }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: \${{ needs.meta.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Install musl-tools" "      VAM_BUILD_CHANNEL: \${{ needs.meta.outputs.channel }}
+      COMMIT: \${{ needs.meta.outputs.commit }}
+      GH_TOKEN: \${{ github.token }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: \${{ needs.meta.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Install musl-tools"
+rb_fails "a secret in assemble" "references secrets" "      GH_TOKEN: \${{ github.token }}
+    steps:
+      # full history" "      GH_TOKEN: \${{ secrets.PAT }}
+    steps:
+      # full history"
+rb_fails "the version input inside run: in assemble" "inputs.version.*inside run:" "          ls -l assets
+" "          echo \${{ inputs.version }}
+"
+rb_fails "an unpinned download-artifact" "not pinned by a full 40-hex" "actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern" "actions/download-artifact@v7 # v7.0.0
+        with:
+          pattern"
+rb_fails "assemble uploading without if-no-files-found: error" "if-no-files-found: error" "          name: release-\${{ needs.meta.outputs.version }}
+          path: release/*
+          if-no-files-found: error" "          name: release-\${{ needs.meta.outputs.version }}
+          path: release/*
+          if-no-files-found: ignore"
 
 echo "rust.yml keeps a complete push run on main"
 rust_fails() {
