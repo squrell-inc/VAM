@@ -192,9 +192,18 @@ fn serve(
 ) -> std::io::Result<()> {
     s.set_nonblocking(false)?;
     s.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    // Read the whole request head: one read() can return part of it, and answering a partial
+    // request then closing with bytes unread makes the kernel reset the connection.
+    let mut head = Vec::new();
     let mut buf = [0u8; 4096];
-    let n = s.read(&mut buf)?;
-    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+    while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 64 * 1024 {
+        let n = s.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        head.extend_from_slice(&buf[..n]);
+    }
+    let req = String::from_utf8_lossy(&head).into_owned();
     let mut parts = req.lines().next().unwrap_or_default().split_whitespace();
     let (method, path) = (
         parts.next().unwrap_or_default(),
@@ -236,9 +245,8 @@ mod tests {
 
     fn get(base: &str, path: &str) -> (u16, Vec<u8>) {
         let mut s = TcpStream::connect(base.trim_start_matches("http://")).unwrap();
-        write!(
-            s,
-            "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        s.write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
         )
         .unwrap();
         let mut out = Vec::new();
