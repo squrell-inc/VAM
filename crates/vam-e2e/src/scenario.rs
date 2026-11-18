@@ -515,7 +515,7 @@ pub struct ThreadById {
 #[serde(untagged)]
 pub enum Chat {
     Text(String),
-    Full(ChatFull),
+    Full(Box<ChatFull>),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -547,6 +547,16 @@ pub struct ChatFull {
     /// then checks it) instead of a failed step.
     #[serde(default)]
     pub refused: bool,
+    /// Alias of an `agent` piece sent as the run's `inlineAgent` (its `spec`, no `agentRef`).
+    /// vamd accepts no inline agent, so `check` needs `refused: true` with it.
+    pub inline: Option<String>,
+    /// Alias of a `playbook` piece sent as the run's `inlinePlaybook`, with `agent:` or
+    /// `inline:`. Needs `refused: true` as well.
+    #[serde(rename = "inlinePlaybook")]
+    pub inline_playbook: Option<String>,
+    /// With `inlinePlaybook`: extra run `inputs` (what the playbook's input schema requires).
+    #[serde(default)]
+    pub inputs: BTreeMap<String, serde_yaml::Value>,
 }
 
 fn yes() -> bool {
@@ -600,6 +610,27 @@ impl Chat {
     /// Whether a 4xx answer to the start is expected (checked by `expect: { refused }`).
     pub fn refused(&self) -> bool {
         matches!(self, Chat::Full(f) if f.refused)
+    }
+    /// The `agent` piece sent inline, when set.
+    pub fn inline(&self) -> Option<&str> {
+        match self {
+            Chat::Text(_) => None,
+            Chat::Full(f) => f.inline.as_deref(),
+        }
+    }
+    /// The `playbook` piece sent inline, when set.
+    pub fn inline_playbook(&self) -> Option<&str> {
+        match self {
+            Chat::Text(_) => None,
+            Chat::Full(f) => f.inline_playbook.as_deref(),
+        }
+    }
+    /// Extra run inputs sent with an inline playbook.
+    pub fn inputs(&self) -> Option<&BTreeMap<String, serde_yaml::Value>> {
+        match self {
+            Chat::Text(_) => None,
+            Chat::Full(f) => Some(&f.inputs),
+        }
     }
     /// The `e2e-step:<label>` label the message carries.
     pub fn label(&self) -> Option<String> {
@@ -674,6 +705,8 @@ pub struct Expect {
     pub refused: Option<bool>,
     /// With `refused`: the refusal's answer body contains this text.
     pub contains: Option<String>,
+    /// With `refused`: the refusal's exact HTTP status.
+    pub status: Option<u16>,
     /// `node: { fields }`: `GET /v1/node` fields (dotted paths from the response body).
     pub node: Option<NodeExpect>,
     /// `plain-http: refused`: a plain-HTTP request to vamd's address gets no API answer.
@@ -946,6 +979,38 @@ mod harness_tests {
         for bad in ["thread: forever", "thread: { id: other }"] {
             assert!(serde_yaml::from_str::<Step>(&format!("chat: {{ text: hi, {bad} }}")).is_err());
         }
+    }
+
+    #[test]
+    fn chat_takes_inline_parts_and_expect_takes_a_status() {
+        let Step::Chat(c) = serde_yaml::from_str::<Step>(
+            "chat: { text: hi, inline: probe, inlinePlaybook: pb, as: m, refused: true }",
+        )
+        .unwrap() else {
+            panic!("a chat")
+        };
+        assert_eq!(
+            (c.inline(), c.inline_playbook(), c.refused()),
+            (Some("probe"), Some("pb"), true)
+        );
+        let Step::Chat(plain) = serde_yaml::from_str::<Step>("chat: hi").unwrap() else {
+            panic!("a chat")
+        };
+        assert_eq!((plain.inline(), plain.inline_playbook()), (None, None));
+        assert!(serde_yaml::from_str::<Step>("chat: { text: hi, inline_playbook: pb }").is_err());
+        let Step::Chat(c) =
+            serde_yaml::from_str::<Step>("chat: { text: hi, inputs: { topic: x } }").unwrap()
+        else {
+            panic!("a chat")
+        };
+        assert_eq!(c.inputs().map(|m| m.len()), Some(1));
+        let Step::Expect(e) =
+            serde_yaml::from_str::<Step>("expect: { refused: true, status: 400, contains: x }")
+                .unwrap()
+        else {
+            panic!("an expect")
+        };
+        assert_eq!((e.status, e.families()), (Some(400), 1));
     }
 
     #[test]

@@ -1,0 +1,35 @@
+id: a-run-with-an-inline-agent-is-refused-and-writes-nothing
+title: A run that carries an inline agent is refused with 400 for a member and a publisher, and no agent row exists afterwards
+description: >
+  POST /v1/runs takes an agent by reference only. An inlineAgent, with or without a resourceId, is refused
+  with 400 telling the caller to save it with PUT /v1/agents first, and nothing is written: the admin, who
+  sees every draft, finds no agent under either caller's URN, and neither do the callers.
+tags: [members, chat, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - agent-inline-probe
+when:
+  - chat: { inline: agent-inline-probe, as: member, text: "e2e-step:im Hello", refused: true }
+  - expect: { refused: true, status: 400, contains: "PUT /v1/agents" }
+  - chat: { inline: agent-inline-probe, as: pub, text: "e2e-step:ip Hello", refused: true }
+  - expect: { refused: true, status: 400, contains: "PUT /v1/agents" }
+then:
+  - identity-request: { as: admin, credential: key, path: "/v1/agents/{{urn:agent-inline-probe:pub}}", status: 404 }
+  - identity-request: { as: admin, credential: key, path: "/v1/agents/{{urn:agent-inline-probe:member}}", status: 404 }
+  - identity-request: { as: pub, credential: key, path: "/v1/agents/{{urn:agent-inline-probe:pub}}", status: 404 }
+  - identity-request: { as: member, credential: key, path: "/v1/agents/{{urn:agent-inline-probe:member}}", status: 404 }
+guards:
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/catalog.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/inbox.rs
+mock:
+  - when: { step: im }
+    reply: { text: hello }
+  - when: { step: ip }
+    reply: { text: hello }
+status: pending
+expectFail: { step: when.0, class: product }
