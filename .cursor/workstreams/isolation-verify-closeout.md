@@ -27,12 +27,12 @@ Do not re-litigate without editing this list.
 1. Isolation is always on (`owner_user_id`). No `--isolation` flag.
 2. Operator signs in with the bootstrap API key. One operator. `operator` + `local` user seeds stay. Example catalog seeds go.
 3. Members do not need `catalog:write` to **list/get** released catalog. PUT/release stay write/publish scopes.
-   *Amended 2026-11-17 by the product owner:* members also create and edit their **own draft agents** (scope `agents:draft`, released skills, playbooks and policies only). Skills, playbooks, policies, skill packages and every release stay on `catalog:write` / `publish:grant`. See `member-draft-agents` (locked decisions 6, 7 and 11).
+   *Amended 2026-11-17 by the product owner:* members also create and edit their **own draft agents** (scope `agents:draft`, released skills, playbooks and policies only). Skills, playbooks, policies, skill packages and every release stay on `catalog:write` / `publish:grant`. Behaviour: `/orchestrator/member-agents/` (workstream `member-draft-agents`, closed 2026-11-18).
 4. Members set ENVs with user-scope `PUT /v1/secrets`.
 5. **Workspace** pins agent URN + version at create time. Label on the workspace. Chat sends that pin. Not a composer version dropdown.
 6. Owners/publishers may pin draft (`1.0.0-draft`) or a released version. Members pin released only.
    *Amended 2026-10-10 by the product owner:* "draft" means the owner's private working copy, whatever slot it is stored in. The fixed `1.0.0-draft` slot is replaced in `agent-experience` Phase 1, which must keep this pin behaviour working.
-   *Amended 2026-11-17 by the product owner:* a member may also pin **their own** draft agent; a foreign draft stays 404 for every member. A member's draft run resolves released parts only. See `member-draft-agents` (locked decisions 7 and 10).
+   *Amended 2026-11-17 by the product owner:* a member may also pin **their own** draft agent; a foreign draft stays 404 for every member. A member's draft run resolves released parts only. Behaviour: `/orchestrator/member-agents/` (workstream `member-draft-agents`, closed 2026-11-18).
 7. Composer dropdown is **models** from the operator allowlist. Agent `preferredModels` is the default only.
 8. The VAM app must not hardcode CreateRun `agentRef` to `1.0.0`.
 9. Implement later, one phase per plan, on `feat/improving-the-vam` + `feature/user-admin-ui` (not `main`).
