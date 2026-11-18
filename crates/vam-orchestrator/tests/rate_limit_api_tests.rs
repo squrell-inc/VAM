@@ -84,7 +84,9 @@ async fn call(
 }
 
 async fn json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
 }
 

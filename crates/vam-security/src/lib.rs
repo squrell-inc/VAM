@@ -21,6 +21,8 @@ pub mod receipt;
 pub mod secret_forms;
 #[cfg(feature = "ssrf-guard")]
 pub mod ssrf_guard;
+#[cfg(feature = "tls-roots")]
+pub mod tls_roots;
 pub mod token;
 pub mod vendor_text;
 
