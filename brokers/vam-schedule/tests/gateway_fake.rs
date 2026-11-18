@@ -206,7 +206,11 @@ async fn broker_client(sock: &Path) -> HostedBrokerClient<tonic::transport::Chan
         .unwrap()
         .connect_with_connector(tower::service_fn(move |_u: http::Uri| {
             let p = p.clone();
-            async move { tokio::net::UnixStream::connect(p).await }
+            async move {
+                tokio::net::UnixStream::connect(p)
+                    .await
+                    .map(hyper_util::rt::TokioIo::new)
+            }
         }))
         .await
         .unwrap();

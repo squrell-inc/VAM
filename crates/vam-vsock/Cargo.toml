@@ -22,8 +22,8 @@ thiserror = { workspace = true }
 vam-spec = { path = "../vam-spec" }
 vam-security = { path = "../vam-security", optional = true }
 tokio = { version = "1.34", features = ["net", "time", "io-util", "rt", "macros", "rt-multi-thread"] }
-prost = "0.12"
-prost-types = "0.12"
+prost = "0.14"
+prost-types = "0.14"
 bytes = "1.10"
 log = "0.4"
 rand = { version = "0.8", optional = true }

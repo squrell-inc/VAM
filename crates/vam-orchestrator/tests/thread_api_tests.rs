@@ -87,7 +87,9 @@ fn app_state(store: Arc<SqliteWorkflowStore>) -> AppState {
 }
 
 async fn response_body(response: axum::response::Response) -> String {
-    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
@@ -332,7 +334,7 @@ async fn another_owners_workspace_is_404_and_auth_is_required() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/v1/workspaces/{}/threads", w.ws))
+                .uri(format!("/v1/workspaces/{}/threads", w.ws))
                 .body(Body::empty())
                 .unwrap(),
         )
