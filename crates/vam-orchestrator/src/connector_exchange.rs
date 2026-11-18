@@ -22,7 +22,7 @@ use crate::connectors::now_secs;
 use crate::error::OrchestratorError;
 use crate::host_tools::{CredentialGeneration, McpCredentialWriteGuard};
 use crate::mcp_oauth_refresh::{
-    best_effort_revoke_oauth_refresh, exchange_authorization_code, CodeGrant, RefreshFailure,
+    exchange_authorization_code, prepare_oauth_refresh_revoke, CodeGrant, RefreshFailure,
     RefreshFailureKind,
 };
 use crate::mcp_registry::{
@@ -162,11 +162,12 @@ pub(crate) fn exchange_and_connect(
         Some(prior) => (prior.tools.clone(), prior.header_bindings.clone()),
         None => (Vec::new(), Vec::new()),
     };
-    // The previous server's refresh token is revoked (best effort) now that the new grant is good;
-    // its row and credentials go in the commit below, not before.
-    if let Some(row) = stale.as_ref() {
-        let _attempt = best_effort_revoke_oauth_refresh(vault, row);
-    }
+    // The previous server's refresh token is read now, while its row still exists, and revoked
+    // (best effort) only once the commit below has replaced that row: a refused or failed commit
+    // leaves the old row and a token the provider still honours.
+    let stale_revoke = stale
+        .as_ref()
+        .and_then(|row| prepare_oauth_refresh_revoke(vault, row).ok());
     let commit = ConnectorConnectionCommit {
         owner: c.owner,
         creator: c.creator,
@@ -209,6 +210,9 @@ pub(crate) fn exchange_and_connect(
             ));
         }
     };
+    if let Some(prepared) = stale_revoke {
+        let _attempt = prepared.send();
+    }
     // Callers that began with the replaced tokens retry with these (and do not refresh with the old
     // single-use refresh token).
     gate.credentials_replaced();

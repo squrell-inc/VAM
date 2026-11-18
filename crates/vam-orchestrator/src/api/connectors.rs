@@ -2284,6 +2284,11 @@ mod tests {
 
     /// A member's row on the connector's previous server, needing a sign-in, with tokens.
     fn previous_server_row(n: &Node) {
+        previous_server_row_revoked_at(n, None);
+    }
+
+    /// [`previous_server_row`] whose server revokes refresh tokens at `revocation`.
+    fn previous_server_row_revoked_at(n: &Node, revocation: Option<String>) {
         use crate::mcp_registry::{
             McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
         };
@@ -2291,7 +2296,7 @@ mod tests {
             resource: "https://mcp.old-home.example/mcp".into(),
             authorization_server: "https://auth.old-home.example".into(),
             token_endpoint: "https://auth.old-home.example/token".into(),
-            revocation_endpoint: None,
+            revocation_endpoint: revocation,
             client_id: "c-old".into(),
             registration_method: McpOauthRegistrationMethod::Manual,
             scopes: vec![],
@@ -2364,6 +2369,73 @@ mod tests {
         assert_eq!(
             token_of(&n, "ada", "filebox/oauth/access-token"),
             NEW_ACCESS
+        );
+    }
+
+    #[tokio::test]
+    async fn a_moved_connectors_old_token_is_revoked_only_after_its_replacement_commits() {
+        let n = xchg_node("xchg-revoke-after");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let revoker = provider();
+        crate::mcp_oauth_refresh::test_seam::serve(
+            "revoke.old-home-revoke.example",
+            revoker.base.clone(),
+        );
+        previous_server_row_revoked_at(
+            &n,
+            Some("https://revoke.old-home-revoke.example/revoke".into()),
+        );
+        // The provider accepts the code, but the disk refuses the replacement: the old row and its
+        // refresh token stay, and nothing has asked the old server to revoke that token.
+        n.store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER no_new_access_token BEFORE INSERT ON host_secrets
+                 WHEN NEW.binding_id = 'filebox/oauth/access-token'
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        assert!(revoker.requests().is_empty(), "revoked before the commit");
+        assert_eq!(row_of(&n, "ada").url, "https://mcp.old-home.example/mcp");
+        assert_eq!(token_of(&n, "ada", "filebox/oauth/refresh-token"), "OLD-R");
+        // The replacement commits: then, and only then, the old token is revoked, once.
+        n.store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER no_new_access_token;")
+            .unwrap();
+        revoker.reply(200, serde_json::Value::Null);
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let revoked = revoker.requests();
+        assert_eq!(revoked.len(), 1, "one revoke after the commit");
+        assert_eq!(
+            revoked[0].form.get("token").map(String::as_str),
+            Some("OLD-R")
+        );
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            NEW_REFRESH
         );
     }
 
