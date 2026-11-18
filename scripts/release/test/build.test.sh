@@ -70,7 +70,7 @@ expect_match "the checkout, CARGO_HOME and RUSTUP_HOME are remapped" "remap-path
 expect_match "host binaries are stripped" "STRIP=true" "$(cat "$log")"
 expect_match "SOURCE_DATE_EPOCH is the commit time" "EPOCH=$epoch\$" "$(grep EPOCH= "$log" | head -n 1)"
 expect_match "the commit, date and channel are passed" "SHA=$short DATE=2026-11-18 CHANNEL=dev INC=0" "$(cat "$log")"
-expect_match "cargo audit bin runs with the advisories deny.toml ignores" "audit bin --ignore RUSTSEC-2026-0001 " "$(cat "$log")"
+expect_match "cargo audit bin runs with the advisories deny.toml ignores (before bin: --ignore is an audit option)" "audit --ignore RUSTSEC-2026-0001 .*bin " "$(cat "$log")"
 
 echo "refusals"
 expect_fail "a binary needing glibc 2.35" "needs GLIBC_2\.35, above the floor 2\.34" bld STUB_GLIBC=2.35 -- x86_64-unknown-linux-gnu --set cli --out "$t_tmp/o2"

@@ -140,7 +140,7 @@ if [ "${SKIP_AUDIT:-0}" != 1 ]; then
   ignores=()
   while IFS= read -r id; do ignores+=(--ignore "$id"); done < <(grep -oE 'RUSTSEC-[0-9]+-[0-9]+' deny.toml | sort -u)
   for b in "${bins[@]}"; do
-    "cargo" "+$toolchain" audit bin "${ignores[@]}" "$out/$b" >&2 || die "cargo audit bin failed for $b"
+    "cargo" "+$toolchain" audit "${ignores[@]}" bin "$out/$b" >&2 || die "cargo audit bin failed for $b"
   done
 fi
 
