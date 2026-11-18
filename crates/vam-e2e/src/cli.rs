@@ -34,6 +34,7 @@ impl Engine {
             ));
         }
         let root = self.cli_tree(x, what)?;
+        let built_cli = cli.clone();
         if let Some(rel) = &x.copy_cli {
             let dst = root.join(rel);
             if let Some(dir) = dst.parent() {
@@ -276,8 +277,11 @@ impl Engine {
                 ));
             }
         }
+        // The binary under test (copied into the tree by `copyCli`, in this step or an earlier
+        // one) is not output of the step: the tree scan skips copies of it.
+        let placed = std::fs::read(&built_cli).ok();
         for a in x.absent.iter().chain(&x.absent_in_files) {
-            if let Some(f) = find_in_tree(&root, sub(a).as_bytes()) {
+            if let Some(f) = find_in_tree(&root, sub(a).as_bytes(), placed.as_deref()) {
                 return Err(Fail::new(
                     Class::Product,
                     format!("no file under the tree contains `{a}`"),
@@ -406,8 +410,9 @@ fn snapshot(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
     out
 }
 
-/// The first file under `dir` whose bytes contain `needle`.
-fn find_in_tree(dir: &Path, needle: &[u8]) -> Option<PathBuf> {
+/// The first file under `dir` that contains `needle`, skipping files whose bytes are exactly
+/// `skip` (the runner's own copies of the binary under test).
+fn find_in_tree(dir: &Path, needle: &[u8], skip: Option<&[u8]>) -> Option<PathBuf> {
     if needle.is_empty() {
         return None;
     }
@@ -415,11 +420,14 @@ fn find_in_tree(dir: &Path, needle: &[u8]) -> Option<PathBuf> {
         let p = e.path();
         let Ok(t) = e.file_type() else { continue };
         if t.is_dir() {
-            if let Some(f) = find_in_tree(&p, needle) {
+            if let Some(f) = find_in_tree(&p, needle, skip) {
                 return Some(f);
             }
         } else if t.is_file() {
             if let Ok(b) = std::fs::read(&p) {
+                if skip == Some(b.as_slice()) {
+                    continue;
+                }
                 if b.windows(needle.len()).any(|w| w == needle) {
                     return Some(p);
                 }
@@ -479,6 +487,30 @@ fn run_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tree_scan_skips_copies_of_the_binary_under_test_only() {
+        let t = tempfile::tempdir().unwrap();
+        let bin = b"\x7fELF the --checkout flag".to_vec();
+        std::fs::create_dir_all(t.path().join("kit-1")).unwrap();
+        std::fs::write(t.path().join("kit-1/vam"), &bin).unwrap();
+        std::fs::write(t.path().join("out.txt"), "done base: built from the kit").unwrap();
+        let word = b"checkout";
+        assert_eq!(
+            find_in_tree(t.path(), word, None),
+            Some(t.path().join("kit-1/vam"))
+        );
+        assert_eq!(find_in_tree(t.path(), word, Some(&bin)), None);
+        std::fs::write(t.path().join("out.txt"), "looking for a checkout").unwrap();
+        assert_eq!(
+            find_in_tree(t.path(), word, Some(&bin)),
+            Some(t.path().join("out.txt"))
+        );
+        // a modified copy is not the binary under test
+        std::fs::write(t.path().join("kit-1/vam"), b"other checkout").unwrap();
+        std::fs::write(t.path().join("out.txt"), "clean").unwrap();
+        assert!(find_in_tree(t.path(), word, Some(&bin)).is_some());
+    }
 
     #[test]
     fn only_an_owner_piece_falls_back_to_the_bootstrap_key() {

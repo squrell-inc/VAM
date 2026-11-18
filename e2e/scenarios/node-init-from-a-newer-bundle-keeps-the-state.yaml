@@ -44,5 +44,4 @@ when:
 guards:
   - vam:crates/vam-cli/src/cmd/node_install.rs
   - vam:crates/vam-cli/src/cmd/node.rs
-status: pending
-expectFail: { step: when.0, class: product }
+status: active

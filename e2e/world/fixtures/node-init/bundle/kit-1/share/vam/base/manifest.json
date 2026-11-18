@@ -1,1 +1,5 @@
-{ "kit": "fixture", "version": "fixture-1", "files": ["build-rootfs.sh"] }
+{
+  "name": "vam/base:2",
+  "version": "fixture-1",
+  "files": { "build-rootfs.sh": "f90e2ae47c9d4c9c32a1102cc3888f3033c5505f2d4fb26f71e01119b3775b53" }
+}
