@@ -2262,6 +2262,7 @@ impl Engine {
             Step::Cli(x) => self.cli_step(x),
             Step::ConnectorConnect(x) => self.connector_connect(x),
             Step::ConnectorCheck(x) => self.connector_check(x),
+            Step::ApiCall(x) => self.api_call(x),
             Step::MockProvider(x) => self.mock_provider(x),
             Step::EditAgentDraft(x) => self.edit_agent_draft(x),
             Step::ReleaseAgent(x) => self.release_agent(x),
@@ -3240,6 +3241,7 @@ impl Engine {
             "no form of secret `{}` in what the run left behind",
             x.secret
         );
+        self.sync_filebox();
         let value = match self.ctx.secrets.get(&x.secret) {
             Some(v) => v.0.clone(),
             None => {

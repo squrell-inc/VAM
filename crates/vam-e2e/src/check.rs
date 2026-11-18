@@ -109,12 +109,12 @@ pub fn check(root: &Path) -> Vec<CheckError> {
             PieceKind::MockProvider => {
                 if !matches!(
                     w.provider.as_deref(),
-                    Some("microsoft-login" | "microsoft-graph" | "linear-server")
+                    Some("microsoft-login" | "microsoft-graph" | "linear-server" | "filebox")
                 ) {
                     errors.push(CheckError::new(
                         &p,
                         "piece-body",
-                        "a mock-provider piece needs `provider: microsoft-login`, `microsoft-graph` or `linear-server`",
+                        "a mock-provider piece needs `provider: microsoft-login`, `microsoft-graph`, `linear-server` or `filebox`",
                     ));
                 }
             }
@@ -327,6 +327,13 @@ fn check_scenario(
                 .is_some_and(|w| w.provider.as_deref() == Some("microsoft-login"))
             {
                 secret_aliases.insert("microsoft-365".to_string());
+            }
+            // The filebox provider holds a client secret and issues tokens: its alias names them all.
+            if cat
+                .piece(piece)
+                .is_some_and(|w| w.provider.as_deref() == Some("filebox"))
+            {
+                secret_aliases.insert(alias.to_string());
             }
         }
         lint(errors, p, "alias", alias);
@@ -662,11 +669,32 @@ fn check_scenario(
             Step::ConnectorNode(x) => {
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
                 check_connector_id(errors, p, &pos, &x.id);
+                if let Some(s) = x.client.as_ref().and_then(|c| c.client_secret.as_ref()) {
+                    refer_mock(errors, p, &pos, &mock_aliases, Some(&s.piece));
+                }
             }
             Step::ConnectorConnect(x) => {
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
                 check_connector_id(errors, p, &pos, &x.id);
                 refer_mock(errors, p, &pos, &mock_aliases, x.piece.as_deref());
+            }
+            Step::ApiCall(x) => {
+                refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
+                if !matches!(x.method.to_ascii_uppercase().as_str(), "GET" | "DELETE") {
+                    errors.push(CheckError::new(
+                        p,
+                        "api-call",
+                        format!("{pos}: `api-call.method` is GET or DELETE"),
+                    ));
+                }
+                if !x.path.starts_with('/') {
+                    errors.push(CheckError::new(
+                        p,
+                        "api-call",
+                        format!("{pos}: `api-call.path` must start with `/`"),
+                    ));
+                }
+                refer_mock(errors, p, &pos, &mock_aliases, x.absent.as_deref());
             }
             Step::ConnectorCheck(x) => {
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());

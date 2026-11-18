@@ -1,11 +1,15 @@
 //! The steps for connectors and the two runner-hosted mock providers.
 //!
-//! Steps: `connector-node`, `connector-connect`, `connector-check`, `mock-provider`; expects:
-//! `connectors` and `mock-requests`. The wire shapes are written down in `e2e/README.md` under
+//! Steps: `connector-node`, `connector-connect`, `connector-check`, `mock-provider`, `api-call`;
+//! expects: `connectors` and `mock-requests`. The wire shapes are written down in `e2e/README.md` under
 //! "Connectors".
 //!
 //! The providers are std-only loopback HTTP servers, started once per run and reset by each
 //! `mock-provider` piece:
+//! - `filebox` (a fictional Box-like service) serves one listener for three hosts: the MCP server
+//!   (`POST /mcp`, `search_files` and `read_file`), RFC 9728 and RFC 8414 metadata, `GET /authorize`
+//!   (the runner plays the browser) and `POST /token` and `/revoke`. The token endpoint is a
+//!   confidential client (`client_secret_post`) with single-use rotating refresh tokens.
 //! - `microsoft-login` serves `POST /{tenant}/oauth2/v2.0/token` for `refresh_token` grants. It
 //!   accepts only refresh tokens the runner registered, logs form field NAMES (and the values of
 //!   a few non-secret fields), and can be revoked.
@@ -42,6 +46,19 @@ pub const PASS_GRAPH_ENDPOINT: bool = true;
 /// installed (`COMMUNITY_MCP_URL`) is answered by the Linear mock. Off until the node knows the keys
 /// (a default vamd refuses the whole variable); on since CN-4.11.
 pub const PASS_MCP_SERVER_SEAM: bool = true;
+/// The MCP URL of the `filebox` connector in the `marketplace-community-connectors` fixture.
+pub const FILEBOX_MCP_URL: &str = "https://mcp.filebox.example/mcp";
+/// The origin of the `filebox` authorization server (its metadata names it).
+pub const FILEBOX_AUTH_ORIGIN: &str = "https://auth.filebox.example";
+/// Add the `oauth:<https origin>` key to the seam: the discovery fetch, the code exchange and the
+/// refresh at `https://auth.filebox.example` are answered by the filebox mock. Held out until CN-5
+/// wave 2 makes vamd accept the key (a default vamd refuses the whole variable).
+pub const PASS_OAUTH_SEAM: bool = false;
+/// The client ids the filebox provider has registered start with this.
+const FILEBOX_CLIENT_PREFIX: &str = "e2e-filebox-client";
+/// The redirect URI the runner uses when it plays the app.
+const APP_REDIRECT_URI: &str = "squrell://oauth";
+
 /// The MCP URL of the `bugwatch` connector in the `marketplace-community-connectors` fixture.
 pub const COMMUNITY_MCP_URL: &str = "https://mcp.bugwatch.example/mcp";
 
@@ -82,6 +99,42 @@ pub struct ConnectorNode {
     /// The step passes only when vamd answers 400, 403 or 409 (a 404 or 405 is a missing route).
     #[serde(default)]
     pub refused: bool,
+    /// With `refused`: the refusal's answer body contains this text.
+    pub contains: Option<String>,
+    /// An org-supplied OAuth client: `{ clientId, clientSecret: { piece, which } }`. The secret's
+    /// value comes from the filebox mock and is never printed.
+    pub client: Option<NodeClient>,
+}
+
+/// `client: { clientId, clientSecret }` of `connector-node`: sent as `client: { clientId,
+/// clientSecret }` in the body of `PUT /v1/connectors/{id}/node`. Without `clientSecret` the body
+/// carries no secret.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NodeClient {
+    pub client_id: String,
+    pub client_secret: Option<SecretRef>,
+}
+
+/// `{ piece, which }`: a client secret of a filebox `mock-provider` piece.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretRef {
+    pub piece: String,
+    #[serde(default)]
+    pub which: SecretWhich,
+}
+
+/// `current`: the secret the provider accepts now. `rotated`: the same, after a `rotateSecret`
+/// step (a scenario that names it before any rotation is a scenario error). `wrong`: a value the
+/// provider never held.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SecretWhich {
+    #[default]
+    Current,
+    Rotated,
+    Wrong,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +168,48 @@ pub struct ConnectorConnect {
     pub as_: Option<String>,
     #[serde(default)]
     pub refused: bool,
+    /// With `refused`: the refusal's answer body contains this text.
+    pub contains: Option<String>,
+    /// Org-supplied client (a filebox `piece`): `exchange` (default) plays the app as D29 says:
+    /// authorize at the pinned endpoint, then post code, verifier and redirect URI to
+    /// `POST /v1/connectors/{id}/connection/oauth/code`. `tokens` plays an app that holds the
+    /// tokens itself: `PUT /v1/mcp/connections`, then `…/oauth/tokens`.
+    pub via: Option<Via>,
+    /// `exchange`: the redirect URI sent (default `squrell://oauth`).
+    pub redirect_uri: Option<String>,
+    /// `tokens`: the token endpoint named in the connection (default: the node's pinned one).
+    pub token_endpoint: Option<String>,
+    /// `tokens`: the client id named in the connection (default: the node's).
+    pub client_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Via {
+    Exchange,
+    Tokens,
+}
+
+/// `api-call: { method, path, as, refused, contains, absent }`: one request as an identity.
+/// `GET` and `DELETE` only. Without `refused` the answer must be 2xx; with it 400, 403 or 409
+/// (a 404 or 405 is a missing route) and the body holds `contains`. `absent` names a filebox
+/// `mock-provider` piece: no form of its client secret or tokens is in the answer body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiCallStep {
+    #[serde(default = "get_method")]
+    pub method: String,
+    pub path: String,
+    #[serde(rename = "as")]
+    pub as_: Option<String>,
+    #[serde(default)]
+    pub refused: bool,
+    pub contains: Option<String>,
+    pub absent: Option<String>,
+}
+
+fn get_method() -> String {
+    "GET".to_string()
 }
 
 /// `connector-check: { id, as }`.
@@ -128,7 +223,7 @@ pub struct ConnectorCheck {
 
 /// `mock-provider: { piece, revoke }`.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MockProviderStep {
     pub piece: String,
     /// The provider refuses everything from now on (`invalid_grant` / 401).
@@ -137,6 +232,15 @@ pub struct MockProviderStep {
     /// Graph only: `true` makes `POST /v1.0/me/sendMail` log the request and then wait without
     /// answering; `false` releases it (and later requests answer at once).
     pub hold: Option<bool>,
+    /// Filebox only: the current access token is refused from now on (until a refresh).
+    #[serde(default)]
+    pub expire: bool,
+    /// Filebox only: `true` makes the token endpoint log a refresh request and then wait without
+    /// answering; `false` releases the waiting requests.
+    pub hold_token: Option<bool>,
+    /// Filebox only: the provider's client secret changes; the old one is refused.
+    #[serde(default)]
+    pub rotate_secret: bool,
 }
 
 /// `connectors: { id, as, fields, absent }`: one connector of `GET /v1/connectors` for a caller.
@@ -168,6 +272,11 @@ pub struct MockRequestsExpect {
     #[serde(default)]
     pub lacks: Vec<String>,
     pub count: Option<usize>,
+    /// Only requests that carry this field are counted and judged (`grant_type=refresh_token`).
+    pub with: Option<String>,
+    /// At least this many requests (after `with`).
+    #[serde(rename = "atLeast")]
+    pub at_least: Option<usize>,
 }
 
 // ---- mock providers --------------------------------------------------------------------------
@@ -195,6 +304,33 @@ struct State {
     refresh: BTreeSet<String>,
     /// Graph: `sendMail` is logged and then held until released.
     hold: bool,
+    /// Filebox: the provider's own state.
+    fb: Filebox,
+}
+
+/// What the filebox provider remembers. Values are kept here and never logged.
+#[derive(Default)]
+struct Filebox {
+    /// The client secret the provider accepts now.
+    secret: String,
+    /// Secrets the provider held before a `rotateSecret`: refused, logged as `old`.
+    old: BTreeSet<String>,
+    /// A value the provider never held.
+    wrong: String,
+    /// Codes the authorize endpoint minted and nobody redeemed: `(client_id, redirect, challenge)`.
+    codes: BTreeMap<String, (String, String, String)>,
+    /// The access token the MCP server accepts now (empty: none).
+    access: String,
+    /// Access tokens that were valid once (logged as `authorization-expired`).
+    stale: BTreeSet<String>,
+    /// Refresh tokens issued and not yet spent.
+    live: BTreeSet<String>,
+    /// Refresh tokens spent once: presenting one again is `invalid_grant`.
+    spent: BTreeSet<String>,
+    /// The token endpoint waits on refresh requests.
+    hold_token: bool,
+    /// Every token the provider issued, in order, for the runner's scrub list.
+    issued: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -202,16 +338,19 @@ enum Kind {
     Login,
     Linear,
     Graph,
+    Filebox,
 }
 
-/// The three providers.
+/// The four providers.
 pub struct Mocks {
     login: Arc<Mutex<State>>,
     linear: Arc<Mutex<State>>,
     graph: Arc<Mutex<State>>,
+    filebox: Arc<Mutex<State>>,
     login_addr: SocketAddr,
     linear_addr: SocketAddr,
     graph_addr: SocketAddr,
+    filebox_addr: SocketAddr,
 }
 
 struct Req {
@@ -230,7 +369,11 @@ impl Mocks {
         let l1 = TcpListener::bind("127.0.0.1:0")?;
         let l2 = TcpListener::bind("127.0.0.1:0")?;
         let l3 = TcpListener::bind("127.0.0.1:0")?;
+        let l4 = TcpListener::bind("127.0.0.1:0")?;
+        let filebox = Arc::new(Mutex::new(State::default()));
         let m = Mocks {
+            filebox_addr: l4.local_addr()?,
+            filebox: filebox.clone(),
             login_addr: l1.local_addr()?,
             linear_addr: l2.local_addr()?,
             graph_addr: l3.local_addr()?,
@@ -240,6 +383,7 @@ impl Mocks {
         };
         serve(l1, login.clone(), Kind::Login);
         serve(l2, linear, Kind::Linear);
+        serve(l4, filebox, Kind::Filebox);
         serve_graph(l3, graph, login);
         Ok(Arc::new(m))
     }
@@ -256,6 +400,12 @@ impl Mocks {
         if PASS_MCP_SERVER_SEAM {
             m[format!("mcp:{COMMUNITY_MCP_URL}")] =
                 json!(format!("http://{}/mcp", self.linear_addr));
+            m[format!("mcp:{FILEBOX_MCP_URL}")] =
+                json!(format!("http://{}/mcp", self.filebox_addr));
+        }
+        if PASS_OAUTH_SEAM {
+            m[format!("oauth:{FILEBOX_AUTH_ORIGIN}")] =
+                json!(format!("http://{}", self.filebox_addr));
         }
         m.to_string()
     }
@@ -265,6 +415,7 @@ impl Mocks {
             Kind::Login => &self.login,
             Kind::Linear => &self.linear,
             Kind::Graph => &self.graph,
+            Kind::Filebox => &self.filebox,
         }
     }
 
@@ -273,6 +424,7 @@ impl Mocks {
             Kind::Login => self.login_addr,
             Kind::Linear => self.linear_addr,
             Kind::Graph => self.graph_addr,
+            Kind::Filebox => self.filebox_addr,
         }
     }
 }
@@ -451,6 +603,7 @@ fn respond(mut s: TcpStream, status: u16, ctype: &str, body: &str) {
         202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
+        405 => "Method Not Allowed",
         _ => "Not Found",
     };
     let _ = write!(
@@ -466,6 +619,7 @@ fn handle(stream: TcpStream, state: &Arc<Mutex<State>>, kind: Kind) -> std::io::
     match kind {
         Kind::Login => login(out, req, state),
         Kind::Linear => linear(out, req, state),
+        Kind::Filebox => filebox(out, req, state),
         Kind::Graph => unreachable!("served by serve_graph"),
     }
     Ok(())
@@ -612,6 +766,279 @@ fn linear(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     respond(out, 200, "application/json", &body.to_string());
 }
 
+/// Form fields of the filebox token endpoint whose value may be logged: none is a secret.
+const FILEBOX_LOGGED_VALUES: &[&str] = &["client_id", "grant_type", "redirect_uri", "resource"];
+
+fn sha256_b64url(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    b64url(&Sha256::digest(s.as_bytes()))
+}
+
+fn form_pairs(body: &str) -> BTreeMap<String, String> {
+    body.split('&')
+        .filter(|p| !p.is_empty())
+        .map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            (form_decode(k), form_decode(v))
+        })
+        .collect()
+}
+
+fn log_filebox(
+    state: &Arc<Mutex<State>>,
+    req: &Req,
+    path: &str,
+    fields: BTreeSet<String>,
+) -> usize {
+    let mut st = state.lock().unwrap();
+    st.log.push(Logged {
+        path: path.to_string(),
+        method: req.method.clone(),
+        fields,
+    });
+    st.log.len() - 1
+}
+
+fn filebox_issue(st: &mut State) -> Value {
+    let (access, refresh) = (rand_token(), rand_token());
+    let old = std::mem::replace(&mut st.fb.access, access.clone());
+    if !old.is_empty() {
+        st.fb.stale.insert(old);
+    }
+    st.fb.live.insert(refresh.clone());
+    st.fb.issued.push(access.clone());
+    st.fb.issued.push(refresh.clone());
+    json!({ "token_type": "Bearer", "access_token": access, "refresh_token": refresh, "expires_in": 3600 })
+}
+
+fn filebox(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
+    let (path, query) = req.path.split_once('?').unwrap_or((req.path.as_str(), ""));
+    let path = path.to_string();
+    let query = query.to_string();
+    match (req.method.as_str(), path.as_str()) {
+        ("GET", p) if p.starts_with("/.well-known/oauth-protected-resource") => {
+            log_filebox(state, &req, &path, BTreeSet::new());
+            let body = json!({
+                "resource": FILEBOX_MCP_URL,
+                "authorization_servers": [FILEBOX_AUTH_ORIGIN],
+                "bearer_methods_supported": ["header"]
+            });
+            respond(out, 200, "application/json", &body.to_string());
+        }
+        (
+            "GET",
+            "/.well-known/oauth-authorization-server" | "/.well-known/openid-configuration",
+        ) => {
+            log_filebox(state, &req, &path, BTreeSet::new());
+            // No registration endpoint: the admin registered a client by hand.
+            let body = json!({
+                "issuer": FILEBOX_AUTH_ORIGIN,
+                "authorization_endpoint": format!("{FILEBOX_AUTH_ORIGIN}/authorize"),
+                "token_endpoint": format!("{FILEBOX_AUTH_ORIGIN}/token"),
+                "revocation_endpoint": format!("{FILEBOX_AUTH_ORIGIN}/revoke"),
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code", "refresh_token"],
+                "code_challenge_methods_supported": ["S256"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post"]
+            });
+            respond(out, 200, "application/json", &body.to_string());
+        }
+        ("GET", "/authorize") => filebox_authorize(out, req, state, &query),
+        ("POST", "/token") => filebox_token(out, req, state),
+        ("POST", "/revoke") => {
+            let names: BTreeSet<String> = form_pairs(&req.body).into_keys().collect();
+            log_filebox(state, &req, &path, names);
+            respond(out, 200, "application/json", "{}");
+        }
+        ("POST", "/mcp") => filebox_mcp(out, req, state),
+        _ => respond(out, 404, "text/plain", "not found"),
+    }
+}
+
+/// The browser's half: a code for the registered client id, the redirect URI and the S256
+/// challenge, in the `Location` of a 302.
+fn filebox_authorize(mut out: TcpStream, req: Req, state: &Arc<Mutex<State>>, query: &str) {
+    let q = form_pairs(query);
+    let get = |k: &str| q.get(k).cloned().unwrap_or_default();
+    let mut fields: BTreeSet<String> = q.keys().cloned().collect();
+    for k in ["client_id", "code_challenge_method", "redirect_uri"] {
+        fields.insert(format!("{k}={}", get(k)));
+    }
+    log_filebox(state, &req, "/authorize", fields);
+    let ok = get("response_type") == "code"
+        && get("client_id").starts_with(FILEBOX_CLIENT_PREFIX)
+        && get("code_challenge_method") == "S256"
+        && !get("code_challenge").is_empty()
+        && !get("redirect_uri").is_empty();
+    if !ok {
+        return respond(out, 400, "text/plain", "invalid_request");
+    }
+    let code = rand_token();
+    state.lock().unwrap().fb.codes.insert(
+        code.clone(),
+        (get("client_id"), get("redirect_uri"), get("code_challenge")),
+    );
+    let sep = if get("redirect_uri").contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    let _ = write!(
+        out,
+        "HTTP/1.1 302 Found\r\nLocation: {}{sep}code={code}&state={}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        get("redirect_uri"),
+        get("state")
+    );
+}
+
+/// The confidential token endpoint: `client_secret_post`, single-use codes, single-use rotating
+/// refresh tokens. Logs field names, a few non-secret values, `client-secret=current|old|wrong|none`
+/// and, for a refresh, `refresh=fresh|reused|unknown`; never a value.
+fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
+    let form = form_pairs(&req.body);
+    let grant = form.get("grant_type").cloned().unwrap_or_default();
+    let client_id = form.get("client_id").cloned().unwrap_or_default();
+    let secret_label = {
+        let st = state.lock().unwrap();
+        match form.get("client_secret") {
+            None => "none",
+            Some(s) if *s == st.fb.secret => "current",
+            Some(s) if st.fb.old.contains(s) => "old",
+            Some(_) => "wrong",
+        }
+    };
+    let mut fields: BTreeSet<String> = form.keys().cloned().collect();
+    for k in FILEBOX_LOGGED_VALUES {
+        if let Some(v) = form.get(*k) {
+            fields.insert(format!("{k}={v}"));
+        }
+    }
+    fields.insert(format!("client-secret={secret_label}"));
+    let idx = log_filebox(state, &req, "/token", fields);
+    // A held refresh waits, logged, until released (at most 30 s: a stuck scenario still ends).
+    if grant == "refresh_token" {
+        let start = std::time::Instant::now();
+        while state.lock().unwrap().fb.hold_token
+            && start.elapsed() < std::time::Duration::from_secs(30)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    let mut note = None;
+    let result: Result<Value, (u16, &str)> = {
+        let mut st = state.lock().unwrap();
+        if secret_label != "current" || !client_id.starts_with(FILEBOX_CLIENT_PREFIX) {
+            Err((401, "invalid_client"))
+        } else if grant == "authorization_code" {
+            let code = form.get("code").map(String::as_str).unwrap_or_default();
+            match st.fb.codes.remove(code) {
+                Some((cid, redirect, challenge))
+                    if cid == client_id
+                        && form.get("redirect_uri") == Some(&redirect)
+                        && sha256_b64url(
+                            form.get("code_verifier")
+                                .map(String::as_str)
+                                .unwrap_or_default(),
+                        ) == challenge =>
+                {
+                    Ok(filebox_issue(&mut st))
+                }
+                _ => Err((400, "invalid_grant")),
+            }
+        } else if grant == "refresh_token" {
+            let rt = form.get("refresh_token").cloned().unwrap_or_default();
+            if st.fb.live.remove(&rt) {
+                st.fb.spent.insert(rt);
+                note = Some("refresh=fresh");
+                Ok(filebox_issue(&mut st))
+            } else if st.fb.spent.contains(&rt) {
+                note = Some("refresh=reused");
+                Err((400, "invalid_grant"))
+            } else {
+                note = Some("refresh=unknown");
+                Err((400, "invalid_grant"))
+            }
+        } else {
+            Err((400, "unsupported_grant_type"))
+        }
+    };
+    if let Some(n) = note {
+        if let Some(l) = state.lock().unwrap().log.get_mut(idx) {
+            l.fields.insert(n.to_string());
+        }
+    }
+    match result {
+        Ok(v) => respond(out, 200, "application/json", &v.to_string()),
+        Err((status, err)) => respond(
+            out,
+            status,
+            "application/json",
+            &json!({ "error": err }).to_string(),
+        ),
+    }
+}
+
+fn filebox_mcp(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
+    let rpc: Value = serde_json::from_str(&req.body).unwrap_or(Value::Null);
+    let method = rpc["method"].as_str().unwrap_or_default().to_string();
+    let id = rpc["id"].clone();
+    let sent = req
+        .headers
+        .get("authorization")
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let mut fields = BTreeSet::new();
+    fields.insert(format!("method={method}"));
+    let authed = {
+        let st = state.lock().unwrap();
+        let authed =
+            !st.revoked && !st.fb.access.is_empty() && sent.as_deref() == Some(&st.fb.access);
+        match &sent {
+            None => {}
+            Some(_) if authed => {
+                fields.insert("authorization".to_string());
+            }
+            Some(t) if st.fb.stale.contains(t) => {
+                fields.insert("authorization-expired".to_string());
+            }
+            Some(_) => {
+                fields.insert("authorization-wrong".to_string());
+            }
+        }
+        authed
+    };
+    if method == "tools/call" {
+        let tool = rpc["params"]["name"].as_str().unwrap_or_default();
+        fields.insert(format!("tool={tool}"));
+        // `tool-ok=` only for a call the provider answered.
+        if authed {
+            fields.insert(format!("tool-ok={tool}"));
+        }
+    }
+    log_filebox(state, &req, "/mcp", fields);
+    if !authed {
+        return respond(out, 401, "application/json", r#"{"error":"unauthorized"}"#);
+    }
+    let result = match method.as_str() {
+        "initialize" => json!({
+            "protocolVersion": "2025-03-26",
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "mock-filebox", "version": "1" }
+        }),
+        "tools/list" => {
+            let tool = |name: &str| {
+                json!({ "name": name, "description": name,
+                        "inputSchema": { "type": "object", "properties": {} } })
+            };
+            json!({ "tools": [tool("search_files"), tool("read_file")] })
+        }
+        "tools/call" => json!({ "content": [{ "type": "text", "text": "ok" }], "isError": false }),
+        _ => return respond(out, 202, "application/json", ""),
+    };
+    let body = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+    respond(out, 200, "application/json", &body.to_string());
+}
+
 /// `*` matches every path; a leading or trailing `*` matches a suffix or a prefix.
 fn path_matches(pattern: &str, path: &str) -> bool {
     if pattern == "*" {
@@ -641,6 +1068,28 @@ fn rand_token() -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The browser's half of the authorization-code flow: `GET` the authorize URL on the mock and read
+/// the `code` out of the `Location` of the redirect.
+fn browser_get_code(addr: SocketAddr, path_and_query: &str) -> Result<String, String> {
+    let mut s = TcpStream::connect(addr).map_err(|e| e.to_string())?;
+    write!(
+        s,
+        "GET {path_and_query} HTTP/1.1\r\nHost: auth.filebox.example\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|e| e.to_string())?;
+    let mut out = String::new();
+    s.read_to_string(&mut out).map_err(|e| e.to_string())?;
+    let status = out.lines().next().unwrap_or_default().to_string();
+    let location = out
+        .lines()
+        .find_map(|l| l.strip_prefix("Location: "))
+        .ok_or_else(|| format!("no redirect: {status}"))?;
+    let query = location.split_once('?').map(|x| x.1).unwrap_or_default();
+    form_pairs(query)
+        .remove("code")
+        .ok_or_else(|| "the redirect carries no code".to_string())
+}
+
 // ---- engine side -----------------------------------------------------------------------------
 
 /// What the connector steps remember inside a scenario.
@@ -659,6 +1108,12 @@ pub struct ConnState {
     nodes: std::collections::BTreeSet<String>,
     /// Bearer of the Linear mock for this scenario (also in the scrub list).
     linear_bearer: String,
+    /// Alias of the filebox `mock-provider` piece of this scenario.
+    filebox_alias: Option<String>,
+    /// How many of the filebox provider's issued tokens the scrub list already holds.
+    filebox_synced: usize,
+    /// Connector ids a `connector-node` step gave a client; cleared at cleanup.
+    client_nodes: std::collections::BTreeSet<String>,
 }
 
 fn product(want: impl Into<String>, got: impl Into<String>) -> Fail {
@@ -699,6 +1154,7 @@ impl Engine {
         match self.ctx.conn.providers.get(alias) {
             Some(0) => Ok(Kind::Login),
             Some(2) => Ok(Kind::Graph),
+            Some(3) => Ok(Kind::Filebox),
             Some(_) => Ok(Kind::Linear),
             None => Err(Fail::new(
                 Class::Scenario,
@@ -719,10 +1175,11 @@ impl Engine {
             Some("microsoft-login") => Kind::Login,
             Some("linear-server") => Kind::Linear,
             Some("microsoft-graph") => Kind::Graph,
+            Some("filebox") => Kind::Filebox,
             other => {
                 return Err(Fail::new(
                     Class::Scenario,
-                    "provider microsoft-login, microsoft-graph or linear-server",
+                    "provider microsoft-login, microsoft-graph, linear-server or filebox",
                     format!("{other:?}"),
                 ))
             }
@@ -734,6 +1191,25 @@ impl Engine {
             if kind == Kind::Linear {
                 st.bearer = bearer.clone();
             }
+            if kind == Kind::Filebox {
+                st.fb.secret = rand_token();
+                st.fb.wrong = rand_token();
+            }
+        }
+        if kind == Kind::Filebox {
+            // The client secret the provider holds, a value it never held, and later the rotated
+            // one and every token it issues: all are in the scrub list, and `secret-absent:
+            // { secret: <alias> }` judges them all (the companions are `<alias>#...`).
+            let (secret, wrong) = {
+                let st = mocks.state(kind).lock().unwrap();
+                (st.fb.secret.clone(), st.fb.wrong.clone())
+            };
+            self.ctx.secrets.insert(alias.to_string(), Secret(secret));
+            self.ctx
+                .secrets
+                .insert(format!("{alias}#wrong"), Secret(wrong));
+            self.ctx.conn.filebox_alias = Some(alias.to_string());
+            self.ctx.conn.filebox_synced = 0;
         }
         if kind == Kind::Linear {
             self.remember(alias, &bearer);
@@ -745,6 +1221,7 @@ impl Engine {
                 Kind::Login => 0,
                 Kind::Linear => 1,
                 Kind::Graph => 2,
+                Kind::Filebox => 3,
             },
         );
         Ok(())
@@ -753,7 +1230,36 @@ impl Engine {
     pub(super) fn mock_provider(&mut self, m: &MockProviderStep) -> Result<(), Fail> {
         let kind = self.provider_of(&m.piece)?;
         let mocks = self.mocks()?;
+        let filebox_only = m.expire || m.hold_token.is_some() || m.rotate_secret;
+        if filebox_only && kind != Kind::Filebox {
+            return Err(Fail::new(
+                Class::Scenario,
+                "`expire`, `holdToken` and `rotateSecret` on a filebox mock-provider piece",
+                format!("piece `{}`", m.piece),
+            ));
+        }
         let mut st = mocks.state(kind).lock().unwrap();
+        if filebox_only {
+            if m.expire {
+                let cur = std::mem::take(&mut st.fb.access);
+                if !cur.is_empty() {
+                    st.fb.stale.insert(cur);
+                }
+            }
+            if let Some(h) = m.hold_token {
+                st.fb.hold_token = h;
+            }
+            if m.rotate_secret {
+                let old = std::mem::replace(&mut st.fb.secret, rand_token());
+                st.fb.old.insert(old);
+                let new = st.fb.secret.clone();
+                drop(st);
+                self.ctx
+                    .secrets
+                    .insert(format!("{}#rotated", m.piece), Secret(new));
+            }
+            return Ok(());
+        }
         if let Some(h) = m.hold {
             if kind != Kind::Graph {
                 return Err(Fail::new(
@@ -804,31 +1310,52 @@ impl Engine {
         }
         // Node state outlives a scenario on one vamd: put every touched connector back to
         // "not enabled, no consent" so the next scenario starts clean.
+        let client_nodes = std::mem::take(&mut self.ctx.conn.client_nodes);
         for id in std::mem::take(&mut self.ctx.conn.nodes) {
-            let _ = self.api.put_as(
-                None,
-                &format!("/v1/connectors/{}/node", seg(&id)),
-                &json!({ "enabled": false, "consent": null }),
-            );
+            let path = format!("/v1/connectors/{}/node", seg(&id));
+            if client_nodes.contains(&id) {
+                // An org client (and its vault secret) outlives a scenario on one vamd: clear it too.
+                let body = json!({ "enabled": false, "consent": null, "client": null });
+                if self.api.put_as(None, &path, &body).is_ok_and(|r| r.ok()) {
+                    continue;
+                }
+            }
+            let _ = self
+                .api
+                .put_as(None, &path, &json!({ "enabled": false, "consent": null }));
         }
         self.ctx.conn = ConnState::default();
     }
 
     /// A refusal must be 400, 403 or 409: a 404 or 405 is a missing route.
     fn judge(&self, step: &str, refused: bool, r: &crate::api::Reply) -> Result<(), Fail> {
+        self.judge_with(step, refused, None, r)
+    }
+
+    /// As `judge`, and a refusal's body must hold `contains`.
+    fn judge_with(
+        &self,
+        step: &str,
+        refused: bool,
+        contains: Option<&str>,
+        r: &crate::api::Reply,
+    ) -> Result<(), Fail> {
         let shown = format!(
             "{} {}",
             r.status,
             self.scrub(&r.body.chars().take(300).collect::<String>())
         );
         if refused {
-            if matches!(r.status, 400 | 403 | 409) {
-                return Ok(());
+            if !matches!(r.status, 400 | 403 | 409) {
+                return Err(product(
+                    format!("{step} is refused (400, 403 or 409)"),
+                    shown,
+                ));
             }
-            return Err(product(
-                format!("{step} is refused (400, 403 or 409)"),
-                shown,
-            ));
+            if let Some(c) = contains.filter(|c| !r.body.contains(*c)) {
+                return Err(product(format!("{step} is refused with `{c}`"), shown));
+            }
+            return Ok(());
         }
         if r.ok() {
             Ok(())
@@ -843,13 +1370,264 @@ impl Engine {
         if let Some(c) = &n.consent {
             body["consent"] = json!({ "tenantId": c.tenant });
         }
+        if let Some(c) = &n.client {
+            let mut client = json!({ "clientId": c.client_id });
+            if let Some(s) = &c.client_secret {
+                client["clientSecret"] = json!(self.client_secret_value(s)?);
+            }
+            body["client"] = client;
+            self.ctx.conn.client_nodes.insert(n.id.clone());
+        }
         let path = format!("/v1/connectors/{}/node", seg(&n.id));
         self.ctx.conn.nodes.insert(n.id.clone());
         let r = self
             .api
             .put_as(key.as_deref(), &path, &body)
             .map_err(conn)?;
-        self.judge(&format!("PUT {path}"), n.refused, &r)
+        self.judge_with(&format!("PUT {path}"), n.refused, n.contains.as_deref(), &r)
+    }
+
+    /// The value of a filebox client secret a `connector-node` step names.
+    fn client_secret_value(&mut self, s: &SecretRef) -> Result<String, Fail> {
+        if self.provider_of(&s.piece)? != Kind::Filebox {
+            return Err(Fail::new(
+                Class::Scenario,
+                "a filebox mock-provider piece for `clientSecret.piece`",
+                format!("piece `{}`", s.piece),
+            ));
+        }
+        let mocks = self.mocks()?;
+        let st = mocks.state(Kind::Filebox).lock().unwrap();
+        match s.which {
+            SecretWhich::Current => Ok(st.fb.secret.clone()),
+            SecretWhich::Rotated if st.fb.old.is_empty() => Err(Fail::new(
+                Class::Scenario,
+                "a `rotateSecret` step before `which: rotated`",
+                "the provider's secret was never rotated",
+            )),
+            SecretWhich::Rotated => Ok(st.fb.secret.clone()),
+            SecretWhich::Wrong => Ok(st.fb.wrong.clone()),
+        }
+    }
+
+    /// Puts the tokens the filebox provider issued since the last call into the scrub list, as
+    /// companions of its piece (`<alias>#t<n>`).
+    pub(super) fn sync_filebox(&mut self) {
+        let (Some(alias), Some(mocks)) = (
+            self.ctx.conn.filebox_alias.clone(),
+            self.connector_mocks.clone(),
+        ) else {
+            return;
+        };
+        let issued: Vec<String> = mocks.filebox.lock().unwrap().fb.issued.clone();
+        for (n, t) in issued.iter().enumerate().skip(self.ctx.conn.filebox_synced) {
+            self.ctx
+                .secrets
+                .insert(format!("{alias}#t{n}"), Secret(t.clone()));
+        }
+        self.ctx.conn.filebox_synced = issued.len();
+    }
+
+    /// A connector with an org-supplied client, connected as the app does (D29): the pinned
+    /// authorize endpoint and client id come from the member's `GET /v1/connectors` entry.
+    fn connect_org_client(
+        &mut self,
+        c: &ConnectorConnect,
+        key: Option<String>,
+    ) -> Result<(), Fail> {
+        let mocks = self.mocks()?;
+        let r = self
+            .api
+            .get_as(key.as_deref(), "/v1/connectors")
+            .map_err(conn)?;
+        let body = r.json();
+        let entry = body["connectors"]
+            .as_array()
+            .and_then(|a| a.iter().find(|e| e["id"].as_str() == Some(c.id.as_str())))
+            .cloned()
+            .ok_or_else(|| {
+                product(
+                    format!("connector `{}` is listed", c.id),
+                    self.scrub(&r.body.chars().take(300).collect::<String>()),
+                )
+            })?;
+        let text = |path: &str| -> Result<String, Fail> {
+            dotted(&entry, path)
+                .and_then(Value::as_str)
+                .map(String::from)
+                .ok_or_else(|| {
+                    product(
+                        format!("`{}` has {path} (the node's pinned client)", c.id),
+                        format!("{:?}", dotted(&entry, path)),
+                    )
+                })
+        };
+        let client_id = text("node.client.clientId")?;
+        let authorize = text("node.client.authorizeEndpoint")?;
+        let token_endpoint = text("node.client.tokenEndpoint")?;
+        let mcp_url = text("mcp.url")?;
+        if c.via == Some(Via::Tokens) {
+            return self.connect_org_tokens(
+                c,
+                key,
+                &client_id,
+                &authorize,
+                &token_endpoint,
+                &mcp_url,
+            );
+        }
+        let redirect = c
+            .redirect_uri
+            .clone()
+            .unwrap_or_else(|| APP_REDIRECT_URI.into());
+        let verifier = format!("{}{}", rand_token(), rand_token());
+        let challenge = sha256_b64url(&verifier);
+        let path = authorize
+            .split_once("://")
+            .and_then(|(_, rest)| rest.find('/').map(|i| rest[i..].to_string()))
+            .unwrap_or_else(|| "/authorize".to_string());
+        let pct = |s: &str| {
+            s.bytes()
+                .map(|b| match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                        (b as char).to_string()
+                    }
+                    _ => format!("%{b:02X}"),
+                })
+                .collect::<String>()
+        };
+        let state = rand_token();
+        // The runner plays the browser: it follows the pinned endpoint's path on the mock.
+        let q = format!(
+            "{path}?response_type=code&client_id={}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&state={state}",
+            pct(&client_id),
+            pct(&redirect)
+        );
+        let code = browser_get_code(mocks.filebox_addr, &q).map_err(|e| {
+            Fail::new(
+                Class::Harness,
+                "the filebox authorize endpoint gives a code",
+                e,
+            )
+        })?;
+        // Codes and verifiers are single-use, but they are still kept out of every output.
+        self.remember(&c.id, &code);
+        self.remember(&c.id, &verifier);
+        let ep = format!("/v1/connectors/{}/connection/oauth/code", seg(&c.id));
+        let r = self
+            .api
+            .post_as(
+                key.as_deref(),
+                &ep,
+                &json!({ "code": code, "codeVerifier": verifier, "redirectUri": redirect }),
+            )
+            .map_err(conn)?;
+        if r.ok() {
+            self.ctx.conn.mcp.push((c.id.clone(), key.clone()));
+        }
+        self.sync_filebox();
+        self.judge_with(&format!("POST {ep}"), c.refused, c.contains.as_deref(), &r)
+    }
+
+    /// An app that holds the tokens itself: the routes a connector with `org_vault` must refuse.
+    fn connect_org_tokens(
+        &mut self,
+        c: &ConnectorConnect,
+        key: Option<String>,
+        client_id: &str,
+        authorize: &str,
+        token_endpoint: &str,
+        mcp_url: &str,
+    ) -> Result<(), Fail> {
+        let origin = authorize
+            .rsplit_once('/')
+            .map(|x| x.0)
+            .unwrap_or(authorize)
+            .to_string();
+        let body = json!({
+            "connectionId": c.id,
+            "url": mcp_url,
+            "authMode": "oauth",
+            "oauth": {
+                "resource": mcp_url,
+                "authorizationServer": origin,
+                "tokenEndpoint": c.token_endpoint.clone().unwrap_or_else(|| token_endpoint.to_string()),
+                "clientId": c.client_id.clone().unwrap_or_else(|| client_id.to_string()),
+                "registrationMethod": "manual",
+                "scopes": []
+            }
+        });
+        let r = self
+            .api
+            .put_as(key.as_deref(), "/v1/mcp/connections", &body)
+            .map_err(conn)?;
+        if r.ok() {
+            self.ctx.conn.mcp.push((c.id.clone(), key.clone()));
+        } else {
+            return self.judge_with(
+                "PUT /v1/mcp/connections",
+                c.refused,
+                c.contains.as_deref(),
+                &r,
+            );
+        }
+        let (access, refresh) = (rand_token(), rand_token());
+        self.remember(&c.id, &access);
+        self.remember(&c.id, &refresh);
+        let ep = format!("/v1/mcp/connections/{}/oauth/tokens", seg(&c.id));
+        let r = self
+            .api
+            .put_as(
+                key.as_deref(),
+                &ep,
+                &json!({ "accessToken": access, "refreshToken": refresh }),
+            )
+            .map_err(conn)?;
+        self.judge_with(&format!("PUT {ep}"), c.refused, c.contains.as_deref(), &r)
+    }
+
+    pub(super) fn api_call(&mut self, a: &ApiCallStep) -> Result<(), Fail> {
+        let key = self.key_of(a.as_.as_deref())?;
+        let r = match a.method.to_ascii_uppercase().as_str() {
+            "GET" => self.api.get_as(key.as_deref(), &a.path),
+            "DELETE" => self.api.delete_as(key.as_deref(), &a.path),
+            other => {
+                return Err(Fail::new(
+                    Class::Scenario,
+                    "`api-call` method GET or DELETE",
+                    other.to_string(),
+                ))
+            }
+        }
+        .map_err(conn)?;
+        let step = format!("{} {}", a.method.to_ascii_uppercase(), a.path);
+        self.judge_with(&step, a.refused, a.contains.as_deref(), &r)?;
+        if let Some(alias) = &a.absent {
+            self.sync_filebox();
+            let values: Vec<String> = self
+                .ctx
+                .secrets
+                .iter()
+                .filter(|(k, _)| *k == alias || k.starts_with(&format!("{alias}#")))
+                .map(|(_, v)| v.0.clone())
+                .collect();
+            if values.is_empty() {
+                return Err(Fail::new(
+                    Class::Scenario,
+                    format!("`{alias}` holds secrets"),
+                    "not a filebox mock-provider piece in `given`",
+                ));
+            }
+            for v in values {
+                if let Some(form) = crate::forms::find_form(&v, &r.body) {
+                    return Err(product(
+                        format!("no form of `{alias}`'s secrets in the answer to {step}"),
+                        format!("the {form} form is in the body"),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn connector_check(&mut self, c: &ConnectorCheck) -> Result<(), Fail> {
@@ -870,6 +1648,9 @@ impl Engine {
         };
         if c.id == "microsoft-365" {
             return self.connect_rest(c, key, kind);
+        }
+        if kind == Some(Kind::Filebox) {
+            return self.connect_org_client(c, key);
         }
         let mocks = self.mocks()?;
         let url = match (&c.url, kind) {
@@ -1009,6 +1790,7 @@ impl Engine {
             ));
         }
         let body = r.json();
+        self.sync_filebox();
         // No token the runner made is in any listing.
         let leaked = self
             .ctx
@@ -1036,25 +1818,13 @@ impl Engine {
                 self.scrub(&r.body.chars().take(300).collect::<String>()),
             ));
         };
-        for (path, want) in &x.fields {
-            let got = dotted(entry, path);
-            let yaml: Value = serde_json::to_value(want).unwrap_or(Value::Null);
-            if got != Some(&yaml) {
-                return Err(product(
-                    format!("`{}` {path} is {yaml}", x.id),
-                    format!("{got:?}"),
-                ));
-            }
-        }
-        for path in &x.absent {
-            if dotted(entry, path).is_some() {
-                return Err(product(
-                    format!("`{}` has no {path}", x.id),
-                    "present".to_string(),
-                ));
-            }
-        }
-        Ok(())
+        // Exact values, `{ present: true }` and `{ contains: text }`; `absent` paths must not exist.
+        self.mkt_fields(
+            &format!("connector `{}`", x.id),
+            entry,
+            &x.fields,
+            &x.absent,
+        )
     }
 
     /// What a provider saw. A request that has not arrived yet is waited for (up to 8 s) unless
@@ -1086,16 +1856,25 @@ impl Engine {
             .iter()
             .filter(|l| path_matches(&x.path, &l.path))
             .filter(|l| x.method.as_deref().is_none_or(|m| l.method == m))
+            .filter(|l| x.with.as_ref().is_none_or(|w| l.fields.contains(w)))
             .cloned()
             .collect();
         let all: BTreeSet<&String> = seen.iter().flat_map(|l| l.fields.iter()).collect();
         let want = format!("{} saw requests at {}", x.piece, x.path);
         let none_wanted = x.count == Some(0);
-        if (seen.is_empty() && !none_wanted) || x.count.is_some_and(|n| n != seen.len()) {
+        let short = x.at_least.is_some_and(|n| seen.len() < n);
+        if (seen.is_empty() && !none_wanted) || short || x.count.is_some_and(|n| n != seen.len()) {
             return Err(product(
                 format!(
-                    "{want}{}",
-                    x.count.map(|n| format!(" ({n})")).unwrap_or_default()
+                    "{want}{}{}{}",
+                    x.with
+                        .as_ref()
+                        .map(|w| format!(" with `{w}`"))
+                        .unwrap_or_default(),
+                    x.count.map(|n| format!(" ({n})")).unwrap_or_default(),
+                    x.at_least
+                        .map(|n| format!(" (at least {n})"))
+                        .unwrap_or_default()
                 ),
                 format!("{} requests", seen.len()),
             ));
@@ -1182,6 +1961,173 @@ mod tests {
             .log
             .iter()
             .any(|l| l.fields.iter().any(|f| f.contains("b-secret"))));
+    }
+
+    fn filebox_ready(m: &Mocks) {
+        let mut st = m.filebox.lock().unwrap();
+        *st = State::default();
+        st.fb.secret = "s-current".into();
+        st.fb.wrong = "s-wrong".into();
+    }
+
+    fn filebox_code(m: &Mocks, verifier: &str) -> String {
+        let q = format!(
+            "/authorize?response_type=code&client_id=e2e-filebox-client&redirect_uri=squrell%3A%2F%2Foauth&code_challenge={}&code_challenge_method=S256&state=x",
+            sha256_b64url(verifier)
+        );
+        browser_get_code(m.filebox_addr, &q).unwrap()
+    }
+
+    fn token(m: &Mocks, body: &str) -> String {
+        post(m.filebox_addr, "/token", "", body)
+    }
+
+    #[test]
+    fn filebox_exchanges_a_code_once_with_the_secret_and_the_verifier() {
+        let m = Mocks::start().unwrap();
+        filebox_ready(&m);
+        let code = filebox_code(&m, "v-verifier");
+        let form = |secret: &str, verifier: &str, code: &str| {
+            format!(
+                "grant_type=authorization_code&client_id=e2e-filebox-client&client_secret={secret}&code={code}&code_verifier={verifier}&redirect_uri=squrell%3A%2F%2Foauth"
+            )
+        };
+        assert!(token(&m, &form("s-wrong", "v-verifier", &code)).contains("invalid_client"));
+        // The wrong secret did not spend the code.
+        assert!(token(&m, &form("s-current", "other", &code)).contains("invalid_grant"));
+        // A wrong verifier spends it: codes are single-use.
+        assert!(token(&m, &form("s-current", "v-verifier", &code)).contains("invalid_grant"));
+        let code = filebox_code(&m, "v-verifier");
+        let ok = token(&m, &form("s-current", "v-verifier", &code));
+        assert!(
+            ok.starts_with("HTTP/1.1 200") && ok.contains("refresh_token"),
+            "{ok}"
+        );
+        let st = m.filebox.lock().unwrap();
+        let f = &st
+            .log
+            .iter()
+            .rev()
+            .find(|l| l.path == "/token")
+            .unwrap()
+            .fields;
+        assert!(f.contains("client-secret=current") && f.contains("code_verifier"));
+        assert!(f.contains("redirect_uri=squrell://oauth"));
+        assert!(!f
+            .iter()
+            .any(|x| x.contains("s-current") || x.contains("v-verifier")));
+        assert_eq!(st.fb.issued.len(), 2);
+    }
+
+    #[test]
+    fn filebox_refresh_tokens_are_single_use_and_the_secret_can_rotate() {
+        let m = Mocks::start().unwrap();
+        filebox_ready(&m);
+        let code = filebox_code(&m, "v");
+        let first = token(
+            &m,
+            &format!("grant_type=authorization_code&client_id=e2e-filebox-client&client_secret=s-current&code={code}&code_verifier=v&redirect_uri=squrell%3A%2F%2Foauth"),
+        );
+        let json: Value = serde_json::from_str(first.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let (access, refresh) = (
+            json["access_token"].as_str().unwrap().to_string(),
+            json["refresh_token"].as_str().unwrap().to_string(),
+        );
+        let rpc =
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_files"}}"#;
+        let call = |bearer: &str| {
+            post(
+                m.filebox_addr,
+                "/mcp",
+                &format!("Authorization: Bearer {bearer}\r\n"),
+                rpc,
+            )
+        };
+        assert!(call(&access).starts_with("HTTP/1.1 200"));
+        // The access token expires: refused and logged as expired, not wrong.
+        {
+            let mut st = m.filebox.lock().unwrap();
+            let cur = std::mem::take(&mut st.fb.access);
+            st.fb.stale.insert(cur);
+        }
+        assert!(call(&access).starts_with("HTTP/1.1 401"));
+        assert!(call("nonsense").starts_with("HTTP/1.1 401"));
+        let refresh_form = |secret: &str, rt: &str| {
+            format!("grant_type=refresh_token&client_id=e2e-filebox-client&client_secret={secret}&refresh_token={rt}")
+        };
+        let ok = token(&m, &refresh_form("s-current", &refresh));
+        assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+        // Spent once: the same token again is `invalid_grant`.
+        assert!(token(&m, &refresh_form("s-current", &refresh)).contains("invalid_grant"));
+        // The provider rotates its secret: the old one is `old`, refused as a client.
+        {
+            let mut st = m.filebox.lock().unwrap();
+            let old = std::mem::replace(&mut st.fb.secret, "s-new".into());
+            st.fb.old.insert(old);
+        }
+        assert!(token(&m, &refresh_form("s-current", &refresh)).contains("invalid_client"));
+        let st = m.filebox.lock().unwrap();
+        let fields: Vec<&BTreeSet<String>> = st
+            .log
+            .iter()
+            .filter(|l| l.path == "/token")
+            .map(|l| &l.fields)
+            .collect();
+        assert!(fields.iter().any(|f| f.contains("refresh=fresh")));
+        assert!(fields.iter().any(|f| f.contains("refresh=reused")));
+        assert!(fields.iter().any(|f| f.contains("client-secret=old")));
+        let mcp: Vec<&BTreeSet<String>> = st
+            .log
+            .iter()
+            .filter(|l| l.path == "/mcp")
+            .map(|l| &l.fields)
+            .collect();
+        assert!(mcp.iter().any(|f| f.contains("authorization-expired")));
+        assert!(mcp.iter().any(|f| f.contains("authorization-wrong")));
+        assert!(mcp.iter().any(|f| f.contains("tool-ok=search_files")));
+    }
+
+    #[test]
+    fn filebox_holds_a_refresh_until_released() {
+        let m = Mocks::start().unwrap();
+        filebox_ready(&m);
+        {
+            let mut st = m.filebox.lock().unwrap();
+            st.fb.live.insert("r1".into());
+            st.fb.hold_token = true;
+        }
+        let addr = m.filebox_addr;
+        let t = std::thread::spawn(move || {
+            post(
+                addr,
+                "/token",
+                "",
+                "grant_type=refresh_token&client_id=e2e-filebox-client&client_secret=s-current&refresh_token=r1",
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!t.is_finished());
+        // Logged on arrival, while it waits.
+        assert_eq!(m.filebox.lock().unwrap().log.len(), 1);
+        m.filebox.lock().unwrap().fb.hold_token = false;
+        assert!(t.join().unwrap().starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn filebox_serves_metadata_without_a_registration_endpoint() {
+        let m = Mocks::start().unwrap();
+        let get = |path: &str| {
+            let mut s = TcpStream::connect(m.filebox_addr).unwrap();
+            write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            out
+        };
+        let prm = get("/.well-known/oauth-protected-resource/mcp");
+        assert!(prm.contains("https://auth.filebox.example") && prm.contains(FILEBOX_MCP_URL));
+        let asm = get("/.well-known/oauth-authorization-server");
+        assert!(asm.contains("code_challenge_methods_supported") && asm.contains("S256"));
+        assert!(!asm.contains("registration_endpoint"));
     }
 
     #[test]

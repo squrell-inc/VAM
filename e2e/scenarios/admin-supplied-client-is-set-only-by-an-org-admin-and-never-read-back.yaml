@@ -1,0 +1,51 @@
+id: admin-supplied-client-is-set-only-by-an-org-admin-and-never-read-back
+title: The admin-supplied OAuth client is set only by an org admin and its secret is never read back
+description: >
+  The Filebox connector is installed and needs the admin's own OAuth client. Enabling it without a client is
+  refused (the reason names the client id), enabling with a client id and no secret is refused (it names the
+  secret), a member cannot enable it with a client, and a client on a connector that uses the publisher's own
+  client (Bugwatch) is refused. The org administrator enables it with a client id and secret: the entry shows the
+  client id, that a secret is set, the endpoints the node pinned from the provider's metadata (on the provider's
+  authorization host) and who saved it (admins only). The secret is in no connector listing, in no vault listing
+  for the admin or a member, and a delete of its vault row is refused. Disabled and enabled again with no client in
+  the request, the client and the secret are still there.
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - org-administrator
+  - marketplace-community-connectors
+  - mock-filebox-server
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: filebox-connector, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-admin }
+  - connector-node: { id: filebox, enabled: true, as: org-administrator, refused: true, contains: client id }
+  - connector-node: { id: filebox, enabled: true, as: org-administrator, client: { clientId: e2e-filebox-client }, refused: true, contains: secret }
+  - connector-node: { id: filebox, enabled: true, as: org-member, client: { clientId: e2e-filebox-client, clientSecret: { piece: mock-filebox-server, which: current } }, refused: true }
+  - connector-node: { id: bugwatch, enabled: true, as: org-administrator, client: { clientId: e2e-filebox-client, clientSecret: { piece: mock-filebox-server, which: current } }, refused: true, contains: client }
+  - connector-node: { id: filebox, enabled: true, as: org-administrator, client: { clientId: e2e-filebox-client, clientSecret: { piece: mock-filebox-server, which: current } } }
+  - expect: { connectors: { id: filebox, as: org-administrator, fields: { state: connect, provider.client: org, node.enabled: true, node.client.clientId: e2e-filebox-client, node.client.secretSet: true, node.client.authorizeEndpoint: "https://auth.filebox.example/authorize", node.client.tokenEndpoint: "https://auth.filebox.example/token", node.client.updatedBy: { present: true } } } }
+  - expect: { connectors: { id: filebox, as: org-member, fields: { state: connect, node.client.clientId: e2e-filebox-client, node.client.secretSet: true, node.client.authorizeEndpoint: "https://auth.filebox.example/authorize" }, absent: [node.client.updatedBy, node.client.clientSecret] } }
+  - api-call: { path: /v1/connectors, as: org-administrator, absent: mock-filebox-server }
+  - api-call: { path: /v1/connectors, as: org-member, absent: mock-filebox-server }
+  - api-call: { path: /v1/secrets, as: org-administrator, absent: mock-filebox-server }
+  - api-call: { path: /v1/secrets, as: org-member, absent: mock-filebox-server }
+  - api-call: { method: DELETE, path: /v1/secrets/connector/filebox/oauth/client-secret, as: org-administrator, refused: true }
+  - expect: { connectors: { id: filebox, as: org-administrator, fields: { node.client.secretSet: true } } }
+  - connector-node: { id: filebox, enabled: false, as: org-administrator }
+  - expect: { connectors: { id: filebox, as: org-member, fields: { state: askAdmin } } }
+  - connector-node: { id: filebox, enabled: true, as: org-administrator }
+then:
+  - expect: { connectors: { id: filebox, as: org-member, fields: { state: connect, node.client.clientId: e2e-filebox-client, node.client.secretSet: true } } }
+  - expect: { connectors: { id: filebox, as: org-administrator, fields: { node.client.secretSet: true, node.client.tokenEndpoint: "https://auth.filebox.example/token" } } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+  - vam:crates/vam-orchestrator/src/secrets.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-spec/src/connector.rs
+status: pending
+expectFail: { step: when.2, class: product }
