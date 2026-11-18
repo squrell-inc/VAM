@@ -349,13 +349,27 @@ impl Api {
         file_name: &str,
         bytes: Vec<u8>,
     ) -> Result<Reply, ConnError> {
+        self.post_file_as(None, path, file_name, bytes)
+    }
+
+    /// As `post_file`, with another identity's key (`None`: the bootstrap key).
+    pub fn post_file_as(
+        &self,
+        key: Option<&str>,
+        path: &str,
+        file_name: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Reply, ConnError> {
         let part =
             reqwest::blocking::multipart::Part::bytes(bytes).file_name(file_name.to_string());
         let form = reqwest::blocking::multipart::Form::new().part("file", part);
         let resp = self
             .client()?
             .post(format!("{}{path}", self.base))
-            .header("Authorization", format!("Bearer {}", self.key))
+            .header(
+                "Authorization",
+                format!("Bearer {}", key.unwrap_or(&self.key)),
+            )
             .header("Idempotency-Key", self.idem())
             .multipart(form)
             .send()

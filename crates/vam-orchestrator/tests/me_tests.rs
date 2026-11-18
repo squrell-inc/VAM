@@ -278,6 +278,21 @@ async fn get_me_member_is_not_403() {
     assert_identity(&body, "alice", "alice", "member", MEMBER_SCOPES);
 }
 
+/// A member's default key holds `agents:draft` and no `catalog:write`.
+#[tokio::test]
+async fn get_me_lists_agents_draft_for_a_member_default_key() {
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    store
+        .create_managed_user("alice", "alice", "alice-secret", UserRole::Member)
+        .expect("alice");
+    let secret = mint_owned_key(&store, "alice", MEMBER_SCOPES);
+    let app = test_app(app_state_http_only(store));
+    let (status, body) = get_me(app, Some(&secret)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"agents:draft\""), "{body}");
+    assert!(!body.contains("catalog:write"), "{body}");
+}
+
 /// A key minted with a subset of scopes reports those scopes, not the role default.
 #[tokio::test]
 async fn get_me_reports_bearer_scopes_not_role_defaults() {
@@ -294,6 +309,66 @@ async fn get_me_reports_bearer_scopes_not_role_defaults() {
         !body.contains("users:admin") && !body.contains("brokers:admin"),
         "{body}"
     );
+}
+
+/// A key minted with no list follows the live role: `GET /v1/me` shows the promoted scopes,
+/// then the demoted ones. A key minted with a list above the role is capped by it.
+#[tokio::test]
+async fn get_me_reports_effective_scopes_after_promotion_and_demotion() {
+    use vam_orchestrator::keys::ScopeMode;
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    store
+        .create_managed_user("alice", "alice", "alice-secret", UserRole::Member)
+        .expect("alice");
+    let member_set: Vec<String> = MEMBER_SCOPES.iter().map(|s| (*s).to_string()).collect();
+    let mut above = member_set.clone();
+    above.push("catalog:write".to_string());
+    let role_secret = mint_api_key_secret();
+    store
+        .create_api_key_owned_with_mode(
+            "alice-role",
+            "alice-role",
+            &role_secret,
+            "User::\"alice\"",
+            &member_set,
+            "alice",
+            ScopeMode::Role,
+        )
+        .expect("role key");
+    let above_secret = mint_api_key_secret();
+    store
+        .create_api_key_owned_with_mode(
+            "alice-above",
+            "alice-above",
+            &above_secret,
+            "User::\"alice\"",
+            &above,
+            "alice",
+            ScopeMode::Explicit,
+        )
+        .expect("explicit key");
+    let app = test_app(app_state_http_only(store.clone()));
+
+    let (_, body) = get_me(app.clone(), Some(&role_secret)).await;
+    assert_identity(&body, "alice", "alice", "member", MEMBER_SCOPES);
+    let (_, body) = get_me(app.clone(), Some(&above_secret)).await;
+    assert_identity(&body, "alice", "alice", "member", MEMBER_SCOPES);
+
+    store
+        .set_user_role("alice", UserRole::Publisher)
+        .expect("promote");
+    let (_, body) = get_me(app.clone(), Some(&role_secret)).await;
+    assert_identity(&body, "alice", "alice", "publisher", PUBLISHER_SCOPES);
+    let (_, body) = get_me(app.clone(), Some(&above_secret)).await;
+    let mut want: Vec<&str> = MEMBER_SCOPES.to_vec();
+    want.push("catalog:write");
+    assert_identity(&body, "alice", "alice", "publisher", &want);
+
+    store
+        .set_user_role("alice", UserRole::Member)
+        .expect("demote");
+    let (_, body) = get_me(app, Some(&role_secret)).await;
+    assert_identity(&body, "alice", "alice", "member", MEMBER_SCOPES);
 }
 
 #[tokio::test]
