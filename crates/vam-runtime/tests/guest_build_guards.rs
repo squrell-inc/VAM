@@ -14,8 +14,27 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+const FORBIDDEN_BUILD_FLAGS: [&str; 3] = ["process-guest", "--features", "--all-features"];
+
 #[test]
-fn rootfs_build_scripts_never_enable_process_guest() {
+fn build_guest_script_builds_the_default_guest() {
+    // build-guest.sh is the one place that compiles the guest init.
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/release/build-guest.sh");
+    let text = std::fs::read_to_string(&script).unwrap();
+    for forbidden in FORBIDDEN_BUILD_FLAGS {
+        assert!(
+            !text.contains(forbidden),
+            "build-guest.sh must not contain {forbidden:?}: the rootfs guest is the default build"
+        );
+    }
+    assert!(
+        text.contains("--bin vam-runtime"),
+        "build-guest.sh builds vam-runtime"
+    );
+}
+
+#[test]
+fn rootfs_build_scripts_call_build_guest_and_never_enable_process_guest() {
     let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
     let mut seen = 0;
     for entry in std::fs::read_dir(&scripts).unwrap() {
@@ -26,15 +45,15 @@ fn rootfs_build_scripts_never_enable_process_guest() {
         }
         seen += 1;
         let text = std::fs::read_to_string(&path).unwrap();
-        for forbidden in ["process-guest", "--features", "--all-features"] {
+        for forbidden in FORBIDDEN_BUILD_FLAGS {
             assert!(
                 !text.contains(forbidden),
                 "{name} must not contain {forbidden:?}: the rootfs guest is the default build"
             );
         }
         assert!(
-            text.contains("--bin vam-runtime"),
-            "{name} builds vam-runtime"
+            text.contains("release/build-guest.sh"),
+            "{name} builds the guest init through scripts/release/build-guest.sh"
         );
     }
     assert!(seen >= 2, "found the rootfs scripts");

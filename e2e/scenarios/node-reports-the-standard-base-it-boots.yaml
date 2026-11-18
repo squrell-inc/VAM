@@ -25,6 +25,8 @@ guards:
   - vam:crates/vam-orchestrator/src/api/mod.rs
   - vam:crates/vam-orchestrator/src/daemon.rs
   - vam:scripts/build-rootfs.sh
+  - vam:scripts/release/build-guest.sh
+  - vam:scripts/e2e/firecracker-assets.sh
 mock:
   - when: { step: hello }
     reply: { text: Hello. }

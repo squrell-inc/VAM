@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs the assets the firecracker CI lane needs (x86_64 Linux):
 # pinned Firecracker + jailer, a pinned guest kernel, and a rootfs built from this
-# tree's vam-runtime (scripts/build-rootfs.sh) on the base VAM_BASE names.
+# tree's vam-runtime (scripts/release/build-guest.sh, injected by scripts/build-rootfs.sh --runtime) on the base VAM_BASE names.
 #
 #   scripts/e2e/firecracker-assets.sh [--check] [--env-file FILE]
 #
@@ -99,13 +99,14 @@ if [ "$check" -eq 1 ]; then
   exit 0
 fi
 
-want="$(cat scripts/build-rootfs.sh | sha256sum | cut -d' ' -f1)-$(git ls-files crates/vam-runtime Cargo.lock | xargs cat | sha256sum | cut -d' ' -f1)-$(git ls-files scripts/base | xargs cat | sha256sum | cut -d' ' -f1)-${VAM_BASE}"
+want="$(cat scripts/build-rootfs.sh scripts/release/build-guest.sh | sha256sum | cut -d' ' -f1)-$(git ls-files crates/vam-runtime Cargo.lock | xargs cat | sha256sum | cut -d' ' -f1)-$(git ls-files scripts/base | xargs cat | sha256sum | cut -d' ' -f1)-${VAM_BASE}"
 if [ -f "$ROOTFS" ] && [ -f "$BASE_MANIFEST" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$want" ]; then
   echo "rootfs up to date"
 else
   # The standard base carries Bun (pinned); the minimal "before" image stays Bun-free as it was.
   skip_bun=0; [ "$VAM_BASE" = minimal ] && skip_bun=1
-  VAM_ROOTFS_OUT="$ROOTFS" VAM_BASE="$VAM_BASE" VAM_ROOTFS_SKIP_BUN="$skip_bun" scripts/build-rootfs.sh
+  guest_bin="$(scripts/release/build-guest.sh)"
+  VAM_ROOTFS_OUT="$ROOTFS" VAM_BASE="$VAM_BASE" VAM_ROOTFS_SKIP_BUN="$skip_bun" scripts/build-rootfs.sh --runtime "$guest_bin"
   echo "$want" > "$STAMP"
 fi
 

@@ -3,6 +3,12 @@
 #
 #   scripts/build-rootfs.sh             standard base: Debian slim + Python, git, curl, jq, Bun
 #   scripts/build-rootfs.sh --minimal   the old busybox:musl image (deprecated; removed next release)
+#   scripts/build-rootfs.sh --runtime PATH   inject PATH as /sbin/init instead of building it
+#                                       (no cargo, no musl-gcc); PATH must be a static x86_64 ELF
+#
+# Without --runtime the guest init comes from scripts/release/build-guest.sh, the one way to build it.
+# The recipe (Dockerfile, pins) is found beside this script (scripts/base/) or in the script's own
+# directory (share/vam/base/ of a node bundle). sudo is used only when not root.
 #
 #   VAM_BASE=standard|minimal   same choice by environment (default standard)
 #   VAM_ROOTFS_OUT=PATH         image path (default target/rootfs.ext4)
@@ -17,18 +23,31 @@ export PAGER=cat
 # 1. Paths and choices
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-STAGING_DIR="$WORKSPACE_ROOT/target/rootfs-staging"
-ROOTFS_OUT="${VAM_ROOTFS_OUT:-$WORKSPACE_ROOT/target/rootfs.ext4}"
+if [ -f "$SCRIPT_DIR/base/Dockerfile" ]; then
+  RECIPE_DIR="$SCRIPT_DIR/base"
+elif [ -f "$SCRIPT_DIR/Dockerfile" ]; then
+  RECIPE_DIR="$SCRIPT_DIR"
+else
+  echo "no recipe (Dockerfile) beside $SCRIPT_DIR" >&2; exit 1
+fi
+if [ -f "$WORKSPACE_ROOT/Cargo.toml" ]; then DEFAULT_OUT="$WORKSPACE_ROOT/target/rootfs.ext4"; else DEFAULT_OUT="$PWD/rootfs.ext4"; fi
+ROOTFS_OUT="${VAM_ROOTFS_OUT:-$DEFAULT_OUT}"
+SUDO=""
+if [ "$(id -u)" != 0 ]; then SUDO=sudo; fi
+RUNTIME_PATH=""
 ROOTFS_STEM="${ROOTFS_OUT%.ext4}"
 BASE_MANIFEST_OUT="$ROOTFS_STEM.base.json"
 PACKAGES_OUT="$ROOTFS_STEM.packages.txt"
 
 VAM_BASE="${VAM_BASE:-standard}"
-for arg in "$@"; do
-  case "$arg" in
-    --minimal) VAM_BASE=minimal ;;
-    --standard) VAM_BASE=standard ;;
-    *) echo "usage: $0 [--standard|--minimal]" >&2; exit 2 ;;
+USAGE="usage: $0 [--standard|--minimal] [--runtime PATH]"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --minimal) VAM_BASE=minimal; shift ;;
+    --standard) VAM_BASE=standard; shift ;;
+    --runtime) [ "$#" -ge 2 ] || { echo "$USAGE" >&2; exit 2; }; RUNTIME_PATH="$2"; shift 2 ;;
+    --runtime=*) RUNTIME_PATH="${1#--runtime=}"; shift ;;
+    *) echo "$USAGE" >&2; exit 2 ;;
   esac
 done
 case "$VAM_BASE" in
@@ -39,26 +58,35 @@ if [ "$VAM_BASE" = minimal ]; then
   echo "DEPRECATED: the minimal base (busybox:musl, vam/base:1) is kept for one release only; use the standard base." >&2
 fi
 
-if [ -z "${CC_x86_64_unknown_linux_musl:-}" ] && ! command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
-  if command -v musl-gcc >/dev/null 2>&1; then
-    export CC_x86_64_unknown_linux_musl="musl-gcc"
-  elif command -v gcc >/dev/null 2>&1; then
-    export CC_x86_64_unknown_linux_musl="gcc"
+# The injected binary is checked before anything else runs: a static x86_64 ELF (no
+# interpreter), or PID 1 would not start.
+check_runtime() {
+  local f="$1" h
+  [ -f "$f" ] || { echo "--runtime: $f is not a file" >&2; return 1; }
+  [ "$(head -c 4 "$f" | od -An -c | tr -d ' ')" = '177ELF' ] || { echo "--runtime: $f is not an ELF file" >&2; return 1; }
+  command -v readelf >/dev/null 2>&1 || { echo "--runtime: readelf (binutils) is required to check $f" >&2; return 1; }
+  h="$(readelf -h "$f" 2>/dev/null)" || { echo "--runtime: $f is not a readable ELF file" >&2; return 1; }
+  printf '%s\n' "$h" | grep -q 'Class:.*ELF64' || { echo "--runtime: $f is not 64-bit" >&2; return 1; }
+  printf '%s\n' "$h" | grep -q 'Machine:.*X86-64' || { echo "--runtime: $f is not x86_64" >&2; return 1; }
+  printf '%s\n' "$h" | grep -Eq 'Type:.*(EXEC|DYN)' || { echo "--runtime: $f is not an executable" >&2; return 1; }
+  if readelf -lW "$f" 2>/dev/null | grep -q ' INTERP '; then
+    echo "--runtime: $f is dynamically linked (has an interpreter); a static binary is required" >&2; return 1
   fi
+}
+
+if [ -n "$RUNTIME_PATH" ]; then
+  check_runtime "$RUNTIME_PATH" || exit 2
+  BINARY_PATH="$RUNTIME_PATH"
+  RUNTIME_SOURCE=injected
+else
+  BINARY_PATH="$("$SCRIPT_DIR/release/build-guest.sh" --target x86_64)"
+  RUNTIME_SOURCE=built
 fi
-
-echo "=== Building static VAM runtime binary ==="
-RUSTFLAGS="-C target-feature=+crt-static" cargo build \
-  --manifest-path "$WORKSPACE_ROOT/Cargo.toml" \
-  --target x86_64-unknown-linux-musl \
-  -p vam-runtime --bin vam-runtime \
-  --release
-
-BINARY_PATH="${CARGO_TARGET_DIR:-$WORKSPACE_ROOT/target}/x86_64-unknown-linux-musl/release/vam-runtime"
+RUNTIME_SHA256="$(sha256sum "$BINARY_PATH" | cut -d' ' -f1)"
 
 echo "=== Creating staging directory ($VAM_BASE base) ==="
-sudo rm -rf "$STAGING_DIR"
-mkdir -p "$STAGING_DIR"
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vam-rootfs-staging.XXXXXX")"
+trap '$SUDO rm -rf "$STAGING_DIR"' EXIT
 mkdir -p "$(dirname "$ROOTFS_OUT")"
 
 BASE_NAME=""
@@ -69,7 +97,7 @@ RUNTIMES_JSON=""
 if [ "$VAM_BASE" = standard ]; then
   # ---- Standard base: docker build, export, then the same injection steps ----
   # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/base/pins"
+  . "$RECIPE_DIR/pins"
   for v in DEBIAN_TAG DEBIAN_DIGEST SNAPSHOT_TIMESTAMP BUN_VERSION BUN_SHA256 BASE_NAME BASE_REVISION; do
     case "${!v:-UNRESOLVED}" in
       UNRESOLVED*) echo "scripts/base/pins: $v is unresolved; run scripts/base/resolve-pins.sh --write" >&2; exit 1 ;;
@@ -81,14 +109,14 @@ if [ "$VAM_BASE" = standard ]; then
   BASE_IMAGE="vam-base-build:${BASE_REVISION}-${DEBIAN_DIGEST#sha256:}"
   BASE_IMAGE="${BASE_IMAGE:0:60}"
   docker build \
-    -f "$SCRIPT_DIR/base/Dockerfile" \
+    -f "$RECIPE_DIR/Dockerfile" \
     --build-arg "DEBIAN_TAG=$DEBIAN_TAG" \
     --build-arg "DEBIAN_DIGEST=$DEBIAN_DIGEST" \
     --build-arg "SNAPSHOT_TIMESTAMP=$SNAPSHOT_TIMESTAMP" \
     --build-arg "BUN_VERSION=$BUN_VERSION" \
     --build-arg "BUN_SHA256=$BUN_SHA256" \
     -t "$BASE_IMAGE" \
-    "$SCRIPT_DIR/base"
+    "$RECIPE_DIR"
 
   echo "=== Reading versions and packages from the built image ==="
   FACTS="$(docker run --rm --entrypoint /bin/sh "$BASE_IMAGE" -c '
@@ -110,25 +138,25 @@ if [ "$VAM_BASE" = standard ]; then
   echo "=== Exporting the image filesystem ==="
   CONTAINER_ID=$(docker create "$BASE_IMAGE")
   # Keep ownership and modes (Debian's system users, shadow group): extract as root.
-  docker export "$CONTAINER_ID" | sudo tar -x -p --numeric-owner -C "$STAGING_DIR"
+  docker export "$CONTAINER_ID" | $SUDO tar -x -p --numeric-owner -C "$STAGING_DIR"
   docker rm "$CONTAINER_ID"
-  sudo rm -f "$STAGING_DIR/.dockerenv"
+  $SUDO rm -f "$STAGING_DIR/.dockerenv"
 
   echo "=== Configuring users and groups (Debian's kept, guest 1000:100 added) ==="
-  sudo mkdir -p "$STAGING_DIR/etc"
-  if ! sudo grep -q '^guest:' "$STAGING_DIR/etc/passwd"; then
-    echo "guest:x:1000:100:guest:/home/guest:/bin/bash" | sudo tee -a "$STAGING_DIR/etc/passwd" >/dev/null
+  $SUDO mkdir -p "$STAGING_DIR/etc"
+  if ! $SUDO grep -q '^guest:' "$STAGING_DIR/etc/passwd"; then
+    echo "guest:x:1000:100:guest:/home/guest:/bin/bash" | $SUDO tee -a "$STAGING_DIR/etc/passwd" >/dev/null
   fi
-  if [ -f "$STAGING_DIR/etc/shadow" ] && ! sudo grep -q '^guest:' "$STAGING_DIR/etc/shadow"; then
-    echo "guest:*:19000:0:99999:7:::" | sudo tee -a "$STAGING_DIR/etc/shadow" >/dev/null
+  if [ -f "$STAGING_DIR/etc/shadow" ] && ! $SUDO grep -q '^guest:' "$STAGING_DIR/etc/shadow"; then
+    echo "guest:*:19000:0:99999:7:::" | $SUDO tee -a "$STAGING_DIR/etc/shadow" >/dev/null
   fi
   # gid 100 is Debian's `users` group, so guest's primary group already exists.
-  if ! sudo grep -q '^[^:]*:[^:]*:100:' "$STAGING_DIR/etc/group"; then
-    echo "users:x:100:" | sudo tee -a "$STAGING_DIR/etc/group" >/dev/null
+  if ! $SUDO grep -q '^[^:]*:[^:]*:100:' "$STAGING_DIR/etc/group"; then
+    echo "users:x:100:" | $SUDO tee -a "$STAGING_DIR/etc/group" >/dev/null
   fi
-  printf 'vam-guest\n' | sudo tee "$STAGING_DIR/etc/hostname" >/dev/null
-  printf '127.0.0.1\tlocalhost\n::1\t\tlocalhost\n' | sudo tee "$STAGING_DIR/etc/hosts" >/dev/null
-  printf 'passwd:     files\ngroup:      files\nhosts:      files\n' | sudo tee "$STAGING_DIR/etc/nsswitch.conf" >/dev/null
+  printf 'vam-guest\n' | $SUDO tee "$STAGING_DIR/etc/hostname" >/dev/null
+  printf '127.0.0.1\tlocalhost\n::1\t\tlocalhost\n' | $SUDO tee "$STAGING_DIR/etc/hosts" >/dev/null
+  printf 'passwd:     files\ngroup:      files\nhosts:      files\n' | $SUDO tee "$STAGING_DIR/etc/nsswitch.conf" >/dev/null
 else
   # ---- Minimal base (deprecated): busybox:musl, Bun musl baseline, musl libs ----
   BASE_NAME="vam/base:1"
@@ -211,29 +239,29 @@ fi
 
 echo "=== Creating necessary empty directories for mountpoints ==="
 # The root drive is attached read-only, so every mount point must exist in the image.
-sudo mkdir -p \
+$SUDO mkdir -p \
   "$STAGING_DIR/proc" "$STAGING_DIR/sys" "$STAGING_DIR/dev" "$STAGING_DIR/tmp" \
   "$STAGING_DIR/work" "$STAGING_DIR/home/guest" "$STAGING_DIR/mnt/drive9"
 
 # Set permissions for tmp and guest home in staging
-sudo chmod 1777 "$STAGING_DIR/tmp"
-sudo chmod 755 "$STAGING_DIR/home/guest"
+$SUDO chmod 1777 "$STAGING_DIR/tmp"
+$SUDO chmod 755 "$STAGING_DIR/home/guest"
 
 # vam-runtime goes in LAST, so nothing the image holds can replace PID 1 (locked decision 4).
 echo "=== Injecting vam-runtime as /sbin/init ==="
-sudo mkdir -p "$STAGING_DIR/sbin"
-sudo rm -f "$STAGING_DIR/sbin/init"
-sudo cp "$BINARY_PATH" "$STAGING_DIR/sbin/init"
-sudo chmod +x "$STAGING_DIR/sbin/init"
+$SUDO mkdir -p "$STAGING_DIR/sbin"
+$SUDO rm -f "$STAGING_DIR/sbin/init"
+$SUDO cp "$BINARY_PATH" "$STAGING_DIR/sbin/init"
+$SUDO chmod +x "$STAGING_DIR/sbin/init"
 
 echo "=== Adjusting ownerships to root:root inside rootfs ==="
 # Since mke2fs -d preserves the source files' uid/gid, the minimal image (extracted as the
 # caller) is set to root:root. The standard image keeps its own ownership; only what this
 # script wrote or copied is handed to root.
 if [ "$VAM_BASE" = minimal ]; then
-  sudo chown -R root:root "$STAGING_DIR"
+  $SUDO chown -R root:root "$STAGING_DIR"
 else
-  sudo chown root:root "$STAGING_DIR/sbin/init" "$STAGING_DIR/etc/hostname" "$STAGING_DIR/etc/hosts" \
+  $SUDO chown root:root "$STAGING_DIR/sbin/init" "$STAGING_DIR/etc/hostname" "$STAGING_DIR/etc/hosts" \
     "$STAGING_DIR/etc/nsswitch.conf" "$STAGING_DIR/tmp" "$STAGING_DIR/work" "$STAGING_DIR/home/guest" \
     "$STAGING_DIR/mnt/drive9" "$STAGING_DIR/proc" "$STAGING_DIR/sys" "$STAGING_DIR/dev"
 fi
@@ -242,7 +270,7 @@ echo "=== Creating the ext4 image via mke2fs ==="
 rm -f "$ROOTFS_OUT"
 if [ "$VAM_BASE" = standard ]; then
   # Content-sized: on-disk use of the tree plus 25%, rounded up to 64 MiB.
-  USED_BYTES_TREE=$(sudo du -s --block-size=1 "$STAGING_DIR" | cut -f1)
+  USED_BYTES_TREE=$($SUDO du -s --block-size=1 "$STAGING_DIR" | cut -f1)
   MIB64=$((64 * 1024 * 1024))
   WANT=$((USED_BYTES_TREE + USED_BYTES_TREE / 4))
   IMAGE_BYTES=$(((WANT + MIB64 - 1) / MIB64 * MIB64))
@@ -252,18 +280,18 @@ if [ "$VAM_BASE" = standard ]; then
   # the build host (mke2fs -d copies them), so the image bytes can differ between builds; the
   # package list beside the image is what two builds on the same pins must agree on.
   FIXED_UUID="7a3f1c52-5d0e-4b86-9a41-0c6e2d8b1f37"
-  sudo env E2FSPROGS_FAKE_TIME=1700000000 mke2fs -t ext4 -F -O ^has_journal -m 0 \
+  $SUDO env E2FSPROGS_FAKE_TIME=1700000000 mke2fs -t ext4 -F -O ^has_journal -m 0 \
     -U "$FIXED_UUID" -E "hash_seed=$FIXED_UUID,lazy_itable_init=0" \
     -d "$STAGING_DIR" "$ROOTFS_OUT"
 else
   truncate -s 256M "$ROOTFS_OUT"
   # Format ext4 without journal (for speed and size) and copy staging directory
-  sudo mke2fs -t ext4 -F -O ^has_journal -m 0 -d "$STAGING_DIR" "$ROOTFS_OUT"
+  $SUDO mke2fs -t ext4 -F -O ^has_journal -m 0 -d "$STAGING_DIR" "$ROOTFS_OUT"
 fi
 
 echo "=== Repairing permissions on the host file ==="
 # mke2fs ran as sudo; hand the image back to the caller
-sudo chown "$(id -u):$(id -g)" "$ROOTFS_OUT"
+$SUDO chown "$(id -u):$(id -g)" "$ROOTFS_OUT"
 
 echo "=== Verifying the rootfs image ==="
 # 1. Clean check
@@ -271,37 +299,37 @@ e2fsck -fn "$ROOTFS_OUT"
 
 # 2. debugfs assertions
 echo "=== debugfs: Verify sbin/init exists and is root-owned ==="
-sudo PAGER=cat debugfs -R "stat /sbin/init" "$ROOTFS_OUT"
+$SUDO PAGER=cat debugfs -R "stat /sbin/init" "$ROOTFS_OUT"
 
 echo "=== debugfs: Verify etc/passwd contains guest ==="
-PASSWD_IN_IMAGE="$(sudo PAGER=cat debugfs -R "cat /etc/passwd" "$ROOTFS_OUT")"
+PASSWD_IN_IMAGE="$($SUDO PAGER=cat debugfs -R "cat /etc/passwd" "$ROOTFS_OUT")"
 echo "$PASSWD_IN_IMAGE"
 printf '%s\n' "$PASSWD_IN_IMAGE" | grep -q '^guest:x:1000:100:'
 
 if [ "$VAM_BASE" = standard ]; then
   for f in /usr/bin/python3 /usr/bin/git /usr/local/bin/bun; do
     echo "=== debugfs: Verify $f exists ==="
-    sudo PAGER=cat debugfs -R "stat $f" "$ROOTFS_OUT"
+    $SUDO PAGER=cat debugfs -R "stat $f" "$ROOTFS_OUT"
   done
   echo "=== debugfs: Verify /bin/busybox exists (PID 1 brings up loopback with it) ==="
-  BB_STAT="$(sudo PAGER=cat debugfs -R "stat /bin/busybox" "$ROOTFS_OUT" 2>/dev/null || true)"
+  BB_STAT="$($SUDO PAGER=cat debugfs -R "stat /bin/busybox" "$ROOTFS_OUT" 2>/dev/null || true)"
   if ! printf '%s\n' "$BB_STAT" | grep -q 'Inode:'; then
-    sudo PAGER=cat debugfs -R "stat /usr/bin/busybox" "$ROOTFS_OUT"
+    $SUDO PAGER=cat debugfs -R "stat /usr/bin/busybox" "$ROOTFS_OUT"
   fi
   echo "=== debugfs: Verify the mount points exist ==="
   for d in /proc /sys /dev /tmp /work /home/guest /mnt/drive9; do
-    D_STAT="$(sudo PAGER=cat debugfs -R "stat $d" "$ROOTFS_OUT")"
+    D_STAT="$($SUDO PAGER=cat debugfs -R "stat $d" "$ROOTFS_OUT")"
     printf '%s\n' "$D_STAT" | grep -q 'Type: directory' || { echo "mount point $d missing" >&2; exit 1; }
   done
 elif [ "${VAM_ROOTFS_SKIP_BUN:-0}" != "1" ]; then
   echo "=== debugfs: Verify usr/local/bin/bun exists ==="
-  sudo PAGER=cat debugfs -R "stat /usr/local/bin/bun" "$ROOTFS_OUT"
+  $SUDO PAGER=cat debugfs -R "stat /usr/local/bin/bun" "$ROOTFS_OUT"
 fi
 
 echo "=== Writing the base manifest beside the image ==="
 IMAGE_SHA256="$(sha256sum "$ROOTFS_OUT" | cut -d' ' -f1)"
 IMAGE_SIZE="$(stat -c %s "$ROOTFS_OUT")"
-USED_BYTES="$(sudo dumpe2fs -h "$ROOTFS_OUT" 2>/dev/null | awk -F: '
+USED_BYTES="$($SUDO dumpe2fs -h "$ROOTFS_OUT" 2>/dev/null | awk -F: '
   /^Block count:/ {b=$2+0} /^Free blocks:/ {f=$2+0} /^Block size:/ {s=$2+0}
   END {print (b-f)*s}')"
 {
@@ -310,6 +338,8 @@ USED_BYTES="$(sudo dumpe2fs -h "$ROOTFS_OUT" 2>/dev/null | awk -F: '
   printf '  "version": "%s",\n' "$BASE_VERSION"
   printf '  "digest": "sha256:%s",\n' "$IMAGE_SHA256"
   if [ -n "$BASE_EXTRA_JSON" ]; then printf '%s\n' "$BASE_EXTRA_JSON"; fi
+  printf '  "runtimeSha256": "%s",\n' "$RUNTIME_SHA256"
+  printf '  "runtimeSource": "%s",\n' "$RUNTIME_SOURCE"
   printf '  "imageBytes": %s,\n' "$IMAGE_SIZE"
   printf '  "usedBytes": %s,\n' "$USED_BYTES"
   printf '  "runtimes": {%s}\n' "$RUNTIMES_JSON"
