@@ -194,6 +194,16 @@ authentication, so all see effective scopes with no change of their own):
 
 ### 4.2 Q5: the run route never writes released rows (Phase 2)
 
+> *Amended 2026-11-18 by the product owner (option B):* the run route refuses
+> any inline agent or inline playbook with 400 and writes nothing; `vam run
+> <dir>` saves the draft with `PUT /v1/agents` (and `PUT /v1/playbooks`), shows
+> any refusal, then runs it by ref pinned `-draft`. The bullets below on saving
+> inline parts as drafts, the "inline agent of Phase 2" caller in §4.3, the
+> inline clause in §4.4 and the last sentence of §5 no longer apply. The
+> writers still become test-only (through a `test-support` feature, since
+> integration tests call them). Plan of record: the tracker's Phase 2 and
+> locked decision 5.
+
 - Inline agent with a `resource_id`: saved through the **same function as
   `PUT /v1/agents`** (authority, owner check, installed and platform refusals,
   and from Phase 3 the member rules), as the caller's **draft** only. The run
