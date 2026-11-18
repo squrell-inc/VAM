@@ -46,7 +46,29 @@ export CARGO_INCREMENTAL=0
 export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_PROFILE_TEST_DEBUG=0
 mkdir -p "$CARGO_TARGET_DIR"
-out="${LOCAL_CI_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/local-ci.XXXXXX")}"
+# Process-mode tools run with dropped privileges and read their materialized skill files under
+# $out (scenario state lives in $out/e2e). mktemp -d makes the directory 0700, so as root every Bun
+# or Python tool failed with "Permission denied" or CouldntReadCurrentDirectory. Open up only the
+# directory created here; a LOCAL_CI_OUT the caller chose keeps its mode and must already be
+# traversable.
+if [ -n "${LOCAL_CI_OUT:-}" ]; then
+  out="$LOCAL_CI_OUT"
+  mkdir -p "$out"
+else
+  out="$(mktemp -d "${TMPDIR:-/tmp}/local-ci.XXXXXX")"
+  chmod 755 "$out"
+fi
+# Every directory from / to $out must be traversable by other users, or tools fail later with an
+# unclear error (TMPDIR under a 0700 /root, for example).
+d="$(cd "$out" && pwd -P)"
+while [ "$d" != "/" ]; do
+  if [ "$(( 0$(stat -c %a "$d") & 1 ))" -eq 0 ]; then
+    echo "local.sh: $d is not traversable by other users (mode $(stat -c %a "$d")); tool processes run" >&2
+    echo "  with dropped privileges and cannot reach $out. Use another TMPDIR or LOCAL_CI_OUT." >&2
+    exit 1
+  fi
+  d="$(dirname "$d")"
+done
 
 free_gb() { df -BG --output=avail "$CARGO_TARGET_DIR" | tail -1 | tr -dc '0-9'; }
 # Process-mode tools run on the host under Bun. Same pin as .github/workflows/rust.yml.
