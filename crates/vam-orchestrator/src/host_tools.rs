@@ -3109,13 +3109,23 @@ fn refresh_mcp_connection(
     conn: &crate::mcp_registry::McpConnection,
     refresh: McpRefresher,
 ) -> Result<(), crate::mcp_oauth_refresh::RefreshFailure> {
-    use crate::mcp_oauth_refresh::{RefreshFailure, RefreshFailureKind};
-
     let mut attempt = RefreshAttempt::default();
     let outcome = exchange_and_store_mcp_tokens(store, vault, conn, refresh, &mut attempt);
     let Err(failure) = outcome else {
         return Ok(());
     };
+    record_refresh_failure(store, conn, &attempt, failure)
+}
+
+/// Records a refresh failure on the row (see [`refresh_mcp_connection`]) and returns the failure
+/// the caller reports.
+fn record_refresh_failure(
+    store: &SqliteWorkflowStore,
+    conn: &crate::mcp_registry::McpConnection,
+    attempt: &RefreshAttempt,
+    failure: crate::mcp_oauth_refresh::RefreshFailure,
+) -> Result<(), crate::mcp_oauth_refresh::RefreshFailure> {
+    use crate::mcp_oauth_refresh::{RefreshFailure, RefreshFailureKind};
     if attempt.recorded {
         return Err(failure);
     }
@@ -3147,6 +3157,116 @@ fn refresh_mcp_connection(
             Err(failure)
         }
     }
+}
+
+/// A stored access token is treated as expired this many seconds before its `expires_at`.
+const PENDING_TOOLS_EXPIRY_SKEW_SECS: i64 = 60;
+
+/// Why a tools-pending row could not get a fresh access token.
+#[derive(Debug)]
+pub(crate) enum PendingRefreshError {
+    /// The store or the gate failed.
+    Store(crate::error::OrchestratorError),
+    /// The provider refused, or could not be reached; its failure is fixed text.
+    Refresh(crate::mcp_oauth_refresh::RefreshFailure),
+}
+
+/// The row of a stored sign-in whose tools are not adopted yet, ready for its tools to be listed,
+/// and the credential generation that goes with it, both read under the connection's credential
+/// gate.
+///
+/// The access token the tools are listed with is the one the exchange stored, which may have
+/// expired by the time the member retries. When the row's `expires_at` says so, the token is
+/// refreshed first with the same machinery a tool call uses: under the gate (concurrent calls
+/// spend a single-use refresh token once), on a blocking worker that finishes even if the caller
+/// goes away, with the node's client and the org secret for a connector whose client is the
+/// admin's (`commit_org_client_refresh`), and the rotated tokens are stored. The row stays
+/// tools-pending through the refresh: only the adoption connects it. A refusal (`invalid_grant`, a
+/// refused client) is recorded as for any refresh and the member signs in again; a transient
+/// failure records nothing, so the row stays pending and the member can retry. A row with no
+/// recorded expiry is listed with the stored token. The generation is taken after the refresh.
+pub(crate) async fn prepare_pending_tools_row(
+    store: &Arc<SqliteWorkflowStore>,
+    vault: &Arc<SecretsVault>,
+    conn: &crate::mcp_registry::McpConnection,
+    refresh: McpRefresher,
+) -> Result<(crate::mcp_registry::McpConnection, CredentialGeneration), PendingRefreshError> {
+    let lock_failed = || {
+        PendingRefreshError::Store(crate::error::OrchestratorError::CorruptState(
+            "mcp credential lock unavailable".into(),
+        ))
+    };
+    let gate = mcp_refresh_gate(store, conn).map_err(|_| lock_failed())?;
+    let mut state = Arc::clone(&gate.state).lock_owned().await;
+    let read = || {
+        store
+            .get_mcp_connection(conn.scope, &conn.owner_user_id, &conn.connection_id)
+            .map_err(PendingRefreshError::Store)
+    };
+    let current = read()?;
+    let now = crate::connectors::now_secs();
+    let expired = current.oauth.as_ref().is_some_and(|o| {
+        crate::mcp_registry::is_tools_pending(o)
+            && o.expires_at
+                .is_some_and(|at| at <= now.saturating_add(PENDING_TOOLS_EXPIRY_SKEW_SECS))
+    });
+    if expired {
+        let (store2, vault2, row, gate2) = (
+            Arc::clone(store),
+            Arc::clone(vault),
+            current.clone(),
+            Arc::clone(&gate),
+        );
+        let (back, outcome) = tokio::task::spawn_blocking(move || {
+            let _keep_gate_alive = gate2;
+            let outcome = refresh_pending_connection(&store2, &vault2, &row, refresh);
+            state.failure = outcome.as_ref().err().cloned();
+            state.generation = state.generation.wrapping_add(1);
+            (state, outcome)
+        })
+        .await
+        .map_err(|_| lock_failed())?;
+        state = back;
+        outcome.map_err(PendingRefreshError::Refresh)?;
+    }
+    let current = read()?;
+    let generation = CredentialGeneration {
+        gate: Arc::clone(&gate),
+        generation: state.generation,
+    };
+    drop(state);
+    Ok((current, generation))
+}
+
+/// [`refresh_mcp_connection`] for a tools-pending row: a definitive refusal is recorded (the
+/// stored grant is dead, the member signs in again), a transient failure is not (recording it would
+/// replace the pending reason, and the tools-refresh route would no longer finish the row).
+fn refresh_pending_connection(
+    store: &SqliteWorkflowStore,
+    vault: &SecretsVault,
+    conn: &crate::mcp_registry::McpConnection,
+    refresh: McpRefresher,
+) -> Result<(), crate::mcp_oauth_refresh::RefreshFailure> {
+    use crate::mcp_oauth_refresh::RefreshFailureKind;
+    let mut attempt = RefreshAttempt::default();
+    match exchange_and_store_mcp_tokens(store, vault, conn, refresh, &mut attempt) {
+        Ok(()) => Ok(()),
+        Err(failure) if attempt.recorded || failure.kind == RefreshFailureKind::Transient => {
+            Err(failure)
+        }
+        Err(failure) => record_refresh_failure(store, conn, &attempt, failure),
+    }
+}
+
+/// [`refresh_mcp_connection`] for tests outside this module.
+#[cfg(test)]
+pub(crate) fn refresh_connection_for_tests(
+    store: &SqliteWorkflowStore,
+    vault: &SecretsVault,
+    conn: &crate::mcp_registry::McpConnection,
+    refresh: McpRefresher,
+) -> Result<(), crate::mcp_oauth_refresh::RefreshFailure> {
+    refresh_mcp_connection(store, vault, conn, refresh)
 }
 
 /// What a refresh attempt leaves for its failure record.
@@ -3241,6 +3361,17 @@ fn exchange_and_store_mcp_tokens(
             {
                 return Err(RefreshFailure::needs_reauth(
                     "the admin changed the OAuth client",
+                ));
+            }
+            // A row a save (or a refusal) parked is not refreshed: the request would spend the
+            // member's refresh token for a commit that refuses to clear the mark. A tools-pending
+            // row is the one `needs_reauth` row that is refreshed (`prepare_pending_tools_row`).
+            if metadata.status == crate::mcp_registry::McpOauthStatus::NeedsReauth
+                && !crate::mcp_registry::is_tools_pending(metadata)
+            {
+                attempt.recorded = true;
+                return Err(RefreshFailure::needs_reauth(
+                    "the connection needs a new sign-in",
                 ));
             }
             attempt.org_client = Some(node.clone());

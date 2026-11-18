@@ -51,6 +51,12 @@ pub struct Discovered {
     /// `token_endpoint_auth_methods_supported` means `client_secret_basic`). Without a secret there
     /// is nothing to authenticate and this is the default, unused.
     pub token_auth_method: TokenAuthMethod,
+    /// How the secret authenticates at the revocation endpoint, when the provider lists
+    /// `revocation_endpoint_auth_methods_supported` (RFC 8414 §2) with a method this node can use,
+    /// chosen by the rule of [`Self::token_auth_method`]. `None` when it lists nothing (or only
+    /// methods this node cannot use), when there is no revocation endpoint, or when no secret is
+    /// kept: the revoke then uses the token method, as it did before the field was read.
+    pub revocation_auth_method: Option<TokenAuthMethod>,
 }
 
 /// Why discovery failed. `Unreachable` may heal on a retry; `Unsuitable` is the provider's (or the
@@ -121,7 +127,7 @@ pub fn discover(
 ) -> Result<Discovered, DiscoveryError> {
     let started = Instant::now();
     let mcp = check_endpoint(mcp_url, "connector's MCP URL")?;
-    let issuer = protected_resource_issuer(&mcp, fetcher, started)?;
+    let issuer = protected_resource_issuer(mcp_url, &mcp, fetcher, started)?;
     let meta = authorization_server_metadata(&issuer, fetcher, started)?;
     let found = pin_endpoints(&issuer, &meta, keeps_secret)?;
     // Fail now, with the secret not yet stored, if the token host is not a public one.
@@ -139,10 +145,19 @@ fn out_of_time(started: Instant) -> Result<(), DiscoveryError> {
     Ok(())
 }
 
+/// The RFC 8414 well-known URL of an issuer with `path`: a terminating `/` of the path is removed
+/// before the suffix is inserted (RFC 8414 §3.1).
 fn well_known(base: &Url, suffix: &str, path: &str) -> Result<Url, DiscoveryError> {
+    well_known_exact(base, suffix, path.trim_end_matches('/'))
+}
+
+/// The well-known URL with `path` inserted unchanged after the suffix. RFC 9728 §3.1 inserts the
+/// suffix between the host and the resource's path as it is: only a path that is just `/` (an
+/// origin) loses its slash, so `/mcp/` stays `/mcp/`.
+fn well_known_exact(base: &Url, suffix: &str, path: &str) -> Result<Url, DiscoveryError> {
     let mut u = base.clone();
     u.set_query(None);
-    let path = path.trim_end_matches('/');
+    let path = if path == "/" { "" } else { path };
     u.set_path(&format!("/.well-known/{suffix}{path}"));
     Ok(u)
 }
@@ -156,14 +171,18 @@ fn well_known(base: &Url, suffix: &str, path: &str) -> Result<Url, DiscoveryErro
 /// difference accepted is an empty path against `/` on an identifier that is only an origin, which
 /// RFC 3986 §6.2.3 makes the same URI for `https` (`https://h` and `https://h/`).
 fn protected_resource_issuer(
+    configured: &str,
     mcp: &Url,
     fetcher: &dyn MetadataFetcher,
     started: Instant,
 ) -> Result<String, DiscoveryError> {
-    // The query is part of the resource identifier (RFC 9728 §3.1): the resource-specific
-    // well-known URL keeps it after the inserted path, and the document must name it.
-    let identifier = mcp.as_str().to_string();
-    let mut specific = well_known(mcp, "oauth-protected-resource", mcp.path())?;
+    // The resource identifier is the connector's MCP URL as configured (and validated), which is
+    // also the `resource` the node sends in token requests (RFC 8707). The parsed URL is only for
+    // the fetch: a parser normalizes it (it drops `:443`, lowercases the host), and the document must
+    // name the identifier itself (RFC 9728 §3.3). The query is part of the identifier (§3.1): the
+    // resource-specific well-known URL keeps it after the inserted path.
+    let identifier = configured.to_string();
+    let mut specific = well_known_exact(mcp, "oauth-protected-resource", mcp.path())?;
     specific.set_query(mcp.query());
     let root_identifier = format!("{}://{}", mcp.scheme(), mcp.host_str().unwrap_or_default());
     let mut candidates = vec![(specific, identifier)];
@@ -265,6 +284,30 @@ fn authorization_server_metadata(
     Err(last)
 }
 
+/// The method a `*_auth_methods_supported` list picks: POST when listed, else Basic when listed,
+/// else `None` (nothing this node can use).
+fn pick_listed_method(listed: &[Value]) -> Option<TokenAuthMethod> {
+    let listed: Vec<&str> = listed.iter().filter_map(Value::as_str).collect();
+    if listed.contains(&"client_secret_post") {
+        Some(TokenAuthMethod::ClientSecretPost)
+    } else if listed.contains(&"client_secret_basic") {
+        Some(TokenAuthMethod::ClientSecretBasic)
+    } else {
+        None
+    }
+}
+
+/// The revocation-endpoint authentication method, when the provider publishes one this node can
+/// use (`revocation_endpoint_auth_methods_supported`, RFC 8414 §2), by the token method's rule.
+/// Revocation is best effort, so a list with nothing usable refuses nothing: it reads as `None`
+/// and the revoke keeps the token method.
+fn choose_revocation_auth_method(meta: &Value) -> Option<TokenAuthMethod> {
+    match meta.get("revocation_endpoint_auth_methods_supported") {
+        Some(Value::Array(listed)) => pick_listed_method(listed),
+        _ => None,
+    }
+}
+
 /// The token-endpoint authentication method a connector that keeps a secret will use (RFC 8414 §2).
 fn choose_auth_method(meta: &Value) -> Result<TokenAuthMethod, DiscoveryError> {
     let refuse = || {
@@ -275,16 +318,7 @@ fn choose_auth_method(meta: &Value) -> Result<TokenAuthMethod, DiscoveryError> {
     match meta.get("token_endpoint_auth_methods_supported") {
         // Omitted: RFC 8414 says `client_secret_basic`.
         None | Some(Value::Null) => Ok(TokenAuthMethod::ClientSecretBasic),
-        Some(Value::Array(listed)) => {
-            let listed: Vec<&str> = listed.iter().filter_map(Value::as_str).collect();
-            if listed.contains(&"client_secret_post") {
-                Ok(TokenAuthMethod::ClientSecretPost)
-            } else if listed.contains(&"client_secret_basic") {
-                Ok(TokenAuthMethod::ClientSecretBasic)
-            } else {
-                Err(refuse())
-            }
-        }
+        Some(Value::Array(listed)) => pick_listed_method(listed).ok_or_else(refuse),
         Some(_) => Err(refuse()),
     }
 }
@@ -325,6 +359,10 @@ fn pin_endpoints(
         issuer: issuer.to_string(),
         authorize_endpoint: authorize.to_string(),
         token_endpoint: token.to_string(),
+        revocation_auth_method: revocation
+            .as_ref()
+            .filter(|_| keeps_secret)
+            .and_then(|_| choose_revocation_auth_method(meta)),
         revocation_endpoint: revocation.map(|r| r.to_string()),
         token_auth_method,
     })
@@ -637,9 +675,12 @@ mod tests {
             );
             assert_eq!(f.asked.borrow().len(), 1, "{resource}");
         }
-        // A connector configured with the trailing slash must be named with it.
+        // A connector configured with the trailing slash must be named with it, and its metadata
+        // is looked up with the slash kept (RFC 9728 §3.1 inserts the suffix before the path as it
+        // is): only the preserved path is served here.
         let with_slash = "https://mcp.box.example/mcp/";
-        let f = with(fake(), PRM_URL, prm());
+        let slash_url = "https://mcp.box.example/.well-known/oauth-protected-resource/mcp/";
+        let f = Fake::new(&[(slash_url, prm()), (AS_URL, asm())]);
         assert!(
             matches!(
                 discover(with_slash, true, &f),
@@ -649,8 +690,27 @@ mod tests {
         );
         let mut doc = prm();
         doc["resource"] = json!(with_slash);
-        let f = with(fake(), PRM_URL, doc);
+        let f = Fake::new(&[(slash_url, doc), (AS_URL, asm())]);
         assert!(discover(with_slash, true, &f).is_ok());
+        assert_eq!(f.asked.borrow()[0], slash_url);
+    }
+
+    #[test]
+    fn the_resource_is_compared_as_configured_not_as_a_parser_spells_it() {
+        // `:443` is the default port: a URL parser drops it, but it is part of the identifier the
+        // connector names, so the document must name it as configured.
+        let configured = "https://mcp.box.example:443/mcp";
+        let mut doc = prm();
+        doc["resource"] = json!(configured);
+        let f = with(fake(), PRM_URL, doc);
+        assert!(discover(configured, true, &f).is_ok());
+        assert_eq!(f.asked.borrow()[0], PRM_URL);
+        // The parser's spelling is not the configured identifier.
+        let f = with(fake(), PRM_URL, prm());
+        assert!(matches!(
+            discover(configured, true, &f),
+            Err(DiscoveryError::Unsuitable(_))
+        ));
     }
 
     #[test]
@@ -772,6 +832,59 @@ mod tests {
         ] {
             assert_eq!(method(listed, false).unwrap(), Post);
         }
+    }
+
+    #[test]
+    fn the_revocation_authentication_method_is_read_on_its_own_and_falls_back_to_the_token_one() {
+        use TokenAuthMethod::{ClientSecretBasic as Basic, ClientSecretPost as Post};
+        let method = |listed: Option<Value>, keeps: bool, revocation: bool| {
+            let mut meta = asm();
+            if let Some(v) = listed {
+                meta["revocation_endpoint_auth_methods_supported"] = v;
+            }
+            if !revocation {
+                meta.as_object_mut().unwrap().remove("revocation_endpoint");
+            }
+            let d = discover(MCP, keeps, &with(fake(), AS_URL, meta)).unwrap();
+            assert_eq!(
+                d.token_auth_method, Post,
+                "the token method is the token list's"
+            );
+            d.revocation_auth_method
+        };
+        // The token endpoint takes POST; the revocation endpoint may say otherwise.
+        assert_eq!(
+            method(Some(json!(["client_secret_basic"])), true, true),
+            Some(Basic)
+        );
+        // The same rule as the token method: POST when listed, else Basic.
+        assert_eq!(
+            method(
+                Some(json!(["client_secret_basic", "client_secret_post"])),
+                true,
+                true
+            ),
+            Some(Post)
+        );
+        // Nothing listed, or nothing usable: `None`, the revoke keeps the token method. Revocation
+        // is best effort, so this refuses nothing.
+        for listed in [
+            None,
+            Some(json!(["private_key_jwt"])),
+            Some(json!([])),
+            Some(json!("client_secret_basic")),
+        ] {
+            assert_eq!(method(listed, true, true), None);
+        }
+        // No revocation endpoint, or no secret kept: nothing to pin.
+        assert_eq!(
+            method(Some(json!(["client_secret_basic"])), true, false),
+            None
+        );
+        assert_eq!(
+            method(Some(json!(["client_secret_basic"])), false, true),
+            None
+        );
     }
 
     #[test]

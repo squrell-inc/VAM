@@ -138,18 +138,29 @@ runs parked, until `POST /v1/mcp/connections/{id}/refresh` lists them. A provide
 (`invalid_client`) is a 409 saying the client id or secret the admin entered was refused; a refused or
 spent code is a 400; an unreachable provider, or an answer with no refresh token, is a 502. When the admin saves a
 corrected secret for the same client, a member whose refresh the provider had refused for the client
-(`invalid_client`) is connected again; a revoked grant still needs a sign-in. No code, verifier,
+(`invalid_client`) is connected again; a revoked grant still needs a sign-in. A save that corrects the secret and
+turns the connector off connects no one again: those members stay parked until the admin enables it again with the
+same client. No code, verifier,
 secret or token is in any answer or error. For such a connector the app-path routes are closed:
 `PUT /v1/mcp/connections/:id/oauth/tokens` answers 400 (use the code exchange), a connect that names another
 token endpoint or client id is refused, and a `clientSecret` is refused for any connector-backed row. A refresh
 and the revoke on disconnect use the node's endpoints, client id and the org secret, read at that moment (a
-replaced secret is used by the next refresh); a row whose client id or endpoint differs from the node's is
+replaced secret is used by the next refresh); the revoke authenticates the way the provider's
+`revocation_endpoint_auth_methods_supported` says (the same choice as for the token endpoint), or as the token
+endpoint does when the provider lists nothing there; a row whose client id or endpoint differs from the node's is
 marked `needs_reauth` without a request, and `invalid_client` on a refresh marks it `needs_reauth` naming the
 admin's client, unless the admin saved the client again while the provider was answering: then the refusal was
 of a secret no longer saved, nothing is recorded, and the next call refreshes with the saved one. A refresh the
 provider accepts after the admin changed the client id or token endpoint stores nothing and leaves the member
-`needs_reauth`; one accepted after a secret-only save is stored. A corrected secret reconnects only members whose
-tokens are of the current client id and token endpoint. Providers whose refresh tokens are single-use are safe: the refresh gate below makes
+`needs_reauth`; one accepted after a secret-only save is stored. A corrected secret reconnects a member
+automatically only while their grant still belongs to the current client: the refusal was of this client id and
+token endpoint, and no save changed either since. A save that changes the client id or the token endpoint replaces
+the recoverable mark with "the admin changed the client", so the row stays `needs_reauth` and the member signs in
+again, even if the admin later returns to the earlier client (A, then B, then A) and corrects its secret. A
+parked row is not refreshed at all, and a refresh never clears a mark a save left. If the provider rotated the
+refresh token and the node then fails to store the access token, the rotated refresh token is still kept (the
+next call refreshes with it). The client and its secret are read at one revision: an admin save between the two
+reads sends nothing. Providers whose refresh tokens are single-use are safe: the refresh gate below makes
 concurrent calls spend the token once.
 
 `vamd` stores the access and refresh tokens as `connection` vault rows, each pinned to one host
@@ -198,7 +209,8 @@ manifest names the token gets nothing), plus the tests in `mcp_credentials_stay_
   `rotating-refresh-token-is-spent-once-when-two-tasks-call-at-once` and the gate tests in `host_tools.rs`.
 - A corrected or rotated secret keeps members connected, and a changed client id does not:
   `admin-corrects-the-client-secret-and-members-stay-connected`, and for a client the provider refused,
-  `a_corrected_secret_for_the_same_client_brings_back_members_a_refused_client_parked` in `api/connectors.rs`.
+  `a_corrected_secret_for_the_same_client_brings_back_members_a_refused_client_parked` and
+  `a_corrected_secret_saved_with_a_disable_keeps_members_parked_until_the_enable` in `api/connectors.rs`.
 - The commit rules (one transaction, a client replaced mid-exchange stores nothing, a moved connector's old row goes
   only after the new grant, a disconnect during `tools/list` is not undone, a stored sign-in whose tools cannot be read
   is retried by the tools-refresh route): `api/connectors.rs` route tests

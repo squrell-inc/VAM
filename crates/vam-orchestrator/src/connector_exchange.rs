@@ -14,7 +14,13 @@
 //! transaction first checks that the admin's client (by its revision), the connector's server and
 //! the enable are still the ones the code was exchanged for: a client replaced while the provider
 //! was answering, even one replaced and then put back, stores nothing and the member signs in again.
+//!
+//! The row is committed tools-pending (`needs_reauth` with `TOOLS_PENDING_REASON`): the route then
+//! adopts the vetted tools, and only that adoption makes it `connected`. A caller that goes away
+//! between the two leaves a row the tools-refresh route finishes, never a `connected` row with no
+//! tools.
 
+use crate::api::error::ApiError;
 use crate::connector_client::{
     client_in, org_client_secret, CodeExchangeRequest, NodeClient, OrgConnector,
 };
@@ -27,7 +33,7 @@ use crate::mcp_oauth_refresh::{
 };
 use crate::mcp_registry::{
     ConnectorConnectionCommit, McpAuthMode, McpConnection, McpOauthMetadata,
-    McpOauthRegistrationMethod, McpOauthStatus,
+    McpOauthRegistrationMethod, McpOauthStatus, TOOLS_PENDING_REASON,
 };
 use crate::secrets::{SecretScope, SecretsVault};
 use crate::workflow::SqliteWorkflowStore;
@@ -81,6 +87,18 @@ fn superseded(connector_id: &str) -> OrchestratorError {
     ))
 }
 
+/// The 502 when the provider spent the code but the node could not save the connection. Not
+/// retryable: the same request carries the same spent code, so the member starts a new sign-in.
+/// (Other MCP errors keep the global mapping, which is retryable.)
+fn spent_but_not_saved() -> ApiError {
+    let mut e = ApiError::from(OrchestratorError::Mcp(
+        "the provider accepted the sign-in, but the connection could not be saved and the code cannot be used again: sign in again"
+            .into(),
+    ));
+    e.retryable = false;
+    e
+}
+
 /// Exchanges the code and connects the member, all under `gate` (the connection's credential
 /// gate). Blocking.
 ///
@@ -95,12 +113,12 @@ pub(crate) fn exchange_and_connect(
     vault: &SecretsVault,
     c: &CodeConnect<'_>,
     gate: &mut McpCredentialWriteGuard,
-) -> Result<Connected, OrchestratorError> {
+) -> Result<Connected, ApiError> {
     let id = c.connector_id;
     let existing = match store.get_mcp_connection(SecretScope::User, c.owner, id) {
         Ok(row) => Some(row),
         Err(OrchestratorError::NotFound(_)) => None,
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
     };
     // A row on another URL is a server the member added by hand under this id: the connector cannot
     // take it. The one exception is the row of a connector update that moved its server: it is
@@ -113,13 +131,25 @@ pub(crate) fn exchange_and_connect(
             crate::connectors::gate_mcp_write(store, id, None, Some(&row.url))?;
             return Err(OrchestratorError::InvalidContract(format!(
                 "`{id}` is a connector id and cannot take a server added by hand"
-            )));
+            ))
+            .into());
         }
     }
     let existing = existing.filter(|r| r.url == c.org.mcp_url);
 
     // The secret is read and sent here, to the one host it is pinned to, and nowhere else.
-    let secret = org_client_secret(vault, c.client, &c.client.token_endpoint)?;
+    // A client the admin saved again after the route read it is not this sign-in's: nothing is
+    // sent, and the member signs in again (the commit makes the same check if the save lands
+    // while the provider answers).
+    let secret =
+        org_client_secret(vault, c.client, &c.client.token_endpoint).map_err(|e| match e {
+            OrchestratorError::Conflict(msg)
+                if msg.ends_with(crate::connector_client::SECRET_READ_SUPERSEDED) =>
+            {
+                superseded(id)
+            }
+            e => e,
+        })?;
     let grant = CodeGrant {
         token_endpoint: &c.client.token_endpoint,
         client_id: &c.client.client_id,
@@ -135,7 +165,8 @@ pub(crate) fn exchange_and_connect(
     let Some(refresh_token) = tokens.refresh_token.as_deref() else {
         return Err(OrchestratorError::Mcp(
             "the provider returned no refresh token, so the connection could not be kept".into(),
-        ));
+        )
+        .into());
     };
 
     let now = now_secs();
@@ -151,9 +182,13 @@ pub(crate) fn exchange_and_connect(
             .expires_in
             .and_then(|s| i64::try_from(s).ok())
             .map(|s| now.saturating_add(s)),
-        status: McpOauthStatus::Connected,
+        // Committed as a sign-in whose tools are not adopted yet: `needs_reauth` with
+        // TOOLS_PENDING_REASON, which only the tool adoption clears. If the request goes away (or
+        // the node stops) between this commit and the adoption, the row is not left `connected`
+        // with no tools: it waits, retryable, for `POST /v1/mcp/connections/{id}/refresh`.
+        status: McpOauthStatus::NeedsReauth,
         last_refresh_at: Some(now),
-        last_refresh_error: None,
+        last_refresh_error: Some(TOOLS_PENDING_REASON.into()),
     };
     let oauth_prior = existing
         .as_ref()
@@ -206,13 +241,10 @@ pub(crate) fn exchange_and_connect(
     };
     let conn = match store.commit_connector_connection(vault, &commit, &still_current) {
         Ok(conn) => conn,
-        Err(e @ OrchestratorError::Conflict(_)) => return Err(e),
+        Err(e @ OrchestratorError::Conflict(_)) => return Err(e.into()),
         Err(e) => {
             tracing::warn!(connection_id = id, error = %e, "connector connection not saved after the code was spent");
-            return Err(OrchestratorError::Mcp(
-                "the provider accepted the sign-in, but the connection could not be saved and the code cannot be used again: sign in again"
-                    .into(),
-            ));
+            return Err(spent_but_not_saved());
         }
     };
     if let Some(prepared) = stale_revoke {

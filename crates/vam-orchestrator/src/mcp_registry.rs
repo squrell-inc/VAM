@@ -2192,7 +2192,17 @@ pub(crate) fn mark_connector_rows_need_reauth(
             continue;
         };
         if oauth.status == McpOauthStatus::NeedsReauth {
-            continue;
+            // Already parked. A mark that a later save could undo on its own (a refused client,
+            // which a corrected secret clears; a sign-in whose tools are pending, which an adoption
+            // clears) is replaced by this one: its tokens are of the client being replaced, and
+            // only a new sign-in may bring the row back, even if the admin later returns to that
+            // client (A→B→A) and corrects its secret. Any other mark already needs a sign-in.
+            let recoverable = oauth.last_refresh_error.as_deref()
+                == Some(crate::connector_client::CLIENT_REFUSED_REASON)
+                || oauth.last_refresh_error.as_deref() == Some(TOOLS_PENDING_REASON);
+            if !recoverable {
+                continue;
+            }
         }
         oauth.status = McpOauthStatus::NeedsReauth;
         oauth.last_refresh_error = sanitize_oauth_last_refresh_error(why);
@@ -2309,6 +2319,23 @@ fn delete_bindings_in(
 /// tools-refresh route adopts the tools, and only then does the row go back to `connected`.
 pub(crate) const TOOLS_PENDING_REASON: &str =
     "signed in but the tool list could not be read: refresh the connection";
+
+/// Whether a row's OAuth state is a stored sign-in whose tools are not adopted yet.
+pub(crate) fn is_tools_pending(oauth: &McpOauthMetadata) -> bool {
+    oauth.status == McpOauthStatus::NeedsReauth
+        && oauth.last_refresh_error.as_deref() == Some(TOOLS_PENDING_REASON)
+}
+
+/// The 409 when a connector row changed while its tools were being read: a later sign-in, a
+/// disconnect, a refresh or an admin save rewrote or removed it. Whatever was signed in for this
+/// request is already stored (and then replaced or removed): the caller reads the connection's
+/// state again, and does not repeat a request that carried a single-use code.
+pub(crate) fn tools_read_superseded(id: &str) -> OrchestratorError {
+    OrchestratorError::Conflict(format!(
+        "the connection to `{id}` changed while its tools were being read (a later sign-in or a disconnect): \
+         read the connection's state again; do not repeat this sign-in with the same code"
+    ))
+}
 
 /// What one member's code exchange commits (CN-5.3): the row, both tokens, and the end of a
 /// previous server's row, all in one transaction.
@@ -2864,14 +2891,17 @@ impl SqliteWorkflowStore {
     }
 
     /// Writes the vetted tool list, the server's instructions and the connector's risk classes onto a
-    /// connector row that is still there and still on `expected_url`: a row a disconnect removed in
-    /// the meantime is NOT brought back (`Conflict`, nothing written). A row that carries
+    /// connector row that is still there, still on the policy's URL and still the sign-in the caller
+    /// read (`observed`, its OAuth metadata, compared exactly): a row a disconnect removed in the
+    /// meantime is NOT brought back, and a row another sign-in, refresh or admin save rewrote is
+    /// not given tools read for the old one (`Conflict`, nothing written). A row that carries
     /// [`TOOLS_PENDING_REASON`] goes back to `connected` in the same write: its tools are adopted.
     pub(crate) fn adopt_connector_tools_if_present(
         &self,
         scope: SecretScope,
         owner_user_id: &str,
         policy: &crate::connectors::McpPolicy,
+        observed: Option<&McpOauthMetadata>,
         tools: &[McpTool],
         instructions: Option<&str>,
     ) -> Result<McpConnection, OrchestratorError> {
@@ -2882,11 +2912,7 @@ impl SqliteWorkflowStore {
             .map_err(|e| OrchestratorError::InvalidContract(e.to_string()))?;
         let (effects_json, ask_json) = policy_columns(policy, &tools)?;
         let owner = vault_owner_user_id(scope, owner_user_id).to_string();
-        let gone = || {
-            OrchestratorError::Conflict(format!(
-                "the connection to `{id}` was removed or changed while its tools were being read; connect again"
-            ))
-        };
+        let gone = || tools_read_superseded(id);
         {
             let mut connection = self
                 .connection
@@ -2903,6 +2929,10 @@ impl SqliteWorkflowStore {
                 .optional()?
                 .ok_or_else(gone)?;
             if url != policy.url {
+                return Err(gone());
+            }
+            let stored = serde_json::from_str::<McpOauthMetadata>(&raw).ok();
+            if stored.as_ref() != observed {
                 return Err(gone());
             }
             let mut oauth_json = raw;
@@ -2931,13 +2961,19 @@ impl SqliteWorkflowStore {
                     id
                 ],
             )?;
-            if let Some(text) = instructions.and_then(sanitize_mcp_instructions) {
-                tx.execute(
-                    "UPDATE mcp_connections SET instructions = ?1
-                     WHERE scope = ?2 AND owner_user_id = ?3 AND connection_id = ?4",
-                    params![text, scope.as_str(), owner, id],
-                )?;
-            }
+            // `instructions` is what a successful `initialize` presented: `None` (the field was
+            // absent) and an empty text both mean the server has none now, and the snapshot type
+            // does not tell them apart (`sanitize_snapshot` folds both to `None`). So the stored
+            // value is replaced either way, with "" for none, as `set_mcp_instructions` stores it:
+            // a server that dropped its instructions does not keep the stale ones in the prompt.
+            let text = instructions
+                .and_then(sanitize_mcp_instructions)
+                .unwrap_or_default();
+            tx.execute(
+                "UPDATE mcp_connections SET instructions = ?1
+                 WHERE scope = ?2 AND owner_user_id = ?3 AND connection_id = ?4",
+                params![text, scope.as_str(), owner, id],
+            )?;
             tx.commit()?;
         }
         self.get_mcp_connection(scope, &owner, id)
@@ -2964,9 +3000,12 @@ impl SqliteWorkflowStore {
         let mut oauth: McpOauthMetadata = serde_json::from_str(&raw)
             .map_err(|_| OrchestratorError::InvalidContract("invalid oauth metadata".into()))?;
         let now = now_secs();
-        oauth.status = McpOauthStatus::Connected;
+        // A sign-in whose tools are not adopted yet stays pending: only the adoption connects it.
+        if !is_tools_pending(&oauth) {
+            oauth.status = McpOauthStatus::Connected;
+            oauth.last_refresh_error = None;
+        }
         oauth.last_refresh_at = Some(now);
-        oauth.last_refresh_error = None;
         // A new token without expires_in has unknown expiry. Do not carry
         // the old access token's expiry onto its replacement.
         oauth.expires_at = expires_in
@@ -3020,7 +3059,7 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        let tx = connection.transaction()?;
+        let mut tx = connection.transaction()?;
         let raw: String = tx.query_row(
             "SELECT oauth_metadata_json FROM mcp_connections
              WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3 AND auth_mode = 'oauth'",
@@ -3030,12 +3069,18 @@ impl SqliteWorkflowStore {
         let mut current: McpOauthMetadata = serde_json::from_str(&raw)
             .map_err(|_| OrchestratorError::InvalidContract("invalid oauth metadata".into()))?;
         let node = crate::connector_client::client_in(&tx, &conn.connection_id)?;
-        let still_used = node.as_ref().is_some_and(|n| {
-            n.revision == used.revision
-                || (n.client_id == used.client_id
-                    && n.token_endpoint == used.token_endpoint
-                    && current.status != McpOauthStatus::NeedsReauth)
-        });
+        // A tools-pending row is `needs_reauth` for its tools, not because a save marked it.
+        let pending = is_tools_pending(&current);
+        // Any other `needs_reauth` is a mark the refresh must not clear, on either branch: a save
+        // A→B→A gives A a new revision, and a refresh that read A at that revision would otherwise
+        // undo the mark B's save left. (No refresh legitimately starts from such a row: a call
+        // fails fast on it, and a corrected secret puts a refused row back to `connected` first.)
+        let unmarked = pending || current.status != McpOauthStatus::NeedsReauth;
+        let still_used = unmarked
+            && node.as_ref().is_some_and(|n| {
+                n.revision == used.revision
+                    || (n.client_id == used.client_id && n.token_endpoint == used.token_endpoint)
+            });
         if !still_used {
             if current.status != McpOauthStatus::NeedsReauth {
                 record_refresh_failure_in(&tx, conn, true, "the admin changed the OAuth client")?;
@@ -3043,45 +3088,72 @@ impl SqliteWorkflowStore {
             tx.commit()?;
             return Ok(false);
         }
-        let mut tokens = vec![(
-            mcp_oauth_access_token_binding_id(&conn.connection_id),
-            &access,
-            mcp_host,
-        )];
-        if let Some(sealed) = &refresh {
-            tokens.push((
-                mcp_oauth_refresh_token_binding_id(&conn.connection_id),
-                sealed,
-                token_host,
-            ));
-        }
-        for (binding_id, sealed, host) in tokens {
+        // The rotated refresh token first, on its own: the provider has spent the old one, so it
+        // must survive a failure of the writes after it. Those (the access token and the row's
+        // state) run in a savepoint; if they fail, only they are rolled back and the transaction
+        // commits the new refresh token (the next call refreshes with it). The client check above
+        // guards both.
+        let put = |c: &Connection,
+                   binding_id: String,
+                   sealed: &crate::secrets::SealedSecret,
+                   host: &str| {
             crate::secrets::put_host_secret_in(
-                &tx,
+                c,
                 &binding_id,
                 SecretKind::Connection,
                 &sealed.nonce,
                 &sealed.ciphertext,
                 &sealed.fingerprint,
-                &[host],
+                &[host.to_string()],
                 None,
                 conn.scope,
                 &conn.owner_user_id,
+            )
+        };
+        if let Some(sealed) = &refresh {
+            put(
+                &tx,
+                mcp_oauth_refresh_token_binding_id(&conn.connection_id),
+                sealed,
+                &token_host,
             )?;
         }
-        let now = now_secs();
-        current.status = McpOauthStatus::Connected;
-        current.last_refresh_at = Some(now);
-        current.last_refresh_error = None;
-        current.expires_at = expires_in
-            .map(|seconds| now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)));
-        let json = oauth_metadata_json(Some(&current))?;
-        tx.execute(
-            "UPDATE mcp_connections SET oauth_metadata_json = ?1, updated_at = ?2
-             WHERE scope = ?3 AND owner_user_id = ?4 AND connection_id = ?5 AND auth_mode = 'oauth'",
-            params![json, now, conn.scope.as_str(), owner, conn.connection_id],
-        )?;
+        let rest = {
+            let sp = tx.savepoint()?;
+            let written = (|| -> Result<(), OrchestratorError> {
+                put(
+                    &sp,
+                    mcp_oauth_access_token_binding_id(&conn.connection_id),
+                    &access,
+                    &mcp_host,
+                )?;
+                let now = now_secs();
+                // A sign-in whose tools are not adopted yet stays pending: only the adoption
+                // connects it.
+                if !pending {
+                    current.status = McpOauthStatus::Connected;
+                    current.last_refresh_error = None;
+                }
+                current.last_refresh_at = Some(now);
+                current.expires_at = expires_in
+                    .map(|seconds| now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX)));
+                let json = oauth_metadata_json(Some(&current))?;
+                sp.execute(
+                    "UPDATE mcp_connections SET oauth_metadata_json = ?1, updated_at = ?2
+                     WHERE scope = ?3 AND owner_user_id = ?4 AND connection_id = ?5
+                       AND auth_mode = 'oauth'",
+                    params![json, now, conn.scope.as_str(), owner, conn.connection_id],
+                )?;
+                Ok(())
+            })();
+            match written {
+                Ok(()) => sp.commit().map_err(OrchestratorError::from),
+                // Dropping the savepoint rolls back to it.
+                Err(e) => Err(e),
+            }
+        };
         tx.commit()?;
+        rest?;
         Ok(true)
     }
 

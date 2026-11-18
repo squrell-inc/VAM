@@ -91,7 +91,8 @@ where
 
 /// How the node authenticates the org's client secret at the token and revocation endpoints (RFC 6749
 /// §2.3.1). Pinned at Enable from the provider's metadata and used by the code exchange, refresh and
-/// revoke alike: the secret never moves from one method to another on its own.
+/// revoke (the revoke uses its own pinned method when the provider lists one): the secret never
+/// moves from one method to another on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TokenAuthMethod {
     /// `client_id` and `client_secret` in the form body.
@@ -137,6 +138,10 @@ pub struct NodeClient {
     pub revocation_endpoint: Option<String>,
     /// Pinned at Enable (the provider's metadata decides); only used when a secret is kept.
     pub token_auth_method: TokenAuthMethod,
+    /// Pinned at Enable from `revocation_endpoint_auth_methods_supported`; `None` (the provider
+    /// listed none it can use, or a client saved before it was read) means the revoke uses
+    /// [`Self::token_auth_method`].
+    pub revocation_auth_method: Option<TokenAuthMethod>,
     pub secret_set: bool,
     pub updated_at: i64,
     pub updated_by: String,
@@ -349,6 +354,7 @@ pub fn plan_client(
                 token_endpoint: d.token_endpoint,
                 revocation_endpoint: d.revocation_endpoint,
                 token_auth_method: d.token_auth_method,
+                revocation_auth_method: d.revocation_auth_method,
                 secret_set: keeps
                     && (req.client_secret.is_some() || existing.is_some_and(|e| e.secret_set)),
                 updated_at: now,
@@ -424,7 +430,8 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
             updated_at INTEGER NOT NULL,
             updated_by TEXT NOT NULL,
             token_auth_method TEXT NOT NULL DEFAULT 'client_secret_post',
-            revision INTEGER NOT NULL DEFAULT 0
+            revision INTEGER NOT NULL DEFAULT 0,
+            revocation_auth_method TEXT
         );
         -- The last client revision a connector was given. Kept when its client is removed, so a
         -- client saved again later never reuses a revision a sign-in or a refresh captured.
@@ -461,6 +468,19 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
             [],
         )?;
     }
+    // A store from before the revocation method was read: NULL, the revoke keeps the token method.
+    let has_revocation_method: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('node_connector_clients')
+         WHERE name = 'revocation_auth_method'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_revocation_method == 0 {
+        connection.execute(
+            "ALTER TABLE node_connector_clients ADD COLUMN revocation_auth_method TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -484,7 +504,7 @@ fn next_client_revision(c: &Connection, connector_id: &str) -> Result<i64, Orche
 
 const COLUMNS: &str = "connector_id, client_id, issuer, authorize_endpoint, token_endpoint, \
                        revocation_endpoint, secret_set, updated_at, updated_by, token_auth_method, \
-                       revision";
+                       revision, revocation_auth_method";
 
 fn row_to_client(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeClient> {
     Ok(NodeClient {
@@ -499,6 +519,10 @@ fn row_to_client(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeClient> {
         updated_by: r.get(8)?,
         token_auth_method: TokenAuthMethod::parse(&r.get::<_, String>(9)?),
         revision: r.get(10)?,
+        revocation_auth_method: r
+            .get::<_, Option<String>>(11)?
+            .as_deref()
+            .map(TokenAuthMethod::parse),
     })
 }
 
@@ -593,8 +617,10 @@ impl SqliteWorkflowStore {
     ///
     /// A save of a corrected secret for the unchanged client also clears the rows a refresh the
     /// provider refused for that client (`invalid_client`) put into `needs_reauth`, and only those:
-    /// a revoked grant still needs a sign-in. The owners of the cleared rows are returned so the
-    /// caller can continue their parked runs.
+    /// a revoked grant still needs a sign-in. That happens only when the save leaves the connector
+    /// enabled; a save that disables it clears nothing, and the save that enables it again (the
+    /// client kept or repeated) clears them instead. The owners of the cleared rows are returned so
+    /// the caller can continue their parked runs.
     ///
     /// This is the only code that writes `connector/<id>/oauth/client-secret`.
     pub(crate) fn put_node_with_client(
@@ -624,6 +650,7 @@ impl SqliteWorkflowStore {
                 CLIENT_CHANGED_WHILE_SAVING.into(),
             ));
         }
+        let was_enabled = crate::connectors::node_enabled_in(&tx, &node.connector_id)?;
         crate::connectors::put_node_connector_in(&tx, node)?;
         match &plan.write {
             ClientWrite::Keep => {}
@@ -635,7 +662,7 @@ impl SqliteWorkflowStore {
                 tx.execute(
                     &format!(
                         "INSERT INTO node_connector_clients ({COLUMNS})
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                          ON CONFLICT(connector_id) DO UPDATE SET client_id = excluded.client_id,
                              issuer = excluded.issuer,
                              authorize_endpoint = excluded.authorize_endpoint,
@@ -644,7 +671,8 @@ impl SqliteWorkflowStore {
                              secret_set = excluded.secret_set,
                              updated_at = excluded.updated_at, updated_by = excluded.updated_by,
                              token_auth_method = excluded.token_auth_method,
-                             revision = excluded.revision"
+                             revision = excluded.revision,
+                             revocation_auth_method = excluded.revocation_auth_method"
                     ),
                     params![
                         client.connector_id,
@@ -657,7 +685,8 @@ impl SqliteWorkflowStore {
                         client.updated_at,
                         client.updated_by,
                         client.token_auth_method.as_str(),
-                        revision
+                        revision,
+                        client.revocation_auth_method.map(TokenAuthMethod::as_str)
                     ],
                 )?;
                 if let (Some(sealed), Some(host)) = (&sealed, client.token_host()) {
@@ -684,15 +713,21 @@ impl SqliteWorkflowStore {
                 &[mcp_url],
                 "the admin changed the client: reconnect",
             )?;
-        } else if matches!(
-            &plan.write,
-            ClientWrite::Set {
-                secret: Some(_),
-                ..
-            }
-        ) {
+        } else if node.enabled
+            && (!was_enabled
+                || matches!(
+                    &plan.write,
+                    ClientWrite::Set {
+                        secret: Some(_),
+                        ..
+                    }
+                ))
+        {
             // The same client with a new secret: a refresh the old secret failed is worth another
             // try, so the rows it parked are back (the next call refreshes with the new secret).
+            // Only on a save that leaves the connector enabled: a save that corrects the secret
+            // and disables the connector leaves the rows parked, with their notifications open,
+            // and the enable that follows (with the client kept) is the save that clears them.
             cleared = crate::mcp_registry::clear_refused_client_rows(
                 &tx,
                 &node.connector_id,
@@ -779,6 +814,11 @@ impl SqliteWorkflowStore {
     }
 }
 
+/// The text of the 409 when the admin saved the client again between the read of the client and the
+/// read of its secret (after the connector id).
+pub(crate) const SECRET_READ_SUPERSEDED: &str =
+    "was saved again while its secret was being read: try again";
+
 /// The org's client secret, for one request to `endpoint`. **The only place the secret is read for
 /// sending.** It is read at org scope with [`SecretsVault::decrypt_secret_at`] (never a lookup that
 /// falls back across scopes), and only when the endpoint's host is the token endpoint's host the
@@ -824,10 +864,26 @@ pub(crate) fn org_client_secret(
         }
         Ok(())
     };
-    match vault.decrypt_secret_at_checked(SecretScope::Org, ORG_OWNER_USER_ID, &binding, accept) {
-        Err(OrchestratorError::NotFound(_)) => Err(not_saved()),
-        other => other,
+    let secret = match vault.decrypt_secret_at_checked(
+        SecretScope::Org,
+        ORG_OWNER_USER_ID,
+        &binding,
+        accept,
+    ) {
+        Err(OrchestratorError::NotFound(_)) => return Err(not_saved()),
+        other => other?,
+    };
+    // The client and its secret are two reads: a save between them could pair `client`'s id with
+    // the next client's secret. Every save moves the revision and the revision never goes back, so
+    // the client still at `client.revision` after the secret was read means the secret is that
+    // client's. Otherwise nothing is sent.
+    let current = vault.workflow_store().node_client(id)?;
+    if current.as_ref().map(|c| c.revision) != Some(client.revision) {
+        return Err(OrchestratorError::Conflict(format!(
+            "the OAuth client for `{id}` {SECRET_READ_SUPERSEDED}"
+        )));
     }
+    Ok(secret)
 }
 
 /// The body of `POST /v1/connectors/{id}/connection/oauth/code`: what the app got from the browser
@@ -945,6 +1001,7 @@ mod tests {
             token_endpoint: token.into(),
             revocation_endpoint: None,
             token_auth_method: TokenAuthMethod::ClientSecretPost,
+            revocation_auth_method: None,
         }
     }
 
@@ -957,6 +1014,7 @@ mod tests {
             token_endpoint: "https://auth.filebox.example/token".into(),
             revocation_endpoint: None,
             token_auth_method: TokenAuthMethod::ClientSecretPost,
+            revocation_auth_method: None,
             secret_set: secret,
             updated_at: 1,
             updated_by: "olga".into(),
@@ -1081,6 +1139,8 @@ mod tests {
         initialize_schema(&c).unwrap();
         let saved = client_in(&c, "filebox").unwrap().unwrap();
         assert_eq!(saved.token_auth_method, TokenAuthMethod::ClientSecretPost);
+        // No revocation method was read for it: the revoke keeps the token method.
+        assert_eq!(saved.revocation_auth_method, None);
         assert_eq!(saved.client_id, "c1");
         // And at revision 0: the first save that changes it moves it on.
         assert_eq!(saved.revision, 0);
@@ -1371,6 +1431,7 @@ pub(crate) mod test_support {
             token_endpoint: format!("https://auth.{tag}.example/token"),
             revocation_endpoint: Some(format!("https://auth.{tag}.example/revoke")),
             token_auth_method: TokenAuthMethod::ClientSecretPost,
+            revocation_auth_method: None,
             secret_set: true,
             updated_at: 1,
             updated_by: "olga".into(),
@@ -1459,6 +1520,7 @@ mod exchange_tests {
             token_endpoint: format!("https://auth.{tag}.example/token"),
             revocation_endpoint: Some(format!("https://auth.{tag}.example/revoke")),
             token_auth_method: method,
+            revocation_auth_method: None,
         }
     }
 
@@ -1884,6 +1946,21 @@ mod exchange_tests {
             })
             .unwrap_err();
         assert!(matches!(e, OrchestratorError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn a_secret_saved_after_the_client_was_read_is_not_paired_with_it() {
+        let (store, vault, client) = world("secret-revision");
+        // An admin saves the client again (a new secret) after `client` was read: the secret now
+        // stored belongs to the newer revision and is not sent with the older read.
+        let newer = enable_filebox(&store, &vault, "secret-revision", "c-2", "NEWER-SECRET-v");
+        assert!(newer.revision > client.revision);
+        let e = org_client_secret(&vault, &client, &client.token_endpoint).unwrap_err();
+        assert!(matches!(e, OrchestratorError::Conflict(_)), "{e}");
+        assert!(!e.to_string().contains("NEWER-SECRET"), "{e}");
+        // The current read gets its own secret.
+        let got = org_client_secret(&vault, &newer, &newer.token_endpoint).unwrap();
+        assert_eq!(got.expose_secret(), "NEWER-SECRET-v");
     }
 
     #[test]
