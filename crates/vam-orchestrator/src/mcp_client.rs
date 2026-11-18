@@ -9,6 +9,7 @@
 //! a blocking thread.
 
 use std::time::Duration;
+use vam_security::tls_roots::BundledRoots;
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -512,6 +513,7 @@ fn parse_retry_after_ms(value: &str) -> Option<u64> {
 
 fn base_builder(timeout_ms: u64) -> reqwest::blocking::ClientBuilder {
     reqwest::blocking::Client::builder()
+        .bundled_roots()
         .timeout(Duration::from_millis(timeout_ms))
         .connect_timeout(Duration::from_millis(5000))
         // A 302 to another host would skip the allowlist. Do not follow it.

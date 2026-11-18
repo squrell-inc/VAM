@@ -851,7 +851,7 @@ mod tests {
             w.method(PUT)
                 .path("/v1/hosted/brokers")
                 .header_exists("idempotency-key")
-                .body_contains("\"unixPath\":\"/s\"");
+                .body_includes("\"unixPath\":\"/s\"");
             t.status(200).body(r#"{"broker":{}}"#);
         });
         let c = Client::new_with_ca(
@@ -864,7 +864,7 @@ mod tests {
         .unwrap();
         let (r, _) = register_one(&c, &manifest, "/s").await.unwrap();
         assert_eq!(r, Registered::Done);
-        put.assert_hits(1);
+        put.assert_calls(1);
         empty.delete();
         server.mock(|w, t| {
             w.method(GET).path("/v1/hosted/brokers");
@@ -875,6 +875,6 @@ mod tests {
         });
         let (r, _) = register_one(&c, &manifest, "/s").await.unwrap();
         assert_eq!(r, Registered::Unchanged);
-        put.assert_hits(1);
+        put.assert_calls(1);
     }
 }

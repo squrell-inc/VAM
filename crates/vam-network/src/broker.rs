@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
+use vam_security::tls_roots::BundledRoots;
 
 use vam_spec::v1::{
     EgressRequest, EgressResponse, ErrorStatus, SecretBinding, VamErrorCode, VsockEnvelope,
@@ -1085,6 +1086,7 @@ impl EgressBrokerServer {
         }
 
         let client = reqwest::Client::builder()
+            .bundled_roots()
             .resolve(host, decision.addr)
             .redirect(reqwest::redirect::Policy::none())
             // Ambient HTTP(S)_PROXY must not bypass the pinned address or the deny set.

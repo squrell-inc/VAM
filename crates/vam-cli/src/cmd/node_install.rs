@@ -367,7 +367,10 @@ fn build_stamp(checkout: &Path) -> String {
 }
 
 async fn download(url: &str) -> Result<Vec<u8>> {
-    let resp = reqwest::get(url)
+    let resp = crate::transport::client_builder()?
+        .build()?
+        .get(url)
+        .send()
         .await
         .with_context(|| format!("download {url}"))?
         .error_for_status()

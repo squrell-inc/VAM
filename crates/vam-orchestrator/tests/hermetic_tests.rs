@@ -3106,7 +3106,7 @@ async fn post_budget_run(
         .expect("create run");
     let status = response.status();
     let text = String::from_utf8(
-        hyper::body::to_bytes(response.into_body())
+        axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body")
             .to_vec(),

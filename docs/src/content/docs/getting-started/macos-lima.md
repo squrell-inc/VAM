@@ -1,7 +1,10 @@
 ---
 title: macOS + Lima (Local Linux Node)
 description: Run the full VAM stack on Apple Silicon — nested-KVM Lima VM, aarch64 rootfs, guest kernel, vamd, and Mac CLI on port 8080.
+status: shipped
 ---
+
+The Mac `vam` CLI comes from a release: take `vam-<V>-aarch64-apple-darwin.tar.gz` (Intel: `x86_64-apple-darwin`), check it with `shasum -a 256 -c --ignore-missing SHA256SUMS`, and put `vam` on your `PATH`. See [Releases](/getting-started/releases/). The node does not: the release's node bundle is x86_64 Linux only, so the node in the Lima VM is built from source, as this page shows.
 
 Apple Silicon Macs cannot run Firecracker or KVM natively on macOS. This page is the **primary local development path** on Mac: a **Lima** aarch64 Linux VM with nested KVM runs `vamd`, Firecracker, and microVM sessions; the Mac `vam` CLI talks to it over HTTP on port **8080**.
 
