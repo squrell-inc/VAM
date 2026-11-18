@@ -120,7 +120,8 @@ that secret, so it does not exchange the code. It runs the browser sign-in with 
 authorization endpoint and the admin's client id, then posts what it got to
 `POST /v1/connectors/{id}/connection/oauth/code` with `{ code, codeVerifier, redirectUri }` (no endpoint and no
 client field; any other field is a 400). `redirectUri` must be the app's own, `squrell://oauth` or
-`http://127.0.0.1:<port>/<path>`. `vamd` posts the code, the verifier, the redirect URI, the client id, the
+`http://127.0.0.1:<port>/<path>` with an explicit port other than 80 (a loopback URI with no port, or with the
+default port 80, is refused). `vamd` posts the code, the verifier, the redirect URI, the client id, the
 `resource` and the secret (in the body, or as HTTP Basic, as pinned) to the pinned token endpoint, over the same
 DNS-pinned public address, no redirects and no proxy as a refresh (`mcp_oauth_refresh.rs`). The secret is read at
 org scope only when that host is the one it is pinned to (`connector_client.rs`, `org_client_secret`). Once the
@@ -134,7 +135,8 @@ secret) run before the request and write nothing. After the provider has accepte
 so what can still fail says so: a client replaced (even replaced and then put back, judged by the client's
 revision), or the connector turned off, while the provider was answering is a 409 and nothing is stored; a failure to save is a 502 that replaces nothing and says to sign in again; tools that
 cannot be read leave the sign-in stored but the connection `needsReconnect`, with the notification open and parked
-runs parked, until `POST /v1/mcp/connections/{id}/refresh` lists them. A listing that fails is recorded only while
+runs parked, until `POST /v1/mcp/connections/{id}/refresh?scope=user` lists them (the member's row is user-scoped;
+an org admin who leaves out `scope` addresses the org scope and gets a 404). A listing that fails is recorded only while
 the row is still the sign-in it was for (its URL and OAuth state, checked in the transaction that writes the mark):
 when another refresh already adopted the tools, or an admin save marked the row, the failure is a 409 and the row is
 left as it is. That recovery runs only while the connector is enabled: on a connector the admin turned off it is a
@@ -144,7 +146,9 @@ passed; when the provider sent no `expires_in` there is none, so a token the MCP
 tools are listed is refreshed once, under the credential gate, and the listing is tried once more with the renewed
 token (never more than once per request). A provider that refuses the client
 (`invalid_client`) is a 409 saying the client id or secret the admin entered was refused; a refused or
-spent code is a 400; an unreachable provider, or an answer with no refresh token, is a 502. When the admin saves a
+spent code is a 400; an unreachable provider is a 502 the app may retry; an answer with no refresh token is a 502 that is not
+retryable: the provider must issue a refresh token (offline access) for the admin's client before the member signs
+in again. When the admin saves a
 corrected secret for the same client, a member whose refresh the provider had refused for the client
 (`invalid_client`) is connected again; a revoked grant still needs a sign-in. A sign-in whose tools were still
 pending when the provider refused the client goes back to pending, not to connected: the tools-refresh route then
@@ -158,11 +162,16 @@ secret or token is in any answer or error. For such a connector the app-path rou
 token endpoint or client id is refused, and a `clientSecret` is refused for any connector-backed row. A refresh
 and the revoke on disconnect use the node's endpoints, client id and the org secret, read at that moment (a
 replaced secret is used by the next refresh); the revoke authenticates the way the provider's
-`revocation_endpoint_auth_methods_supported` says (the same choice as for the token endpoint), or as the token
-endpoint does when the provider lists nothing there; a row whose client id or endpoint differs from the node's is
+`revocation_endpoint_auth_methods_supported` says (the same choice as for the token endpoint), with
+`client_secret_basic` when the provider omits the field (RFC 8414 §2's default), and as the token endpoint does when
+the list has nothing this node can use or the client was saved before the field was read; a row whose client id or endpoint differs from the node's is
 marked `needs_reauth` without a request, and `invalid_client` on a refresh marks it `needs_reauth` naming the
 admin's client, unless the admin saved the client again while the provider was answering: then the refusal was
-of a secret no longer saved, nothing is recorded, and the next call refreshes with the saved one. A refresh the
+of a secret no longer saved and nothing is recorded for it. When that save only replaced the secret of the same
+client (the client id and token endpoint unchanged, so the member's grant still belongs to the current client), the
+next call refreshes with the saved secret (a tools-pending sign-in stays pending, and the tools-refresh route uses
+it); a save that changed the client id or the token endpoint has already marked the row `needs_reauth`, as below,
+and the member signs in again. A refresh the
 provider accepts after the admin changed the client id or token endpoint stores nothing and leaves the member
 `needs_reauth`; one accepted after a secret-only save is stored. A corrected secret reconnects a member
 automatically only while their grant still belongs to the current client: the refusal was of this client id and
@@ -171,7 +180,9 @@ the recoverable mark with "the admin changed the client", so the row stays `need
 again, even if the admin later returns to the earlier client (A, then B, then A) and corrects its secret. A
 parked row is not refreshed at all, and a refresh never clears a mark a save left. If the provider rotated the
 refresh token and the node then fails to store the access token, the rotated refresh token is still kept (the
-next call refreshes with it). The client and its secret are read at one revision: an admin save between the two
+next call refreshes with it): it is written first and the later writes run in a savepoint, so this holds only while
+the outer transaction still commits. If the whole transaction rolls back (the disk is full, an I/O error) after the
+provider spent the old refresh token, neither token is stored and the member may need to sign in again. The client and its secret are read at one revision: an admin save between the two
 reads sends nothing. Providers whose refresh tokens are single-use are safe: the refresh gate below makes
 concurrent calls spend the token once.
 
@@ -222,15 +233,22 @@ manifest names the token gets nothing), plus the tests in `mcp_credentials_stay_
 - A corrected or rotated secret keeps members connected, and a changed client id does not:
   `admin-corrects-the-client-secret-and-members-stay-connected`, and for a client the provider refused,
   `a_corrected_secret_for_the_same_client_brings_back_members_a_refused_client_parked` and
-  `a_corrected_secret_saved_with_a_disable_keeps_members_parked_until_the_enable` in `api/connectors.rs`.
+  `a_corrected_secret_saved_with_a_disable_keeps_members_parked_until_the_enable` and
+  `a_refused_client_on_a_pending_sign_in_goes_back_to_pending_after_a_corrected_secret` in `api/connectors.rs`, and
+  `a_plain_disable_and_enable_leaves_a_refused_client_parked` in `connector_client.rs`.
 - The commit rules (one transaction, a client replaced mid-exchange stores nothing, a moved connector's old row goes
   only after the new grant, a disconnect during `tools/list` is not undone, a stored sign-in whose tools cannot be read
   is retried by the tools-refresh route): `api/connectors.rs` route tests
   `an_exchange_for_a_client_the_admin_replaced_meanwhile_stores_nothing`,
+  `a_client_changed_and_changed_back_while_the_provider_answers_stores_nothing` (the commit's revision check, with
+  the provider's answer held),
   `a_save_that_fails_after_the_code_was_spent_replaces_nothing_and_says_to_sign_in_again`,
   `a_row_of_a_moved_connector_is_replaced_only_once_the_new_grant_is_valid`,
   `a_disconnect_while_tools_are_listed_does_not_bring_the_row_back` and
-  `a_sign_in_whose_tools_cannot_be_read_stays_retryable_and_is_not_announced`; two admins' saves racing is
+  `a_sign_in_whose_tools_cannot_be_read_stays_retryable_and_is_not_announced`,
+  `a_failed_listing_never_marks_a_row_another_request_already_moved_on`,
+  `a_pending_sign_in_is_not_recovered_while_the_connector_is_off` and
+  `a_pending_sign_in_whose_token_the_server_refuses_is_refreshed_once_and_adopted`; two admins' saves racing is
   `a_save_planned_before_another_admins_save_commits_nothing` in `connector_client.rs`.
 
 ## Not proved

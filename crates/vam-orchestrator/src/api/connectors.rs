@@ -1399,14 +1399,21 @@ mod tests {
         base: url::Url,
         seen: Arc<Mutex<Vec<Seen>>>,
         replies: Arc<Mutex<VecDeque<(u16, String)>>>,
+        hold: HeldReply,
     }
+
+    /// The next request's answer is held: the provider says the request arrived on the first
+    /// channel, then waits on the second before it answers.
+    type HeldReply =
+        Arc<Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>>;
 
     fn provider() -> Provider {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let seen = Arc::new(Mutex::new(Vec::<Seen>::new()));
         let replies = Arc::new(Mutex::new(VecDeque::<(u16, String)>::new()));
-        let (log, queue) = (seen.clone(), replies.clone());
+        let hold: HeldReply = Arc::new(Mutex::new(None));
+        let (log, queue, held) = (seen.clone(), replies.clone(), hold.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
@@ -1443,6 +1450,11 @@ mod tests {
                     form,
                     authorization,
                 });
+                let pending = held.lock().unwrap().take();
+                if let Some((arrived, release)) = pending {
+                    let _ = arrived.send(());
+                    let _ = release.recv();
+                }
                 let (status, payload) = queue
                     .lock()
                     .unwrap()
@@ -1459,10 +1471,18 @@ mod tests {
             base,
             seen,
             replies,
+            hold,
         }
     }
 
     impl Provider {
+        /// Holds the answer to the next request: returns "it arrived" and "answer now".
+        fn hold_next(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *self.hold.lock().unwrap() = Some((arrived_tx, release_rx));
+            (arrived_rx, release_tx)
+        }
         fn reply(&self, status: u16, body: serde_json::Value) {
             let body = if body.is_null() {
                 String::new()
@@ -1942,7 +1962,9 @@ mod tests {
             )
         );
 
-        // A disconnect revokes the refresh token at the node's endpoint with the org secret.
+        // A disconnect revokes the refresh token at the node's endpoint with the org secret. The
+        // provider's metadata omits `revocation_endpoint_auth_methods_supported`, so the revoke
+        // uses RFC 8414's default, HTTP Basic (the token endpoint takes POST).
         n.token.reply(200, serde_json::Value::Null);
         let (s, b) = call(
             &n.app,
@@ -1958,8 +1980,19 @@ mod tests {
         let revoke = seen.last().unwrap();
         assert_eq!(revoke.path, "/revoke");
         assert_eq!(revoke.form["token"], NEW_REFRESH);
-        assert_eq!(revoke.form["client_id"], "c-1");
-        assert_eq!(revoke.form["client_secret"], SECRET);
+        let expected = {
+            use base64::Engine as _;
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("c-1:{SECRET}"))
+            )
+        };
+        assert_eq!(revoke.authorization.as_deref(), Some(expected.as_str()));
+        assert!(
+            !revoke.form.contains_key("client_secret"),
+            "{:?}",
+            revoke.form
+        );
         assert!(member_vault_ids(&n.vault).is_empty());
     }
 
@@ -1997,12 +2030,14 @@ mod tests {
                 StatusCode::BAD_GATEWAY,
                 "exchange",
             ),
-            // The provider answers 200 with no refresh token: the connection could not be kept.
+            // The provider answers 200 with no refresh token: the connection could not be kept,
+            // and repeating the request cannot help (the code is spent, and the provider must be
+            // set up to issue a refresh token first).
             (
                 200,
                 serde_json::json!({ "access_token": NEW_ACCESS, "token_type": "Bearer" }),
                 StatusCode::BAD_GATEWAY,
-                "refresh token",
+                "offline access",
             ),
         ];
         for (provider_status, provider_body, want, text) in cases {
@@ -2016,6 +2051,10 @@ mod tests {
             .await;
             assert_eq!(s, want, "{b}");
             assert!(b.to_string().contains(text), "{b}");
+            if want == StatusCode::BAD_GATEWAY {
+                // Only an unreachable provider is worth retrying.
+                assert_eq!(b["retryable"], text == "exchange", "{b}");
+            }
             assert_no_value("a refused exchange", &b.to_string());
             assert!(
                 n.store
@@ -2315,6 +2354,81 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::OK, "{b}");
+    }
+
+    #[tokio::test]
+    async fn a_client_changed_and_changed_back_while_the_provider_answers_stores_nothing() {
+        let n = xchg_node("xchg-aba-held");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let c1 = n.store.node_client("filebox").unwrap().unwrap();
+
+        // ada signs in again. The secret read and the request pass every check (nothing has
+        // changed yet); the provider accepts the code, but its answer is held until the admin
+        // has saved c-2 and then c-1 again.
+        let (arrived, release) = n.token.hold_next();
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "HELD-A", "refresh_token": "HELD-R", "expires_in": 3600 }),
+        );
+        let admin = async {
+            tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+                .await
+                .unwrap();
+            let (s, b) = put_client(&n, "c-2", Some("C2-SECRET-wwwwwwwwwwww")).await;
+            assert_eq!(s, StatusCode::OK, "{b}");
+            let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+            assert_eq!(s, StatusCode::OK, "{b}");
+            release.send(()).unwrap();
+        };
+        let ((s, b), ()) = tokio::join!(
+            exchange(
+                &n,
+                "member-secret",
+                "filebox",
+                exchange_body("squrell://oauth"),
+            ),
+            admin
+        );
+        // The commit's revision check refuses it: the client id and endpoint are c-1's again,
+        // but not the revision the sign-in read.
+        let back = n.store.node_client("filebox").unwrap().unwrap();
+        assert_eq!(back.client_id, c1.client_id);
+        assert!(back.revision > c1.revision);
+        assert_eq!(n.token.requests().len(), 2, "the held request was sent");
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("sign in again"), "{b}");
+        assert_no_value("the refusal", &b.to_string());
+        // The tokens are the first sign-in's, and the mark c-2's save left stays.
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/access-token"),
+            NEW_ACCESS
+        );
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            NEW_REFRESH
+        );
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(
+            oauth.status,
+            crate::mcp_registry::McpOauthStatus::NeedsReauth
+        );
+        assert!(
+            oauth
+                .last_refresh_error
+                .as_deref()
+                .is_some_and(|e| e.contains("changed the client")),
+            "{oauth:?}"
+        );
     }
 
     #[tokio::test]

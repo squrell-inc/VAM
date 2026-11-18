@@ -51,11 +51,12 @@ pub struct Discovered {
     /// `token_endpoint_auth_methods_supported` means `client_secret_basic`). Without a secret there
     /// is nothing to authenticate and this is the default, unused.
     pub token_auth_method: TokenAuthMethod,
-    /// How the secret authenticates at the revocation endpoint, when the provider lists
-    /// `revocation_endpoint_auth_methods_supported` (RFC 8414 §2) with a method this node can use,
-    /// chosen by the rule of [`Self::token_auth_method`]. `None` when it lists nothing (or only
-    /// methods this node cannot use), when there is no revocation endpoint, or when no secret is
-    /// kept: the revoke then uses the token method, as it did before the field was read.
+    /// How the secret authenticates at the revocation endpoint: from
+    /// `revocation_endpoint_auth_methods_supported` (RFC 8414 §2), chosen by the rule of
+    /// [`Self::token_auth_method`] when listed, and `client_secret_basic` (RFC 8414's default) when
+    /// the field is omitted. `None` when it lists only methods this node cannot use, when there is
+    /// no revocation endpoint, or when no secret is kept: the revoke then uses the token method, as
+    /// it did before the field was read.
     pub revocation_auth_method: Option<TokenAuthMethod>,
 }
 
@@ -297,14 +298,16 @@ fn pick_listed_method(listed: &[Value]) -> Option<TokenAuthMethod> {
     }
 }
 
-/// The revocation-endpoint authentication method, when the provider publishes one this node can
-/// use (`revocation_endpoint_auth_methods_supported`, RFC 8414 §2), by the token method's rule.
-/// Revocation is best effort, so a list with nothing usable refuses nothing: it reads as `None`
-/// and the revoke keeps the token method.
+/// The revocation-endpoint authentication method (`revocation_endpoint_auth_methods_supported`,
+/// RFC 8414 §2), read when a revocation endpoint was discovered. Omitted, RFC 8414 says
+/// `client_secret_basic`, so Basic is pinned. A list picks by the token method's rule. Revocation is
+/// best effort, so a list (or a value) with nothing usable refuses nothing: it reads as `None` and
+/// the revoke keeps the token method, as it does for a client saved before this was read.
 fn choose_revocation_auth_method(meta: &Value) -> Option<TokenAuthMethod> {
     match meta.get("revocation_endpoint_auth_methods_supported") {
+        None | Some(Value::Null) => Some(TokenAuthMethod::ClientSecretBasic),
         Some(Value::Array(listed)) => pick_listed_method(listed),
-        _ => None,
+        Some(_) => None,
     }
 }
 
@@ -866,10 +869,12 @@ mod tests {
             ),
             Some(Post)
         );
-        // Nothing listed, or nothing usable: `None`, the revoke keeps the token method. Revocation
-        // is best effort, so this refuses nothing.
+        // Omitted: RFC 8414 §2's default, `client_secret_basic`, even though the token endpoint
+        // takes POST.
+        assert_eq!(method(None, true, true), Some(Basic));
+        // Nothing usable listed: `None`, the revoke keeps the token method. Revocation is best
+        // effort, so this refuses nothing.
         for listed in [
-            None,
             Some(json!(["private_key_jwt"])),
             Some(json!([])),
             Some(json!("client_secret_basic")),
@@ -877,6 +882,8 @@ mod tests {
             assert_eq!(method(listed, true, true), None);
         }
         // No revocation endpoint, or no secret kept: nothing to pin.
+        assert_eq!(method(None, true, false), None);
+        assert_eq!(method(None, false, true), None);
         assert_eq!(
             method(Some(json!(["client_secret_basic"])), true, false),
             None

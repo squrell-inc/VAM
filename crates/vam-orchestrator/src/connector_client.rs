@@ -968,8 +968,9 @@ impl std::fmt::Debug for CodeExchangeRequest {
     }
 }
 
-/// The app's own redirect URIs (open question 6): `squrell://oauth`, or a loopback address with a
-/// port and a path. The admin registers them with the provider.
+/// The app's own redirect URIs (open question 6): `squrell://oauth`, or a loopback address with an
+/// explicit port other than 80 (the URL parser drops a default port, so `:80` reads as none) and a
+/// path. The admin registers them with the provider.
 pub const APP_REDIRECT_URI: &str = "squrell://oauth";
 const MAX_CODE_LEN: usize = 4096;
 
@@ -2202,6 +2203,8 @@ mod exchange_tests {
             "https://127.0.0.1:5000/cb",
             "http://localhost:5000/cb",
             "http://127.0.0.1/cb",
+            // The default port reads as no port (`Url::port()` is `None` for it): refused too.
+            "http://127.0.0.1:80/cb",
             "http://127.0.0.1:5000/cb?x=1",
             "http://127.0.0.1:5000/cb#f",
             "http://user@127.0.0.1:5000/cb",
