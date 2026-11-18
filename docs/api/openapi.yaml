@@ -1129,6 +1129,26 @@ paths:
         A connector whose client id is not configured on this node cannot be
         enabled (409). An unknown id is 404. A member gets 403 and nothing
         changes. The body is validated before anything is written.
+
+        **Admin-supplied client (`provider.client: org`).** The body may carry
+        `client: { clientId, clientSecret? }`. It is accepted only for such a
+        connector (400 otherwise); enabling one with no client stored or given
+        is 409 (the text names the client id); one that keeps a secret
+        (`clientSecret: org_vault`) needs a secret stored or given (400). On a
+        body with a client, the node reads the provider's OAuth metadata from
+        the connector's MCP URL (RFC 9728, then RFC 8414 / OpenID Connect) over
+        https to public addresses only, requires S256, and pins the
+        authorization and token endpoints on the node row; a provider that
+        cannot be read is 502 and one whose metadata cannot be used is 409,
+        and nothing is written. The secret becomes one org-scope `connection`
+        vault row pinned to the token endpoint's host; it is never returned,
+        never listed (`GET /v1/secrets` and `/v1/org/secrets` omit the row) and
+        the secrets API refuses to read, write or delete it. A new secret alone
+        keeps members connected; a new client id or a moved token endpoint marks
+        every member's connection `needs_reauth`. A token endpoint that moved to
+        another host needs the secret entered again (409). `client: null` (only
+        with `enabled: false`) removes the client and its secret. A disable
+        keeps the client; `{ "enabled": true }` alone restores it.
       parameters:
         - name: id
           in: path
@@ -1155,7 +1175,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ConnectorEntry"
         "400":
-          description: Unknown body field, a tenant that is not a GUID, or consent on a connector that takes none.
+          description: Unknown body field, a tenant that is not a GUID, consent on a connector that takes none, a client on a connector that uses the publisher's own, a missing client secret, or a malformed client (the answer never quotes the body).
           content:
             application/json:
               schema:
@@ -1173,7 +1193,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "409":
-          description: The connector is not configured on this node (its client id is the placeholder).
+          description: The connector is not configured on this node (its client id is the placeholder, or an admin-supplied client is not stored), or the provider's metadata cannot be used (no S256, an endpoint that is not public https, a moved token endpoint without a new secret).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: The provider's OAuth metadata could not be read; nothing was written.
           content:
             application/json:
               schema:
@@ -6590,6 +6616,21 @@ components:
             tenantId:
               type: string
               description: Microsoft tenant GUID the admin consented for.
+        client:
+          type: [object, "null"]
+          description: |
+            The org's own OAuth client, for a connector with `provider.client: org`. Omitted keeps the
+            stored client; `null` removes it (only with `enabled: false`).
+          additionalProperties: false
+          required: [clientId]
+          properties:
+            clientId:
+              type: string
+              description: 1-128 characters of letters, digits, `.`, `_`, `-`.
+            clientSecret:
+              type: string
+              writeOnly: true
+              description: "Required the first time for `clientSecret: org_vault`; omitted keeps the stored secret. Never returned."
     PutConnectorConnectionRequest:
       type: object
       additionalProperties: false
@@ -6639,6 +6680,18 @@ components:
             updatedAt:
               type: integer
               description: Only for callers with `users:admin`.
+            client:
+              type: object
+              description: "A connector with `provider.client: org` whose client is stored (members see it once the connector is enabled). Never holds the secret."
+              properties:
+                clientId: { type: string }
+                secretSet: { type: boolean }
+                authorizeEndpoint: { type: string, description: Pinned at Enable from the provider's metadata. }
+                tokenEndpoint: { type: string, description: Pinned at Enable; the only place the secret is sent. }
+                updatedAt: { type: integer }
+                updatedBy:
+                  type: string
+                  description: Only for callers with `users:admin`.
         source:
           type: string
           enum: [builtin, marketplace]

@@ -18,6 +18,8 @@ pub mod catalog_resolve;
 pub mod catalog_suggest;
 pub mod catalog_tier;
 pub mod connection_egress;
+pub mod connector_client;
+pub mod connector_discovery;
 pub mod connector_park;
 pub mod connectors;
 pub mod contacts;

@@ -47,5 +47,4 @@ guards:
   - vam:crates/vam-orchestrator/src/secrets.rs
   - vam:crates/vam-orchestrator/src/api/mod.rs
   - vam:crates/vam-spec/src/connector.rs
-status: pending
-expectFail: { step: when.4, class: product }
+status: active

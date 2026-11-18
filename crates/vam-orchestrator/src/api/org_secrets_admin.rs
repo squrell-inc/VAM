@@ -42,6 +42,7 @@ async fn put_org_secret(
         return Err(OrchestratorError::InvalidContract("binding_id is required".into()).into());
     }
     let kind = SecretKind::from_proto(req.kind)?;
+    crate::api::refuse_connector_row(SecretScope::Org, &req.binding_id)?;
     let idem = if req.idempotency_key.is_empty() {
         Some(idempotency.as_str())
     } else {
@@ -71,7 +72,9 @@ async fn list_org_secrets(
     state
         .pdp
         .authorize(&auth, "ListOrgHostSecrets", USERS_ADMIN_SCOPE)?;
-    let secrets = state.vault.list_org_metadata()?;
+    let mut secrets = state.vault.list_org_metadata()?;
+    // A connector's org rows (the admin's client secret) are managed with the connector.
+    secrets.retain(|m| !crate::connector_client::is_connector_org_row(m.scope, &m.binding_id));
     let resp = ListHostSecretsResponse {
         secrets: secrets.iter().map(to_proto_secret).collect(),
     };
@@ -95,6 +98,7 @@ async fn delete_org_secret(
     if binding_id.trim().is_empty() {
         return Err(OrchestratorError::InvalidContract("binding_id is required".into()).into());
     }
+    crate::api::refuse_connector_row(SecretScope::Org, &binding_id)?;
     let meta = state
         .vault
         .delete_secret_at(SecretScope::Org, ORG_OWNER_USER_ID, &binding_id)?;

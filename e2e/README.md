@@ -778,8 +778,9 @@ and **single-use rotating refresh tokens** (a spent one answers `invalid_grant`)
 - The client secret, a value the provider never held, the rotated secret and every token it issued are in the scrub
   list; `expect: { secret-absent: { secret: <piece alias> } }` judges all of them.
 - Seam: `mcp:https://mcp.filebox.example/mcp` is mapped to the mock with the other `mcp:` keys. The key
-  `oauth:https://auth.filebox.example` (discovery, exchange and refresh at the pinned endpoints) is held out by
-  `PASS_OAUTH_SEAM` (`connectors.rs`, `false`) until CN-5 wave 2 makes vamd accept it.
+  `oauth:https://auth.filebox.example` (discovery, exchange and refresh at the pinned endpoints; every URL on that
+  origin keeps its path) is on (`PASS_OAUTH_SEAM`, `connectors.rs`). The `/.well-known/` metadata of an `mcp:` server
+  is answered by the same mock, so Enable's discovery runs the real code against it.
 - `connector-node` takes `client: { clientId, clientSecret: { piece, which: current | rotated | wrong } }`, sent as
   `client: { clientId, clientSecret }` in the body (the secret value comes from the mock, never printed; leave
   `clientSecret` out to send none), and `contains` (the refusal's body holds the text). A node with a client is sent

@@ -301,6 +301,13 @@ pub struct HostSecretMetadata {
     pub scope: SecretScope,
 }
 
+/// A value encrypted under the vault key, ready to be stored: no plaintext.
+pub(crate) struct SealedSecret {
+    pub(crate) nonce: Vec<u8>,
+    pub(crate) ciphertext: Vec<u8>,
+    pub(crate) fingerprint: String,
+}
+
 #[derive(Clone)]
 pub struct SecretsVault {
     master_key: [u8; 32],
@@ -446,6 +453,16 @@ impl SecretsVault {
             scope,
             owner,
         )
+    }
+
+    /// Encrypts `value` for a row another writer stores itself (inside its own transaction).
+    pub(crate) fn seal(&self, value: &str) -> Result<SealedSecret, OrchestratorError> {
+        let (nonce, ciphertext) = encrypt_value(&self.master_key, value.as_bytes())?;
+        Ok(SealedSecret {
+            nonce,
+            ciphertext,
+            fingerprint: Self::fingerprint(value),
+        })
     }
 
     pub fn list_metadata(&self) -> Result<Vec<HostSecretMetadata>, OrchestratorError> {
@@ -978,42 +995,22 @@ impl SqliteWorkflowStore {
         scope: SecretScope,
         owner_user_id: &str,
     ) -> Result<HostSecretMetadata, OrchestratorError> {
-        let destinations_json = serde_json::to_string(allowed_destinations)
-            .map_err(|e| OrchestratorError::Core(e.to_string()))?;
-        let now = unix_timestamp();
-        let owner = vault_owner_user_id(scope, owner_user_id);
         let connection = self
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        connection.execute(
-            "INSERT INTO host_secrets (
-                scope, owner_user_id, binding_id, kind, nonce, ciphertext, fingerprint,
-                allowed_destinations_json, created_at, updated_at, idempotency_key
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)
-             ON CONFLICT(scope, owner_user_id, binding_id) DO UPDATE SET
-                kind = excluded.kind,
-                nonce = excluded.nonce,
-                ciphertext = excluded.ciphertext,
-                fingerprint = excluded.fingerprint,
-                allowed_destinations_json = excluded.allowed_destinations_json,
-                updated_at = excluded.updated_at,
-                idempotency_key = COALESCE(excluded.idempotency_key, host_secrets.idempotency_key)",
-            params![
-                scope.as_str(),
-                owner,
-                binding_id,
-                kind.as_str(),
-                nonce,
-                ciphertext,
-                fingerprint,
-                destinations_json,
-                now,
-                idempotency_key,
-            ],
-        )?;
-        drop(connection);
-        self.get_host_secret_metadata(scope, owner, binding_id)
+        put_host_secret_in(
+            &connection,
+            binding_id,
+            kind,
+            nonce,
+            ciphertext,
+            fingerprint,
+            allowed_destinations,
+            idempotency_key,
+            scope,
+            owner_user_id,
+        )
     }
 
     pub fn list_host_secrets(&self) -> Result<Vec<HostSecretMetadata>, OrchestratorError> {
@@ -1414,6 +1411,65 @@ fn parse_master_key_hex(hex_key: &str) -> Result<[u8; 32], OrchestratorError> {
     let mut key = [0u8; 32];
     key.copy_from_slice(&bytes);
     Ok(key)
+}
+
+/// Upserts one `host_secrets` row on a connection the caller already holds (inside a transaction,
+/// or not). The row's kind is whatever the caller passes: the one caller that writes a
+/// `connection` row outside the MCP and REST connection writers is
+/// `connector_client::put_node_with_client`.
+#[allow(clippy::too_many_arguments)] // mirrors `put_host_secret`
+pub(crate) fn put_host_secret_in(
+    connection: &rusqlite::Connection,
+    binding_id: &str,
+    kind: SecretKind,
+    nonce: &[u8],
+    ciphertext: &[u8],
+    fingerprint: &str,
+    allowed_destinations: &[String],
+    idempotency_key: Option<&str>,
+    scope: SecretScope,
+    owner_user_id: &str,
+) -> Result<HostSecretMetadata, OrchestratorError> {
+    let destinations_json = serde_json::to_string(allowed_destinations)
+        .map_err(|e| OrchestratorError::Core(e.to_string()))?;
+    let now = unix_timestamp();
+    let owner = vault_owner_user_id(scope, owner_user_id);
+    connection.execute(
+        "INSERT INTO host_secrets (
+            scope, owner_user_id, binding_id, kind, nonce, ciphertext, fingerprint,
+            allowed_destinations_json, created_at, updated_at, idempotency_key
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)
+         ON CONFLICT(scope, owner_user_id, binding_id) DO UPDATE SET
+            kind = excluded.kind,
+            nonce = excluded.nonce,
+            ciphertext = excluded.ciphertext,
+            fingerprint = excluded.fingerprint,
+            allowed_destinations_json = excluded.allowed_destinations_json,
+            updated_at = excluded.updated_at,
+            idempotency_key = COALESCE(excluded.idempotency_key, host_secrets.idempotency_key)",
+        params![
+            scope.as_str(),
+            owner,
+            binding_id,
+            kind.as_str(),
+            nonce,
+            ciphertext,
+            fingerprint,
+            destinations_json,
+            now,
+            idempotency_key,
+        ],
+    )?;
+    connection
+        .query_row(
+            "SELECT binding_id, kind, fingerprint, allowed_destinations_json,
+                    created_at, updated_at, last_used_at, owner_user_id, scope
+             FROM host_secrets
+             WHERE scope = ?1 AND owner_user_id = ?2 AND binding_id = ?3",
+            params![scope.as_str(), owner, binding_id],
+            parse_metadata_row,
+        )
+        .map_err(|e| secret_not_found(e, scope, owner, binding_id))
 }
 
 fn encrypt_value(
