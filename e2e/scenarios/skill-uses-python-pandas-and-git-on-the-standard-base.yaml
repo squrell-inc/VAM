@@ -23,6 +23,7 @@ then:
   - expect: { thread: { role: tool, contains: "toolchain-commit: Fix rounding in ledger" } }
 guards:
   - vam:scripts/build-rootfs.sh
+  - vam:scripts/release/build-guest.sh
   - vam:scripts/base/Dockerfile
   - vam:scripts/e2e/firecracker-assets.sh
 mock:
