@@ -148,26 +148,25 @@ fn well_known(base: &Url, suffix: &str, path: &str) -> Result<Url, DiscoveryErro
 }
 
 /// RFC 9728: the protected-resource metadata names the authorization server. Tries the path
-/// suffixed form first (`/.well-known/oauth-protected-resource/mcp`), then the root. Each candidate
+/// suffixed form first (`/.well-known/oauth-protected-resource/mcp`, with the MCP URL's query if it
+/// has one), then the root (no query). Each candidate
 /// carries the resource identifier its URL was built from, and the document must name exactly that
 /// one (RFC 9728 §3.3): a document for another path, another server or no resource at all is not
-/// this server's metadata. A trailing `/` is the one difference tolerated, the same one the
-/// well-known path ignores.
+/// this server's metadata. The comparison is exact: `/mcp/` is not `/mcp`. The one spelling
+/// difference accepted is an empty path against `/` on an identifier that is only an origin, which
+/// RFC 3986 §6.2.3 makes the same URI for `https` (`https://h` and `https://h/`).
 fn protected_resource_issuer(
     mcp: &Url,
     fetcher: &dyn MetadataFetcher,
     started: Instant,
 ) -> Result<String, DiscoveryError> {
-    let identifier = {
-        let mut u = mcp.clone();
-        u.set_query(None);
-        u.as_str().to_string()
-    };
+    // The query is part of the resource identifier (RFC 9728 §3.1): the resource-specific
+    // well-known URL keeps it after the inserted path, and the document must name it.
+    let identifier = mcp.as_str().to_string();
+    let mut specific = well_known(mcp, "oauth-protected-resource", mcp.path())?;
+    specific.set_query(mcp.query());
     let root_identifier = format!("{}://{}", mcp.scheme(), mcp.host_str().unwrap_or_default());
-    let mut candidates = vec![(
-        well_known(mcp, "oauth-protected-resource", mcp.path())?,
-        identifier,
-    )];
+    let mut candidates = vec![(specific, identifier)];
     if !mcp.path().trim_end_matches('/').is_empty() {
         candidates.push((
             well_known(mcp, "oauth-protected-resource", "")?,
@@ -188,7 +187,7 @@ fn protected_resource_issuer(
             }
         };
         let named = doc.get("resource").and_then(Value::as_str);
-        if named.map(|r| r.trim_end_matches('/')) != Some(expected.trim_end_matches('/')) {
+        if !named.is_some_and(|r| same_resource(r, &expected)) {
             return Err(unsuitable(
                 "the MCP server's protected-resource metadata does not name this server as its resource",
             ));
@@ -207,6 +206,22 @@ fn protected_resource_issuer(
         return Ok(first.to_string());
     }
     Err(last)
+}
+
+/// RFC 9728 §3.3: the metadata's `resource` must be identical to the identifier the well-known URL
+/// was built from. Only an origin may be spelled with or without its `/` path (RFC 3986 §6.2.3).
+fn same_resource(named: &str, expected: &str) -> bool {
+    if named == expected {
+        return true;
+    }
+    let origin_only = |s: &str| {
+        Url::parse(s)
+            .is_ok_and(|u| u.path() == "/" && u.query().is_none() && u.fragment().is_none())
+    };
+    // With the path exactly `/`, each side is the origin with or without that one `/`.
+    origin_only(named)
+        && origin_only(expected)
+        && named.trim_end_matches('/') == expected.trim_end_matches('/')
 }
 
 /// RFC 8414, then OpenID Connect discovery, in the order the MCP authorization spec gives.
@@ -582,17 +597,17 @@ mod tests {
             // The authorization server's metadata was never asked for.
             assert_eq!(f.asked.borrow().len(), 1, "{resource:?}");
         }
-        // Exactly the identifier (a trailing slash aside) passes.
-        for resource in [MCP, "https://mcp.box.example/mcp/"] {
-            let mut doc = prm();
-            doc["resource"] = json!(resource);
-            let f = with(fake(), PRM_URL, doc);
-            assert!(discover(MCP, true, &f).is_ok(), "{resource}");
-        }
-        // The root fallback is checked against the identifier it was built from.
+        // Exactly the identifier passes.
+        let mut doc = prm();
+        doc["resource"] = json!(MCP);
+        let f = with(fake(), PRM_URL, doc);
+        assert!(discover(MCP, true, &f).is_ok());
+        // The root fallback is checked against the identifier it was built from. An origin is the
+        // same URI with or without its `/` path (RFC 3986 §6.2.3); a doubled slash is not.
         for (resource, ok) in [
             ("https://mcp.box.example", true),
             ("https://mcp.box.example/", true),
+            ("https://mcp.box.example//", false),
             (MCP, false),
             ("https://other.example", false),
         ] {
@@ -601,6 +616,76 @@ mod tests {
             let f = Fake::new(&[(PRM_ROOT_URL, root), (AS_URL, asm())]);
             assert_eq!(discover(MCP, true, &f).is_ok(), ok, "{resource}");
         }
+    }
+
+    #[test]
+    fn a_resource_that_differs_by_a_trailing_slash_is_refused() {
+        // RFC 9728 §3.3: the identifiers must be identical, so a trailing slash on either side is
+        // another resource, not a spelling of this one.
+        for resource in [
+            "https://mcp.box.example/mcp/",
+            "https://mcp.box.example/mcp//",
+            "https://mcp.box.example/mcp///",
+        ] {
+            let mut doc = prm();
+            doc["resource"] = json!(resource);
+            let f = with(fake(), PRM_URL, doc);
+            let e = discover(MCP, true, &f).unwrap_err();
+            assert!(
+                matches!(e, DiscoveryError::Unsuitable(_)),
+                "{resource}: {e}"
+            );
+            assert_eq!(f.asked.borrow().len(), 1, "{resource}");
+        }
+        // A connector configured with the trailing slash must be named with it.
+        let with_slash = "https://mcp.box.example/mcp/";
+        let f = with(fake(), PRM_URL, prm());
+        assert!(
+            matches!(
+                discover(with_slash, true, &f),
+                Err(DiscoveryError::Unsuitable(_))
+            ),
+            "{MCP} named for {with_slash}"
+        );
+        let mut doc = prm();
+        doc["resource"] = json!(with_slash);
+        let f = with(fake(), PRM_URL, doc);
+        assert!(discover(with_slash, true, &f).is_ok());
+    }
+
+    #[test]
+    fn a_query_is_part_of_the_resource_identifier() {
+        // RFC 9728 §3.1: the resource-specific lookup keeps the query, and the document names it.
+        let with_query = "https://mcp.box.example/mcp?tenant=blue";
+        let url = "https://mcp.box.example/.well-known/oauth-protected-resource/mcp?tenant=blue";
+        let mut doc = prm();
+        doc["resource"] = json!(with_query);
+        let f = Fake::new(&[(url, doc), (AS_URL, asm())]);
+        assert!(discover(with_query, true, &f).is_ok());
+        assert_eq!(f.asked.borrow()[0], url);
+        // The identifier without its query, or with another one, is another resource.
+        for named in [
+            MCP,
+            "https://mcp.box.example/mcp?tenant=red",
+            "https://mcp.box.example/mcp?tenant=blue&x=1",
+        ] {
+            let mut doc = prm();
+            doc["resource"] = json!(named);
+            let f = Fake::new(&[(url, doc), (AS_URL, asm())]);
+            assert!(
+                matches!(
+                    discover(with_query, true, &f),
+                    Err(DiscoveryError::Unsuitable(_))
+                ),
+                "{named}"
+            );
+        }
+        // The origin fallback is unchanged: no query, the root identifier.
+        let mut root = prm();
+        root["resource"] = json!("https://mcp.box.example");
+        let f = Fake::new(&[(PRM_ROOT_URL, root), (AS_URL, asm())]);
+        assert!(discover(with_query, true, &f).is_ok());
+        assert_eq!(f.asked.borrow()[1], PRM_ROOT_URL);
     }
 
     #[test]
