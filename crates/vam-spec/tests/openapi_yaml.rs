@@ -127,3 +127,16 @@ fn every_local_ref_resolves() {
     walk(&doc, &doc, &mut bad);
     assert!(bad.is_empty(), "dangling $ref: {bad:?}");
 }
+
+#[test]
+fn openapi_node_status_reports_the_build() {
+    let doc = load();
+    let schemas = &doc["components"]["schemas"];
+    assert!(schemas["NodeStatus"]["properties"]["build"].is_mapping());
+    for f in ["version", "commit", "commitDate", "channel"] {
+        assert!(
+            schemas["NodeBuild"]["properties"][f].is_mapping(),
+            "NodeBuild.{f}"
+        );
+    }
+}

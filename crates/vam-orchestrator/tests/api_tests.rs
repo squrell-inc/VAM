@@ -7497,12 +7497,12 @@ async fn org_admin_can_mint_list_and_revoke_user_api_keys() {
         .oneshot(bearer_get("/v1/node", secret))
         .await
         .unwrap();
-    assert_eq!(
-        node.status(),
-        StatusCode::OK,
-        "{}",
-        response_body(node).await
-    );
+    assert_eq!(node.status(), StatusCode::OK);
+    let node_body = response_body(node).await;
+    let build = vam_spec::build_info!();
+    assert!(node_body.contains("\"build\""), "{node_body}");
+    assert!(node_body.contains(&build.version), "{node_body}");
+    assert!(node_body.contains(&build.commit), "{node_body}");
 
     let key_id = store
         .list_api_keys_for_owner("alice")
@@ -11295,4 +11295,19 @@ async fn admin_cannot_rename_or_reach_users_through_the_id_only_routes_by_name()
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[test]
+fn node_build_maps_a_fixed_build_info() {
+    let info = vam_spec::build_info::BuildInfo::new("0.3.0", "3f9c2ab", "2026-11-20", "release");
+    let b = vam_orchestrator::api::node_build(&info);
+    assert_eq!(
+        (
+            b.version.as_str(),
+            b.commit.as_str(),
+            b.commit_date.as_str(),
+            b.channel.as_str()
+        ),
+        ("0.3.0", "3f9c2ab", "2026-11-20", "release")
+    );
 }

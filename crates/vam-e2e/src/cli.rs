@@ -64,9 +64,7 @@ impl Engine {
         let name = x.bin.name();
         let mut ca = None;
         if let Some(alias) = &x.as_ {
-            let key = self.key_of(Some(alias))?.ok_or_else(|| {
-                Fail::new(Class::Scenario, format!("a key for `{alias}`"), "none yet")
-            })?;
+            let key = self.cli_key(alias)?;
             let mut pre = vec![
                 "--host".to_string(),
                 self.api.base().to_string(),
@@ -290,6 +288,30 @@ impl Engine {
         Ok(())
     }
 
+    /// The key `as: <alias>` runs with: the identity's own key, or, for an Owner piece only (the
+    /// bootstrap key has no minted identity), the bootstrap key. Any other alias without a key
+    /// is a scenario error, never operator privilege.
+    pub(super) fn cli_key(&self, alias: &str) -> Result<String, Fail> {
+        if let Some(k) = self.key_of(Some(alias))? {
+            return Ok(k);
+        }
+        let owner = self
+            .ctx
+            .pieces
+            .get(alias)
+            .and_then(|r| self.pieces.get(&r.piece))
+            .is_some_and(|w| is_owner_role(w.role.as_deref()));
+        if owner {
+            Ok(self.api.key().to_string())
+        } else {
+            Err(Fail::new(
+                Class::Scenario,
+                format!("a key for `{alias}`"),
+                "none yet",
+            ))
+        }
+    }
+
     /// The scratch tree for this step: a fresh copy of `from`, or the previous step's tree.
     fn cli_tree(&mut self, x: &CliStep, what: &str) -> Result<PathBuf, Fail> {
         if x.root.same {
@@ -320,6 +342,17 @@ impl Engine {
         self.ctx.cli_root = Some(dir.clone());
         Ok(dir)
     }
+}
+
+/// An `org` piece with no role, or `Owner` or `Operator`, is the bootstrap key.
+fn is_owner_role(role: Option<&str>) -> bool {
+    let norm: String = role
+        .unwrap_or("Owner")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
+    matches!(norm.as_str(), "owner" | "operator")
 }
 
 fn make_writable(dir: &Path) {
@@ -446,6 +479,16 @@ fn run_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_owner_piece_falls_back_to_the_bootstrap_key() {
+        assert!(is_owner_role(None));
+        assert!(is_owner_role(Some("Owner")));
+        assert!(is_owner_role(Some("operator")));
+        assert!(!is_owner_role(Some("Member")));
+        assert!(!is_owner_role(Some("OrgAdmin")));
+        assert!(!is_owner_role(Some("Publisher")));
+    }
 
     #[test]
     fn a_command_that_hangs_is_killed_at_the_timeout() {

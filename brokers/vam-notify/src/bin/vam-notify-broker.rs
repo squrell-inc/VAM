@@ -18,6 +18,7 @@ use vam_notify::NotifyBroker;
 #[derive(Debug, Parser)]
 #[command(
     name = "vam-notify-broker",
+    version = vam_spec::build_info!().leaked_version_line(),
     about = "HSP notification channel broker: delivers vamd's neutral renderings to channel adapters (Slack).",
     args_conflicts_with_subcommands = true
 )]

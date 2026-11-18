@@ -1,6 +1,6 @@
 [package]
 name = "vam-firecracker"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 authors = ["Xue Haonan <xuehaonan27@gmail.com>", "VAM Contributors"]
 description = "Hardened fork of firecracker-rs-sdk for VAM VM isolation"
