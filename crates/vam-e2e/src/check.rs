@@ -658,6 +658,42 @@ fn check_scenario(
                         format!("{pos}: `contains` and `absent` entries are not empty"),
                     ));
                 }
+                for m in &x.matches {
+                    // `{{name}}` placeholders are replaced at run time; lint the rest.
+                    if m.is_empty() || (!m.contains("{{") && regex::Regex::new(m).is_err()) {
+                        errors.push(CheckError::new(
+                            p,
+                            "cli",
+                            format!("{pos}: `matches` entry `{m}` is not a valid regex"),
+                        ));
+                    }
+                }
+                for (f, c) in &x.files {
+                    if c.contains.is_none() && c.absent.is_none() && !c.unchanged {
+                        errors.push(CheckError::new(
+                            p,
+                            "cli",
+                            format!("{pos}: `files.{f}` needs `contains`, `absent` or `unchanged`"),
+                        ));
+                    }
+                }
+                if x.cwd.as_deref().is_some_and(|c| c != "root") {
+                    errors.push(CheckError::new(
+                        p,
+                        "cli",
+                        format!("{pos}: `cwd` is `root` or omitted"),
+                    ));
+                }
+                if x.timeout == Some(0) {
+                    errors.push(CheckError::new(
+                        p,
+                        "cli",
+                        format!("{pos}: `timeout` is at least 1"),
+                    ));
+                }
+                if x.as_.is_some() {
+                    refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
+                }
             }
             Step::ConnectorNode(x) => {
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());

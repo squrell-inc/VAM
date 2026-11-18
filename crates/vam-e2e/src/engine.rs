@@ -211,6 +211,8 @@ struct Ctx {
     cli_root: Option<std::path::PathBuf>,
     /// The secret a `cli` step captured (`{{secret}}` in later `cli` steps). Never printed.
     cli_secret: Option<String>,
+    /// Words a `cli` step kept with `remember` (`{{<as>}}` in later `cli` checks).
+    cli_vars: HashMap<String, String>,
     /// Marketplace steps (`marketplace.rs`).
     mkt: marketplace::MktState,
 }

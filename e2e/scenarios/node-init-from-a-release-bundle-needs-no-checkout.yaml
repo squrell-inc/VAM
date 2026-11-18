@@ -1,0 +1,37 @@
+id: node-init-from-a-release-bundle-needs-no-checkout
+title: A node installs from an extracted release bundle with no checkout anywhere
+description: >
+  `vam node init --no-systemd` run from a bundle directory (the `vam` binary with `vam-runtime`
+  and `share/vam/base/` beside it) on a ready host that has no base image builds the base from
+  the bundle's kit and the bundle's runtime, under `--root`, and starts no search for a
+  checkout. It exits 0, says `done base: built from the kit`, and the base manifest under the
+  tree names the sha256 of the runtime that came in the bundle. The output never says
+  `checkout`.
+
+  The fixture bundle's kit builder is a shell stub that needs no Docker: it writes a small image
+  and a manifest naming the sha256 of the `--runtime` file it was given. Its files are fixtures,
+  never real pins. The tree holds two bundles, `kit-1` and `kit-2`, so a later scenario can
+  install the second over the first.
+tags: [release]
+needs: process
+given: []
+when:
+  - cli:
+      args: [node, init, --root, "{{root}}", --no-systemd, --vamd, "{{vamd}}"]
+      root: { from: node-init/bundle }
+      cwd: root
+      copyCli: kit-1/vam
+      exit: ok
+      capture: "admin key: "
+      contains:
+        - "done base: built from the kit"
+      absent:
+        - "checkout"
+      files:
+        var/lib/vam/assets/rootfs.base.json:
+          contains: "631d231b4f35b567583a652bd898b3630572a325ecbc18f34203de5f141e24ed"
+guards:
+  - vam:crates/vam-cli/src/cmd/node_install.rs
+  - vam:crates/vam-cli/src/cmd/node.rs
+status: pending
+expectFail: { step: when.0, class: product }
