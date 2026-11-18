@@ -2197,9 +2197,14 @@ pub(crate) fn mark_connector_rows_need_reauth(
             // clears) is replaced by this one: its tokens are of the client being replaced, and
             // only a new sign-in may bring the row back, even if the admin later returns to that
             // client (A→B→A) and corrects its secret. Any other mark already needs a sign-in.
-            let recoverable = oauth.last_refresh_error.as_deref()
-                == Some(crate::connector_client::CLIENT_REFUSED_REASON)
-                || oauth.last_refresh_error.as_deref() == Some(TOOLS_PENDING_REASON);
+            let recoverable = matches!(
+                oauth.last_refresh_error.as_deref(),
+                Some(
+                    crate::connector_client::CLIENT_REFUSED_REASON
+                        | crate::connector_client::CLIENT_REFUSED_PENDING_REASON
+                        | TOOLS_PENDING_REASON
+                )
+            );
             if !recoverable {
                 continue;
             }
@@ -2222,7 +2227,11 @@ pub(crate) fn mark_connector_rows_need_reauth(
 /// is a row on another URL (a server the member added by hand). Only a row whose tokens are of the
 /// node's current client (its client id and token endpoint, read here inside the caller's
 /// transaction) is cleared: a row a refused c1 parked stays parked when the admin moved to c2 and
-/// then fixed c2's secret. Runs inside the caller's transaction.
+/// then fixed c2's secret. A row the refusal found tools-pending (it carries
+/// [`crate::connector_client::CLIENT_REFUSED_PENDING_REASON`]) goes back to tools-pending, not to
+/// `connected`: its tools are still not adopted, so it is not returned (no notification resolved,
+/// no parked run resumed) and the tools-refresh route finishes it. Runs inside the caller's
+/// transaction.
 pub(crate) fn clear_refused_client_rows(
     connection: &Connection,
     connection_id: &str,
@@ -2252,22 +2261,31 @@ pub(crate) fn clear_refused_client_rows(
         let Ok(mut oauth) = serde_json::from_str::<McpOauthMetadata>(&raw) else {
             continue;
         };
+        let pending = reason == crate::connector_client::CLIENT_REFUSED_REASON
+            && oauth.last_refresh_error.as_deref()
+                == Some(crate::connector_client::CLIENT_REFUSED_PENDING_REASON);
         if oauth.status != McpOauthStatus::NeedsReauth
-            || oauth.last_refresh_error.as_deref() != Some(reason)
+            || !(pending || oauth.last_refresh_error.as_deref() == Some(reason))
             || oauth.client_id != client.client_id
             || oauth.token_endpoint != client.token_endpoint
         {
             continue;
         }
-        oauth.status = McpOauthStatus::Connected;
-        oauth.last_refresh_error = None;
+        if pending {
+            oauth.last_refresh_error = Some(TOOLS_PENDING_REASON.into());
+        } else {
+            oauth.status = McpOauthStatus::Connected;
+            oauth.last_refresh_error = None;
+        }
         let json = oauth_metadata_json(Some(&oauth))?;
         connection.execute(
             "UPDATE mcp_connections SET oauth_metadata_json = ?1, updated_at = ?2
              WHERE scope = ?3 AND owner_user_id = ?4 AND connection_id = ?5 AND auth_mode = 'oauth'",
             params![json, now_secs(), SecretScope::User.as_str(), owner, connection_id],
         )?;
-        cleared.push(owner);
+        if !pending {
+            cleared.push(owner);
+        }
     }
     Ok(cleared)
 }
@@ -2468,6 +2486,14 @@ fn record_refresh_failure_in(
     let mut oauth: McpOauthMetadata = serde_json::from_str(&raw)
         .map_err(|_| OrchestratorError::InvalidContract("invalid oauth metadata".into()))?;
     let transition = needs_reauth && oauth.status != McpOauthStatus::NeedsReauth;
+    // A refused admin client on a sign-in whose tools are not adopted yet keeps that fact: a
+    // corrected secret puts the row back to tools-pending, not to `connected`.
+    let error = if error == crate::connector_client::CLIENT_REFUSED_REASON && is_tools_pending(&oauth)
+    {
+        crate::connector_client::CLIENT_REFUSED_PENDING_REASON
+    } else {
+        error
+    };
     if needs_reauth {
         oauth.status = McpOauthStatus::NeedsReauth;
     }

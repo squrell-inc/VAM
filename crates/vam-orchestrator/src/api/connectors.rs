@@ -2942,6 +2942,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_client_on_a_pending_sign_in_goes_back_to_pending_after_a_corrected_secret() {
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        let tools_ok = Arc::new(AtomicBool::new(false));
+        let n = xchg_node_with("xchg-pending-refused", tools_ok.clone());
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // A stored sign-in whose tools could not be read, with an access token that has expired.
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": NEW_ACCESS, "refresh_token": NEW_REFRESH, "expires_in": 0 }),
+        );
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The renewal before the tools are read is refused for the admin's client.
+        n.token.reply(
+            401,
+            serde_json::json!({ "error": "invalid_client", "error_description": SECRET }),
+        );
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(
+            oauth.last_refresh_error.as_deref(),
+            Some(connector_client::CLIENT_REFUSED_PENDING_REASON)
+        );
+
+        // The admin corrects the secret: the sign-in is pending again, not connected (no tools are
+        // adopted yet), and nothing is announced.
+        let (s, b) = put_client(&n, "c-1", Some("CORRECTED-SECRET-qqqqqqqq")).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let row = row_of(&n, "ada");
+        assert!(row.tools.is_empty(), "{:?}", row.tools);
+        let oauth = row.oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(
+            oauth.last_refresh_error.as_deref(),
+            Some(crate::mcp_registry::TOOLS_PENDING_REASON)
+        );
+        assert_eq!(open_notices(&n, "ada"), 0);
+
+        // The tools-refresh route finishes it with the corrected secret.
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "FRESH-A", "refresh_token": "FRESH-R", "expires_in": 3600 }),
+        );
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["drift"], "adopted", "{b}");
+        let row = row_of(&n, "ada");
+        assert_eq!(row.oauth.unwrap().status, Connected);
+        assert_eq!(
+            row.tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["search_files"]
+        );
+    }
+
+    #[tokio::test]
     async fn a_sign_in_whose_tools_cannot_be_read_stays_retryable_and_is_not_announced() {
         use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
         let tools_ok = Arc::new(AtomicBool::new(true));

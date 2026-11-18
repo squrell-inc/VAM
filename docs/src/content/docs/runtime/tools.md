@@ -138,7 +138,9 @@ runs parked, until `POST /v1/mcp/connections/{id}/refresh` lists them. A provide
 (`invalid_client`) is a 409 saying the client id or secret the admin entered was refused; a refused or
 spent code is a 400; an unreachable provider, or an answer with no refresh token, is a 502. When the admin saves a
 corrected secret for the same client, a member whose refresh the provider had refused for the client
-(`invalid_client`) is connected again; a revoked grant still needs a sign-in. A save that corrects the secret and
+(`invalid_client`) is connected again; a revoked grant still needs a sign-in. A sign-in whose tools were still
+pending when the provider refused the client goes back to pending, not to connected: the tools-refresh route then
+renews its token with the corrected secret and adopts the tools, and only that connects it. A save that corrects the secret and
 turns the connector off connects no one again: those members stay parked until the admin enables it again with the
 same client. Turning the connector off and on again with no secret saved in between is not a correction (the
 provider refused the secret that is still saved), so those members stay parked; the node keeps a marker on the

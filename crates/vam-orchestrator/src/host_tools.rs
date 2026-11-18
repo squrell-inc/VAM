@@ -3181,8 +3181,10 @@ pub(crate) enum PendingRefreshError {
 /// spend a single-use refresh token once), on a blocking worker that finishes even if the caller
 /// goes away, with the node's client and the org secret for a connector whose client is the
 /// admin's (`commit_org_client_refresh`), and the rotated tokens are stored. The row stays
-/// tools-pending through the refresh: only the adoption connects it. A refusal (`invalid_grant`, a
-/// refused client) is recorded as for any refresh and the member signs in again; a transient
+/// tools-pending through the refresh: only the adoption connects it. A revoked grant
+/// (`invalid_grant`) is recorded as for any refresh and the member signs in again. A refused admin
+/// client is recorded as `CLIENT_REFUSED_PENDING_REASON`: the admin's corrected secret puts the row
+/// back to tools-pending (never `connected`), and this route finishes it; a transient
 /// failure records nothing, so the row stays pending and the member can retry. A row with no
 /// recorded expiry is listed with the stored token. The generation is taken after the refresh.
 pub(crate) async fn prepare_pending_tools_row(

@@ -126,6 +126,13 @@ impl TokenAuthMethod {
 pub(crate) const CLIENT_REFUSED_REASON: &str =
     "the provider refused the client id or secret your admin entered";
 
+/// [`CLIENT_REFUSED_REASON`] for a row the refusal found tools-pending (a sign-in stored, its tools
+/// not adopted yet). A corrected secret for the same client puts such a row back to
+/// [`crate::mcp_registry::TOOLS_PENDING_REASON`], never to `connected`: only the adoption connects
+/// it. A save that changes the client replaces it like any recoverable mark.
+pub(crate) const CLIENT_REFUSED_PENDING_REASON: &str =
+    "the provider refused the client id or secret your admin entered (sign-in stored: its tools are not read yet)";
+
 /// The stored, public half of an admin-supplied client. No secret is here, only whether one is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeClient {
@@ -1808,6 +1815,68 @@ mod exchange_tests {
         assert!(write_node(&store, &vault, &node(false), &keep, tag).is_empty());
         assert!(write_node(&store, &vault, &node(true), &keep, tag).is_empty());
         assert_eq!(status(), NeedsReauth);
+    }
+
+    #[test]
+    fn a_refusal_of_a_pending_sign_in_stays_pending_and_a_changed_client_replaces_it() {
+        use crate::mcp_registry::McpOauthStatus::NeedsReauth;
+        use crate::mcp_registry::TOOLS_PENDING_REASON;
+        let tag = "pending-refused";
+        let (store, vault, _c1) = world(tag);
+        let def = store.connector_entry("filebox").unwrap().unwrap().def;
+        let refuse_pending = |who: &str| {
+            let row = member_row(&store, &vault, tag, who, "c-1", None);
+            store
+                .record_mcp_oauth_refresh_failure(&row, true, TOOLS_PENDING_REASON)
+                .unwrap();
+            let row = store
+                .get_mcp_connection(SecretScope::User, who, "filebox")
+                .unwrap();
+            store
+                .record_mcp_oauth_refresh_failure(&row, true, CLIENT_REFUSED_REASON)
+                .unwrap();
+        };
+        let state = |who: &str| {
+            let oauth = store
+                .get_mcp_connection(SecretScope::User, who, "filebox")
+                .unwrap()
+                .oauth
+                .unwrap();
+            (oauth.status, oauth.last_refresh_error.unwrap_or_default())
+        };
+        refuse_pending("ada");
+        assert_eq!(
+            state("ada"),
+            (NeedsReauth, CLIENT_REFUSED_PENDING_REASON.to_string())
+        );
+        // A corrected secret for the same client: pending again, not returned (nothing resumes).
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-1", Some("CORRECTED"));
+        assert!(write_node(&store, &vault, &node(true), &plan, tag).is_empty());
+        assert_eq!(state("ada"), (NeedsReauth, TOOLS_PENDING_REASON.to_string()));
+
+        // A→B→A: refused again while pending, then the admin moves to c-2 and back to c-1 with a
+        // corrected secret. B's save replaced the recoverable mark: she signs in again.
+        let row = store
+            .get_mcp_connection(SecretScope::User, "ada", "filebox")
+            .unwrap();
+        store
+            .record_mcp_oauth_refresh_failure(&row, true, CLIENT_REFUSED_REASON)
+            .unwrap();
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-2", Some("B"));
+        assert!(plan.reauth);
+        write_node(&store, &vault, &node(true), &plan, tag);
+        let changed = state("ada");
+        assert_eq!(changed.0, NeedsReauth);
+        assert!(changed.1.contains("changed the client"), "{changed:?}");
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-1", Some("A"));
+        write_node(&store, &vault, &node(true), &plan, tag);
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-1", Some("A-CORRECTED"));
+        assert!(write_node(&store, &vault, &node(true), &plan, tag).is_empty());
+        assert_eq!(state("ada"), changed);
     }
 
     #[test]
