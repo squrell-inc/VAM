@@ -22,5 +22,5 @@ when:
         bin/vam: { unchanged: true }
 guards:
   - vam:crates/vam-cli/src/main.rs
-status: pending
-expectFail: { step: when.0, class: product }
+  - vam:crates/vam-cli/src/cmd/upgrade.rs
+status: active
