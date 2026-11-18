@@ -51,8 +51,9 @@ async fn list_connectors(
     ensure_ready(&state, false)?;
     state.pdp.authorize(&auth, "ListConnectors", "node:read")?;
     let cfg = connectors::config();
-    let nodes = state.store.node_connectors()?;
-    let clients = state.store.node_clients()?;
+    // The node rows and the clients in one read, so an entry never pairs a node row with a client
+    // from another save.
+    let (nodes, clients) = state.store.node_connectors_and_clients()?;
     let admin = auth.has_users_admin();
     let list: Vec<Value> = state
         .store
@@ -128,7 +129,7 @@ fn entry_for(
 ) -> Result<Value, OrchestratorError> {
     let def = &e.def;
     let id = e.id();
-    let node = state.store.node_connector(&id)?;
+    let (node, client) = state.store.node_connector_and_client(&id)?;
     let (mine, account) = caller_connection_state(state, auth, &id, node.as_ref());
     let mut entry = connectors::list_entry(
         def,
@@ -143,7 +144,6 @@ fn entry_for(
         account.as_deref(),
     );
     connectors::annotate_source(&mut entry, e, auth.has_users_admin());
-    let client = state.store.node_client(&id)?;
     connector_client::annotate_client(&mut entry, def, client.as_ref(), auth.has_users_admin());
     Ok(entry)
 }
@@ -210,7 +210,7 @@ async fn put_node(
     // The plan was made from `def` and `existing_client`, before discovery ran: the write checks both
     // again inside its transaction and refuses (409, nothing written) if another admin's save moved
     // either in the meantime.
-    let cleared = state.store.put_node_with_client(
+    let saved = state.store.put_node_with_client(
         &state.vault,
         &row,
         &plan,
@@ -220,11 +220,13 @@ async fn put_node(
             client: existing_client.as_ref(),
         },
     )?;
+    #[cfg(test)]
+    test_seam::after_save(&mcp_url);
     // Members whose refresh the provider had refused for this client are connected again (the same
     // client, a corrected secret, or the enable after a save that corrected it with a disable):
     // their reconnect notification is resolved and parked runs go on. A save that leaves the
     // connector off clears no one, so nothing is resumed on a disabled connector.
-    for owner in &cleared {
+    for owner in &saved.cleared {
         if let Ok(conn) = state
             .store
             .get_mcp_connection(SecretScope::User, owner, &id)
@@ -232,17 +234,46 @@ async fn put_node(
             super::reauth::resume_parked(&state, &conn).await;
         }
     }
-    let (mine, account) = caller_connection_state(&state, &auth, &id, Some(&row));
-    let mut entry = connectors::list_entry(&def, &cfg, Some(&row), mine, true);
+    // The node row and the client are the ones this save committed, read in its transaction: a
+    // concurrent save cannot pair this node row with another save's client (or with none).
+    let (mine, account) = caller_connection_state(&state, &auth, &id, Some(&saved.node));
+    let mut entry = connectors::list_entry(&def, &cfg, Some(&saved.node), mine, true);
     connectors::show_account(
         &mut entry,
-        connectors::caller_state(&def, Some(&row), mine),
+        connectors::caller_state(&def, Some(&saved.node), mine),
         account.as_deref(),
     );
     connectors::annotate_source(&mut entry, &found, true);
-    let client = state.store.node_client(&id)?;
-    connector_client::annotate_client(&mut entry, &def, client.as_ref(), true);
+    connector_client::annotate_client(&mut entry, &def, saved.client.as_ref(), true);
     Ok(json_http_response(StatusCode::OK, entry.to_string()))
+}
+
+/// Runs a test's step right after a node save committed, as another admin's save landing then.
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    type Step = Box<dyn FnOnce() + Send>;
+    static AFTER_SAVE: Mutex<BTreeMap<String, Step>> = Mutex::new(BTreeMap::new());
+
+    /// The next save of the connector whose MCP server is `mcp_url` runs `step` once committed.
+    pub(crate) fn on_next_save(mcp_url: &str, step: impl FnOnce() + Send + 'static) {
+        AFTER_SAVE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(mcp_url.to_string(), Box::new(step));
+    }
+
+    pub(super) fn after_save(mcp_url: &str) {
+        let step = AFTER_SAVE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(mcp_url);
+        if let Some(step) = step {
+            step();
+        }
+    }
 }
 
 /// Parses the body of `PUT /v1/connectors/{id}/node`. A body that carries a `client` may carry the
@@ -2414,6 +2445,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_exchange_rechecks_the_enable_once_it_holds_the_gate() {
+        let n = xchg_node("xchg-off-at-gate");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let client = n.store.node_client("filebox").unwrap().unwrap();
+        // The route passed its enable check, then waited for the member's credential gate; the
+        // admin turned the connector off meanwhile. Holding the gate, the exchange checks again:
+        // a 403, no secret read, no code sent, nothing written.
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/connectors/filebox/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({ "enabled": false })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(200, tokens_reply());
+        let e = exchange_made_with(&n, "ada", client).await.err().unwrap();
+        assert_eq!(e.status, StatusCode::FORBIDDEN, "{}", e.message);
+        assert!(n.token.requests().is_empty(), "{:?}", n.token.requests());
+        assert!(n
+            .store
+            .get_mcp_connection(SecretScope::User, "ada", "filebox")
+            .is_err());
+        assert!(member_vault_ids(&n.vault).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_node_answer_is_the_node_and_client_its_save_committed() {
+        let n = xchg_node("xchg-save-snapshot");
+        // Another admin's write lands right after this save commits (here: the client row goes).
+        let store = n.store.clone();
+        super::test_seam::on_next_save("https://mcp.xchg-save-snapshot.example/mcp", move || {
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .execute(
+                    "DELETE FROM node_connector_clients WHERE connector_id = 'filebox'",
+                    [],
+                )
+                .unwrap();
+        });
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // The answer pairs this save's node row with this save's client, not with the later state.
+        assert_eq!(b["node"]["enabled"], true, "{b}");
+        assert_eq!(b["node"]["configured"], true, "{b}");
+        assert_eq!(b["node"]["client"]["clientId"], "c-1", "{b}");
+        assert_eq!(n.store.node_client("filebox").unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn an_exchange_for_a_client_the_admin_replaced_meanwhile_stores_nothing() {
         let n = xchg_node("xchg-superseded");
         let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
@@ -2474,22 +2559,32 @@ mod tests {
             .has_binding_at(SecretScope::User, "olga", "filebox/oauth/access-token")
             .unwrap());
 
-        // The connector turned off while the provider answered: the same.
+        // The connector turned off while the provider answered: the same. (Turned off before the
+        // exchange holds the gate, it is a 403 and nothing is sent:
+        // `an_exchange_rechecks_the_enable_once_it_holds_the_gate`.)
         let current = n.store.node_client("filebox").unwrap().unwrap();
-        let (s, b) = call(
-            &n.app,
-            "PUT",
-            "/v1/connectors/filebox/node",
-            "orgadmin-secret",
-            Some(serde_json::json!({ "enabled": false })),
-        )
-        .await;
-        assert_eq!(s, StatusCode::OK, "{b}");
         n.token.reply(
             200,
             serde_json::json!({ "access_token": "LATE-A", "refresh_token": "LATE-R" }),
         );
-        let e = exchange_made_with(&n, "olga", current).await.err().unwrap();
+        let (arrived, release) = n.token.hold_next();
+        let admin = async {
+            tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+                .await
+                .unwrap();
+            let (s, b) = call(
+                &n.app,
+                "PUT",
+                "/v1/connectors/filebox/node",
+                "orgadmin-secret",
+                Some(serde_json::json!({ "enabled": false })),
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{b}");
+            release.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(exchange_made_with(&n, "olga", current), admin);
+        let e = result.err().unwrap();
         assert_eq!(e.status, StatusCode::CONFLICT, "{}", e.message);
         assert!(n
             .store
@@ -3496,11 +3591,14 @@ mod tests {
         assert_eq!(grant.form["grant_type"], "refresh_token");
         assert_eq!(grant.form["refresh_token"], NEW_REFRESH);
         assert_eq!(grant.form["client_id"], "c-1");
-        assert!(
-            grant.form.get("client_secret").map(String::as_str) == Some(SECRET)
-                || grant.authorization.is_some(),
+        // The provider advertises `client_secret_post`: the org secret is in the body and there is
+        // no Authorization header (the Basic wire test covers the other method).
+        assert_eq!(
+            grant.form.get("client_secret").map(String::as_str),
+            Some(SECRET),
             "the org secret authenticates the refresh"
         );
+        assert!(grant.authorization.is_none(), "{:?}", grant.authorization);
         assert_eq!(token_of(&n, "ada", "filebox/oauth/access-token"), "FRESH-A");
         assert_eq!(
             token_of(&n, "ada", "filebox/oauth/refresh-token"),

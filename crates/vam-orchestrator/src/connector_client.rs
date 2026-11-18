@@ -686,6 +686,41 @@ impl SqliteWorkflowStore {
         client_in(&c, id)
     }
 
+    /// The node row and the client of `id`, in one read: never a node row of one save with the
+    /// client of another.
+    pub(crate) fn node_connector_and_client(
+        &self,
+        id: &str,
+    ) -> Result<(Option<crate::connectors::NodeConnector>, Option<NodeClient>), OrchestratorError>
+    {
+        let c = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        Ok((
+            crate::connectors::node_connector_in(&c, id)?,
+            client_in(&c, id)?,
+        ))
+    }
+
+    /// Every node row and every client, in one read (the listing's snapshot).
+    pub(crate) fn node_connectors_and_clients(
+        &self,
+    ) -> Result<(Vec<crate::connectors::NodeConnector>, Vec<NodeClient>), OrchestratorError> {
+        let c = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let nodes = crate::connectors::node_connectors_in(&c)?;
+        let mut stmt = c.prepare(&format!(
+            "SELECT {COLUMNS} FROM node_connector_clients ORDER BY connector_id"
+        ))?;
+        let clients = stmt
+            .query_map([], row_to_client)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((nodes, clients))
+    }
+
     pub fn node_clients(&self) -> Result<Vec<NodeClient>, OrchestratorError> {
         let c = self
             .connection
@@ -727,7 +762,7 @@ impl SqliteWorkflowStore {
         plan: &ClientPlan,
         mcp_url: &str,
         basis: &PlanBasis<'_>,
-    ) -> Result<Vec<String>, OrchestratorError> {
+    ) -> Result<NodeSave, OrchestratorError> {
         let sealed = match &plan.write {
             ClientWrite::Set {
                 secret: Some(s), ..
@@ -850,9 +885,29 @@ impl SqliteWorkflowStore {
                 )?;
             }
         }
+        // What this save committed, read in its own transaction: the answer to the save shows
+        // exactly this, whatever another save writes after the commit.
+        let saved_node = crate::connectors::node_connector_in(&tx, &node.connector_id)?
+            .unwrap_or_else(|| node.clone());
+        let saved_client = client_in(&tx, &node.connector_id)?;
         tx.commit()?;
-        Ok(cleared)
+        Ok(NodeSave {
+            cleared,
+            node: saved_node,
+            client: saved_client,
+        })
     }
+}
+
+/// What [`SqliteWorkflowStore::put_node_with_client`] committed.
+#[derive(Debug)]
+pub(crate) struct NodeSave {
+    /// Members whose refused-client mark the save cleared (their parked runs go on).
+    pub(crate) cleared: Vec<String>,
+    /// The node row as committed.
+    pub(crate) node: crate::connectors::NodeConnector,
+    /// The client as committed (`None`: the connector has none).
+    pub(crate) client: Option<NodeClient>,
 }
 
 // ---- what the node does with the client (CN-5.3, CN-5.4) ----------------------------------------
@@ -1636,6 +1691,7 @@ pub(crate) mod test_support {
                 },
             )
             .unwrap()
+            .cleared
     }
 }
 

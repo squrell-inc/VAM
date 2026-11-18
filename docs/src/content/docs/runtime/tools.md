@@ -131,7 +131,9 @@ client, the enable and the connector's server are still what the code was exchan
 next, and the member's connector entry is the answer.
 
 The local checks (body, redirect URI, code and verifier syntax, the connector, the enable, the saved client and
-secret) run before the request and write nothing. Just before the code is sent, the node records the exchange under
+secret) run before the request and write nothing; the enable is checked again once the member's credential gate is
+held, before the secret is read (a connector turned off while the request waited is a 403 and nothing is sent).
+Just before the code is sent, the node records the exchange under
 the member, the connector and the request's `Idempotency-Key` (`connector_code_exchanges`, the key's SHA-256, kept a
 week): a request repeated with the same key, because the first answer was lost, never presents the code to the
 provider again (RFC 6749 §4.1.2: a provider refuses a reused code and may revoke the tokens the first exchange

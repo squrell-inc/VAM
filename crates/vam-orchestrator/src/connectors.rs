@@ -1269,6 +1269,32 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
     Ok(())
 }
 
+/// The node row of `id`, read on the caller's connection or transaction.
+pub(crate) fn node_connector_in(
+    c: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<NodeConnector>, OrchestratorError> {
+    Ok(c.query_row(
+        &format!("SELECT {COLUMNS} FROM node_enabled_connectors WHERE connector_id = ?1"),
+        params![id],
+        row_to_node,
+    )
+    .optional()?)
+}
+
+/// Every node row, read on the caller's connection or transaction.
+pub(crate) fn node_connectors_in(
+    c: &rusqlite::Connection,
+) -> Result<Vec<NodeConnector>, OrchestratorError> {
+    let mut stmt = c.prepare(&format!(
+        "SELECT {COLUMNS} FROM node_enabled_connectors ORDER BY connector_id"
+    ))?;
+    let rows = stmt
+        .query_map([], row_to_node)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 fn row_to_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeConnector> {
     Ok(NodeConnector {
         connector_id: r.get(0)?,
@@ -1318,13 +1344,7 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        Ok(connection
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM node_enabled_connectors WHERE connector_id = ?1"),
-                params![id],
-                row_to_node,
-            )
-            .optional()?)
+        node_connector_in(&connection, id)
     }
 
     pub fn node_connectors(&self) -> Result<Vec<NodeConnector>, OrchestratorError> {
@@ -1332,13 +1352,7 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        let mut stmt = connection.prepare(&format!(
-            "SELECT {COLUMNS} FROM node_enabled_connectors ORDER BY connector_id"
-        ))?;
-        let rows = stmt
-            .query_map([], row_to_node)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        node_connectors_in(&connection)
     }
 
     /// Whether the node has this connector enabled (the gate other waves read).

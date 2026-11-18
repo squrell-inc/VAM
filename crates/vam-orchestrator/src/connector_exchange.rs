@@ -140,6 +140,10 @@ pub(crate) fn exchange_and_connect(
     gate: &mut McpCredentialWriteGuard,
 ) -> Result<Connected, ApiError> {
     let id = c.connector_id;
+    // The route checked the enable before it waited for the gate: an admin may have turned the
+    // connector off meanwhile. Checked again now, before the secret is read or the code sent (the
+    // commit checks it once more).
+    crate::connectors::gate_mcp_write(store, id, None, None)?;
     let existing = match store.get_mcp_connection(SecretScope::User, c.owner, id) {
         Ok(row) => Some(row),
         Err(OrchestratorError::NotFound(_)) => None,
