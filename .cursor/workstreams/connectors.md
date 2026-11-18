@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: connectors
-current_phase: 4 build done 2026-11-09 (8 scenarios active and green; waves 0–7 merged), real-tenant wave 9 and lane B wait for the owner; 2 and 3 released to main 2026-11-09, checklists out; Phase 1 released, checklist out
+current_phase: 5 defined 2026-11-18, breakdown pending; 4 build done 2026-11-09 (8 scenarios active and green; waves 0–7 merged), real-tenant wave 9 and lane B wait for the owner; 2 and 3 released to main 2026-11-09, checklists out; Phase 1 released, checklist out
 design_docs:
   - design/connectors.md
   - docs/src/content/docs/runtime/tools.md
@@ -38,6 +38,10 @@ decision record (D1–D22), agreed with the owner 2026-11-07.
 1. One `vamd` node per customer organization (D1).
 2. Squrell owns the OAuth app registrations; customers never see a client
    id. The org admin consents once; each user connects their own account (D3).
+   **Amended 2026-11-18 (owner, D28):** where Squrell has no app and the
+   provider has no dynamic registration (Box, Salesforce, Zendesk), a
+   connector may say the org admin supplies the client id, and the secret
+   when one is needed.
 3. Nothing reaches a member before the node's admin enables it (D4).
    Enabling is an org-admin decision (`users:admin`), not operator-only.
 4. A connector is connectivity only: how a credential is obtained, whose it
@@ -65,6 +69,23 @@ decision record (D1–D22), agreed with the owner 2026-11-07.
 11. Entra: no dynamic registration; never send the RFC 8707 `resource`
     parameter; never send `prompt=consent` on user sign-in; validate the
     token's tenant instead of the templated issuer (design §6.1).
+12. Admin-supplied client (owner, 2026-11-18, D28): `provider.client:
+    "org"`; `clientSecret: "org_vault"` only with it. The secret is an
+    org-scope `connection` vault row pinned to the token endpoint host, written
+    only by an org admin, never returned, never sent to the app, never a guest
+    binding.
+13. Code exchange on the node when a secret is involved (owner, 2026-11-18,
+    D29): the app runs the browser sign-in with PKCE and hands code, verifier
+    and redirect URI to `vamd`, which exchanges at the token endpoint pinned at
+    Enable. Without a secret the app exchanges as today.
+14. Company address (owner, 2026-11-18, D30): one `{subdomain}` parameter
+    under a fixed suffix, entered once at Enable, one DNS label, filled in at
+    Enable; afterwards every host is exact.
+15. Marketplace connectors may declare REST bindings (owner, 2026-11-18, D31),
+    exact hosts, used only inside a tool's declared egress shape.
+16. First proofs (owner, 2026-11-18, D32): Box for Phase 5, Zendesk for
+    Phase 6. The Box listing lives on a `vam-marketplace` branch until Phase 5
+    is released; the team builds and tests it.
 
 ## Status legend
 
@@ -2143,19 +2164,56 @@ Setup: deploy vamd from `main` (after the release), then the app from `main`. Th
 
 Report: "Phase 4 pass", or the step number with a screenshot or the error text.
 
-### Phase 5 — Installable connectors
+### Phase 5 — Admin-supplied client (Box)
 
-**Goal:** developers ship connectors from any trusted marketplace without a
-Squrell release (design D26, §10 Phase 5 row).
-**Depends on:** Phase 4 (marketplace import)
-**Status: folded into Phase 4 (owner, 2026-11-09).** Connectors ship as files in marketplace listings (CN-4.11). What follows stays later: bring-your-own OAuth client and a generic OAuth profile (small follow-up), and the rest of this scope.
-**Plan:** not drafted
-**Scope:** connector as a catalog kind (`urn:vam:connector`); installed and
-built-in connectors merged; qualified connection ids and Squrell-reserved
-ids; the admin's approved capability snapshot (publisher, OAuth app, hosts,
-scopes, MCP server) with re-approval when an upgrade widens it; a generic
-OAuth profile with bring-your-own client (vault-held secret); `vam connector
-init`, `validate`, `test`. Rubric: cost 3 (new trust boundary).
+**Goal:** an org admin enables a connector whose OAuth client they registered
+with the provider, entering the client id and, when asked, the secret; members
+connect from the tile; `vamd` exchanges the code with the vault secret and
+refreshes rotating tokens safely. Marketplace connectors may use it (design
+§13, D28, D29).
+**Depends on:** Phase 4 (marketplace import, released).
+**Status:** defined 2026-11-18 (owner); breakdown pending.
+**Plan:** not drafted (phase-breakdown agent, Opus high).
+**Scope:** `provider.client` and `clientSecret: "org_vault"` in `vam-spec`
+and the marketplace check; Enable takes `{ clientId, clientSecret? }` (org
+admin only; secret write-only, org-scope `connection` row); the app's connect
+flow uses the node's client id and skips registration; a node route that takes
+code, verifier and redirect URI and exchanges with the secret; refresh with the
+org secret (`RefreshProfile::Mcp`), single flight for single-use refresh
+tokens; the capability summary shows "admin-supplied client"; the admin can
+replace the secret; disable and re-enable keep or clear it (open question).
+**Exit:** scenarios green on a mock provider (no secret in any listing, app
+response or guest binding; rotation under concurrent calls); the Box listing
+from the `vam-marketplace` branch `box-connector` (listing files and a
+team test guide in `docs/listing-box.md`, pushed 2026-11-18) connects and runs on a real Box tenant
+(team, on the owner's word).
+**Rubric:** cost 3 (secret handling, a new route, both repos).
+
+### Phase 6 — Company address and REST from marketplaces (Zendesk)
+
+**Goal:** a connector reaches a per-company host and a marketplace connector
+may be REST with skills (design §13, D30, D31).
+**Depends on:** Phase 5.
+**Status:** defined 2026-11-18 (owner); not started.
+**Scope:** `profile: "oauth"` with fixed `endpoints` for providers without
+metadata; one `tenant` parameter (`{subdomain}`, fixed suffix) entered at
+Enable and filled into endpoints, MCP URL and binding hosts; marketplace REST
+bindings with exact hosts and per-tool egress shapes; the admin sees the filled
+hosts. Salesforce `instance_url` pinning is a candidate item (open question).
+**Exit:** a Zendesk REST listing (connector plus skill) works on a mock and,
+on the owner's word, a real Zendesk instance.
+
+### Phase 7 — Developer kit and API keys
+
+**Goal:** a third-party developer builds, checks and tests a connector without
+a Squrell release; API-token systems can be connected.
+**Depends on:** Phase 6.
+**Status:** defined 2026-11-18 (owner); not started.
+**Scope:** `vam connector init`, `validate`, `test` (mock provider world
+piece, also used by marketplace CI); the `api_key` connection flow (admin- or
+member-entered key, `connection` row, host-side inject only).
+**Exit:** a connector built from nothing passes `validate` and `test` and
+installs from a test marketplace.
 
 ## Explicitly later
 
@@ -2163,6 +2221,8 @@ init`, `validate`, `test`. Rubric: cost 3 (new trust boundary).
 - Verified publishers (namespace proof, signing) for marketplace content.
 - Event subscriptions and the first event source (design §6.6).
 - Teams relay, Google secret relay, GitHub, databases.
+- The connector as its own catalog kind with drafts; qualified connection ids;
+  org-held connections (service accounts). (From the old Phase 5 scope.)
 
 ## Progress log
 
