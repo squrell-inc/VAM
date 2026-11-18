@@ -635,32 +635,76 @@ pub(crate) fn best_effort_revoke_oauth_refresh(
 }
 
 fn revoke_oauth_refresh_if_configured(vault: &SecretsVault, conn: &McpConnection) -> RevokeAttempt {
+    match prepare_oauth_refresh_revoke(vault, conn) {
+        Ok(prepared) => prepared.send(),
+        Err(attempt) => attempt,
+    }
+}
+
+/// What revoking a connection's refresh token needs, read from the vault while its rows still
+/// exist: the endpoint and client to use, the refresh token, the client secret and how it is sent.
+/// Reading is separate from sending so a caller can read before it deletes the rows and send only
+/// once that delete has committed (a revoke must never run for a write that is then rolled back).
+pub(crate) struct PreparedRevoke {
+    oauth: McpOauthMetadata,
+    refresh_token: SecretString,
+    client_secret: Option<SecretString>,
+    auth_method: TokenAuthMethod,
+    connection_id: String,
+}
+
+impl PreparedRevoke {
+    /// Sends the revocation. Best effort: a failure is logged and returned, never raised.
+    pub(crate) fn send(self) -> RevokeAttempt {
+        let attempt = dispatch_revoke(
+            &self.oauth,
+            &self.refresh_token,
+            self.client_secret.as_ref(),
+            self.auth_method,
+        );
+        if attempt.attempted && !attempt.succeeded {
+            tracing::warn!(
+                connection_id = %self.connection_id,
+                reason = %attempt.reason,
+                "MCP OAuth refresh-token revocation failed; the replacement stands"
+            );
+        }
+        attempt
+    }
+}
+
+/// Reads what [`PreparedRevoke::send`] needs. `Err` is the attempt to report when there is nothing
+/// to revoke (skipped) or it cannot be read (failed); nothing is sent either way.
+pub(crate) fn prepare_oauth_refresh_revoke(
+    vault: &SecretsVault,
+    conn: &McpConnection,
+) -> Result<PreparedRevoke, RevokeAttempt> {
     let Some(oauth) = conn
         .oauth
         .as_ref()
         .filter(|_| conn.auth_mode == McpAuthMode::Oauth)
     else {
-        return RevokeAttempt::skipped();
+        return Err(RevokeAttempt::skipped());
     };
     // A row of a connector whose client is the admin's revokes with the node's client: the pinned
     // revocation endpoint, the node's client id and the org secret. The row's own are not used.
     let org = match vault.workflow_store().row_client(conn) {
         Ok(RowClient::Org(org)) => Some(org),
         Ok(RowClient::Own) => None,
-        Err(_) => return RevokeAttempt::failed("credential store unavailable"),
+        Err(_) => return Err(RevokeAttempt::failed("credential store unavailable")),
     };
     let org_oauth: Option<McpOauthMetadata> = match &org {
         None => None,
         Some(org) => {
             let Some(node) = org.client.as_ref() else {
-                return RevokeAttempt::skipped();
+                return Err(RevokeAttempt::skipped());
             };
             // Tokens of an earlier client or endpoint are not revoked with another client's secret.
             if oauth.client_id != node.client_id || oauth.token_endpoint != node.token_endpoint {
-                return RevokeAttempt::skipped();
+                return Err(RevokeAttempt::skipped());
             }
             let Some(revocation) = node.revocation_endpoint.clone() else {
-                return RevokeAttempt::skipped();
+                return Err(RevokeAttempt::skipped());
             };
             Some(McpOauthMetadata {
                 revocation_endpoint: Some(revocation),
@@ -677,20 +721,20 @@ fn revoke_oauth_refresh_if_configured(vault: &SecretsVault, conn: &McpConnection
         .filter(|endpoint| !endpoint.is_empty())
         .is_none()
     {
-        return RevokeAttempt::skipped();
+        return Err(RevokeAttempt::skipped());
     }
     let refresh_id = mcp_oauth_refresh_token_binding_id(&conn.connection_id);
     let has_refresh = match vault.has_binding_at(conn.scope, &conn.owner_user_id, &refresh_id) {
         Ok(present) => present,
-        Err(_) => return RevokeAttempt::failed("credential store unavailable"),
+        Err(_) => return Err(RevokeAttempt::failed("credential store unavailable")),
     };
     if !has_refresh {
-        return RevokeAttempt::skipped();
+        return Err(RevokeAttempt::skipped());
     }
     let refresh_token = match vault.decrypt_secret_at(conn.scope, &conn.owner_user_id, &refresh_id)
     {
         Ok(token) => token,
-        Err(_) => return RevokeAttempt::failed("credential store unavailable"),
+        Err(_) => return Err(RevokeAttempt::failed("credential store unavailable")),
     };
     if let Some(org) = &org {
         let client_secret = match (
@@ -700,7 +744,7 @@ fn revoke_oauth_refresh_if_configured(vault: &SecretsVault, conn: &McpConnection
         ) {
             (true, Some(node), Some(endpoint)) => match org_client_secret(vault, node, endpoint) {
                 Ok(secret) => Some(secret),
-                Err(_) => return RevokeAttempt::failed("OAuth client secret unavailable"),
+                Err(_) => return Err(RevokeAttempt::failed("OAuth client secret unavailable")),
             },
             _ => None,
         };
@@ -709,7 +753,13 @@ fn revoke_oauth_refresh_if_configured(vault: &SecretsVault, conn: &McpConnection
             .as_ref()
             .map(|node| node.token_auth_method)
             .unwrap_or_default();
-        return dispatch_revoke(oauth, &refresh_token, client_secret.as_ref(), method);
+        return Ok(PreparedRevoke {
+            oauth: oauth.clone(),
+            refresh_token,
+            client_secret,
+            auth_method: method,
+            connection_id: conn.connection_id.clone(),
+        });
     }
     let client_secret_id = mcp_oauth_client_secret_binding_id(&conn.connection_id);
     let client_secret =
@@ -717,18 +767,19 @@ fn revoke_oauth_refresh_if_configured(vault: &SecretsVault, conn: &McpConnection
             Ok(true) => {
                 match vault.decrypt_secret_at(conn.scope, &conn.owner_user_id, &client_secret_id) {
                     Ok(secret) => Some(secret),
-                    Err(_) => return RevokeAttempt::failed("credential store unavailable"),
+                    Err(_) => return Err(RevokeAttempt::failed("credential store unavailable")),
                 }
             }
             Ok(false) => None,
-            Err(_) => return RevokeAttempt::failed("credential store unavailable"),
+            Err(_) => return Err(RevokeAttempt::failed("credential store unavailable")),
         };
-    dispatch_revoke(
-        oauth,
-        &refresh_token,
-        client_secret.as_ref(),
-        TokenAuthMethod::default(),
-    )
+    Ok(PreparedRevoke {
+        oauth: oauth.clone(),
+        refresh_token,
+        client_secret,
+        auth_method: TokenAuthMethod::default(),
+        connection_id: conn.connection_id.clone(),
+    })
 }
 
 fn dispatch_revoke(
