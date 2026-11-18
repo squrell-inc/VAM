@@ -52,5 +52,4 @@ guards:
   - vam:brokers/vam-web/src/bin/vam-web-broker.rs
   - vam:brokers/vam-schedule/src/bin/vam-schedule-broker.rs
   - vam:brokers/vam-notify/src/bin/vam-notify-broker.rs
-status: pending
-expectFail: { step: when.0, class: product }
+status: active

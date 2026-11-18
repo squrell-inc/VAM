@@ -3,6 +3,7 @@ pub mod v1 {
 }
 
 pub mod args_digest;
+pub mod build_info;
 pub mod call_check;
 pub mod compaction;
 pub mod connector;
