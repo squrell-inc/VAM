@@ -47,6 +47,11 @@ export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_PROFILE_TEST_DEBUG=0
 mkdir -p "$CARGO_TARGET_DIR"
 out="${LOCAL_CI_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/local-ci.XXXXXX")}"
+mkdir -p "$out"
+# mktemp -d makes the directory 0700. Process-mode tools run with dropped privileges and read their
+# materialized skill files under it (scenario state lives in $out/e2e), so as root every Bun or
+# Python tool failed with "Permission denied" or CouldntReadCurrentDirectory. Make it traversable.
+chmod 755 "$out"
 
 free_gb() { df -BG --output=avail "$CARGO_TARGET_DIR" | tail -1 | tr -dc '0-9'; }
 # Process-mode tools run on the host under Bun. Same pin as .github/workflows/rust.yml.
