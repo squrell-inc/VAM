@@ -79,6 +79,16 @@ new_set path_guest_registry
 printf '/home/runner/.cargo/registry/src/index.crates.io-1/a-1.0/src/lib.rs\0' > "$S/assets/vam-runtime-$v-x86_64-unknown-linux-musl"
 expect_ok "a cargo registry path in the unremapped guest init is tolerated" "$scan" "$S/assets"
 expect_match "and reported as a notice" "note .*vam-runtime.*cargo registry path" "$T_OUT"
+new_set path_guest_outdir
+printf '/home/runner/work/VAM/VAM/target/x86_64-unknown-linux-musl/release/build/vam-spec-d416f795f3876ce0/out/vam.v1.rs\0' > "$S/assets/vam-runtime-$v-x86_64-unknown-linux-musl"
+expect_ok "a build-script output path (target/.../build/*/out/) in the guest init is tolerated" "$scan" "$S/assets"
+expect_match "and reported as a notice" "note .*vam-runtime.*build-script output path" "$T_OUT"
+new_set path_host_outdir
+printf '/home/runner/work/VAM/VAM/target/x86_64-unknown-linux-gnu/release/build/vam-spec-1/out/vam.v1.rs\0' > "$S/pkg/vam-$v-x/vam"; pack
+expect_fail "the same build-script output path in a host binary fails" "build machine path.*/home/runner/work" "$scan" "$S/assets"
+new_set path_guest_target_other
+printf '/home/runner/work/VAM/VAM/target/x86_64-unknown-linux-musl/release/deps/x.rlib\0' > "$S/assets/vam-runtime-$v-x86_64-unknown-linux-musl"
+expect_fail "another target/ path in the guest init still fails" "build machine path.*/home/runner/work" "$scan" "$S/assets"
 new_set path_guest_checkout
 printf '/home/runner/.cargo/registry/src/a/lib.rs\0/home/runner/work/VAM/VAM/crates/vam-runtime/src/main.rs\0' > "$S/assets/vam-runtime-$v-x86_64-unknown-linux-musl"
 expect_fail "the checkout path in the guest init still fails" "build machine path.*/home/runner/work" "$scan" "$S/assets"

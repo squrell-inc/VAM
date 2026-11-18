@@ -118,6 +118,8 @@ done < <(grep -arlE 'vam_sk_(dev_)?[0-9a-f]{64}' "$tree" 2>/dev/null | LC_ALL=C 
 path_re='(/home/runner|/Users/runner|/github/workspace|/github/home|/__w/|/usr/local/cargo|/usr/local/rustup)[^[:cntrl:] "]*'
 # a runner's cargo registry and git sources: public crates.io paths, tolerated in the unremapped guest init only
 registry_re='^/(home|Users)/runner/\.cargo/(registry|git)/'
+# build-script output the guest includes (prost's generated vam.v1.rs via include!): a target/ path, not source
+outdir_re='^/(home|Users)/runner/work/[^/]+/[^/]+/target/[^/]+/release/build/[^/]+/out/'
 while IFS= read -r p; do
   [ -n "$p" ] || continue
   rel="${p#"$tree"/}"
@@ -125,8 +127,10 @@ while IFS= read -r p; do
   case "$(basename "$p")" in
     vam-runtime|vam-runtime-*)
       tolerated="$(printf '%s\n' "$hits" | grep -E "$registry_re" || true)"
-      hits="$(printf '%s\n' "$hits" | grep -vE "$registry_re" || true)"
-      [ -z "$tolerated" ] || notice "$rel holds $(printf '%s\n' "$tolerated" | wc -l | tr -d ' ') cargo registry path(s), expected in the unremapped guest init (decision 11)" ;;
+      outdirs="$(printf '%s\n' "$hits" | grep -E "$outdir_re" || true)"
+      hits="$(printf '%s\n' "$hits" | grep -vE "$registry_re" | grep -vE "$outdir_re" || true)"
+      [ -z "$tolerated" ] || notice "$rel holds $(printf '%s\n' "$tolerated" | wc -l | tr -d ' ') cargo registry path(s), expected in the unremapped guest init (decision 11)"
+      [ -z "$outdirs" ] || notice "$rel holds $(printf '%s\n' "$outdirs" | wc -l | tr -d ' ') build-script output path(s) under target/, expected in the unremapped guest init (decision 11)" ;;
   esac
   [ -n "$(printf '%s' "$hits" | tr -d '[:space:]')" ] || continue
   fail "a build machine path in $rel: $(printf '%s\n' "$hits" | head -n 3 | tr '\n' ' ')"
