@@ -59,6 +59,13 @@ expect_ok "a tool with no binary for the platform is built with cargo install --
 expect_match "…at the pinned version" "^cargo install --locked --version 2\.3\.4 --root .* cfake\$" "$(cat "$t_tmp/cargo.log")"
 [ -x "$t_tmp/bin/cfake" ] && ok "…and installed" || bad "cfake not installed"
 expect_fail "a cargo.pins entry that is not a version" "is not a version" cinst badver
+# macOS's BSD wc pads its count ("       1"): a single pin must still be found with such a wc.
+mkdir -p "$t_tmp/padwc"
+printf '#!/bin/sh\nn=$(command -p wc "$@" | tr -d " ")\nprintf "%%8s\\n" "$n"\n' > "$t_tmp/padwc/wc"
+chmod +x "$t_tmp/padwc/wc"
+rm -f "$t_tmp/bin/cfake"
+expect_ok "a cargo.pins tool installs when wc pads its count (macOS)" env PATH="$t_tmp/padwc:$t_tmp/stubcargo:$PATH" STUB_LOG="$t_tmp/cargo.log" TOOLS_CARGO_PINS="$t_tmp/cargo.pins" TOOLS_PLATFORM=darwin-arm64 TOOLS_PINS="$pins" TOOLS_BIN="$t_tmp/bin" "$install" cfake
+expect_ok "a tools.pins tool installs when wc pads its count (macOS)" env PATH="$t_tmp/padwc:$PATH" TOOLS_PINS="$pins" TOOLS_BIN="$t_tmp/bin" "$install" fake
 
 # The real pins file: one line per tool, https from the tool's own release page, 64-hex hashes.
 real="$release_dir/tools.pins"

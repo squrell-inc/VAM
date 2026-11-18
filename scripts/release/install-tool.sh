@@ -35,13 +35,14 @@ mkdir -p "$bin"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/install-tool.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
+# Line counts are compared with -eq: BSD wc (macOS) pads its count with spaces.
 
 for tool in "$@"; do
   line="$(awk -v t="$tool" -v p="$platform" '$1 == t && (($6 == "" ? "linux-x86_64" : $6) == p)' "$pins")"
   if [ -z "$line" ]; then
     cline=""; [ -f "$cargo_pins" ] && cline="$(awk -v t="$tool" '$1 == t' "$cargo_pins")"
     [ -n "$cline" ] || die "'$tool' is not in $pins for $platform (and not in $cargo_pins)"
-    [ "$(printf '%s\n' "$cline" | wc -l)" = 1 ] || die "'$tool' is pinned more than once in $cargo_pins"
+    [ "$(printf '%s\n' "$cline" | wc -l)" -eq 1 ] || die "'$tool' is pinned more than once in $cargo_pins"
     read -r name version <<< "$cline"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "$name: '$version' in $cargo_pins is not a version"
     echo "install-tool: $name $version by cargo install --locked ($platform has no pinned binary)"
@@ -50,7 +51,7 @@ for tool in "$@"; do
     echo "install-tool: installed $bin/$name"
     continue
   fi
-  [ "$(printf '%s\n' "$line" | wc -l)" = 1 ] || die "'$tool' is pinned more than once in $pins for $platform"
+  [ "$(printf '%s\n' "$line" | wc -l)" -eq 1 ] || die "'$tool' is pinned more than once in $pins for $platform"
   read -r name version url sha member _platform <<< "$line"
   [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "$name: the pinned hash is not 64 hex digits"
   archive="$work/$name.archive"
