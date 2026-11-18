@@ -19,6 +19,7 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | `connectors` | Connectors: connectivity, admin enable and consent, per-user connect; Microsoft 365 and Linear first (`design/connectors.md`) | active | 1 released to `main` 2026-11-08, checklist out; 0 done 2026-11-07 |
 | `machine-base` | Machine base (E7 Phase 1 + install slice, launch row 14): Debian slim default base with Python and git, `requiresRuntime` check, `vam node init` | active | 1 closed in base 2026-11-10 (W0-W5, 5/5 scenarios active); release PR into `main` open |
 | `user-identity` | User identity: self-service password change (`POST /v1/me/password`, `vam passwd`), then opaque user IDs and email usernames | active | 1 closed in base 2026-11-12 (self-service password change); 2 (opaque ids, email usernames) not drafted |
+| `skill-list` | Skill list: paged `GET /v1/skills` for the member skill picker (`design/skill-list.md`) | active | 0 |
 
 
 ## Backlog (no tracker)
