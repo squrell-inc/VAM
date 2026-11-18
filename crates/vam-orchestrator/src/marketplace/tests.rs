@@ -6,6 +6,7 @@ fn cfg(state: &Path) -> Option<MarketplaceConfig> {
         fetcher: Fetcher::new(Some(g), state.join("marketplaces"), Limits::default()),
         refresh_every: Some(Duration::from_secs(3600)),
         node_version: "0.1.0".into(),
+        squrell_index_ref: None,
     })
 }
 
@@ -37,6 +38,7 @@ fn input<'a>(
         confirmed_domain: domain,
         pins,
         node_version: "0.1.0",
+        index_ref: None,
     }
 }
 
@@ -94,6 +96,137 @@ fn the_squrell_listing_is_read_at_its_tag_with_what_it_installs_and_can_reach() 
         )]
     );
     assert_eq!(d.tags_seen.len(), 1);
+}
+
+/// A repository whose `staging` branch has a different index than `main`; the listing's tag is on
+/// `main`'s commit.
+fn repo_with_a_staging_index() -> TestRepo {
+    let r = TestRepo::new("marketplace-squrell", &["microsoft-365-v1.0.0"]);
+    r.git(&["checkout", "-q", "-b", "staging"]);
+    let path = r.work_dir().join("marketplace.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replace("Read and send mail", "Staging index: read and send mail"),
+    )
+    .unwrap();
+    r.git(&["add", "-A"]);
+    r.git(&["commit", "-q", "-m", "staging index"]);
+    r.git(&[
+        "push",
+        "-q",
+        "--force",
+        "../bare.git",
+        "HEAD:refs/heads/staging",
+    ]);
+    r
+}
+
+#[test]
+fn the_index_can_be_read_from_a_named_branch_while_artifacts_still_come_from_the_tag() {
+    let state = tempfile::tempdir().unwrap();
+    let Some(c) = cfg(state.path()) else { return };
+    let r = repo_with_a_staging_index();
+    let staging = r.git(&["rev-parse", "staging"]);
+    let main = r.rev("microsoft-365-v1.0.0");
+    assert_ne!(staging, main);
+    let pins = BTreeMap::new();
+
+    // Unset: the default branch head, as before.
+    let plain = read_marketplace(
+        &c.fetcher,
+        &input("squrell", &r, "hub.squrell.cloud", &pins),
+    )
+    .unwrap();
+    assert_eq!(plain.data.head_commit, main);
+    assert!(!listing(&plain.data, "microsoft-365")
+        .description
+        .contains("Staging index"));
+
+    // Named: the index is the branch's; the listing's artifacts are still the tag's commit.
+    let mut i = input("squrell-staging", &r, "hub.squrell.cloud", &pins);
+    i.index_ref = Some("staging");
+    let read = read_marketplace(&c.fetcher, &i).unwrap();
+    assert_eq!(read.data.head_commit, staging);
+    assert_ne!(read.data.index_digest, plain.data.index_digest);
+    let l = listing(&read.data, "microsoft-365");
+    assert!(l.description.contains("Staging index"), "{l:?}");
+    assert_eq!(l.error, None, "{l:?}");
+    assert_eq!(l.commit.as_deref(), Some(main.as_str()));
+    assert_eq!(l.artifacts.len(), 3);
+    // The tag is pinned as always.
+    assert_eq!(
+        read.data.new_pins,
+        vec![("microsoft-365-v1.0.0".to_string(), main)]
+    );
+
+    // A branch the repository does not have is a failed read, never a fallback to the default.
+    let mut i = input("squrell-nobranch", &r, "hub.squrell.cloud", &pins);
+    i.index_ref = Some("no-such-branch");
+    let e = read_marketplace(&c.fetcher, &i).err().unwrap();
+    assert!(e.to_string().contains("no branch `no-such-branch`"), "{e}");
+}
+
+#[test]
+fn only_the_preconfigured_entry_uses_the_index_ref_and_a_bad_name_is_refused() {
+    let state = tempfile::tempdir().unwrap();
+    let Some(mut c) = cfg(state.path()) else {
+        return;
+    };
+    c.squrell_index_ref = Some("box-connector".into());
+    let store = SqliteWorkflowStore::in_memory().unwrap();
+    let squrell = store.marketplace("squrell").unwrap().unwrap();
+    assert_eq!(c.index_ref_for(&squrell), Some("box-connector"));
+    let mut added = squrell.clone();
+    added.preconfigured = false;
+    assert_eq!(c.index_ref_for(&added), None);
+
+    for bad in [
+        "",
+        "-x",
+        "a..b",
+        "a//b",
+        "/a",
+        "a/",
+        "a b",
+        "a;b",
+        "a:b",
+        "a~1",
+        "x.lock",
+        &"x".repeat(101),
+    ] {
+        assert!(fetch::check_index_ref(bad).is_err(), "{bad:?}");
+    }
+    for ok in ["box-connector", "release/1.x", "feat_a.b"] {
+        assert!(fetch::check_index_ref(ok).is_ok(), "{ok}");
+    }
+    // The fetcher never builds a refspec from an unchecked name.
+    let r = TestRepo::new("marketplace-squrell", &["microsoft-365-v1.0.0"]);
+    assert!(matches!(
+        c.fetcher
+            .ls_remote_at(&Remote::File { url: r.url() }, Some("a..b")),
+        Err(FetchError::Invalid(_))
+    ));
+}
+
+#[test]
+fn the_index_ref_comes_from_the_environment_and_a_bad_one_is_an_error() {
+    // The variable is process-global: set, read and clear it in one test.
+    std::env::set_var(ENV_SQURELL_INDEX_REF, " box-connector ");
+    assert_eq!(
+        MarketplaceConfig::index_ref_from_env().unwrap().as_deref(),
+        Some("box-connector")
+    );
+    std::env::set_var(ENV_SQURELL_INDEX_REF, "a..b");
+    let e = MarketplaceConfig::index_ref_from_env().unwrap_err();
+    assert!(
+        e.contains(ENV_SQURELL_INDEX_REF) && e.contains("a..b"),
+        "{e}"
+    );
+    std::env::set_var(ENV_SQURELL_INDEX_REF, "");
+    assert_eq!(MarketplaceConfig::index_ref_from_env().unwrap(), None);
+    std::env::remove_var(ENV_SQURELL_INDEX_REF);
+    assert_eq!(MarketplaceConfig::index_ref_from_env().unwrap(), None);
 }
 
 #[test]
@@ -440,6 +573,7 @@ fn adding_refuses_bad_urls_before_any_network() {
         fetcher: Fetcher::new(None, state.path().join("m"), Limits::default()),
         refresh_every: None,
         node_version: "0.1.0".into(),
+        squrell_index_ref: None,
     };
     let store = SqliteWorkflowStore::in_memory().unwrap();
     for url in [

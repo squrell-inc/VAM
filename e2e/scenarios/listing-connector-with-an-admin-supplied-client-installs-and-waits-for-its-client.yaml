@@ -39,4 +39,4 @@ guards:
   - vam:crates/vam-spec/src/connector_listing.rs
   - vam:crates/vam-spec/src/package.rs
 status: pending
-expectFail: { step: when.2, class: product }
+expectFail: { step: then.0, class: product }
