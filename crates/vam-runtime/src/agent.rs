@@ -827,7 +827,7 @@ async fn run_react_loop(
                                     invalid_streak.1,
                                     tool_name
                                 ),
-                                Some(total_tokens.clone()),
+                                Some(total_tokens),
                             ));
                         }
                         continue;
@@ -1020,7 +1020,7 @@ async fn run_react_loop(
                                         "{STORAGE_COMMIT_FAILED}: the host could not record the \
                                          suspended task: {tail_err}"
                                     ),
-                                    Some(total_tokens.clone()),
+                                    Some(total_tokens),
                                 ));
                             }
                             let continuation =
@@ -1267,7 +1267,7 @@ async fn run_react_loop(
                                 kind.name(),
                                 detail
                             ),
-                            Some(total_tokens.clone()),
+                            Some(total_tokens),
                         ));
                     }
                 }
@@ -1282,7 +1282,7 @@ async fn run_react_loop(
                 )
                 .await
                 {
-                    return Ok(fail_task(lease, 9, message, Some(total_tokens.clone())));
+                    return Ok(fail_task(lease, 9, message, Some(total_tokens)));
                 }
             }
             let mut iter_attrs = std::collections::HashMap::new();
@@ -1729,7 +1729,7 @@ fn step_timeout_outcome(
         lease,
         4,
         format!("step exceeded stepTimeout of {step_timeout_secs}s (round {round})"),
-        Some(total_tokens.clone()),
+        Some(*total_tokens),
     )
 }
 
@@ -1788,12 +1788,12 @@ async fn decide_playbook_finish(
     another_iteration: bool,
 ) -> FinishChoice {
     if playbook_procedure.trim().is_empty() {
-        return FinishChoice::Commit(succeed_with_answer(lease, answer, total_tokens.clone()));
+        return FinishChoice::Commit(succeed_with_answer(lease, answer, *total_tokens));
     }
     let output_json = vam_spec::playbook_run_output_json(&answer);
     match ask_playbook_finish(lease, &output_json, workspace_root).await {
         Ok(report) if report.complete || report.parkable => {
-            FinishChoice::Commit(succeed_with_answer(lease, answer, total_tokens.clone()))
+            FinishChoice::Commit(succeed_with_answer(lease, answer, *total_tokens))
         }
         Ok(report) if another_iteration => {
             let observation = if report.observation.trim().is_empty() {
@@ -1803,10 +1803,10 @@ async fn decide_playbook_finish(
             };
             FinishChoice::Continue(observation)
         }
-        Ok(_) => FinishChoice::Commit(succeed_with_answer(lease, answer, total_tokens.clone())),
+        Ok(_) => FinishChoice::Commit(succeed_with_answer(lease, answer, *total_tokens)),
         Err(err) => {
             tracing::warn!("playbook finish probe failed; committing for the host check: {err}");
-            FinishChoice::Commit(succeed_with_answer(lease, answer, total_tokens.clone()))
+            FinishChoice::Commit(succeed_with_answer(lease, answer, *total_tokens))
         }
     }
 }
@@ -2045,7 +2045,7 @@ async fn run_compaction(
                     "{}: the conversation is still {bytes} bytes after compaction",
                     crate::compaction::CONTEXT_TOO_LARGE
                 ),
-                Some(total_tokens.clone()),
+                Some(*total_tokens),
             ));
         }
         return CompactionResult::Compacted(compacted);

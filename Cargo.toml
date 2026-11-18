@@ -39,8 +39,11 @@ authors = ["Squrell and VAM contributors"]
 
 [workspace.dependencies]
 ed25519-dalek = "2.1"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 sha2 = "0.10"
+# Host HTTPS client: rustls only (aws-lc-rs provider), no OpenSSL. Clients trust the bundled
+# Mozilla roots through vam_security::tls_roots, not the platform store.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset", "form", "query"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
 vam-security = { path = "crates/vam-security" }

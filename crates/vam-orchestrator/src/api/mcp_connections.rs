@@ -1650,8 +1650,9 @@ mod tests {
         secret: &str,
         body: Option<serde_json::Value>,
     ) -> (axum::http::StatusCode, serde_json::Value) {
-        use axum::body::{Body, HttpBody as _};
+        use axum::body::Body;
         use axum::http::Request;
+        use http_body_util::BodyExt as _;
         use tower::ServiceExt;
 
         let builder = Request::builder()
