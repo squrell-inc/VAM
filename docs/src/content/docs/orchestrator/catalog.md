@@ -18,11 +18,11 @@ policies. Each entry is named by a URN. The host stores them in SQLite, stamped 
 | Entry | Write and list | Release |
 |---|---|---|
 | Agent | `PUT`, `GET /v1/agents` | `api/catalog_release.rs` |
-| Skill | `PUT /v1/skills`, reads by URN | `catalog_release::skill_release_route` (`api/mod.rs:169`) |
-| Playbook | `PUT`, `GET /v1/playbooks` | `catalog_release::playbook_release_route` (`api/mod.rs:163`) |
-| Policy | `PUT`, `GET /v1/policies` | `catalog_release::policy_release_route` (`api/mod.rs:156`) |
+| Skill | `PUT /v1/skills`, reads by URN | `catalog_release::skill_release_route` (`api/mod.rs:197`) |
+| Playbook | `PUT`, `GET /v1/playbooks` | `catalog_release::playbook_release_route` (`api/mod.rs:190`) |
+| Policy | `PUT`, `GET /v1/policies` | `catalog_release::policy_release_route` (`api/mod.rs:182`) |
 
-Routes: `api/mod.rs:142-169`.
+Routes: `api/mod.rs:167-197`.
 
 ## Drafts and releases
 
@@ -51,20 +51,21 @@ only warns.
 ## Platform entries
 
 URNs in the `examples.local` namespace are reserved for platform artifacts; a user write to one
-is refused (`catalog_tier.rs:42`). Entries are stored with a tier, `user` or `platform`
-(`catalog_tier.rs:12`).
+is refused (`catalog_tier.rs:46`). Entries are stored with a tier: `user`, `platform`, or
+`marketplace` for rows a trusted marketplace import wrote (`catalog_tier.rs:21-28`).
 
 ## Skill packages
 
-A skill package is admitted only if it holds `SKILLS.md` at the archive root, or inside a single
-top-level directory, and the file starts with YAML frontmatter and has a non-empty body
-(`skill_package_admit.rs:233-243,291-304`). The package also needs `manifest.json`
-(`skill_package_admit.rs:49`).
+A skill package is admitted only if it holds `SKILLS.md` (or the community `SKILL.md`) at the
+archive root, or inside a single top-level directory (`skill_package_admit.rs:226-248`), and the
+file starts with YAML frontmatter and has a non-empty body (`skill_package_admit.rs:274-280`,
+checked by `vam_spec::package::check_skills_md`). The package also needs `manifest.json`
+(`skill_package_admit.rs:251-272`).
 
 ## Agent check
 
 `POST /v1/agent-checks` checks that an agent's parts fit together before it runs
-(`api/mod.rs:160`, `api/composition.rs`). Proved by `agent_check_tests.rs` and the CLI test
+(`api/mod.rs:186`, `api/composition.rs`). Proved by `agent_check_tests.rs` and the CLI test
 `crates/vam-cli/tests/agent_check_cli.rs`.
 
 ## Allowed models

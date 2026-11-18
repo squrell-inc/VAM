@@ -1456,7 +1456,7 @@ paths:
             example:
               spec:
                 resourceId:
-                  urn: "urn:vam:agent:hub.vam.dev/acme/sql-developer"
+                  urn: "urn:vam:agent:local.vam.dev/acme/sql-developer"
                 displayName: "SQL Developer"
                 description: "Specialized agent for database migrations and queries"
                 role: "Database Engineer"
@@ -1492,7 +1492,7 @@ paths:
           required: true
           schema:
             type: string
-          example: "urn:vam:agent:hub.vam.dev/acme/sql-developer"
+          example: "urn:vam:agent:local.vam.dev/acme/sql-developer"
       responses:
         "200":
           description: Agent specification.
@@ -2884,7 +2884,7 @@ paths:
                 runId:
                   urn: "urn:vam:run:local.vam.dev/acme/run-20260826-001"
                 agentRef:
-                  urn: "urn:vam:agent:hub.vam.dev/acme/sql-developer"
+                  urn: "urn:vam:agent:local.vam.dev/acme/sql-developer"
                 workspaceRefUri: "volume://assistant"
                 threadRef: "session-thread-alpha"
                 inputs:
@@ -3859,7 +3859,7 @@ components:
       properties:
         urn:
           type: string
-          example: "urn:vam:agent:hub.vam.dev/acme/sql-developer"
+          example: "urn:vam:agent:local.vam.dev/acme/sql-developer"
 
     Timestamp:
       type: object
