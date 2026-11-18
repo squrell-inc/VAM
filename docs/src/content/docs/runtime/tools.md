@@ -14,6 +14,9 @@ proves:
   - guest-cannot-use-an-mcp-token-placeholder
   - broker-cannot-be-given-an-mcp-credential
   - crates/vam-orchestrator/tests/mcp_credentials_stay_host_side.rs
+  - admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node
+  - rotating-refresh-token-is-spent-once-when-two-tasks-call-at-once
+  - admin-corrects-the-client-secret-and-members-stay-connected
 ---
 
 A tool call goes from the model to the guest loop, then to the host for a policy check, then runs either
@@ -101,6 +104,37 @@ A connection uses one of two auth modes: `static` (the default) or `oauth`.
   `resource` for the MCP server, then hands the tokens to `vamd` with
   `PUT /v1/mcp/connections/:id/oauth/tokens`. `vamd` never opens a browser and never sees the
   authorization code. The discovery and browser steps live in the app, not in this repository.
+  The one exception is a connector whose client the org admin supplied, with a secret
+  (`clientSecret: org_vault`, below): there the node exchanges the code.
+
+### The admin's client: the node exchanges the code
+
+A connector with `provider.client: "org"` and `clientSecret: "org_vault"` uses the OAuth client its org admin
+registered with the provider. The client id, the pinned authorization, token and revocation endpoints and the
+secret are saved at Enable (`PUT /v1/connectors/{id}/node`); the secret is an org-scope `connection` vault row
+pinned to the token endpoint's host, and no route, listing, event or receipt returns it. The app cannot hold
+that secret, so it does not exchange the code. It runs the browser sign-in with PKCE against the pinned
+authorization endpoint and the admin's client id, then posts what it got to
+`POST /v1/connectors/{id}/connection/oauth/code` with `{ code, codeVerifier, redirectUri }` (no endpoint and no
+client field; any other field is a 400). `redirectUri` must be the app's own, `squrell://oauth` or
+`http://127.0.0.1:<port>/<path>`. `vamd` posts the code, the verifier, the redirect URI, the client id, the
+`resource` and the secret (`client_secret_post`) to the pinned token endpoint, over the same DNS-pinned public
+address, no redirects and no proxy as a refresh (`mcp_oauth_refresh.rs`). The secret is read at org scope
+only when that host is the one it is pinned to (`connector_client.rs`, `org_client_secret`). Then it writes
+the member's connection from the connector and the node's client (client id and endpoints are the node's), stores
+the refresh token and then the access token, lists the vetted tools and answers the member's connector entry.
+
+Every refusal is decided before the request and writes nothing. A provider that refuses the client
+(`invalid_client`) is a 409 saying the client id or secret the admin entered was refused; a refused or
+spent code is a 400; an unreachable provider, or an answer with no refresh token, is a 502. No code, verifier,
+secret or token is in any answer or error. For such a connector the app-path routes are closed:
+`PUT /v1/mcp/connections/:id/oauth/tokens` answers 400 (use the code exchange), a connect that names another
+token endpoint or client id is refused, and a `clientSecret` is refused for any connector-backed row. A refresh
+and the revoke on disconnect use the node's endpoints, client id and the org secret, read at that moment (a
+replaced secret is used by the next refresh); a row whose client id or endpoint differs from the node's is
+marked `needs_reauth` without a request, and `invalid_client` on a refresh marks it `needs_reauth` naming the
+admin's client. Providers whose refresh tokens are single-use are safe: the refresh gate below makes
+concurrent calls spend the token once.
 
 `vamd` stores the access and refresh tokens as `connection` vault rows, each pinned to one host
 (`mcp_registry.rs`, `store_mcp_oauth_tokens`): the access token to the MCP server host, the refresh token to the token
@@ -137,11 +171,13 @@ manifest names the token gets nothing), plus the tests in `mcp_credentials_stay_
 ## Not proved
 
 - The confinement of tool processes (Landlock, uid 1000, limits).
-- Calls to a live MCP server and the token refresh against a real provider.
+- Calls to a live MCP server and the token refresh against a real provider (the exchange and refresh with the admin's client are proved against a mock provider).
 
 ## Design notes
 
 - `vamd` is not the OAuth client because it has no browser and no loopback listener. Keeping the
   authorization code in the app means the host holds only tokens, and the app holds none after the hand-off.
+  Where the admin supplied a client with a secret, the secret cannot pass through the app, so the app hands
+  `vamd` the code and `vamd` makes the exchange.
 - Static header auth stays as a permanent mode: not every server speaks OAuth, and a pasted token is the
   only option for those.

@@ -20,7 +20,7 @@ use crate::error::OrchestratorError;
 use crate::keys::USERS_ADMIN_SCOPE;
 use crate::mcp_registry::mcp_oauth_refresh_token_binding_id;
 use crate::secrets::{vault_owner_user_id, SecretScope};
-use crate::{connector_client, connector_discovery};
+use crate::{connector_client, connector_discovery, connector_exchange};
 use vam_spec::v1::VamErrorCode;
 
 /// The scope of the connection routes: a member manages their own connection like a secret.
@@ -37,6 +37,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/v1/connectors/:id/connection/check",
             post(check_connection),
+        )
+        .route(
+            "/v1/connectors/:id/connection/oauth/code",
+            post(exchange_code),
         )
 }
 
@@ -375,6 +379,95 @@ async fn check_connection(
             retryable: true,
         }),
     }
+}
+
+/// `POST /v1/connectors/{id}/connection/oauth/code`: the node exchanges the authorization code the
+/// app got from the browser sign-in (CN-5.3, D29).
+///
+/// For a connector with `client: org` and `clientSecret: org_vault`, the enabled connector's saved
+/// client and nothing else: the body is `{ code, codeVerifier, redirectUri }` and names no endpoint
+/// or client. The node posts the code with the org secret to the token endpoint it pinned at Enable
+/// and connects the caller. Every refusal is decided before anything is sent or written; a provider
+/// that refuses the client (`invalid_client`) is a 409 naming the admin's client, a refused code a
+/// 400, an unreachable provider a 502. The answer is the caller's list entry: no code, verifier,
+/// secret or token is in it, or in any error.
+async fn exchange_code(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, ApiError> {
+    ensure_ready(&state, true)?;
+    state
+        .pdp
+        .authorize(&auth, "ExchangeConnectorCode", CONNECTION_SCOPE)?;
+    let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
+    let found = entry_or_404(&state, &id)?;
+    // A fixed message: a serde error can quote the value it rejected, and this body holds a code.
+    let req: connector_client::CodeExchangeRequest = serde_json::from_str(&body).map_err(|_| {
+        OrchestratorError::InvalidContract(
+            "code exchange body must be { code, codeVerifier, redirectUri }".into(),
+        )
+    })?;
+    let org = state
+        .store
+        .org_connector(&id)?
+        .filter(|o| o.keeps_secret)
+        .ok_or_else(|| {
+            OrchestratorError::InvalidContract(format!(
+                "`{id}` has no code exchange on the node: it signs in with the app's own exchange"
+            ))
+        })?;
+    // Enabled on this node, its own URL.
+    connectors::gate_mcp_write(&state.store, &id, None, None)?;
+    let client = org.client.clone().ok_or_else(|| {
+        OrchestratorError::Conflict(format!(
+            "`{id}` has no OAuth client saved by your admin yet"
+        ))
+    })?;
+    if !client.secret_set {
+        return Err(OrchestratorError::Conflict(format!(
+            "`{id}` has no client secret saved by your admin yet"
+        ))
+        .into());
+    }
+    connector_client::check_code_exchange(&req)?;
+    let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
+    // The connection's credential gate: a refresh of this member's row does not interleave with the
+    // exchange, and a call that began with the old tokens retries with the new ones.
+    let mut gate =
+        crate::host_tools::lock_mcp_credentials_for(&state.store, SecretScope::User, &owner, &id)
+            .await
+            .map_err(|_| {
+                OrchestratorError::CorruptState("mcp credential lock unavailable".into())
+            })?;
+    let (store, vault) = (state.store.clone(), state.vault.clone());
+    let (creator, id2) = (auth.owner_user_id().to_string(), id.clone());
+    // The exchange and every write after it run to the end on a worker that owns the gate, so a
+    // caller that goes away cannot leave a spent code or refresh token unstored.
+    let conn = tokio::task::spawn_blocking(move || {
+        let c = connector_exchange::CodeConnect {
+            owner: &owner,
+            creator: &creator,
+            connector_id: &id2,
+            org: &org,
+            client: &client,
+            request: &req,
+        };
+        connector_exchange::exchange_and_connect(&store, &vault, &c, &mut gate)
+    })
+    .await
+    .map_err(|_| OrchestratorError::Core("connector code exchange task failed".into()))??;
+    // Tools are listed with the member's new token; the vetted ones stay.
+    if let Some(policy) = state.store.mcp_policy(&id)? {
+        let conn = super::mcp_connections::adopt_connector_tools(&state, &conn, &policy).await?;
+        super::mcp_connections::connector_row_reconnected(&state, &conn).await?;
+    }
+    Ok(json_http_response(
+        StatusCode::OK,
+        entry_for(&state, &auth, &found)?.to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -1241,5 +1334,661 @@ mod tests {
         let (s, b) = put(serde_json::json!({ "enabled": true })).await;
         assert_eq!(s, StatusCode::CONFLICT, "{b}");
         assert!(b.to_string().contains("client id"), "{b}");
+    }
+
+    // ---- the node's code exchange (CN-5.3) -----------------------------------------------------
+
+    use std::collections::{BTreeMap, VecDeque};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::Mutex;
+
+    const CODE: &str = "AUTH-CODE-4f8a2c";
+    const VERIFIER: &str = "VERIFIER-0123456789-abcdefghijklmnopqrstuvwxyz-ABCDEFGH";
+    const NEW_ACCESS: &str = "NEW_ACCESS-TOKEN-b71d";
+    const NEW_REFRESH: &str = "NEW_REFRESH-TOKEN-c93e";
+
+    /// One request the loopback provider saw.
+    #[derive(Debug, Clone)]
+    struct Seen {
+        path: String,
+        form: BTreeMap<String, String>,
+    }
+
+    /// A loopback authorization server: records every request, answers from a queue of
+    /// `(status, body)` (a 500 when the queue is empty).
+    struct Provider {
+        base: url::Url,
+        seen: Arc<Mutex<Vec<Seen>>>,
+        replies: Arc<Mutex<VecDeque<(u16, String)>>>,
+    }
+
+    fn provider() -> Provider {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<Seen>::new()));
+        let replies = Arc::new(Mutex::new(VecDeque::<(u16, String)>::new()));
+        let (log, queue) = (seen.clone(), replies.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let path = line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let mut length = 0usize;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim_end().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0u8; length];
+                reader.read_exact(&mut body).unwrap();
+                let form = url::form_urlencoded::parse(&body)
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect();
+                log.lock().unwrap().push(Seen { path, form });
+                let (status, payload) = queue
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or((500, String::new()));
+                let reply = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        Provider {
+            base,
+            seen,
+            replies,
+        }
+    }
+
+    impl Provider {
+        fn reply(&self, status: u16, body: serde_json::Value) {
+            let body = if body.is_null() {
+                String::new()
+            } else {
+                body.to_string()
+            };
+            self.replies.lock().unwrap().push_back((status, body));
+        }
+        fn requests(&self) -> Vec<Seen> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    fn tokens_reply() -> serde_json::Value {
+        serde_json::json!({
+            "access_token": NEW_ACCESS, "refresh_token": NEW_REFRESH,
+            "token_type": "Bearer", "expires_in": 3600
+        })
+    }
+
+    fn exchange_body(redirect: &str) -> serde_json::Value {
+        serde_json::json!({ "code": CODE, "codeVerifier": VERIFIER, "redirectUri": redirect })
+    }
+
+    /// Nothing the app or the member could see carries one of the values a sign-in handles.
+    fn assert_no_value(what: &str, text: &str) {
+        for needle in [
+            SECRET,
+            &SecretsVault::fingerprint(SECRET),
+            CODE,
+            VERIFIER,
+            NEW_ACCESS,
+            NEW_REFRESH,
+            "ORG-CLIENT-SECRET",
+        ] {
+            assert!(!text.contains(needle), "{needle} in {what}: {text}");
+        }
+    }
+
+    fn member_vault_ids(vault: &SecretsVault) -> Vec<String> {
+        vault
+            .list_metadata()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.binding_id)
+            .filter(|id| id.starts_with("filebox/"))
+            .collect()
+    }
+
+    struct Node {
+        app: axum::Router,
+        store: Arc<SqliteWorkflowStore>,
+        vault: Arc<SecretsVault>,
+        token: Provider,
+        mcp_seen: Arc<Mutex<crate::mcp_client::mock::Seen>>,
+    }
+
+    /// `filebox` installed, an app, a loopback provider for `auth.<tag>.example` and a loopback MCP
+    /// server for `mcp.<tag>.example`. Not enabled yet.
+    fn xchg_node(tag: &str) -> Node {
+        let (app, store, vault) = app_world();
+        install_filebox(&store, tag);
+        let token = provider();
+        crate::mcp_oauth_refresh::test_seam::serve(
+            &format!("auth.{tag}.example"),
+            token.base.clone(),
+        );
+        let (mcp_url, mcp_seen) = crate::mcp_client::mock::spawn(|method, id, params| {
+            if method == "tools/list" {
+                return crate::mcp_client::mock::ok(
+                    id,
+                    serde_json::json!({ "tools": [
+                        { "name": "search_files", "inputSchema": { "type": "object" } },
+                        { "name": "delete_everything", "inputSchema": { "type": "object" } }
+                    ] }),
+                );
+            }
+            crate::mcp_client::mock::standard(method, id, params)
+        });
+        crate::mcp_oauth_refresh::test_seam::serve(
+            &format!("mcp.{tag}.example"),
+            url::Url::parse(&mcp_url).unwrap(),
+        );
+        Node {
+            app,
+            store,
+            vault,
+            token,
+            mcp_seen,
+        }
+    }
+
+    async fn exchange(
+        n: &Node,
+        who: &str,
+        id: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        call(
+            &n.app,
+            "POST",
+            &format!("/v1/connectors/{id}/connection/oauth/code"),
+            who,
+            Some(body),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn every_refusal_of_the_exchange_is_decided_before_anything_is_sent_or_written() {
+        let n = xchg_node("xchg-refuse");
+        // Not enabled: refused.
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        // Enabled with the admin's client.
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/connectors/filebox/node",
+            "orgadmin-secret",
+            Some(client_body("c-1", Some(SECRET))),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(200, tokens_reply());
+
+        let with = |extra: (&str, &str)| {
+            let mut b = exchange_body("squrell://oauth");
+            b[extra.0] = serde_json::json!(extra.1);
+            b
+        };
+        let mut refused = vec![
+            // The body names no endpoint and no client.
+            (
+                with(("tokenEndpoint", "https://evil.example/token")),
+                StatusCode::BAD_REQUEST,
+            ),
+            (with(("clientId", "someone-elses")), StatusCode::BAD_REQUEST),
+            (with(("clientSecret", "mine")), StatusCode::BAD_REQUEST),
+            // A redirect URI that is not the app's.
+            (
+                exchange_body("https://evil.example/callback"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                exchange_body("http://localhost:9/cb"),
+                StatusCode::BAD_REQUEST,
+            ),
+            // A verifier that is not RFC 7636's, an empty code, a missing field.
+            (
+                serde_json::json!({ "code": CODE, "codeVerifier": "short", "redirectUri": "squrell://oauth" }),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({ "code": "", "codeVerifier": VERIFIER, "redirectUri": "squrell://oauth" }),
+                StatusCode::BAD_REQUEST,
+            ),
+            (serde_json::json!({ "code": CODE }), StatusCode::BAD_REQUEST),
+        ];
+        refused.push((serde_json::json!("not an object"), StatusCode::BAD_REQUEST));
+        for (body, want) in refused {
+            let (s, b) = exchange(&n, "member-secret", "filebox", body).await;
+            assert_eq!(s, want, "{b}");
+            assert_no_value("a refusal", &b.to_string());
+        }
+        // A connector that uses the publisher's own client has no node exchange; an unknown id is
+        // a 404.
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "linear",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        let (s, _) = exchange(
+            &n,
+            "member-secret",
+            "nope",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        // Nothing was sent to the provider and nothing was written for the member.
+        assert!(n.token.requests().is_empty(), "{:?}", n.token.requests());
+        assert!(n
+            .store
+            .get_mcp_connection(crate::secrets::SecretScope::User, "ada", "filebox")
+            .is_err());
+        assert!(member_vault_ids(&n.vault).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_node_exchanges_the_code_with_the_org_secret_and_connects_the_member() {
+        let n = xchg_node("xchg-ok");
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/connectors/filebox/node",
+            "orgadmin-secret",
+            Some(client_body("c-1", Some(SECRET))),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected", "{b}");
+        assert_no_value("the exchange answer", &b.to_string());
+
+        // One request to the pinned token endpoint, with exactly these fields.
+        let seen = n.token.requests();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].path, "/token");
+        let f = &seen[0].form;
+        assert_eq!(
+            f.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "client_id",
+                "client_secret",
+                "code",
+                "code_verifier",
+                "grant_type",
+                "redirect_uri",
+                "resource"
+            ]
+        );
+        assert_eq!(f["grant_type"], "authorization_code");
+        assert_eq!(f["client_id"], "c-1");
+        assert_eq!(f["client_secret"], SECRET);
+        assert_eq!(f["code"], CODE);
+        assert_eq!(f["code_verifier"], VERIFIER);
+        assert_eq!(f["redirect_uri"], "squrell://oauth");
+        assert_eq!(f["resource"], "https://mcp.xchg-ok.example/mcp");
+
+        // The member's row: the node's client and endpoints, only the vetted tool, tokens in the
+        // member's own vault rows.
+        let row = n
+            .store
+            .get_mcp_connection(crate::secrets::SecretScope::User, "ada", "filebox")
+            .unwrap();
+        let oauth = row.oauth.clone().unwrap();
+        assert_eq!(row.url, "https://mcp.xchg-ok.example/mcp");
+        assert_eq!(oauth.client_id, "c-1");
+        assert_eq!(oauth.token_endpoint, "https://auth.xchg-ok.example/token");
+        assert_eq!(oauth.authorization_server, "https://auth.xchg-ok.example");
+        assert_eq!(
+            oauth.revocation_endpoint.as_deref(),
+            Some("https://auth.xchg-ok.example/revoke")
+        );
+        assert_eq!(
+            oauth.registration_method,
+            crate::mcp_registry::McpOauthRegistrationMethod::Manual
+        );
+        assert_eq!(oauth.status, crate::mcp_registry::McpOauthStatus::Connected);
+        assert!(oauth.expires_at.is_some());
+        assert_eq!(
+            row.tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["search_files"]
+        );
+        let at = |id: &str| {
+            secrecy::ExposeSecret::expose_secret(
+                &n.vault
+                    .decrypt_secret_at(crate::secrets::SecretScope::User, "ada", id)
+                    .unwrap(),
+            )
+            .clone()
+        };
+        assert_eq!(at("filebox/oauth/access-token"), NEW_ACCESS);
+        assert_eq!(at("filebox/oauth/refresh-token"), NEW_REFRESH);
+        // No per-row client secret: the org's is the only one.
+        assert!(!n
+            .vault
+            .has_binding_at(
+                crate::secrets::SecretScope::User,
+                "ada",
+                "filebox/oauth/client-secret"
+            )
+            .unwrap());
+        // The tool list was read with the member's new token.
+        let auth: Vec<_> = n.mcp_seen.lock().unwrap().auth.clone();
+        assert!(
+            auth.iter()
+                .any(|a| a.as_deref() == Some(&format!("Bearer {NEW_ACCESS}"))),
+            "{auth:?}"
+        );
+
+        // No listing, for anyone, carries a secret, a code, a verifier or a token.
+        for who in ["member-secret", "orgadmin-secret", "operator-secret"] {
+            for uri in [
+                "/v1/connectors",
+                "/v1/mcp/connections",
+                "/v1/secrets",
+                "/v1/secrets?scope=org",
+                "/v1/org/secrets",
+            ] {
+                let (s, b) = call(&n.app, "GET", uri, who, None).await;
+                // The org's secrets list is the admin's; a member is refused it.
+                let want = if uri == "/v1/org/secrets" && who == "member-secret" {
+                    StatusCode::FORBIDDEN
+                } else {
+                    StatusCode::OK
+                };
+                assert_eq!(s, want, "{uri} {b}");
+                assert_no_value(uri, &b.to_string());
+            }
+        }
+
+        // The app that holds tokens itself is refused: tokens, a client secret, another endpoint,
+        // another client id, a static connect. Nothing changes.
+        let before = (
+            at("filebox/oauth/access-token"),
+            at("filebox/oauth/refresh-token"),
+        );
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/mcp/connections/filebox/oauth/tokens",
+            "member-secret",
+            Some(serde_json::json!({ "accessToken": "app-a", "refreshToken": "app-r" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(b.to_string().contains("exchange"), "{b}");
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/mcp/connections/filebox/oauth/tokens",
+            "member-secret",
+            Some(serde_json::json!({
+                "accessToken": "app-a", "refreshToken": "app-r", "clientSecret": "app-secret"
+            })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        let connect = |token_endpoint: &str, client_id: &str, mode: &str| {
+            serde_json::json!({
+                "connectionId": "filebox", "url": "https://mcp.xchg-ok.example/mcp",
+                "authMode": mode,
+                "oauth": {
+                    "resource": "https://mcp.xchg-ok.example/mcp",
+                    "authorizationServer": "https://evil.example",
+                    "revocationEndpoint": "https://evil.example/revoke",
+                    "tokenEndpoint": token_endpoint, "clientId": client_id,
+                    "registrationMethod": "dcr", "scopes": []
+                }
+            })
+        };
+        for body in [
+            connect("https://evil.example/token", "c-1", "oauth"),
+            connect(
+                "https://auth.xchg-ok.example/token",
+                "someone-elses",
+                "oauth",
+            ),
+            connect("https://auth.xchg-ok.example/token", "c-1", "static"),
+        ] {
+            let (s, b) = call(
+                &n.app,
+                "PUT",
+                "/v1/mcp/connections",
+                "member-secret",
+                Some(body),
+            )
+            .await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        }
+        // The node's own client and endpoint pass, and the rest of the block is the node's whatever
+        // the request said.
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(connect(
+                "https://auth.xchg-ok.example/token",
+                "c-1",
+                "oauth",
+            )),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let oauth = n
+            .store
+            .get_mcp_connection(crate::secrets::SecretScope::User, "ada", "filebox")
+            .unwrap()
+            .oauth
+            .unwrap();
+        assert_eq!(oauth.authorization_server, "https://auth.xchg-ok.example");
+        assert_eq!(
+            oauth.revocation_endpoint.as_deref(),
+            Some("https://auth.xchg-ok.example/revoke")
+        );
+        assert_eq!(
+            oauth.registration_method,
+            crate::mcp_registry::McpOauthRegistrationMethod::Manual
+        );
+        assert_eq!(
+            before,
+            (
+                at("filebox/oauth/access-token"),
+                at("filebox/oauth/refresh-token")
+            )
+        );
+
+        // A disconnect revokes the refresh token at the node's endpoint with the org secret.
+        n.token.reply(200, serde_json::Value::Null);
+        let (s, b) = call(
+            &n.app,
+            "DELETE",
+            "/v1/mcp/connections/filebox",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_no_value("the disconnect answer", &b.to_string());
+        let seen = n.token.requests();
+        let revoke = seen.last().unwrap();
+        assert_eq!(revoke.path, "/revoke");
+        assert_eq!(revoke.form["token"], NEW_REFRESH);
+        assert_eq!(revoke.form["client_id"], "c-1");
+        assert_eq!(revoke.form["client_secret"], SECRET);
+        assert!(member_vault_ids(&n.vault).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_refuses_the_exchange_writes_nothing_and_names_what_to_fix() {
+        let n = xchg_node("xchg-refused");
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/connectors/filebox/node",
+            "orgadmin-secret",
+            Some(client_body("c-1", Some(SECRET))),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let cases = [
+            // The provider refuses the admin's client: a 409 naming it.
+            (
+                401,
+                serde_json::json!({ "error": "invalid_client", "error_description": SECRET }),
+                StatusCode::CONFLICT,
+                "client id or secret",
+            ),
+            // The code is spent, expired or not this verifier's.
+            (
+                400,
+                serde_json::json!({ "error": "invalid_grant", "error_description": CODE }),
+                StatusCode::BAD_REQUEST,
+                "sign in again",
+            ),
+            // The provider is down.
+            (
+                503,
+                serde_json::json!({ "error": "temporarily_unavailable" }),
+                StatusCode::BAD_GATEWAY,
+                "exchange",
+            ),
+            // The provider answers 200 with no refresh token: the connection could not be kept.
+            (
+                200,
+                serde_json::json!({ "access_token": NEW_ACCESS, "token_type": "Bearer" }),
+                StatusCode::BAD_GATEWAY,
+                "refresh token",
+            ),
+        ];
+        for (provider_status, provider_body, want, text) in cases {
+            n.token.reply(provider_status, provider_body);
+            let (s, b) = exchange(
+                &n,
+                "member-secret",
+                "filebox",
+                exchange_body("squrell://oauth"),
+            )
+            .await;
+            assert_eq!(s, want, "{b}");
+            assert!(b.to_string().contains(text), "{b}");
+            assert_no_value("a refused exchange", &b.to_string());
+            assert!(
+                n.store
+                    .get_mcp_connection(crate::secrets::SecretScope::User, "ada", "filebox")
+                    .is_err(),
+                "nothing was written"
+            );
+            assert!(member_vault_ids(&n.vault).is_empty());
+        }
+        assert_eq!(n.token.requests().len(), 4);
+        // The tile still reads `connect`.
+        let (_, l) = call(&n.app, "GET", "/v1/connectors", "member-secret", None).await;
+        assert_eq!(state_of(&l, "filebox"), "connect");
+    }
+
+    #[tokio::test]
+    async fn a_member_cannot_exchange_for_someone_else_and_a_reconnect_replaces_the_tokens() {
+        let n = xchg_node("xchg-twice");
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/connectors/filebox/node",
+            "orgadmin-secret",
+            Some(client_body("c-1", Some(SECRET))),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(200, tokens_reply());
+        let (s, _) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        // The admin is another user: their own connection is theirs, and ada's is untouched.
+        n.token.reply(
+            200,
+            serde_json::json!({
+                "access_token": "ADMIN-A", "refresh_token": "ADMIN-R", "expires_in": 60
+            }),
+        );
+        let (s, b) = exchange(
+            &n,
+            "orgadmin-secret",
+            "filebox",
+            exchange_body("http://127.0.0.1:51000/oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let token_of = |owner: &str, id: &str| {
+            secrecy::ExposeSecret::expose_secret(
+                &n.vault
+                    .decrypt_secret_at(crate::secrets::SecretScope::User, owner, id)
+                    .unwrap(),
+            )
+            .clone()
+        };
+        assert_eq!(token_of("ada", "filebox/oauth/refresh-token"), NEW_REFRESH);
+        assert_eq!(token_of("olga", "filebox/oauth/refresh-token"), "ADMIN-R");
+        // Ada signs in again: her tokens are replaced, the gate's generation moves.
+        n.token.reply(
+            200,
+            serde_json::json!({
+                "access_token": "ADA-A2", "refresh_token": "ADA-R2", "expires_in": 60
+            }),
+        );
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(token_of("ada", "filebox/oauth/refresh-token"), "ADA-R2");
+        assert_eq!(token_of("ada", "filebox/oauth/access-token"), "ADA-A2");
+        assert_eq!(token_of("olga", "filebox/oauth/refresh-token"), "ADMIN-R");
     }
 }

@@ -774,6 +774,9 @@ and **single-use rotating refresh tokens** (a spent one answers `invalid_grant`)
   provider answered). Never a secret value.
 - `mock-provider: { piece, expire: true }`: the current access token is refused from now on (until a refresh).
   `holdToken: true` makes the token endpoint log a refresh request and then wait (at most 30 s); `false` releases it.
+  While held, an MCP call with an expired token is logged on arrival and answered 401 only on release: the node makes a
+  caller that starts during a refresh wait for it, so this is what keeps two tasks in flight on the same expired token.
+  Runs of one agent and member share a workspace and queue behind each other, so two overlapping tasks use two agents.
   `rotateSecret: true`: the provider's client secret changes and the old one is refused (`client-secret=old`).
 - The client secret, a value the provider never held, the rotated secret and every token it issued are in the scrub
   list; `expect: { secret-absent: { secret: <piece alias> } }` judges all of them.

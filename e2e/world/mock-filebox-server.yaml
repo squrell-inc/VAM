@@ -1,7 +1,7 @@
 piece: mock-filebox-server
 kind: mock-provider
 # A runner-hosted loopback stand-in for a Box-like service (fictional "Filebox"), one listener for three
-# hosts: the MCP server `https://mcp.filebox.example/mcp` (`search_files`, `read_file`; bearer required),
+# hosts: the MCP server `https://mcp.filebox.example/mcp` (`search_files`, `get_file_content`; bearer required),
 # its RFC 9728 metadata (pointing at `https://auth.filebox.example`) and the authorization server's
 # RFC 8414 metadata (authorize, token, revocation, S256, no registration endpoint). `GET /authorize` mints a
 # code for the registered client id (`e2e-filebox-client*`), redirect URI and S256 challenge (the runner plays
