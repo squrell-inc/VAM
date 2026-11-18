@@ -4,6 +4,10 @@ name: Release build
 # pull requests that touch the release path and weekly, so a broken release build shows up before a
 # release does. No publish job, no environment, no secrets, read-only permissions, no caches
 # (locked decisions 8 and 9; design §5.1 and §6). scripts/release/check-workflow.sh holds the rules.
+# `assemble` gathers the assets: scan (gitleaks, key and build-path strings, refused names),
+# SHA256SUMS, release notes (it reads pull request bodies, hence `pull-requests: read`, the one
+# permission beyond `contents: read` in this file) and the release-<version> workflow artifact that
+# release.yml's publish job (a later wave) uploads as the release.
 #
 # The Linux gnu binaries are built inside an AlmaLinux 9 container (glibc 2.34, the decision 8
 # fallback: cargo-zigbuild cannot link cargo-auditable binaries) pinned by digest, on the same
@@ -50,6 +54,8 @@ on:
       - "scripts/build-rootfs.sh"
       - "scripts/base/**"
       - "scripts/assets.pins"
+      - "scripts/refused-names.txt"
+      - ".gitleaks.toml"
       - "Cargo.lock"
   schedule:
     - cron: "41 3 * * 1"
@@ -342,5 +348,57 @@ jobs:
         with:
           name: asset-vam-${{ matrix.target }}
           path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Everything that was built, checked and written down once: the release directory (assets,
+  # SHA256SUMS, RELEASE_NOTES.md, build-info.json) as one workflow artifact. Pull requests and the
+  # weekly run prove it; release.yml's publish job (a later wave) uploads it and holds the write
+  # permissions this job never has. The notes read pull requests through the read-only token.
+  assemble:
+    name: assemble
+    needs: [meta, guest, node-x86_64, cli-linux, cli-macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      CHANNEL: ${{ needs.meta.outputs.channel }}
+      COMMIT: ${{ needs.meta.outputs.commit }}
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # full history and tags: the notes read the merges since the previous tag
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.meta.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: asset-*
+          merge-multiple: true
+          path: assets
+      # A pinned binary checked by sha256 (scripts/release/tools.pins): nothing is compiled.
+      - name: Install gitleaks
+        run: scripts/release/install-tool.sh gitleaks
+      # The scan's own tests with the real gitleaks: a planted token, key and .env must fail it.
+      - name: Self-test the scan
+        env:
+          REQUIRE_GITLEAKS: "1"
+        run: scripts/release/test/run.sh scan
+      - name: Assemble
+        run: |
+          set -euo pipefail
+          ls -l assets
+          scripts/release/assemble.sh --version "$VERSION" --commit "$COMMIT" --channel "$CHANNEL" --assets assets --out release
+          ls -l release
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-${{ needs.meta.outputs.version }}
+          path: release/*
           if-no-files-found: error
           retention-days: 7
