@@ -385,6 +385,13 @@ fn check_scenario(
                         ));
                     }
                 }
+                if c.inputs().is_some_and(|m| !m.is_empty()) && c.inline_playbook().is_none() {
+                    errors.push(CheckError::new(
+                        p,
+                        "chat",
+                        format!("{pos}: `inputs` is read with `inlinePlaybook` only"),
+                    ));
+                }
                 if c.inline().is_some() && c.agent().is_some() {
                     errors.push(CheckError::new(
                         p,

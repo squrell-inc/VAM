@@ -554,6 +554,9 @@ pub struct ChatFull {
     /// `inline:`. Needs `refused: true` as well.
     #[serde(rename = "inlinePlaybook")]
     pub inline_playbook: Option<String>,
+    /// With `inlinePlaybook`: extra run `inputs` (what the playbook's input schema requires).
+    #[serde(default)]
+    pub inputs: BTreeMap<String, serde_yaml::Value>,
 }
 
 fn yes() -> bool {
@@ -620,6 +623,13 @@ impl Chat {
         match self {
             Chat::Text(_) => None,
             Chat::Full(f) => f.inline_playbook.as_deref(),
+        }
+    }
+    /// Extra run inputs sent with an inline playbook.
+    pub fn inputs(&self) -> Option<&BTreeMap<String, serde_yaml::Value>> {
+        match self {
+            Chat::Text(_) => None,
+            Chat::Full(f) => Some(&f.inputs),
         }
     }
     /// The `e2e-step:<label>` label the message carries.
@@ -988,6 +998,12 @@ mod harness_tests {
         };
         assert_eq!((plain.inline(), plain.inline_playbook()), (None, None));
         assert!(serde_yaml::from_str::<Step>("chat: { text: hi, inline_playbook: pb }").is_err());
+        let Step::Chat(c) =
+            serde_yaml::from_str::<Step>("chat: { text: hi, inputs: { topic: x } }").unwrap()
+        else {
+            panic!("a chat")
+        };
+        assert_eq!(c.inputs().map(|m| m.len()), Some(1));
         let Step::Expect(e) =
             serde_yaml::from_str::<Step>("expect: { refused: true, status: 400, contains: x }")
                 .unwrap()

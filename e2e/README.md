@@ -400,7 +400,8 @@ status is class `product`.
   `spec` as the run's `inlineAgent` (no `agentRef`) and/or the playbook piece's `spec` as `inlinePlaybook` (with
   `agent:` or `inline:`), under the name `<piece>-<as>-<scenario>-<runTag>`. vamd accepts neither, so `check`
   refuses either field without `refused: true`, and a start that is accepted fails the step at once (class
-  `product`) instead of waiting for the run.
+  `product`) instead of waiting for the run. `inputs: { k: v }` (with `inlinePlaybook` only) adds run inputs, so a
+  playbook's input schema is met and the refusal under test is the inline rule.
 - `expect: { refused: true, status: <n>, contains }`: with `refused`, the refusal's exact HTTP status (without
   `status`, any 4xx passes). Read after a `chat` step; a refusal from another step records no status (class
   `scenario`).

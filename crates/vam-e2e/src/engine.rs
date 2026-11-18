@@ -1394,6 +1394,9 @@ impl Engine {
         }
         if let Some(p) = &inline_playbook {
             body["inlinePlaybook"] = p["spec"].clone();
+            for (k, v) in c.inputs().into_iter().flatten() {
+                body["spec"]["inputs"][k] = serde_json::to_value(v).unwrap_or(Value::Null);
+            }
         }
         if let Some((space, thread_id)) = place {
             body["spec"]["spaceId"] = json!(space);

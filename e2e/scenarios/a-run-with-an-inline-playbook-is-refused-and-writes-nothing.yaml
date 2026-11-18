@@ -13,9 +13,9 @@ given:
   - agent-plain
   - playbook-draft-probe
 when:
-  - chat: { agent: agent-plain, inlinePlaybook: playbook-draft-probe, as: pub, text: "e2e-step:pp Hello", refused: true }
+  - chat: { agent: agent-plain, inlinePlaybook: playbook-draft-probe, as: pub, inputs: { topic: cats }, text: "e2e-step:pp Hello", refused: true }
   - expect: { refused: true, status: 400, contains: "PUT /v1/playbooks" }
-  - chat: { agent: agent-plain, inlinePlaybook: playbook-draft-probe, as: member, text: "e2e-step:pm Hello", refused: true }
+  - chat: { agent: agent-plain, inlinePlaybook: playbook-draft-probe, as: member, inputs: { topic: cats }, text: "e2e-step:pm Hello", refused: true }
   - expect: { refused: true, status: 400, contains: "PUT /v1/playbooks" }
 then:
   - identity-request: { as: admin, credential: key, path: "/v1/playbooks/{{urn:playbook-draft-probe:pub}}", status: 404 }
@@ -35,4 +35,4 @@ mock:
   - when: { step: mq }
     reply: { text: hello }
 status: pending
-expectFail: { step: when.1, class: product }
+expectFail: { step: when.0, class: product }
