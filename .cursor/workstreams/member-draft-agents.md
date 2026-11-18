@@ -136,7 +136,7 @@ owner-approved spec change (a member's PUT of an own draft in their namespace is
 - [x] Wave 0: scenarios and harness
 - [x] Wave 1: `agents:draft`, restricted mode on the two routes, the save
   validator (refs, refused fields, namespace, cap), key backfill fix, test fallout
-- [ ] Wave 2: `ResolveMode::ReleasedOnly` at record and at session start;
+- [x] Wave 2: `ResolveMode::ReleasedOnly` at record and at session start;
   advanced refs recorded and loaded by pin; explain and check routes use the mode
 
 **Benchmark delta:** none moved; this phase is the launch proof "a member builds
@@ -433,7 +433,7 @@ as, refused}`, `set-role`, `identity-request`, `connector-*`):
   new URN but not an edit; two concurrent creates at the limit leave at most the
   limit. Turns green: `member-draft-agent-is-private-and-in-the-members-namespace`.
   `Decide: NOW — proof 3 (R10, R11), cost 1.`
-- [ ] `MD-3.5` — **`ResolveMode::ReleasedOnly` at record.** In
+- [x] `MD-3.5` — **`ResolveMode::ReleasedOnly` at record.** In
   `catalog_resolve.rs` (the variant and its rules landed in MD-3.3): `run_resolve_context`
   (`:180-202`) returns `(owner, ReleasedOnly)` for a `-draft` agent pin whose
   row owner's live role is Member (`users.role`; an owner with no users row is
@@ -450,7 +450,7 @@ as, refused}`, `set-role`, `identity-request`, `connector-*`):
   `create_user` (a Member) promote that owner to Publisher, nothing else
   changes. Turns green: `then.0` of `demoted-publishers-draft-agent-stops-using-their-draft-skill`.
   `Decide: NOW — proof 3 (R6, R13), cost 1.`
-- [ ] `MD-3.6` — **Session start, explain and check agree.**
+- [x] `MD-3.6` — **Session start, explain and check agree.**
   `SessionAgent` (`policy_legacy.rs:30-40`, `:83-135`) carries the mode from
   `run_resolve_context`; `load_advanced_policy` (`security.rs:398-478`) uses the
   recorded pin (now always present for a recorded run) and, with no pin in a
@@ -610,3 +610,4 @@ team has the handoff (`design/member-draft-agents.md` §9) on the docs site.
 | 2026-11-18 | 3 | Owner approved the Phase 3 breakdown with the open-question defaults (close a Member's explicit `-draft` refs, decision 7 amended; `local` is released-only; cap answers 409; one 400 message per kind; advanced policy pins recorded in every mode). |
 | 2026-11-18 | 3 W0 | Wave 0 on `feat/member-draft-agents-scenarios-member-drafts`: 5 scenarios `pending`, 5 world pieces, harness `{{ns}}`, `put-draft urnOf`, `publish-skill as`/`release: false`, `start-playbook` on a draft. Scoreboard: 0 green, 5 red (right reason, class `product`): four at the member's first save (403 `catalog:write`), the demotion one at `then.1` (the start is accepted and uses the draft skill). Publisher-swapped copies (deleted) confirmed the rest of each scenario passes. 1 fix cycle (playbook step tool on the agent piece), ~1h. Local smoke: the 9 Microsoft-mock sandbox failures as before. |
 | 2026-11-18 | 3 W1 | Wave 1 on `feat/member-draft-agents-member-save`: `agents:draft` in every role default, backfill keeps pre-scope default keys `role`, `require_agent_draft_write` on `PUT /v1/agents` and the agent permissions PUT (13 other `catalog:write` routes unchanged, table test), restricted save (`member_draft.rs`, `publish_agent_draft_restricted`: refused fields, released-only refs through `ResolveMode::ReleasedOnly`, namespace, owner with empty owner as `local`, cap 409 under the store lock), release routes authorize before reading the body. Scoreboard: 3 scenarios green locally (builds-and-runs, refuses-unreleased, private-and-namespace), the connector one `active` and red only at the Microsoft-mock request count (sandbox, as its sibling), demotion still `pending` (red at `then.1`, wave 2); re-run list green; 1 fix cycle (release auth order), ~1h. |
+| 2026-11-18 | 3 W2 | Wave 2 on `feat/member-draft-agents-released-runs`: `ResolveMode::ReleasedOnly` follows the live role (`owner_authors`, `draft_mode_for_owner`, `caller_ref_mode` in `catalog_resolve.rs`; bootstrap owner always authors; missing users row is a Member): a draft run whose agent row's owner (the draft row, not a release row) does not author is released-only in record, session start, explain and check; a Member's caller-supplied refs (run `playbook_ref`, grant playbook) are released-only, a released agent keeps its frozen refs. `permissions.advanced` pins recorded in every mode and loaded by pin; boot refuses a recorded draft pin once released-only (`require_no_draft_pins`, `load_advanced_policy`, legacy pinned policy, `resolve_one_skill_ref`); no-pin policy loads (advanced and legacy) take the latest release outside Draft mode; the permissions view uses `run_resolve_context` and keys `owner_draft_run` on a draft. Test fixtures promoted to Publisher: `store_with_alice_skill` (3 tests) and `foreign_draft_playbook_pin_is_rejected_for_bob_not_alice_or_operator`. Scoreboard: demotion scenario green (flipped `active`), other 4 member-draft and the 11 re-run scenarios green (16/16, the Microsoft-mock ones too); 0 scenario fix cycles, 1 test-fixture fix cycle; unit and integration tests green; ~3h. |
