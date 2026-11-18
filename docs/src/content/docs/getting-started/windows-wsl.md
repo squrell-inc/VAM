@@ -1,7 +1,23 @@
 ---
 title: Windows + WSL (Local Linux Node)
 description: Run the full VAM stack on Windows using WSL2 (Ubuntu). This guide mirrors the macOS + Lima page but uses PowerShell and WSL2.
+status: shipped
+proves:
+  - node-init-from-a-release-bundle-needs-no-checkout
 ---
+
+## Install from a release
+
+Inside WSL2 Ubuntu, the Linux x86_64 node bundle installs a node with no checkout. There is no native Windows `vam.exe` in this release; use the Linux `vam` inside WSL2.
+
+```bash
+tar xzf vam-node-<V>-x86_64-unknown-linux-gnu.tar.gz
+cd vam-node-<V>-x86_64-unknown-linux-gnu
+sudo ./vam node init --check
+sudo ./vam node init
+```
+
+See [Releases](/getting-started/releases/) for the download and how to check it. The sections below build from source instead.
 
 ## Requirements
 
