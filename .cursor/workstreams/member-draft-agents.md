@@ -130,7 +130,7 @@ the PUT's refusal (CLI tests and the team checklist; the `cli` scenario step
 has no host or key, so it cannot prove this).
 
 - [x] Wave 0: scenarios and harness
-- [ ] Wave 1: run route refuses inline parts; writers test-only; CLI and
+- [x] Wave 1: run route refuses inline parts; writers test-only; CLI and
   bench save-then-run; test fallout; proto, OpenAPI and docs lines (one PR)
 
 **Benchmark delta:** none. A security floor (design §6 R1), no benchmark line.
@@ -246,7 +246,7 @@ The three new scenarios guard `api/run_start.rs`, `catalog.rs`,
   `--scenarios a-publisher-saves-a-draft-agent-and-runs-it-by-ref` green;
   `--smoke` green; `vam-e2e` unit tests for the deferred-agent rule, the URN
   lookup and `{{urn:…}}` expansion. `Decide: NOW — proof 3 (security floor R1), cost 1, line launch proof.`
-- [ ] `MD-2.1` — **The run route refuses inline parts.** At the top of
+- [x] `MD-2.1` — **The run route refuses inline parts.** At the top of
   `start_run` (`api/run_start.rs:216`), before `resolve_place` (`:256`) and
   admission (`:280-298`): `req.inline_agent.is_some()` → 400
   (`InvalidArgument`) "inlineAgent is not accepted: save the agent with PUT
@@ -265,7 +265,7 @@ The three new scenarios guard `api/run_start.rs`, `catalog.rs`,
   workspace with an inline agent → 400 (the `:3909` test, now the inline
   message), no inbox message. Turns green the two `pending` scenarios.
   `Decide: NOW — proof 3 (R1), cost 1, line launch proof.`
-- [ ] `MD-2.2` — **Release writers test-only.** `put_agent`,
+- [x] `MD-2.2` — **Release writers test-only.** `put_agent`,
   `put_agent_with_owner`, `put_playbook`, `put_playbook_with_owner`,
   `put_skill`, `put_skill_with_owner`, `put_policy`, `put_policy_with_owner`,
   `put_platform_policy` (`catalog.rs:763-784`, `:947-970`, `:1078-1101`,
@@ -277,7 +277,7 @@ The three new scenarios guard `api/run_start.rs`, `catalog.rs`,
   `brokers/vam-web/Cargo.toml:38-42`. **Accept:** `cargo check -p vam-orchestrator --lib --bins`
   without the feature (no production caller can exist); the PR lists the grep
   of callers. `Decide: NOW — proof 3, cost 1.`
-- [ ] `MD-2.3` — **`vam run --file` saves, then runs by ref.** In
+- [x] `MD-2.3` — **`vam run --file` saves, then runs by ref.** In
   `crates/vam-cli/src/cmd/run.rs` `start_run` (`:350-412`): with a playbook,
   `PUT /v1/playbooks` first (the agent may name it), then with an agent `PUT
   /v1/agents`; a non-2xx answer prints vamd's message plus one hint line
@@ -297,12 +297,12 @@ The three new scenarios guard `api/run_start.rs`, `catalog.rs`,
   hint, exits non-zero, sends no run; URN mismatch exits 2 with no request;
   `--dry-run` unchanged. `cargo test -p vam-cli`.
   `Decide: NOW — the CLI must not hide the refusal, cost 1.`
-- [ ] `MD-2.4` — **`scripts/bench-coldstart.sh` save-then-run.** Check the PUT's
+- [x] `MD-2.4` — **`scripts/bench-coldstart.sh` save-then-run.** Check the PUT's
   status (`:295`, `-sf` already fails on 4xx; keep it), drop `inlineAgent` from
   the run body (`:319`) and pin `agentRef` to the draft. **Accept:**
   `bash -n scripts/bench-coldstart.sh`; the run body built by the script has no
   `inlineAgent` (`grep`). `Decide: NOW — cost 0.`
-- [ ] `MD-2.5` — **Test fallout: inline runs become save-then-run.**
+- [x] `MD-2.5` — **Test fallout: inline runs become save-then-run.**
   - `tests/api_tests.rs` fixtures `create_run_body` (`:2099-2125`) and
     `sample_run_body` (`:3261-3292`) drop `inlineAgent` and pin `agentRef`
     `{major: 1, prerelease: "draft"}`; their callers (`:2195`, `:2223`, `:2260`,
@@ -325,7 +325,7 @@ The three new scenarios guard `api/run_start.rs`, `catalog.rs`,
     breaks is reported, not edited.
   **Accept:** `scripts/ci/local.sh --fast`; the re-run list green.
   `Decide: NOW — part of MD-2.1, cost 1.`
-- [ ] `MD-2.6` — **Proto, OpenAPI and docs lines** (the full pass is Phase 4).
+- [x] `MD-2.6` — **Proto, OpenAPI and docs lines** (the full pass is Phase 4).
   `proto/vam/v1/orchestrator.proto:855-856`: comments say `inline_agent` and
   `inline_playbook` are refused (400); field numbers kept, not reserved or
   renumbered. `docs/api/openapi.yaml:5479-5482`: the same in their
@@ -478,3 +478,4 @@ team has the handoff (`design/member-draft-agents.md` §9) on the docs site.
 | 2026-11-17 | 2 | Phase 2 breakdown drafted (3 new scenarios, 3 waves); waiting for owner approval |
 | 2026-11-18 | 2 | Owner chose option B (the run route refuses inline agents and playbooks; `vam run --file` saves then runs by ref) and two waves. Decisions 5 and 7 amended; Phase 2 rewritten (3 scenarios: 2 pending, 1 guard; waves 0 and 1). Plan approved; wave 0 next. |
 | 2026-11-18 | 2 W0 | Wave 0 on `feat/member-draft-agents-scenarios-inline`: 3 scenarios (2 `pending`, 1 active guard), world piece `agent-inline-probe`, harness: deferred agent not written at `given`, `chat` `inline`/`inlinePlaybook`/`inputs` (with `refused`), `expect` `status`, `put-draft` URN per identity, `{{urn:<piece>:<as>}}`. Scoreboard: 1 green (guard), 2 red (right reason, class `product`, both at `when.0`: 202 today), 2 fix cycles (request shape; playbook inputs so the red is the inline rule), ~50 min. Local smoke: 9 Microsoft-mock scenarios fail the same on the base (container sandbox denies the guest's python under the `--out` path); Actions is the gate. |
+| 2026-11-18 | 2 W1 | Wave 1 on `feat/member-draft-agents-run-route`: run route refuses inline parts first in `start_run` (400, nothing written); 13 writers and dead helpers behind `test-support` (renamed self dev-dependency so `vam-orchestrator/process-guest` still applies); CLI and bench save-then-run; test fallout (fixture setup only, 2 new API tests, 4 CLI tests); proto/OpenAPI comments; docs lines. Harness: `identity-request` `credential: key` on the Owner piece sends the bootstrap key. Scoreboard: 2 turned green (the inline refusals), guard and re-run list green; 3 fix cycles (fixtures, feature flag takeover, Owner identity); ~45 min. No-feature `cargo check -p vam-orchestrator --lib --bins`: 0 warnings. Pre-existing (fails on base too): `process_mode_run_api::runs_on_any_model_but_mock_model_are_refused_in_process_mode` with `--features process-guest`. |
