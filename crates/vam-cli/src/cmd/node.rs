@@ -43,6 +43,11 @@ pub enum NodeCmd {
         /// directory, or the checkout the binary was built in).
         #[arg(long, value_name = "DIR")]
         checkout: Option<std::path::PathBuf>,
+        /// The node kit to build the base image from: a `share/vam/base/` directory with a
+        /// `manifest.json` (default: the one beside this `vam`, in a release bundle). The
+        /// runtime is the `vam-runtime` beside `vam`.
+        #[arg(long, value_name = "DIR", conflicts_with = "checkout")]
+        kit: Option<std::path::PathBuf>,
     },
     /// The notification channels this node offers (operator): show them, or set the adapter, the
     /// vault secret names it reads its tokens from, the org's kind defaults and the app URL.
@@ -89,10 +94,11 @@ pub async fn run(host: Option<String>, token: Option<String>, cmd: NodeCmd) -> R
         base_sha256,
         host_name,
         checkout,
+        kit,
     } = cmd
     {
         if check {
-            return super::node_init::run_check(root, vamd);
+            return super::node_init::run_check(root, vamd, kit);
         }
         return super::node_install::run_install(super::node_install::Options {
             root: root.unwrap_or_else(|| std::path::PathBuf::from("/")),
@@ -103,6 +109,7 @@ pub async fn run(host: Option<String>, token: Option<String>, cmd: NodeCmd) -> R
             base_sha256,
             host_name,
             checkout,
+            kit,
         })
         .await;
     }
