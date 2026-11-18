@@ -23,5 +23,4 @@ guards:
   - vam:crates/vam-orchestrator/src/api/permissions.rs
   - vam:crates/vam-orchestrator/src/catalog_publish.rs
   - vam:crates/vam-orchestrator/src/keys.rs
-status: pending
-expectFail: { step: when.0, class: product }
+status: active

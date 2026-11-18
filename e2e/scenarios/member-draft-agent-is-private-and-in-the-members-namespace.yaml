@@ -37,5 +37,4 @@ guards:
 mock:
   - when: { step: pin }
     reply: { text: Hello. }
-status: pending
-expectFail: { step: when.0, class: product }
+status: active

@@ -2,7 +2,7 @@
 
 use crate::api::auth::AuthContext;
 use crate::error::OrchestratorError;
-use crate::keys::PUBLISH_GRANT_SCOPE;
+use crate::keys::{AGENTS_DRAFT_SCOPE, PUBLISH_GRANT_SCOPE};
 use crate::workflow::SqliteWorkflowStore;
 
 /// List/get visible catalog. Members with run rights (`runs:write`) may read
@@ -25,6 +25,34 @@ pub fn require_catalog_read(auth: &AuthContext) -> Result<(), OrchestratorError>
         Err(OrchestratorError::PermissionDenied(
             "missing required scope 'runs:write'".into(),
         ))
+    }
+}
+
+/// How a caller may write an agent draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentWriteMode {
+    /// `catalog:write` (or `keys:admin`): today's path, no member rules.
+    Full,
+    /// `agents:draft` without `catalog:write`: the caller's own drafts only, from released
+    /// parts, under the rules of [`crate::member_draft`].
+    Restricted,
+}
+
+/// The one gate for the two routes open to `agents:draft`: `PUT /v1/agents` and
+/// `PUT /v1/agents/{urn}/permissions`. Decided on the **effective** scopes, so a key narrowed
+/// to `agents:draft` is restricted even when its owner is a publisher. Every other
+/// `catalog:write` route keeps its own `authorize(…, "catalog:write")`, which `agents:draft`
+/// does not satisfy.
+pub fn require_agent_draft_write(auth: &AuthContext) -> Result<AgentWriteMode, OrchestratorError> {
+    let scopes = &auth.key.record.scopes;
+    if auth.has_keys_admin() || scopes.iter().any(|s| s == "catalog:write") {
+        Ok(AgentWriteMode::Full)
+    } else if scopes.iter().any(|s| s == AGENTS_DRAFT_SCOPE) {
+        Ok(AgentWriteMode::Restricted)
+    } else {
+        Err(OrchestratorError::PermissionDenied(format!(
+            "missing required scope 'catalog:write' or '{AGENTS_DRAFT_SCOPE}'"
+        )))
     }
 }
 
@@ -96,6 +124,20 @@ mod tests {
                 role: UserRole::Member,
             },
         }
+    }
+
+    #[test]
+    fn agent_draft_write_modes() {
+        let mode = |scopes: &[&str]| require_agent_draft_write(&auth_with_scopes(scopes));
+        assert_eq!(mode(&["catalog:write"]).unwrap(), AgentWriteMode::Full);
+        assert_eq!(
+            mode(&["catalog:write", "agents:draft"]).unwrap(),
+            AgentWriteMode::Full
+        );
+        assert_eq!(mode(&["keys:admin"]).unwrap(), AgentWriteMode::Full);
+        assert_eq!(mode(&["agents:draft"]).unwrap(), AgentWriteMode::Restricted);
+        let err = mode(&["runs:write"]).expect_err("neither scope");
+        assert!(err.to_string().contains("catalog:write"), "{err}");
     }
 
     #[test]

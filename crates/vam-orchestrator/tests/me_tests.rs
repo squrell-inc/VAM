@@ -278,6 +278,21 @@ async fn get_me_member_is_not_403() {
     assert_identity(&body, "alice", "alice", "member", MEMBER_SCOPES);
 }
 
+/// A member's default key holds `agents:draft` and no `catalog:write`.
+#[tokio::test]
+async fn get_me_lists_agents_draft_for_a_member_default_key() {
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    store
+        .create_managed_user("alice", "alice", "alice-secret", UserRole::Member)
+        .expect("alice");
+    let secret = mint_owned_key(&store, "alice", MEMBER_SCOPES);
+    let app = test_app(app_state_http_only(store));
+    let (status, body) = get_me(app, Some(&secret)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"agents:draft\""), "{body}");
+    assert!(!body.contains("catalog:write"), "{body}");
+}
+
 /// A key minted with a subset of scopes reports those scopes, not the role default.
 #[tokio::test]
 async fn get_me_reports_bearer_scopes_not_role_defaults() {

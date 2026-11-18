@@ -38,5 +38,4 @@ mock:
     reply: { toolCall: { name: m365_probe_search, args: { method: GET, path: /v1.0/me/messages } } }
   - when: { step: ask, stepStart: true }
     reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-member-draft-agent-uses-a-connector-skill-through-the-members-connection } } }
-status: pending
-expectFail: { step: when.1, class: product }
+status: active

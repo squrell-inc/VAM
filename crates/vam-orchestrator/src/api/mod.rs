@@ -576,15 +576,24 @@ async fn put_agent(
     body: String,
 ) -> Result<Response, ApiError> {
     ensure_ready(&state, true)?;
-    state.pdp.authorize(&auth, "PutCatalog", "catalog:write")?;
+    let mode = crate::api::catalog_auth::require_agent_draft_write(&auth)?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let req: vam_spec::v1::PutAgentRequest = parse_json_body("vam.v1.PutAgentRequest", &body)?;
     let spec = req
         .spec
         .ok_or_else(|| OrchestratorError::InvalidContract("spec is required".into()))?;
-    let saved = state
-        .store
-        .publish_agent_draft_with_owner(&spec, auth.owner_user_id())?;
+    let saved = match mode {
+        crate::api::catalog_auth::AgentWriteMode::Full => state
+            .store
+            .publish_agent_draft_with_owner(&spec, auth.owner_user_id())?,
+        crate::api::catalog_auth::AgentWriteMode::Restricted => {
+            state.store.publish_agent_draft_restricted(
+                &spec,
+                auth.owner_user_id(),
+                crate::member_draft::member_draft_agents_max(),
+            )?
+        }
+    };
     let resp = vam_spec::v1::PutAgentResponse { spec: Some(saved) };
     let (code, json) = json_response("vam.v1.PutAgentResponse", &resp)?;
     Ok(json_http_response(code, json))
