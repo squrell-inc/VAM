@@ -1399,14 +1399,21 @@ mod tests {
         base: url::Url,
         seen: Arc<Mutex<Vec<Seen>>>,
         replies: Arc<Mutex<VecDeque<(u16, String)>>>,
+        hold: HeldReply,
     }
+
+    /// The next request's answer is held: the provider says the request arrived on the first
+    /// channel, then waits on the second before it answers.
+    type HeldReply =
+        Arc<Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>>;
 
     fn provider() -> Provider {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let seen = Arc::new(Mutex::new(Vec::<Seen>::new()));
         let replies = Arc::new(Mutex::new(VecDeque::<(u16, String)>::new()));
-        let (log, queue) = (seen.clone(), replies.clone());
+        let hold: HeldReply = Arc::new(Mutex::new(None));
+        let (log, queue, held) = (seen.clone(), replies.clone(), hold.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
@@ -1443,6 +1450,11 @@ mod tests {
                     form,
                     authorization,
                 });
+                let pending = held.lock().unwrap().take();
+                if let Some((arrived, release)) = pending {
+                    let _ = arrived.send(());
+                    let _ = release.recv();
+                }
                 let (status, payload) = queue
                     .lock()
                     .unwrap()
@@ -1459,10 +1471,18 @@ mod tests {
             base,
             seen,
             replies,
+            hold,
         }
     }
 
     impl Provider {
+        /// Holds the answer to the next request: returns "it arrived" and "answer now".
+        fn hold_next(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *self.hold.lock().unwrap() = Some((arrived_tx, release_rx));
+            (arrived_rx, release_tx)
+        }
         fn reply(&self, status: u16, body: serde_json::Value) {
             let body = if body.is_null() {
                 String::new()
@@ -1529,6 +1549,16 @@ mod tests {
 
     /// [`xchg_node`] whose MCP server refuses `tools/list` while `tools_ok` is false.
     fn xchg_node_with(tag: &str, tools_ok: Arc<AtomicBool>) -> Node {
+        xchg_node_rejecting(tag, tools_ok, Arc::new(Mutex::new(Vec::new())))
+    }
+
+    /// [`xchg_node_with`] whose MCP server answers HTTP 401 to any request whose bearer token is in
+    /// `rejected`.
+    fn xchg_node_rejecting(
+        tag: &str,
+        tools_ok: Arc<AtomicBool>,
+        rejected: Arc<Mutex<Vec<String>>>,
+    ) -> Node {
         let (app, state) = app_world_with_state();
         let (store, vault) = (state.store.clone(), state.vault.clone());
         install_filebox(&store, tag);
@@ -1537,26 +1567,27 @@ mod tests {
             &format!("auth.{tag}.example"),
             token.base.clone(),
         );
-        let (mcp_url, mcp_seen) = crate::mcp_client::mock::spawn(move |method, id, params| {
-            if method == "tools/list" {
-                if !tools_ok.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Some((
-                        "application/json".into(),
-                        serde_json::json!({ "jsonrpc": "2.0", "id": id,
-                            "error": { "code": -32000, "message": "tools are down" } })
-                        .to_string(),
-                    ));
+        let seen_slot: Arc<std::sync::OnceLock<Arc<Mutex<crate::mcp_client::mock::Seen>>>> =
+            Arc::new(std::sync::OnceLock::new());
+        let slot = seen_slot.clone();
+        let (mcp_url, mcp_seen) =
+            crate::mcp_client::mock::spawn_with_status(move |method, id, params| {
+                let auth = slot
+                    .get()
+                    .and_then(|seen| seen.lock().unwrap().auth.last().cloned().flatten());
+                let refused = auth.is_some_and(|a| {
+                    rejected
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|t| a == format!("Bearer {t}"))
+                });
+                if refused {
+                    return Some((401, "application/json".into(), "{}".into()));
                 }
-                return crate::mcp_client::mock::ok(
-                    id,
-                    serde_json::json!({ "tools": [
-                        { "name": "search_files", "inputSchema": { "type": "object" } },
-                        { "name": "delete_everything", "inputSchema": { "type": "object" } }
-                    ] }),
-                );
-            }
-            crate::mcp_client::mock::standard(method, id, params)
-        });
+                with_status_ok(xchg_mcp_reply(&tools_ok, method, id, params))
+            });
+        let _ = seen_slot.set(mcp_seen.clone());
         crate::mcp_oauth_refresh::test_seam::serve(
             &format!("mcp.{tag}.example"),
             url::Url::parse(&mcp_url).unwrap(),
@@ -1569,6 +1600,37 @@ mod tests {
             token,
             mcp_seen,
         }
+    }
+
+    fn with_status_ok(reply: Option<(String, String)>) -> Option<(u16, String, String)> {
+        reply.map(|(ct, body)| (200, ct, body))
+    }
+
+    /// The `filebox` MCP server of [`xchg_node_with`].
+    fn xchg_mcp_reply(
+        tools_ok: &AtomicBool,
+        method: &str,
+        id: &serde_json::Value,
+        params: &serde_json::Value,
+    ) -> Option<(String, String)> {
+        if method == "tools/list" {
+            if !tools_ok.load(std::sync::atomic::Ordering::SeqCst) {
+                return Some((
+                    "application/json".into(),
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id,
+                        "error": { "code": -32000, "message": "tools are down" } })
+                    .to_string(),
+                ));
+            }
+            return crate::mcp_client::mock::ok(
+                id,
+                serde_json::json!({ "tools": [
+                    { "name": "search_files", "inputSchema": { "type": "object" } },
+                    { "name": "delete_everything", "inputSchema": { "type": "object" } }
+                ] }),
+            );
+        }
+        crate::mcp_client::mock::standard(method, id, params)
     }
 
     async fn exchange(
@@ -1900,7 +1962,9 @@ mod tests {
             )
         );
 
-        // A disconnect revokes the refresh token at the node's endpoint with the org secret.
+        // A disconnect revokes the refresh token at the node's endpoint with the org secret. The
+        // provider's metadata omits `revocation_endpoint_auth_methods_supported`, so the revoke
+        // uses RFC 8414's default, HTTP Basic (the token endpoint takes POST).
         n.token.reply(200, serde_json::Value::Null);
         let (s, b) = call(
             &n.app,
@@ -1916,8 +1980,19 @@ mod tests {
         let revoke = seen.last().unwrap();
         assert_eq!(revoke.path, "/revoke");
         assert_eq!(revoke.form["token"], NEW_REFRESH);
-        assert_eq!(revoke.form["client_id"], "c-1");
-        assert_eq!(revoke.form["client_secret"], SECRET);
+        let expected = {
+            use base64::Engine as _;
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("c-1:{SECRET}"))
+            )
+        };
+        assert_eq!(revoke.authorization.as_deref(), Some(expected.as_str()));
+        assert!(
+            !revoke.form.contains_key("client_secret"),
+            "{:?}",
+            revoke.form
+        );
         assert!(member_vault_ids(&n.vault).is_empty());
     }
 
@@ -1955,12 +2030,14 @@ mod tests {
                 StatusCode::BAD_GATEWAY,
                 "exchange",
             ),
-            // The provider answers 200 with no refresh token: the connection could not be kept.
+            // The provider answers 200 with no refresh token: the connection could not be kept,
+            // and repeating the request cannot help (the code is spent, and the provider must be
+            // set up to issue a refresh token first).
             (
                 200,
                 serde_json::json!({ "access_token": NEW_ACCESS, "token_type": "Bearer" }),
                 StatusCode::BAD_GATEWAY,
-                "refresh token",
+                "offline access",
             ),
         ];
         for (provider_status, provider_body, want, text) in cases {
@@ -1974,6 +2051,10 @@ mod tests {
             .await;
             assert_eq!(s, want, "{b}");
             assert!(b.to_string().contains(text), "{b}");
+            if want == StatusCode::BAD_GATEWAY {
+                // Only an unreachable provider is worth retrying.
+                assert_eq!(b["retryable"], text == "exchange", "{b}");
+            }
             assert_no_value("a refused exchange", &b.to_string());
             assert!(
                 n.store
@@ -2273,6 +2354,81 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::OK, "{b}");
+    }
+
+    #[tokio::test]
+    async fn a_client_changed_and_changed_back_while_the_provider_answers_stores_nothing() {
+        let n = xchg_node("xchg-aba-held");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let c1 = n.store.node_client("filebox").unwrap().unwrap();
+
+        // ada signs in again. The secret read and the request pass every check (nothing has
+        // changed yet); the provider accepts the code, but its answer is held until the admin
+        // has saved c-2 and then c-1 again.
+        let (arrived, release) = n.token.hold_next();
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "HELD-A", "refresh_token": "HELD-R", "expires_in": 3600 }),
+        );
+        let admin = async {
+            tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+                .await
+                .unwrap();
+            let (s, b) = put_client(&n, "c-2", Some("C2-SECRET-wwwwwwwwwwww")).await;
+            assert_eq!(s, StatusCode::OK, "{b}");
+            let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+            assert_eq!(s, StatusCode::OK, "{b}");
+            release.send(()).unwrap();
+        };
+        let ((s, b), ()) = tokio::join!(
+            exchange(
+                &n,
+                "member-secret",
+                "filebox",
+                exchange_body("squrell://oauth"),
+            ),
+            admin
+        );
+        // The commit's revision check refuses it: the client id and endpoint are c-1's again,
+        // but not the revision the sign-in read.
+        let back = n.store.node_client("filebox").unwrap().unwrap();
+        assert_eq!(back.client_id, c1.client_id);
+        assert!(back.revision > c1.revision);
+        assert_eq!(n.token.requests().len(), 2, "the held request was sent");
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("sign in again"), "{b}");
+        assert_no_value("the refusal", &b.to_string());
+        // The tokens are the first sign-in's, and the mark c-2's save left stays.
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/access-token"),
+            NEW_ACCESS
+        );
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            NEW_REFRESH
+        );
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(
+            oauth.status,
+            crate::mcp_registry::McpOauthStatus::NeedsReauth
+        );
+        assert!(
+            oauth
+                .last_refresh_error
+                .as_deref()
+                .is_some_and(|e| e.contains("changed the client")),
+            "{oauth:?}"
+        );
     }
 
     #[tokio::test]
@@ -2728,6 +2884,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_listing_never_marks_a_row_another_request_already_moved_on() {
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        let tools_ok = Arc::new(AtomicBool::new(false));
+        let n = xchg_node_with("xchg-mark-race", tools_ok.clone());
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(200, tokens_reply());
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        // Two recoveries read the pending row at the same credential generation.
+        let pending = row_of(&n, "ada");
+        let generation = crate::host_tools::lock_mcp_credentials(&n.store, &pending)
+            .await
+            .unwrap()
+            .generation_handle();
+        let policy = n.store.mcp_policy("filebox").unwrap().unwrap();
+        // One adopts the tools.
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let connected = row_of(&n, "ada");
+        assert_eq!(connected.oauth.as_ref().unwrap().status, Connected);
+        // The other's listing fails after that: a 409, and the connected row is not marked.
+        tools_ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        let e = super::super::mcp_connections::adopt_tools_and_reconnect(
+            &n.state,
+            &pending,
+            &policy,
+            &generation,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT, "{}", e.message);
+        let row = row_of(&n, "ada");
+        assert_eq!(row.oauth, connected.oauth);
+        assert_eq!(row.tools.len(), 1, "{:?}", row.tools);
+
+        // An admin save marks the row while a listing for the connected row is in flight: the
+        // failed listing leaves the admin's mark.
+        let (s, b) = put_client(&n, "c-2", Some("OTHER-SECRET-qqqqqqqqqqqq")).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let marked = row_of(&n, "ada");
+        assert_eq!(marked.oauth.as_ref().unwrap().status, NeedsReauth);
+        let e = super::super::mcp_connections::adopt_tools_and_reconnect(
+            &n.state,
+            &connected,
+            &policy,
+            &generation,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT, "{}", e.message);
+        assert_eq!(row_of(&n, "ada").oauth, marked.oauth);
+    }
+
+    #[tokio::test]
     async fn an_adoption_clears_instructions_the_server_no_longer_sends() {
         let n = xchg_node("xchg-instructions");
         let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
@@ -2942,6 +3169,264 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_client_on_a_pending_sign_in_goes_back_to_pending_after_a_corrected_secret() {
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        let tools_ok = Arc::new(AtomicBool::new(false));
+        let n = xchg_node_with("xchg-pending-refused", tools_ok.clone());
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // A stored sign-in whose tools could not be read, with an access token that has expired.
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": NEW_ACCESS, "refresh_token": NEW_REFRESH, "expires_in": 0 }),
+        );
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The renewal before the tools are read is refused for the admin's client.
+        n.token.reply(
+            401,
+            serde_json::json!({ "error": "invalid_client", "error_description": SECRET }),
+        );
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(
+            oauth.last_refresh_error.as_deref(),
+            Some(connector_client::CLIENT_REFUSED_PENDING_REASON)
+        );
+
+        // The admin corrects the secret: the sign-in is pending again, not connected (no tools are
+        // adopted yet), and nothing is announced.
+        let (s, b) = put_client(&n, "c-1", Some("CORRECTED-SECRET-qqqqqqqq")).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let row = row_of(&n, "ada");
+        assert!(row.tools.is_empty(), "{:?}", row.tools);
+        let oauth = row.oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(
+            oauth.last_refresh_error.as_deref(),
+            Some(crate::mcp_registry::TOOLS_PENDING_REASON)
+        );
+        assert_eq!(open_notices(&n, "ada"), 0);
+
+        // The tools-refresh route finishes it with the corrected secret.
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "FRESH-A", "refresh_token": "FRESH-R", "expires_in": 3600 }),
+        );
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["drift"], "adopted", "{b}");
+        let row = row_of(&n, "ada");
+        assert_eq!(row.oauth.unwrap().status, Connected);
+        assert_eq!(
+            row.tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["search_files"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_sign_in_is_not_recovered_while_the_connector_is_off() {
+        use crate::mcp_registry::McpOauthStatus::Connected;
+        let tools_ok = Arc::new(AtomicBool::new(false));
+        let n = xchg_node_with("xchg-pending-off", tools_ok.clone());
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": NEW_ACCESS, "refresh_token": NEW_REFRESH, "expires_in": 0 }),
+        );
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let set_enabled = |enabled: bool| {
+            call(
+                &n.app,
+                "PUT",
+                "/v1/connectors/filebox/node",
+                "orgadmin-secret",
+                Some(serde_json::json!({ "enabled": enabled })),
+            )
+        };
+        let (s, b) = set_enabled(false).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let pending = row_of(&n, "ada");
+        // Off: refused before the provider is contacted; the sign-in stays pending.
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("turned off"), "{b}");
+        assert_eq!(n.token.requests().len(), 1, "only the exchange");
+        assert_eq!(row_of(&n, "ada").oauth, pending.oauth);
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            NEW_REFRESH
+        );
+        // The adoption commit checks the enable too (a disable that lands while tools are read).
+        let policy = n.store.mcp_policy("filebox").unwrap().unwrap();
+        let tool = crate::mcp_client::McpTool {
+            name: "search_files".into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            ..Default::default()
+        };
+        let e = n
+            .store
+            .adopt_connector_tools_if_present(
+                SecretScope::User,
+                "ada",
+                &policy,
+                pending.oauth.as_ref(),
+                std::slice::from_ref(&tool),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(e, OrchestratorError::Conflict(_)), "{e}");
+        let row = row_of(&n, "ada");
+        assert_eq!(row.oauth, pending.oauth);
+        assert!(row.tools.is_empty(), "{:?}", row.tools);
+
+        // On again: the same route finishes the sign-in.
+        let (s, b) = set_enabled(true).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "FRESH-A", "refresh_token": "FRESH-R", "expires_in": 3600 }),
+        );
+        let (s, b) = call(
+            &n.app,
+            "POST",
+            "/v1/mcp/connections/filebox/refresh",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["drift"], "adopted", "{b}");
+        assert_eq!(row_of(&n, "ada").oauth.unwrap().status, Connected);
+    }
+
+    #[tokio::test]
+    async fn a_pending_sign_in_whose_token_the_server_refuses_is_refreshed_once_and_adopted() {
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        let rejected = Arc::new(Mutex::new(vec![NEW_ACCESS.to_string()]));
+        let n = xchg_node_rejecting(
+            "xchg-pending-401",
+            Arc::new(AtomicBool::new(true)),
+            rejected.clone(),
+        );
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // The provider sends no `expires_in`, so no expiry is stored; the MCP server refuses the
+        // access token, so the tools cannot be read and the sign-in is pending.
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": NEW_ACCESS, "refresh_token": NEW_REFRESH, "token_type": "Bearer" }),
+        );
+        let (s, b) = exchange(
+            &n,
+            "member-secret",
+            "filebox",
+            exchange_body("squrell://oauth"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(oauth.expires_at, None);
+
+        // The retry: the refused token is refreshed once, and the renewed one is refused too.
+        // No loop: a 502, one refresh, and the sign-in stays pending with the rotated tokens.
+        rejected.lock().unwrap().push("STILL-BAD".into());
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "STILL-BAD", "refresh_token": "R-2" }),
+        );
+        let refresh = || {
+            call(
+                &n.app,
+                "POST",
+                "/v1/mcp/connections/filebox/refresh",
+                "member-secret",
+                None,
+            )
+        };
+        let (s, b) = refresh().await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        assert_eq!(n.token.requests().len(), 2, "exchange, one refresh");
+        let oauth = row_of(&n, "ada").oauth.unwrap();
+        assert_eq!(oauth.status, NeedsReauth);
+        assert_eq!(
+            oauth.last_refresh_error.as_deref(),
+            Some(crate::mcp_registry::TOOLS_PENDING_REASON)
+        );
+        assert_eq!(token_of(&n, "ada", "filebox/oauth/refresh-token"), "R-2");
+
+        // The next retry: refused once more, refreshed once, and the new token lists the tools.
+        n.token.reply(
+            200,
+            serde_json::json!({ "access_token": "FRESH-A", "refresh_token": "FRESH-R" }),
+        );
+        let (s, b) = refresh().await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["drift"], "adopted", "{b}");
+        assert_eq!(n.token.requests().len(), 3, "one refresh per retry");
+        let grant = n.token.requests().last().cloned().unwrap();
+        assert_eq!(grant.form["grant_type"], "refresh_token");
+        assert_eq!(grant.form["refresh_token"], "R-2");
+        assert_eq!(token_of(&n, "ada", "filebox/oauth/access-token"), "FRESH-A");
+        assert_eq!(
+            token_of(&n, "ada", "filebox/oauth/refresh-token"),
+            "FRESH-R"
+        );
+        let row = row_of(&n, "ada");
+        assert_eq!(row.oauth.unwrap().status, Connected);
+        assert_eq!(
+            row.tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["search_files"]
+        );
+    }
+
+    #[tokio::test]
     async fn a_sign_in_whose_tools_cannot_be_read_stays_retryable_and_is_not_announced() {
         use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
         let tools_ok = Arc::new(AtomicBool::new(true));
@@ -3098,6 +3583,22 @@ mod tests {
         n.store
             .record_mcp_oauth_refresh_failure(&row_of(&n, "olga"), true, "invalid_grant")
             .unwrap();
+        assert_eq!(open_notices(&n, "ada"), 1);
+
+        // A plain off and on, with no secret saved in between, is not a correction: the provider
+        // refused the secret that is still saved, so ada stays parked.
+        for enabled in [false, true] {
+            let (s, b) = call(
+                &n.app,
+                "PUT",
+                "/v1/connectors/filebox/node",
+                "orgadmin-secret",
+                Some(serde_json::json!({ "enabled": enabled })),
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK, "{b}");
+        }
+        assert_eq!(row_of(&n, "ada").oauth.unwrap().status, NeedsReauth);
         assert_eq!(open_notices(&n, "ada"), 1);
 
         // The admin corrects the secret and turns the connector off in the same save: nothing is

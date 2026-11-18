@@ -1447,10 +1447,39 @@ pub fn fetch_tools_snapshot_for_connection(
     conn: &McpConnection,
     timeout_ms: u64,
 ) -> Result<McpSnapshot, OrchestratorError> {
-    let allowlist = allowlist_from_connection_url(&conn.url)?;
-    let headers = resolve_mcp_connection_headers(vault, caller_user_id, conn)?;
-    let mut client = McpClient::connect(&conn.url, &allowlist, headers, timeout_ms)?;
-    let tools = client.list_tools()?;
+    fetch_tools_snapshot_classified(vault, caller_user_id, conn, timeout_ms).map_err(|e| match e {
+        SnapshotFailure::Unauthorized => McpClientError::HttpStatus(401).into(),
+        SnapshotFailure::Other(e) => e,
+    })
+}
+
+/// Why a tool listing failed, with the MCP server's refusal of the access token (HTTP 401) told
+/// apart: the one failure a token refresh can fix.
+#[derive(Debug)]
+pub(crate) enum SnapshotFailure {
+    Unauthorized,
+    Other(OrchestratorError),
+}
+
+/// [`fetch_tools_snapshot_for_connection`] that reports an HTTP 401 as
+/// [`SnapshotFailure::Unauthorized`].
+pub(crate) fn fetch_tools_snapshot_classified(
+    vault: &SecretsVault,
+    caller_user_id: &str,
+    conn: &McpConnection,
+    timeout_ms: u64,
+) -> Result<McpSnapshot, SnapshotFailure> {
+    let classify = |e: McpClientError| match e {
+        McpClientError::HttpStatus(401) => SnapshotFailure::Unauthorized,
+        e => SnapshotFailure::Other(e.into()),
+    };
+    let allowlist =
+        allowlist_from_connection_url(&conn.url).map_err(|e| SnapshotFailure::Other(e.into()))?;
+    let headers = resolve_mcp_connection_headers(vault, caller_user_id, conn)
+        .map_err(SnapshotFailure::Other)?;
+    let mut client =
+        McpClient::connect(&conn.url, &allowlist, headers, timeout_ms).map_err(classify)?;
+    let tools = client.list_tools().map_err(classify)?;
     Ok(McpSnapshot {
         tools,
         instructions: client.server_instructions().map(str::to_string),
@@ -2197,9 +2226,14 @@ pub(crate) fn mark_connector_rows_need_reauth(
             // clears) is replaced by this one: its tokens are of the client being replaced, and
             // only a new sign-in may bring the row back, even if the admin later returns to that
             // client (A→B→A) and corrects its secret. Any other mark already needs a sign-in.
-            let recoverable = oauth.last_refresh_error.as_deref()
-                == Some(crate::connector_client::CLIENT_REFUSED_REASON)
-                || oauth.last_refresh_error.as_deref() == Some(TOOLS_PENDING_REASON);
+            let recoverable = matches!(
+                oauth.last_refresh_error.as_deref(),
+                Some(
+                    crate::connector_client::CLIENT_REFUSED_REASON
+                        | crate::connector_client::CLIENT_REFUSED_PENDING_REASON
+                        | TOOLS_PENDING_REASON
+                )
+            );
             if !recoverable {
                 continue;
             }
@@ -2222,7 +2256,11 @@ pub(crate) fn mark_connector_rows_need_reauth(
 /// is a row on another URL (a server the member added by hand). Only a row whose tokens are of the
 /// node's current client (its client id and token endpoint, read here inside the caller's
 /// transaction) is cleared: a row a refused c1 parked stays parked when the admin moved to c2 and
-/// then fixed c2's secret. Runs inside the caller's transaction.
+/// then fixed c2's secret. A row the refusal found tools-pending (it carries
+/// [`crate::connector_client::CLIENT_REFUSED_PENDING_REASON`]) goes back to tools-pending, not to
+/// `connected`: its tools are still not adopted, so it is not returned (no notification resolved,
+/// no parked run resumed) and the tools-refresh route finishes it. Runs inside the caller's
+/// transaction.
 pub(crate) fn clear_refused_client_rows(
     connection: &Connection,
     connection_id: &str,
@@ -2252,22 +2290,31 @@ pub(crate) fn clear_refused_client_rows(
         let Ok(mut oauth) = serde_json::from_str::<McpOauthMetadata>(&raw) else {
             continue;
         };
+        let pending = reason == crate::connector_client::CLIENT_REFUSED_REASON
+            && oauth.last_refresh_error.as_deref()
+                == Some(crate::connector_client::CLIENT_REFUSED_PENDING_REASON);
         if oauth.status != McpOauthStatus::NeedsReauth
-            || oauth.last_refresh_error.as_deref() != Some(reason)
+            || !(pending || oauth.last_refresh_error.as_deref() == Some(reason))
             || oauth.client_id != client.client_id
             || oauth.token_endpoint != client.token_endpoint
         {
             continue;
         }
-        oauth.status = McpOauthStatus::Connected;
-        oauth.last_refresh_error = None;
+        if pending {
+            oauth.last_refresh_error = Some(TOOLS_PENDING_REASON.into());
+        } else {
+            oauth.status = McpOauthStatus::Connected;
+            oauth.last_refresh_error = None;
+        }
         let json = oauth_metadata_json(Some(&oauth))?;
         connection.execute(
             "UPDATE mcp_connections SET oauth_metadata_json = ?1, updated_at = ?2
              WHERE scope = ?3 AND owner_user_id = ?4 AND connection_id = ?5 AND auth_mode = 'oauth'",
             params![json, now_secs(), SecretScope::User.as_str(), owner, connection_id],
         )?;
-        cleared.push(owner);
+        if !pending {
+            cleared.push(owner);
+        }
     }
     Ok(cleared)
 }
@@ -2334,6 +2381,14 @@ pub(crate) fn tools_read_superseded(id: &str) -> OrchestratorError {
     OrchestratorError::Conflict(format!(
         "the connection to `{id}` changed while its tools were being read (a later sign-in or a disconnect): \
          read the connection's state again; do not repeat this sign-in with the same code"
+    ))
+}
+
+/// The 409 when a pending sign-in's recovery runs on a connector the node has turned off: nothing is
+/// sent to the provider or written, and the sign-in stays pending.
+pub(crate) fn connector_turned_off(id: &str) -> OrchestratorError {
+    OrchestratorError::Conflict(format!(
+        "the `{id}` connector is turned off on this node: your sign-in stays stored, and refreshing the connection finishes it once your admin turns the connector on again"
     ))
 }
 
@@ -2468,6 +2523,14 @@ fn record_refresh_failure_in(
     let mut oauth: McpOauthMetadata = serde_json::from_str(&raw)
         .map_err(|_| OrchestratorError::InvalidContract("invalid oauth metadata".into()))?;
     let transition = needs_reauth && oauth.status != McpOauthStatus::NeedsReauth;
+    // A refused admin client on a sign-in whose tools are not adopted yet keeps that fact: a
+    // corrected secret puts the row back to tools-pending, not to `connected`.
+    let error =
+        if error == crate::connector_client::CLIENT_REFUSED_REASON && is_tools_pending(&oauth) {
+            crate::connector_client::CLIENT_REFUSED_PENDING_REASON
+        } else {
+            error
+        };
     if needs_reauth {
         oauth.status = McpOauthStatus::NeedsReauth;
     }
@@ -2935,6 +2998,14 @@ impl SqliteWorkflowStore {
             if stored.as_ref() != observed {
                 return Err(gone());
             }
+            // A pending sign-in is finished only on an enabled connector: one turned off while
+            // the tools were read keeps the sign-in pending (nothing written, no run resumed), and
+            // the tools-refresh route finishes it once the connector is on again.
+            if stored.as_ref().is_some_and(is_tools_pending)
+                && !crate::connectors::node_enabled_in(&tx, id)?
+            {
+                return Err(connector_turned_off(id));
+            }
             let mut oauth_json = raw;
             if let Ok(mut oauth) = serde_json::from_str::<McpOauthMetadata>(&oauth_json) {
                 if oauth.status == McpOauthStatus::NeedsReauth
@@ -2977,6 +3048,42 @@ impl SqliteWorkflowStore {
             tx.commit()?;
         }
         self.get_mcp_connection(scope, &owner, id)
+    }
+
+    /// Puts a connector row whose tools could not be read into the tools-pending state
+    /// ([`TOOLS_PENDING_REASON`]), but only while the row is still the one the caller's listing was
+    /// for: present, on `observed.url`, and with exactly `observed`'s OAuth metadata, checked in the
+    /// same transaction as the write. A row another adoption connected, an admin save marked, or a
+    /// later sign-in, refresh or disconnect rewrote or removed is left as it is (`Ok(false)`).
+    pub(crate) fn mark_tools_pending_if_unchanged(
+        &self,
+        observed: &McpConnection,
+    ) -> Result<bool, OrchestratorError> {
+        let owner = vault_owner_user_id(observed.scope, &observed.owner_user_id).to_string();
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let tx = connection.transaction()?;
+        let Some((url, raw)) = tx
+            .query_row(
+                "SELECT url, oauth_metadata_json FROM mcp_connections
+                 WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3
+                   AND auth_mode = 'oauth'",
+                params![observed.scope.as_str(), owner, observed.connection_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        let stored = serde_json::from_str::<McpOauthMetadata>(&raw).ok();
+        if url != observed.url || stored.is_none() || stored.as_ref() != observed.oauth.as_ref() {
+            return Ok(false);
+        }
+        record_refresh_failure_in(&tx, observed, true, TOOLS_PENDING_REASON)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Record a successful host-side refresh without replacing the pinned tool

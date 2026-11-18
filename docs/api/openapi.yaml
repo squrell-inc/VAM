@@ -1328,7 +1328,8 @@ paths:
         PKCE against `node.client.authorizeEndpoint` and the admin's client id, then posts
         what it got. The body names no endpoint and no client; any other field is a 400.
         `redirectUri` must be the app's own: `squrell://oauth` or
-        `http://127.0.0.1:<port>/<path>`. `codeVerifier` is 43-128 RFC 7636 characters.
+        `http://127.0.0.1:<port>/<path>` with an explicit port other than 80 (a loopback URI
+        with no port, or with the default port 80, is a 400). `codeVerifier` is 43-128 RFC 7636 characters.
         `vamd` posts `grant_type=authorization_code`, `code`, `code_verifier`,
         `redirect_uri`, `client_id`, the RFC 8707 `resource` and the org's `client_secret`
         to the token endpoint pinned at Enable (DNS-pinned public address, no redirects),
@@ -1337,7 +1338,8 @@ paths:
         tools. The connection is committed with its tools pending (`needsReconnect`, no
         notification) and is `connected` only once they are adopted, so a request dropped
         between the two (the app went away, the node stopped) leaves a connection that
-        `POST /v1/mcp/connections/{id}/refresh` finishes. The secret goes in the body (`client_secret_post`) or as HTTP Basic
+        `POST /v1/mcp/connections/{id}/refresh?scope=user` finishes (the connection is
+        user-scoped; without `scope` an org admin addresses the org scope and gets a 404). The secret goes in the body (`client_secret_post`) or as HTTP Basic
         (`client_secret_basic`), whichever Enable pinned from the provider's metadata.
         The local checks (body, redirect URI, code and verifier syntax, the connector, its
         enable, the saved client and secret) run before the request and write nothing. Once
@@ -1408,12 +1410,13 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "502":
           description: |
-            The provider could not be reached or answered with no refresh token (nothing was written);
-            or the provider accepted the code but the connection could not be saved (nothing was replaced;
+            The provider could not be reached (nothing was written; retryable); or it answered with no
+            refresh token (nothing was written; not retryable: the provider must issue a refresh token,
+            offline access, for the admin's client before the member signs in again); or the provider accepted the code but the connection could not be saved (nothing was replaced;
             the code cannot be used again, so sign in again); or the sign-in was stored but the
             connector's tools could not be read (the connection is `needsReconnect` and stays so, with
-            its notification open and parked runs parked, until `POST /v1/mcp/connections/{id}/refresh`
-            lists them).
+            its notification open and parked runs parked, until
+            `POST /v1/mcp/connections/{id}/refresh?scope=user` lists them).
           content:
             application/json:
               schema:
@@ -3552,8 +3555,16 @@ paths:
         expired is renewed first, under the connection's refresh gate, with the
         node's client and the org secret for an admin-supplied client; the
         rotated tokens are stored and the row stays pending until its tools are
-        adopted. A refused renewal is a 409 (sign in again); an unreachable
-        provider is a 502 and the row stays pending. The `connection` object uses the same OAuth
+        adopted. A stored token the MCP server refuses (HTTP 401) while the
+        tools are listed is renewed the same way, once, and the listing is
+        tried once more (a provider that sent no `expires_in` leaves no expiry
+        to go by). A refused renewal is a 409 (sign in again); an unreachable
+        provider is a 502 and the row stays pending. On a connector the node
+        has turned off this recovery is a 409 before the provider is contacted
+        and the sign-in stays pending. A listing that fails after another
+        request already adopted the tools, or after an admin save marked the
+        row, is a 409 and leaves the row as it is. The member's pending row is
+        user-scoped: pass `scope=user` (an org admin's default scope is org). The `connection` object uses the same OAuth
         status contract as list: `oauth.status`, `oauth.expiresAt` when known,
         sanitized `oauth.lastRefreshError` when set, and `oauth.hasRefreshBinding`.
         Static connections keep `oauth: null`.

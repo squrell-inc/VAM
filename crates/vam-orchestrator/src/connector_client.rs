@@ -126,6 +126,13 @@ impl TokenAuthMethod {
 pub(crate) const CLIENT_REFUSED_REASON: &str =
     "the provider refused the client id or secret your admin entered";
 
+/// [`CLIENT_REFUSED_REASON`] for a row the refusal found tools-pending (a sign-in stored, its tools
+/// not adopted yet). A corrected secret for the same client puts such a row back to
+/// [`crate::mcp_registry::TOOLS_PENDING_REASON`], never to `connected`: only the adoption connects
+/// it. A save that changes the client replaces it like any recoverable mark.
+pub(crate) const CLIENT_REFUSED_PENDING_REASON: &str =
+    "the provider refused the client id or secret your admin entered (sign-in stored: its tools are not read yet)";
+
 /// The stored, public half of an admin-supplied client. No secret is here, only whether one is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeClient {
@@ -431,7 +438,8 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
             updated_by TEXT NOT NULL,
             token_auth_method TEXT NOT NULL DEFAULT 'client_secret_post',
             revision INTEGER NOT NULL DEFAULT 0,
-            revocation_auth_method TEXT
+            revocation_auth_method TEXT,
+            secret_saved_while_off INTEGER
         );
         -- The last client revision a connector was given. Kept when its client is removed, so a
         -- client saved again later never reuses a revision a sign-in or a refresh captured.
@@ -478,6 +486,19 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
     if has_revocation_method == 0 {
         connection.execute(
             "ALTER TABLE node_connector_clients ADD COLUMN revocation_auth_method TEXT",
+            [],
+        )?;
+    }
+    // A store from before the pending-correction marker: NULL, no secret is waiting for an enable.
+    let has_off_marker: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('node_connector_clients')
+         WHERE name = 'secret_saved_while_off'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_off_marker == 0 {
+        connection.execute(
+            "ALTER TABLE node_connector_clients ADD COLUMN secret_saved_while_off INTEGER",
             [],
         )?;
     }
@@ -554,6 +575,34 @@ pub(crate) fn client_in(c: &Connection, id: &str) -> Result<Option<NodeClient>, 
     .optional()?)
 }
 
+/// Whether a secret was saved for the connector's client while the connector was disabled, and no
+/// enable has acted on it yet (see [`SqliteWorkflowStore::put_node_with_client`]).
+fn secret_saved_while_off_in(
+    c: &Connection,
+    connector_id: &str,
+) -> Result<bool, OrchestratorError> {
+    Ok(c.query_row(
+        "SELECT secret_saved_while_off FROM node_connector_clients WHERE connector_id = ?1",
+        params![connector_id],
+        |r| r.get::<_, Option<i64>>(0),
+    )
+    .optional()?
+    .flatten()
+    .is_some_and(|v| v != 0))
+}
+
+fn set_secret_saved_while_off_in(
+    c: &Connection,
+    connector_id: &str,
+    on: bool,
+) -> Result<(), OrchestratorError> {
+    c.execute(
+        "UPDATE node_connector_clients SET secret_saved_while_off = ?2 WHERE connector_id = ?1",
+        params![connector_id, on.then_some(1i64)],
+    )?;
+    Ok(())
+}
+
 /// What a save's plan assumed about the stored state when it was made: the connector's definition
 /// and the client the plan kept the secret of (or replaced). [`put_node_with_client`] checks both
 /// again inside its transaction: discovery, between the plan and the write, can take seconds, and
@@ -618,9 +667,13 @@ impl SqliteWorkflowStore {
     /// A save of a corrected secret for the unchanged client also clears the rows a refresh the
     /// provider refused for that client (`invalid_client`) put into `needs_reauth`, and only those:
     /// a revoked grant still needs a sign-in. That happens only when the save leaves the connector
-    /// enabled; a save that disables it clears nothing, and the save that enables it again (the
-    /// client kept or repeated) clears them instead. The owners of the cleared rows are returned so
-    /// the caller can continue their parked runs.
+    /// enabled. A save that stores a secret and leaves the connector disabled clears nothing; it
+    /// sets the client's `secret_saved_while_off` marker instead, and the save that enables the
+    /// connector again (the client kept or repeated) clears the refused rows only when that marker
+    /// is set. A plain disable and enable with no secret saved in between clears nothing: the
+    /// provider refused the secret that is still saved, so the members stay parked. Any save that
+    /// leaves the connector enabled, or changes the client, resets the marker. The owners of the
+    /// cleared rows are returned so the caller can continue their parked runs.
     ///
     /// This is the only code that writes `connector/<id>/oauth/client-secret`.
     pub(crate) fn put_node_with_client(
@@ -706,6 +759,15 @@ impl SqliteWorkflowStore {
             }
         }
         let mut cleared = Vec::new();
+        let secret_saved = matches!(
+            &plan.write,
+            ClientWrite::Set {
+                secret: Some(_),
+                ..
+            }
+        );
+        // Read after the client write: an upsert keeps the column, a new client row has NULL.
+        let saved_while_off = secret_saved_while_off_in(&tx, &node.connector_id)?;
         if plan.reauth {
             crate::mcp_registry::mark_connector_rows_need_reauth(
                 &tx,
@@ -713,21 +775,22 @@ impl SqliteWorkflowStore {
                 &[mcp_url],
                 "the admin changed the client: reconnect",
             )?;
-        } else if node.enabled
-            && (!was_enabled
-                || matches!(
-                    &plan.write,
-                    ClientWrite::Set {
-                        secret: Some(_),
-                        ..
-                    }
-                ))
-        {
+            set_secret_saved_while_off_in(&tx, &node.connector_id, false)?;
+        } else if !node.enabled {
+            // A secret saved on a disabled connector waits for the enable; a save that keeps the
+            // secret leaves an earlier one waiting.
+            if secret_saved {
+                set_secret_saved_while_off_in(&tx, &node.connector_id, true)?;
+            }
+        } else if secret_saved || (!was_enabled && saved_while_off) {
             // The same client with a new secret: a refresh the old secret failed is worth another
             // try, so the rows it parked are back (the next call refreshes with the new secret).
             // Only on a save that leaves the connector enabled: a save that corrects the secret
             // and disables the connector leaves the rows parked, with their notifications open,
-            // and the enable that follows (with the client kept) is the save that clears them.
+            // and the enable that follows (with the client kept) is the save that clears them. An
+            // enable with no secret saved while the connector was off is not a correction: the
+            // provider refused the secret that is still saved.
+            set_secret_saved_while_off_in(&tx, &node.connector_id, false)?;
             cleared = crate::mcp_registry::clear_refused_client_rows(
                 &tx,
                 &node.connector_id,
@@ -905,8 +968,9 @@ impl std::fmt::Debug for CodeExchangeRequest {
     }
 }
 
-/// The app's own redirect URIs (open question 6): `squrell://oauth`, or a loopback address with a
-/// port and a path. The admin registers them with the provider.
+/// The app's own redirect URIs (open question 6): `squrell://oauth`, or a loopback address with an
+/// explicit port other than 80 (the URL parser drops a default port, so `:80` reads as none) and a
+/// path. The admin registers them with the provider.
 pub const APP_REDIRECT_URI: &str = "squrell://oauth";
 const MAX_CODE_LEN: usize = 4096;
 
@@ -1700,6 +1764,126 @@ mod exchange_tests {
     }
 
     #[test]
+    fn a_plain_disable_and_enable_leaves_a_refused_client_parked() {
+        use crate::mcp_registry::McpOauthStatus::{Connected, NeedsReauth};
+        let tag = "toggle-refused";
+        let (store, vault, _c1) = world(tag);
+        let def = store.connector_entry("filebox").unwrap().unwrap().def;
+        let ada = member_row(&store, &vault, tag, "ada", "c-1", None);
+        store
+            .record_mcp_oauth_refresh_failure(&ada, true, CLIENT_REFUSED_REASON)
+            .unwrap();
+        let keep = ClientPlan {
+            write: ClientWrite::Keep,
+            reauth: false,
+        };
+        let status = || {
+            store
+                .get_mcp_connection(SecretScope::User, "ada", "filebox")
+                .unwrap()
+                .oauth
+                .unwrap()
+                .status
+        };
+        // Off and on again with no secret saved in between: the provider refused the secret that
+        // is still saved, so ada stays parked.
+        assert!(write_node(&store, &vault, &node(false), &keep, tag).is_empty());
+        assert!(write_node(&store, &vault, &node(true), &keep, tag).is_empty());
+        assert_eq!(status(), NeedsReauth);
+        // A save that keeps the connector enabled, with no secret, clears nothing either.
+        assert!(write_node(&store, &vault, &node(true), &keep, tag).is_empty());
+        assert_eq!(status(), NeedsReauth);
+
+        // A corrected secret saved while it is off (in a save of its own) waits for the enable,
+        // and a plain save while off in between does not drop it.
+        assert!(write_node(&store, &vault, &node(false), &keep, tag).is_empty());
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-1", Some("CORRECTED"));
+        assert!(!plan.reauth);
+        assert!(write_node(&store, &vault, &node(false), &plan, tag).is_empty());
+        assert!(write_node(&store, &vault, &node(false), &keep, tag).is_empty());
+        assert_eq!(status(), NeedsReauth);
+        assert_eq!(write_node(&store, &vault, &node(true), &keep, tag), ["ada"]);
+        assert_eq!(status(), Connected);
+
+        // The enable used the marker up: refused again, another plain toggle parks her still.
+        let ada = store
+            .get_mcp_connection(SecretScope::User, "ada", "filebox")
+            .unwrap();
+        store
+            .record_mcp_oauth_refresh_failure(&ada, true, CLIENT_REFUSED_REASON)
+            .unwrap();
+        assert!(write_node(&store, &vault, &node(false), &keep, tag).is_empty());
+        assert!(write_node(&store, &vault, &node(true), &keep, tag).is_empty());
+        assert_eq!(status(), NeedsReauth);
+    }
+
+    #[test]
+    fn a_refusal_of_a_pending_sign_in_stays_pending_and_a_changed_client_replaces_it() {
+        use crate::mcp_registry::McpOauthStatus::NeedsReauth;
+        use crate::mcp_registry::TOOLS_PENDING_REASON;
+        let tag = "pending-refused";
+        let (store, vault, _c1) = world(tag);
+        let def = store.connector_entry("filebox").unwrap().unwrap().def;
+        let refuse_pending = |who: &str| {
+            let row = member_row(&store, &vault, tag, who, "c-1", None);
+            store
+                .record_mcp_oauth_refresh_failure(&row, true, TOOLS_PENDING_REASON)
+                .unwrap();
+            let row = store
+                .get_mcp_connection(SecretScope::User, who, "filebox")
+                .unwrap();
+            store
+                .record_mcp_oauth_refresh_failure(&row, true, CLIENT_REFUSED_REASON)
+                .unwrap();
+        };
+        let state = |who: &str| {
+            let oauth = store
+                .get_mcp_connection(SecretScope::User, who, "filebox")
+                .unwrap()
+                .oauth
+                .unwrap();
+            (oauth.status, oauth.last_refresh_error.unwrap_or_default())
+        };
+        refuse_pending("ada");
+        assert_eq!(
+            state("ada"),
+            (NeedsReauth, CLIENT_REFUSED_PENDING_REASON.to_string())
+        );
+        // A corrected secret for the same client: pending again, not returned (nothing resumes).
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-1", Some("CORRECTED"));
+        assert!(write_node(&store, &vault, &node(true), &plan, tag).is_empty());
+        assert_eq!(
+            state("ada"),
+            (NeedsReauth, TOOLS_PENDING_REASON.to_string())
+        );
+
+        // A→B→A: refused again while pending, then the admin moves to c-2 and back to c-1 with a
+        // corrected secret. B's save replaced the recoverable mark: she signs in again.
+        let row = store
+            .get_mcp_connection(SecretScope::User, "ada", "filebox")
+            .unwrap();
+        store
+            .record_mcp_oauth_refresh_failure(&row, true, CLIENT_REFUSED_REASON)
+            .unwrap();
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-2", Some("B"));
+        assert!(plan.reauth);
+        write_node(&store, &vault, &node(true), &plan, tag);
+        let changed = state("ada");
+        assert_eq!(changed.0, NeedsReauth);
+        assert!(changed.1.contains("changed the client"), "{changed:?}");
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-1", Some("A"));
+        write_node(&store, &vault, &node(true), &plan, tag);
+        let read = store.node_client("filebox").unwrap();
+        let plan = set(&def, read.as_ref(), tag, "c-1", Some("A-CORRECTED"));
+        assert!(write_node(&store, &vault, &node(true), &plan, tag).is_empty());
+        assert_eq!(state("ada"), changed);
+    }
+
+    #[test]
     fn a_corrected_secret_for_a_later_client_leaves_a_row_an_earlier_client_parked() {
         use crate::mcp_registry::McpOauthStatus::NeedsReauth;
         let tag = "fix-later-client";
@@ -2019,6 +2203,8 @@ mod exchange_tests {
             "https://127.0.0.1:5000/cb",
             "http://localhost:5000/cb",
             "http://127.0.0.1/cb",
+            // The default port reads as no port (`Url::port()` is `None` for it): refused too.
+            "http://127.0.0.1:80/cb",
             "http://127.0.0.1:5000/cb?x=1",
             "http://127.0.0.1:5000/cb#f",
             "http://user@127.0.0.1:5000/cb",

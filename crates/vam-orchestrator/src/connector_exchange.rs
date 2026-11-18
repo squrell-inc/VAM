@@ -99,6 +99,18 @@ fn spent_but_not_saved() -> ApiError {
     e
 }
 
+/// The 502 when the provider accepted the code but sent no refresh token. Nothing is written. Not
+/// retryable: the code is spent, and a new sign-in gets no refresh token either until the provider
+/// is set up to issue one (offline access) for the admin's client.
+fn no_refresh_token() -> ApiError {
+    let mut e = ApiError::from(OrchestratorError::Mcp(
+        "the provider accepted the sign-in but issued no refresh token, so the connection could not be kept: the provider must issue a refresh token (offline access) for this client before you sign in again"
+            .into(),
+    ));
+    e.retryable = false;
+    e
+}
+
 /// Exchanges the code and connects the member, all under `gate` (the connection's credential
 /// gate). Blocking.
 ///
@@ -163,10 +175,7 @@ pub(crate) fn exchange_and_connect(
         .map_err(|failure| exchange_failure(id, &failure))?;
     drop(secret);
     let Some(refresh_token) = tokens.refresh_token.as_deref() else {
-        return Err(OrchestratorError::Mcp(
-            "the provider returned no refresh token, so the connection could not be kept".into(),
-        )
-        .into());
+        return Err(no_refresh_token());
     };
 
     let now = now_secs();
