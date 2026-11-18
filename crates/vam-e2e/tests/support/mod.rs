@@ -586,19 +586,18 @@ impl FakeVamd {
                 .unwrap();
             rt.block_on(async move {
                 let app = Router::new().fallback(handle).with_state(state);
-                let mut server = None;
+                let mut listener = None;
                 for _ in 0..40 {
-                    match axum::Server::try_bind(&addr) {
-                        Ok(s) => {
-                            server = Some(s);
+                    match tokio::net::TcpListener::bind(&addr).await {
+                        Ok(l) => {
+                            listener = Some(l);
                             break;
                         }
                         Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
                     }
                 }
-                let Some(server) = server else { return };
-                let _ = server
-                    .serve(app.into_make_service())
+                let Some(listener) = listener else { return };
+                let _ = axum::serve(listener, app.into_make_service())
                     .with_graceful_shutdown(async {
                         let _ = rx.await;
                     })

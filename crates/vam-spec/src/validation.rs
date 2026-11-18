@@ -5066,7 +5066,7 @@ mod tests {
 
         let negative_creation = TokenUsage {
             cache_creation_tokens: -1,
-            ..valid.clone()
+            ..valid
         };
         assert!(negative_creation.validate().is_err());
     }

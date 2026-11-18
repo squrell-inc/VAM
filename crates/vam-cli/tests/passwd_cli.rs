@@ -37,8 +37,8 @@ fn success_sends_both_passwords_with_a_key_and_clears_the_stored_session() {
             .path("/v1/me/password")
             .header("authorization", "Bearer vam_st_login")
             .header_exists("Idempotency-Key")
-            .body_contains("\"currentPassword\":\"old-pw\"")
-            .body_contains("\"newPassword\":\"new-pw\"");
+            .body_includes("\"currentPassword\":\"old-pw\"")
+            .body_includes("\"newPassword\":\"new-pw\"");
         then.status(200)
             .header("content-type", "application/json")
             .body(
@@ -91,7 +91,7 @@ fn each_call_sends_a_fresh_idempotency_key() {
             .await
             .unwrap();
     });
-    mock.assert_hits(2);
+    mock.assert_calls(2);
 }
 
 #[test]

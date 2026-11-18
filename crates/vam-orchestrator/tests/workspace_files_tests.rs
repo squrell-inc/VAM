@@ -85,7 +85,9 @@ fn app_state_http_only(store: Arc<SqliteWorkflowStore>) -> AppState {
 }
 
 async fn response_body(response: axum::response::Response) -> String {
-    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
@@ -146,7 +148,7 @@ async fn workspace_files_list_and_download_happy_path() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/workspaces/{}/files",
                     space(&store, &user_id, "assistant")
                 ))
@@ -168,7 +170,7 @@ async fn workspace_files_list_and_download_happy_path() {
     let download = app
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/workspaces/{}/files/workspace/notes/a.md",
                     space(&store, &user_id, "assistant")
                 ))
@@ -188,7 +190,9 @@ async fn workspace_files_list_and_download_happy_path() {
             .unwrap(),
         "application/octet-stream"
     );
-    let bytes = hyper::body::to_bytes(download.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(download.into_body(), usize::MAX)
+        .await
+        .unwrap();
     assert_eq!(bytes.as_ref(), payload);
 }
 
@@ -220,7 +224,7 @@ async fn workspace_files_list_excludes_skills() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/workspaces/{}/files",
                     space(&store, &user_id, "ws-skills")
                 ))
@@ -261,7 +265,7 @@ async fn workspace_files_deny_listed_download_is_404() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/workspaces/{}/files/workspace/.vam/SYSTEM.md",
                     space(&store, &user_id, "ws-deny")
                 ))
@@ -427,7 +431,7 @@ async fn workspace_files_oversize_returns_413() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/workspaces/{}/files/workspace/huge.bin",
                     space(&store, &user_id, "ws-big")
                 ))
@@ -492,7 +496,7 @@ async fn workspace_files_put_happy_path_round_trips() {
     let download = app
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/workspaces/{}/files/workspace/notes/a.md",
                     space(&store, &user_id, "assistant")
                 ))
@@ -503,7 +507,9 @@ async fn workspace_files_put_happy_path_round_trips() {
         .await
         .unwrap();
     assert_eq!(download.status(), StatusCode::OK);
-    let bytes = hyper::body::to_bytes(download.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(download.into_body(), usize::MAX)
+        .await
+        .unwrap();
     assert_eq!(bytes.as_ref(), payload);
 }
 
@@ -657,7 +663,7 @@ async fn workspace_files_put_json_base64_png_round_trips() {
     let download = app
         .oneshot(
             Request::builder()
-                .uri(&format!(
+                .uri(format!(
                     "/v1/workspaces/{}/files/workspace/pixel.png",
                     space(&store, &user_id, "assistant")
                 ))
@@ -668,7 +674,9 @@ async fn workspace_files_put_json_base64_png_round_trips() {
         .await
         .unwrap();
     assert_eq!(download.status(), StatusCode::OK);
-    let bytes = hyper::body::to_bytes(download.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(download.into_body(), usize::MAX)
+        .await
+        .unwrap();
     assert!(bytes.starts_with(b"\x89PNG"));
 }
 

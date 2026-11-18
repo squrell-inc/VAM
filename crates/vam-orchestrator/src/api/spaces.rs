@@ -22,8 +22,8 @@ const SCOPE: &str = "sessions:write";
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/spaces", get(list_spaces).post(create_space))
-        .route("/v1/spaces/:id", get(get_space).patch(rename_space))
-        .route("/v1/spaces/:id/threads/:thread", patch(rename_thread))
+        .route("/v1/spaces/{id}", get(get_space).patch(rename_space))
+        .route("/v1/spaces/{id}/threads/{thread}", patch(rename_thread))
 }
 
 fn ts(seconds: i64) -> Timestamp {

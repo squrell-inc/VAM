@@ -171,9 +171,11 @@ jobs:
           fi
           grep -qE "^  - version: ${TASK_SET//./\\.}\$" e2e/task-sets.yaml || { echo "::error::task_set $TASK_SET is not a pinned set in e2e/task-sets.yaml"; exit 1; }
           case "$K" in ''|*[!0-9]*) echo "::error::k must be a number"; exit 1;; esac
-          echo "BENCH_SCENARIOS=${SCENARIOS_IN:-tool-call-first-try-saves-a-draft,matching-request-starts-the-playbook,greeting-starts-no-playbook,injected-text-cannot-start-a-playbook}" >> "$GITHUB_ENV"
-          echo "OUT=$RUNNER_TEMP/bench" >> "$GITHUB_ENV"
-          echo "ARTIFACT=bench-${TASK_SET}-$(tr '/' '-' <<<"$MODEL")-${PROFILE}-${{ github.run_id }}" >> "$GITHUB_ENV"
+          {
+            echo "BENCH_SCENARIOS=${SCENARIOS_IN:-tool-call-first-try-saves-a-draft,matching-request-starts-the-playbook,greeting-starts-no-playbook,injected-text-cannot-start-a-playbook}"
+            echo "OUT=$RUNNER_TEMP/bench"
+            echo "ARTIFACT=bench-${TASK_SET}-$(tr '/' '-' <<<"$MODEL")-${PROFILE}-${{ github.run_id }}"
+          } >> "$GITHUB_ENV"
       - name: Bench
         env:
           VERCEL_AI_GATEWAY_KEY: ${{ secrets.VERCEL_AI_GATEWAY_API_KEY }}
@@ -197,12 +199,15 @@ jobs:
             mkdir -p "$STATE"
             mkfifo "$RUNNER_TEMP/node-stdin"
             # 1. Start the bench node; it stops when a line arrives on its stdin.
+            # The redirects are meant to be the runner's, not root's: the runner made the fifo and
+            # later steps read node.log as the runner.
+            # shellcheck disable=SC2024
             sudo env "PATH=$PATH" "${VENV[@]}" "VAMD_SECRETS_MASTER_KEY=$MASTER" \
               "$TDIR/vam-e2e" node --firecracker --state-dir "$STATE" --bin-dir "$(dirname "$VAMD_BIN")" \
               < "$RUNNER_TEMP/node-stdin" > "$RUNNER_TEMP/vmlogs/node.log" 2>&1 &
             NODE_PID=$!
             exec 3> "$RUNNER_TEMP/node-stdin"
-            for i in $(seq 1 120); do grep -q '^node up: ' "$RUNNER_TEMP/vmlogs/node.log" && break; sleep 1; done
+            for _ in $(seq 1 120); do grep -q '^node up: ' "$RUNNER_TEMP/vmlogs/node.log" && break; sleep 1; done
             HOST=$(sed -n 's/^node up: //p' "$RUNNER_TEMP/vmlogs/node.log" | head -n 1)
             [ -n "$HOST" ] || { echo "::error::bench node did not come up"; tail -n 30 "$RUNNER_TEMP/vmlogs/node.log"; exit 1; }
             # 2. Bind the gateway key into the node's vault (vercel/api-key). Key stays in this step's env.
@@ -224,7 +229,7 @@ jobs:
         if: always()
         run: |
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/bench" "$RUNNER_TEMP/vmlogs" 2>/dev/null || true
-          ls -A /srv/jailer/firecracker 2>/dev/null | sed 's/^/jail left: /' || true
+          find /srv/jailer/firecracker -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | sed 's/^/jail left: /' || true
       # No key-shaped string may reach the results (H0 report's pattern: sk- or vck_ plus 10+ key characters).
       - name: Key grep
         if: always()

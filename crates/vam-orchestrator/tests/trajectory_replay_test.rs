@@ -182,7 +182,9 @@ async fn get_trajectory_returns_sanitized_cas_blob() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let got: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(got["digest"], digest);
     assert_eq!(got["events"].as_array().map(|a| a.len()), Some(2));

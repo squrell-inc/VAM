@@ -22,6 +22,7 @@
 
 use std::fmt;
 use std::time::Duration;
+use vam_security::tls_roots::BundledRoots;
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -84,6 +85,7 @@ impl LiveTransport {
 
     fn build(api_base: String, allow_insecure_ws: bool) -> Self {
         let http = reqwest::Client::builder()
+            .bundled_roots()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             // Never follow a redirect: a 3xx could send the bearer token to another host.
@@ -268,9 +270,11 @@ where
                         // Ack first, before anything slow: Slack resends after 3 s.
                         if let Some(id) = env.get("envelope_id").and_then(Value::as_str) {
                             let ack = json!({ "envelope_id": id }).to_string();
-                            let sent =
-                                tokio::time::timeout(ACK_DEADLINE, ws.send(Message::Text(ack)))
-                                    .await;
+                            let sent = tokio::time::timeout(
+                                ACK_DEADLINE,
+                                ws.send(Message::Text(ack.into())),
+                            )
+                            .await;
                             if !matches!(sent, Ok(Ok(()))) {
                                 tracing::warn!("slack envelope ack failed; closing");
                                 break;

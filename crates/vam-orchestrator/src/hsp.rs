@@ -414,7 +414,11 @@ async fn connect_unix(path: &PathBuf) -> Result<Channel, OrchestratorError> {
             .map_err(|err| OrchestratorError::Hsp(format!("invalid endpoint uri: {err}")))?
             .connect_with_connector(tower::service_fn(move |_uri: http::Uri| {
                 let path = path.clone();
-                async move { tokio::net::UnixStream::connect(path).await }
+                async move {
+                    tokio::net::UnixStream::connect(path)
+                        .await
+                        .map(hyper_util::rt::TokioIo::new)
+                }
             }))
             .await
             .map_err(|err| OrchestratorError::Hsp(format!("uds connect failed: {err}")))

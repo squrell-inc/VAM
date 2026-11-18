@@ -30,9 +30,9 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/notifications", get(list))
         .route("/v1/notifications/summary", get(summary))
         .route("/v1/notifications/read", post(read_many))
-        .route("/v1/notifications/:id", get(get_one))
-        .route("/v1/notifications/:id/read", post(read_one))
-        .route("/v1/notifications/:id/acted", post(acted))
+        .route("/v1/notifications/{id}", get(get_one))
+        .route("/v1/notifications/{id}/read", post(read_one))
+        .route("/v1/notifications/{id}/acted", post(acted))
         .route("/v1/me/notification-prefs", get(get_prefs).put(put_prefs))
 }
 
