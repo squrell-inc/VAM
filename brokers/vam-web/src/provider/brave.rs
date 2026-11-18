@@ -402,7 +402,7 @@ mod tests {
             .expect_err("limited");
         assert_eq!(err.code(), "rate_limited");
         // One try plus two retries.
-        assert_eq!(mock.hits(), 3);
+        assert_eq!(mock.calls(), 3);
     }
 
     #[tokio::test]

@@ -27,9 +27,12 @@ use rcgen::{
     CertificateParams, DistinguishedName, DnType, Ia5String, IsCa, KeyPair, KeyUsagePurpose,
     SanType, PKCS_ECDSA_P256_SHA256,
 };
-use rustls::client::{ServerCertVerified, ServerCertVerifier};
-use rustls::{Certificate, ClientConfig, ClientConnection, Connection, PrivateKey, ServerConfig};
-use rustls::{ServerConnection, ServerName};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{aws_lc_rs, CryptoProvider};
+use rustls::pki_types::pem::{self, PemObject};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::{ClientConfig, ClientConnection, Connection, DigitallySignedStruct, ServerConfig};
+use rustls::{ServerConnection, SignatureScheme};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -304,7 +307,7 @@ fn self_signed(s: &TlsSettings<'_>, now: i64) -> Result<Transport, TlsError> {
         }
     }
 
-    let load = || -> Result<(Vec<Vec<u8>>, Vec<u8>), TlsError> {
+    let load = || -> Result<(Vec<Vec<u8>>, PrivateKeyDer<'static>), TlsError> {
         Ok((
             read_certs(&ca_path, "node certificate")?,
             read_key(&key_path, "node key")?,
@@ -418,14 +421,11 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), TlsError> {
 }
 
 fn read_certs(path: &Path, what: &'static str) -> Result<Vec<Vec<u8>>, TlsError> {
-    let items = read_items(path, what)?;
-    let certs: Vec<Vec<u8>> = items
-        .into_iter()
-        .filter_map(|i| match i {
-            rustls_pemfile::Item::X509Certificate(c) => Some(c),
-            _ => None,
-        })
-        .collect();
+    let raw = read_file(path, what)?;
+    let certs = CertificateDer::pem_slice_iter(&raw)
+        .map(|c| c.map(|c| c.as_ref().to_vec()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| pem_read_error(path, what, e))?;
     if certs.is_empty() {
         return Err(TlsError::NoItem {
             what,
@@ -436,33 +436,35 @@ fn read_certs(path: &Path, what: &'static str) -> Result<Vec<Vec<u8>>, TlsError>
     Ok(certs)
 }
 
-fn read_key(path: &Path, what: &'static str) -> Result<Vec<u8>, TlsError> {
-    read_items(path, what)?
-        .into_iter()
-        .find_map(|i| match i {
-            rustls_pemfile::Item::PKCS8Key(k)
-            | rustls_pemfile::Item::RSAKey(k)
-            | rustls_pemfile::Item::ECKey(k) => Some(k),
-            _ => None,
-        })
-        .ok_or_else(|| TlsError::NoItem {
+/// The first PKCS#8, PKCS#1 (RSA) or SEC1 (EC) private key in the file, as DER.
+fn read_key(path: &Path, what: &'static str) -> Result<PrivateKeyDer<'static>, TlsError> {
+    let raw = read_file(path, what)?;
+    match PrivateKeyDer::from_pem_slice(&raw) {
+        Ok(key) => Ok(key),
+        Err(pem::Error::NoItemsFound) => Err(TlsError::NoItem {
             what,
             path: path.to_path_buf(),
             expected: "PEM private key",
-        })
+        }),
+        Err(e) => Err(pem_read_error(path, what, e)),
+    }
 }
 
-fn read_items(path: &Path, what: &'static str) -> Result<Vec<rustls_pemfile::Item>, TlsError> {
-    let raw = fs::read(path).map_err(|e| TlsError::Read {
-        what,
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    rustls_pemfile::read_all(&mut raw.as_slice()).map_err(|e| TlsError::Read {
+fn read_file(path: &Path, what: &'static str) -> Result<Vec<u8>, TlsError> {
+    fs::read(path).map_err(|e| TlsError::Read {
         what,
         path: path.to_path_buf(),
         source: e,
     })
+}
+
+/// A file that is there but does not parse as PEM reads as unreadable, as before.
+fn pem_read_error(path: &Path, what: &'static str, e: pem::Error) -> TlsError {
+    TlsError::Read {
+        what,
+        path: path.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::InvalidData, e.to_string()),
+    }
 }
 
 fn fingerprint(cert_der: &[u8]) -> String {
@@ -473,16 +475,23 @@ fn fingerprint(cert_der: &[u8]) -> String {
         .join(":")
 }
 
-/// The exact server config that will be served, proven by an in-memory handshake
-/// (rustls 0.21 does not check that the key matches the certificate).
-fn build_config(certs: Vec<Vec<u8>>, key: Vec<u8>) -> Result<Arc<ServerConfig>, TlsError> {
-    let mut cfg = ServerConfig::builder()
-        .with_safe_defaults()
+/// The crypto provider every vamd TLS config uses, named explicitly so a second provider in the
+/// dependency graph can never change which one is picked.
+fn provider() -> Arc<CryptoProvider> {
+    Arc::new(aws_lc_rs::default_provider())
+}
+
+/// The exact server config that will be served, proven by an in-memory handshake (the key must
+/// be the certificate's, and the handshake must complete with the protocol versions served).
+fn build_config(
+    certs: Vec<Vec<u8>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<Arc<ServerConfig>, TlsError> {
+    let mut cfg = ServerConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| TlsError::Mismatch(e.to_string()))?
         .with_no_client_auth()
-        .with_single_cert(
-            certs.into_iter().map(Certificate).collect(),
-            PrivateKey(key),
-        )
+        .with_single_cert(certs.into_iter().map(CertificateDer::from).collect(), key)
         .map_err(|e| TlsError::Mismatch(e.to_string()))?;
     cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let cfg = Arc::new(cfg);
@@ -490,29 +499,64 @@ fn build_config(certs: Vec<Vec<u8>>, key: Vec<u8>) -> Result<Arc<ServerConfig>, 
     Ok(cfg)
 }
 
-struct AcceptAnyName;
+#[derive(Debug)]
+struct AcceptAnyName(Arc<CryptoProvider>);
 
 impl ServerCertVerifier for AcceptAnyName {
-    // The chain and name are not the question here; the handshake signature is
-    // (the trait's default `verify_tls1x_signature` checks it against the certificate's key).
+    // The chain and name are not the question here; the handshake signature is, and it is
+    // checked against the certificate's key.
     fn verify_server_cert(
         &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
+        _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
     }
 }
 
 fn handshake_check(server_cfg: Arc<ServerConfig>) -> Result<(), TlsError> {
     let mismatch = |e: &dyn fmt::Display| TlsError::Mismatch(e.to_string());
-    let client_cfg = ClientConfig::builder()
-        .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(AcceptAnyName))
+    let provider = provider();
+    let client_cfg = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| mismatch(&e))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyName(provider)))
         .with_no_client_auth();
     let name = ServerName::try_from("localhost").map_err(|e| mismatch(&e))?;
     let mut client: Connection = ClientConnection::new(Arc::new(client_cfg), name)
@@ -568,6 +612,7 @@ pub async fn serve_app(
 ) -> Result<(), OrchestratorError> {
     let std_listener = listener.into_std().map_err(OrchestratorError::Io)?;
     axum_server::from_tcp_rustls(std_listener, tls.config)
+        .map_err(OrchestratorError::Io)?
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .map_err(|e| OrchestratorError::Core(format!("HTTPS server error: {e}")))

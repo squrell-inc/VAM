@@ -17,5 +17,8 @@ async fn a_wss_handshake_against_a_non_tls_peer_is_an_error_not_a_panic() {
         }
     });
     let result = tokio_tungstenite::connect_async(format!("wss://localhost:{port}/")).await;
-    assert!(result.is_err(), "a non-TLS peer cannot complete a wss handshake");
+    assert!(
+        result.is_err(),
+        "a non-TLS peer cannot complete a wss handshake"
+    );
 }

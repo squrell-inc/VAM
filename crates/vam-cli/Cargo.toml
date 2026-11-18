@@ -18,8 +18,8 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
-prost = "0.12"
-prost-types = "0.12"
+prost = "0.14"
+prost-types = "0.14"
 rpassword = "7"
 flate2 = "1.0"
 reqwest = { workspace = true, features = ["json", "multipart"] }
@@ -37,7 +37,7 @@ vam-telemetry.workspace = true
 
 [dev-dependencies]
 flate2 = "1.0"
-httpmock = "0.7"
+httpmock = "0.9"
 tar = "0.4"
 tempfile = "3.8"
 ed25519-dalek.workspace = true

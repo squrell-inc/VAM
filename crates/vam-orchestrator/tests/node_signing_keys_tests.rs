@@ -93,7 +93,7 @@ async fn node_status_lists_public_signing_keys_and_never_a_secret() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = String::from_utf8(
-        hyper::body::to_bytes(response.into_body())
+        axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap()
             .to_vec(),

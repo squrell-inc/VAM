@@ -380,7 +380,7 @@ fn test_capability_token_lifecycle() {
             .to_string(),
         script_digest: "a1b2c3d4e5f6".to_string(),
         call_id: String::new(),
-        resource_envelope: Some(env_spec.clone()),
+        resource_envelope: Some(env_spec),
         expires_at: 1000,
         nonce: "nonce-xyz-1".to_string(),
     };
@@ -477,7 +477,7 @@ fn test_capability_token_lifecycle() {
     // 5. Envelope widening / tampering
     let widened_spec = vam_spec::v1::ResourceEnvelope {
         max_memory_bytes: 4 * 1024 * 1024 * 1024,
-        ..env_spec.clone()
+        ..env_spec
     };
     let envelope_tamper_res = verify_capability_token(
         "host-test-key",

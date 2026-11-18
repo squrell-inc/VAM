@@ -84,7 +84,7 @@ fn stats_diff_prints_the_changes_and_json_passes_through() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_eq!(v["base"]["version"], "1.0.0");
-    m.assert_hits(2);
+    m.assert_calls(2);
 }
 
 fn release_mock(server: &MockServer) -> httpmock::Mock<'_> {

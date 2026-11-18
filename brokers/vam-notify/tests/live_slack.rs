@@ -603,7 +603,11 @@ async fn dial(path: PathBuf) -> Channel {
         .unwrap()
         .connect_with_connector(tower::service_fn(move |_: Uri| {
             let p = path.clone();
-            async move { tokio::net::UnixStream::connect(p).await }
+            async move {
+                tokio::net::UnixStream::connect(p)
+                    .await
+                    .map(hyper_util::rt::TokioIo::new)
+            }
         }))
         .await
         .unwrap()

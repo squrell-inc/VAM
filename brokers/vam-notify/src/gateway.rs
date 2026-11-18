@@ -57,7 +57,11 @@ impl GatewayClient {
             })?
             .connect_with_connector(tower::service_fn(move |_uri: Uri| {
                 let dial = dial.clone();
-                async move { tokio::net::UnixStream::connect(dial).await }
+                async move {
+                    tokio::net::UnixStream::connect(dial)
+                        .await
+                        .map(hyper_util::rt::TokioIo::new)
+                }
             }))
             .await
             .map_err(|e| GatewayError::Connect {

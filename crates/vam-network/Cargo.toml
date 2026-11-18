@@ -25,7 +25,7 @@ reqwest = { workspace = true, features = ["json"] }
 secrecy = { version = "0.8", features = ["serde"] }
 zeroize = { version = "1.7", features = ["derive"] }
 libc = "0.2"
-prost = "0.12"
+prost = "0.14"
 vam-telemetry.workspace = true
 tracing.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
