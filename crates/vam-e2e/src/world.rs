@@ -94,7 +94,8 @@ pub struct WorldPiece {
     pub files: std::collections::BTreeMap<String, String>,
     /// `skill` only: arrange the piece's name and URN but do not publish it; a `publish-skill`
     /// step does, so a refusal is a step result (product) and not a harness failure. A `playbook`
-    /// piece with `deferred` is not written at `given` either (a `put-draft` step writes it).
+    /// piece with `deferred` is not written at `given` either, nor is an `agent` piece with
+    /// `deferred` and no `release` (a `put-draft` step writes it).
     #[serde(default)]
     pub deferred: bool,
     /// `git-marketplace` only: the https URL the node is told about (the seam maps it to the repo).
@@ -124,11 +125,41 @@ pub struct EgressSpec {
 }
 
 impl WorldPiece {
+    /// True when `given` does not write the piece: a `put-draft` (or inline `chat`) step does.
+    /// A `playbook` with `deferred`, and an `agent` with `deferred` and no `release`. A deferred
+    /// agent with `release: true` is written at `given` and only left unreleased.
+    pub fn written_by_step(&self) -> bool {
+        self.deferred
+            && (self.kind == PieceKind::Playbook
+                || (self.kind == PieceKind::Agent && !self.release))
+    }
+
     /// The URN in `body.spec.resourceId.urn`, when present.
     pub fn urn(&self) -> Option<&str> {
         self.body
             .as_ref()?
             .pointer("/spec/resourceId/urn")?
             .as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn piece(yaml: &str) -> WorldPiece {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn a_deferred_agent_is_written_by_a_step_only_when_it_is_not_released() {
+        assert!(piece("{ piece: a, kind: agent, deferred: true }").written_by_step());
+        assert!(
+            !piece("{ piece: a, kind: agent, deferred: true, release: true }").written_by_step()
+        );
+        assert!(!piece("{ piece: a, kind: agent }").written_by_step());
+        assert!(piece("{ piece: p, kind: playbook, deferred: true }").written_by_step());
+        assert!(!piece("{ piece: p, kind: playbook }").written_by_step());
+        assert!(!piece("{ piece: s, kind: skill, deferred: true }").written_by_step());
     }
 }

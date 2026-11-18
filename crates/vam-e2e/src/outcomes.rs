@@ -357,6 +357,7 @@ impl Engine {
             )),
             (true, false) if r.status / 100 == 4 => {
                 self.ctx.last_refusal = Some(r.body);
+                self.ctx.last_refusal_status = Some(r.status);
                 Ok(())
             }
             (true, _) => Err(Fail::new(

@@ -164,6 +164,34 @@ pub(super) struct Account {
     pub previous_session: Option<Secret>,
 }
 
+/// Replaces each `{{urn:<piece>:<as>}}` in `text` with what `lookup(piece, as)` finds
+/// (percent-encoded with `encode`). `Err` names the first one with no URN. `{{urn:<piece>}}`
+/// (no identity) is left alone: the world substitution owns it.
+pub fn expand_urns(
+    text: &str,
+    encode: bool,
+    mut lookup: impl FnMut(&str, &str) -> Option<String>,
+) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("{{urn:") {
+        let after = &rest[i + 6..];
+        let Some(j) = after.find("}}") else { break };
+        let inner = &after[..j];
+        out.push_str(&rest[..i]);
+        match inner.split_once(':') {
+            Some((piece, who)) => {
+                let urn = lookup(piece, who).ok_or_else(|| inner.to_string())?;
+                out.push_str(&if encode { crate::api::seg(&urn) } else { urn });
+            }
+            None => out.push_str(&rest[i..i + 6 + j + 2]),
+        }
+        rest = &after[j + 2..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 fn product(expected: impl Into<String>, observed: impl Into<String>) -> Fail {
     Fail::new(Class::Product, expected, observed)
 }
@@ -392,10 +420,21 @@ impl Engine {
         };
         let write = method != reqwest::Method::GET;
         let body = (method == reqwest::Method::POST).then(|| json!({}));
+        let path = self.expand_draft_urns(&x.path, true)?;
+        let contains = x
+            .contains
+            .as_deref()
+            .map(|t| self.expand_draft_urns(t, false))
+            .transpose()?;
+        let lacks = x
+            .lacks
+            .as_deref()
+            .map(|t| self.expand_draft_urns(t, false))
+            .transpose()?;
         let want = format!(
             "{} {} as `{}` with {} answers {}",
             x.method.to_uppercase(),
-            x.path,
+            path,
             x.as_,
             match x.credential {
                 Credential::Session => "its session",
@@ -406,18 +445,18 @@ impl Engine {
         );
         let r = self
             .api
-            .call(method, &x.path, body.as_ref(), Some(&bearer), write)
+            .call(method, &path, body.as_ref(), Some(&bearer), write)
             .map_err(conn)?;
         let seen = scrub(&format!("{} {}", r.status, r.body), &[&bearer]);
         if r.status != x.status {
             return Err(product(want, seen));
         }
-        if let Some(sub) = &x.contains {
+        if let Some(sub) = &contains {
             if !r.body.contains(sub.as_str()) {
                 return Err(product(format!("{want} with `{sub}`"), seen));
             }
         }
-        if let Some(sub) = &x.lacks {
+        if let Some(sub) = &lacks {
             if r.body.contains(sub.as_str()) {
                 return Err(product(format!("{want} without `{sub}`"), seen));
             }
@@ -430,43 +469,17 @@ impl Engine {
     /// check never decides the answer.
     pub(super) fn put_draft(&mut self, p: &PutDraft, scenario_id: &str) -> Result<(), Fail> {
         let key = self.key_of(p.as_.as_deref())?;
-        let rec = self.ctx.pieces.get(&p.piece).cloned().ok_or_else(|| {
-            scenario(
-                format!("world piece `{}` in `given`", p.piece),
-                "not in `given`",
-            )
-        })?;
-        let wp = self.pieces.get(&rec.piece).cloned().ok_or_else(|| {
-            Fail::new(
-                Class::Harness,
-                format!("world piece `{}`", rec.piece),
-                "unknown piece",
-            )
-        })?;
-        let coll = match wp.kind {
+        let (kind, body) = self.draft_body(&p.piece, p.as_.as_deref(), scenario_id)?;
+        let coll = match kind {
             PieceKind::Playbook => "playbooks",
             PieceKind::Agent => "agents",
             _ => {
                 return Err(scenario(
                     format!("`{}` is a playbook or agent piece", p.piece),
-                    format!("kind {:?}", wp.kind),
+                    format!("kind {kind:?}"),
                 ))
             }
         };
-        let body = wp
-            .body
-            .as_ref()
-            .ok_or_else(|| scenario(format!("piece `{}` has a body", p.piece), "no body"))?;
-        let who = p.as_.as_deref().unwrap_or("bootstrap");
-        let name = format!("{}-{who}-{scenario_id}-{}", p.piece, self.eff_tag().0);
-        let text = self.subst(body.to_string(), &name);
-        let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-            Fail::new(
-                Class::Harness,
-                "a JSON body after substitution",
-                e.to_string(),
-            )
-        })?;
         let path = format!("/v1/{coll}");
         let want = format!(
             "PUT {path} as {} answers {}{}",
@@ -596,6 +609,30 @@ mod tests {
         assert_eq!(r.role, RoleChange::Member);
         assert!(serde_yaml::from_str::<SetRole>("{ as: m, role: owner }").is_err());
         assert!(serde_yaml::from_str::<SetRole>("{ role: member }").is_err());
+    }
+
+    #[test]
+    fn urn_placeholders_expand_per_identity_and_encode_in_paths() {
+        let find = |piece: &str, who: &str| {
+            (piece == "probe" && who == "pub").then(|| "urn:vam:agent:h/e2e/probe-pub".to_string())
+        };
+        assert_eq!(
+            expand_urns("/v1/agents/{{urn:probe:pub}}/versions", true, find).unwrap(),
+            "/v1/agents/urn%3Avam%3Aagent%3Ah%2Fe2e%2Fprobe-pub/versions"
+        );
+        assert_eq!(
+            expand_urns("a {{urn:probe:pub}} b {{urn:probe:pub}}", false, find).unwrap(),
+            "a urn:vam:agent:h/e2e/probe-pub b urn:vam:agent:h/e2e/probe-pub"
+        );
+        assert_eq!(
+            expand_urns("{{urn:probe:member}}", false, find).unwrap_err(),
+            "probe:member"
+        );
+        // The world's own `{{urn:<piece>}}` and plain text pass through.
+        assert_eq!(
+            expand_urns("x {{urn:probe}} {{name}} {{urn:", false, find).unwrap(),
+            "x {{urn:probe}} {{name}} {{urn:"
+        );
     }
 
     #[test]

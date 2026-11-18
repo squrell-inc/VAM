@@ -383,11 +383,27 @@ status is class `product`.
   plus `catalog:write`).
 - A `playbook` piece with `deferred: true` is not written at `given` (its name and URN are still worked out);
   `playbook-draft-probe` is one, with the body of `playbook-one-step`. A `put-draft` step writes it.
+- An `agent` piece with `deferred: true` and no `release` is not written at `given` either (an agent piece with
+  `deferred` and `release: true` is still written and only left unreleased). `agent-inline-probe` is one, with the
+  body of `agent-plain`. A `put-draft` step saves it, or a `chat` with `inline:` sends it inside the run.
 - `put-draft: { piece, as, status, contains }`: `PUT /v1/playbooks` (or `/v1/agents`, by the piece's kind) with the
   piece's body and an `Idempotency-Key`, as the identity (the bootstrap key when `as` is omitted). The URN's
   `{{name}}` becomes `<piece>-<as>-<scenario>-<runTag>`, so every identity writes a row of its own and the owner
   check never decides the answer; nothing needs cleanup. `status` is exact and required; `contains` is a body
-  substring. The probe writes a playbook because that route stays on `catalog:write` for good.
+  substring. The probe writes a playbook because that route stays on `catalog:write` for good. The step remembers
+  the URN it wrote (or tried) per piece and identity; `chat: { agent: <deferred agent piece>, as }` runs that URN
+  (class `scenario` when no `put-draft` wrote one as that identity), and `identity-request` can name it.
+- `{{urn:<piece>:<as>}}` in an `identity-request`'s `path` (percent-encoded), `contains` and `lacks`: the URN a
+  `put-draft`, or a `chat` with `inline` or `inlinePlaybook`, as `<as>` wrote or tried for `<piece>`. None yet:
+  class `scenario`. `check` needs `<piece>` in `given` and `<as>` an `org` piece.
+- `chat: { inline: <agent piece>, inlinePlaybook: <playbook piece>, refused: true }`: sends the agent piece's
+  `spec` as the run's `inlineAgent` (no `agentRef`) and/or the playbook piece's `spec` as `inlinePlaybook` (with
+  `agent:` or `inline:`), under the name `<piece>-<as>-<scenario>-<runTag>`. vamd accepts neither, so `check`
+  refuses either field without `refused: true`, and a start that is accepted fails the step at once (class
+  `product`) instead of waiting for the run.
+- `expect: { refused: true, status: <n>, contains }`: with `refused`, the refusal's exact HTTP status (without
+  `status`, any 4xx passes). Read after a `chat` step; a refusal from another step records no status (class
+  `scenario`).
 - `set-role: { as, role: publisher | member }`: as the bootstrap key, `POST` (publisher) or `DELETE` (member)
   `/v1/users/{id}/publish-grant` for the identity. A non-2xx answer is class `harness`, because the role change is
   arrangement, not the behaviour under test.
