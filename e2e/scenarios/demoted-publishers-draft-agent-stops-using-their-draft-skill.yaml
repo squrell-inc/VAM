@@ -40,5 +40,4 @@ mock:
     reply: { toolCall: { name: load_skill, args: { skill: skill-draft-probe-demoted-publishers-draft-agent-stops-using-their-draft-skill } } }
   - when: { step: md }
     reply: { text: Hello. }
-status: pending
-expectFail: { step: then.1, class: product }
+status: active

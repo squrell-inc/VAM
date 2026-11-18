@@ -149,7 +149,12 @@ pub fn record_resolved_refs(
 
     let mut resolved = Vec::new();
     if let Some(playbook_ref) = spec.playbook_ref.take() {
-        let pinned = resolve_ref_by_urn(store, &playbook_ref, viewer)?;
+        // The caller named this ref: a caller who does not author never takes a draft.
+        let playbook_viewer = Viewer {
+            mode: caller_ref_mode(store, owner_user_id, mode),
+            ..viewer
+        };
+        let pinned = resolve_ref_by_urn(store, &playbook_ref, playbook_viewer)?;
         spec.playbook_ref = Some(pinned.clone());
         if !is_unversioned(&playbook_ref) || pinned.version.is_some() {
             resolved.push(pinned);
@@ -194,11 +199,92 @@ pub fn run_resolve_context(
         .agent_ref
         .as_ref()
         .and_then(|r| r.resource_id.as_ref())
-        .and_then(|id| store.get_agent_record_visible(&id.urn, caller, true).ok())
-        .map(|record| record.owner_user_id)
-        .filter(|owner| !owner.is_empty())
-        .unwrap_or_else(|| caller.to_string());
-    (owner, ResolveMode::Draft)
+        .map(|id| store.agent_draft_owner(&id.urn));
+    let owner = match owner {
+        Some(Ok(Some(owner))) => owner,
+        // A lookup error fails closed: `local` is a Member, so the run is released-only.
+        Some(Err(_)) => crate::users::LOCAL_USER_ID.to_string(),
+        Some(Ok(None)) | None => caller.to_string(),
+    };
+    let mode = draft_mode_for_owner(store, &owner);
+    (owner, mode)
+}
+
+/// True when `user_id` authors catalog parts by its LIVE role: Operator, OrgAdmin or
+/// Publisher, and the bootstrap owner always. A missing users row or a lookup error does
+/// not author (fail closed). The legacy owner `local` is a Member.
+pub(crate) fn owner_authors(store: &SqliteWorkflowStore, user_id: &str) -> bool {
+    if user_id == crate::users::OPERATOR_USER_ID {
+        return true;
+    }
+    store
+        .get_user(user_id)
+        .map(|user| user.role != crate::users::UserRole::Member)
+        .unwrap_or(false)
+}
+
+/// The mode a draft agent's run resolves every ref in: [`ResolveMode::Draft`] when the
+/// agent row's owner authors, else [`ResolveMode::ReleasedOnly`].
+pub(crate) fn draft_mode_for_owner(store: &SqliteWorkflowStore, owner: &str) -> ResolveMode {
+    if owner_authors(store, owner) {
+        ResolveMode::Draft
+    } else {
+        ResolveMode::ReleasedOnly
+    }
+}
+
+/// The mode for a ref the caller names at start (a run's `playbook_ref`, a grant's
+/// playbook): `base` when the caller authors, else [`ResolveMode::ReleasedOnly`], so a
+/// Member's explicit `-draft` ref is refused. A released agent's frozen refs keep `base`.
+pub(crate) fn caller_ref_mode(
+    store: &SqliteWorkflowStore,
+    caller: &str,
+    base: ResolveMode,
+) -> ResolveMode {
+    if base == ResolveMode::ReleasedOnly || !owner_authors(store, caller) {
+        ResolveMode::ReleasedOnly
+    } else {
+        base
+    }
+}
+
+/// Session start in [`ResolveMode::ReleasedOnly`]: a recorded draft pin (the run was
+/// recorded while its owner authored) is refused, so a demoted owner's old run fails closed.
+pub(crate) fn require_no_draft_pins(
+    spec: &RunSpec,
+    mode: ResolveMode,
+) -> Result<(), OrchestratorError> {
+    if mode != ResolveMode::ReleasedOnly {
+        return Ok(());
+    }
+    for pinned in spec.resolved_refs.iter().chain(spec.playbook_ref.iter()) {
+        let draft = pinned
+            .version
+            .as_ref()
+            .is_some_and(|v| v.prerelease.eq_ignore_ascii_case("draft"));
+        let urn = pinned
+            .resource_id
+            .as_ref()
+            .map(|id| id.urn.as_str())
+            .unwrap_or("");
+        if draft && matches!(artifact_kind(urn), Some("skill" | "playbook" | "policy")) {
+            return Err(OrchestratorError::InvalidContract(format!(
+                "'{urn}': drafts are not available to this agent"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The one message for every ref that is not an existing release, whatever the cause
+/// (missing URN, someone else's draft, the caller's own draft, an explicit `-draft`, a
+/// version with no release, a digest mismatch): nothing to learn about other users' rows.
+pub(crate) fn not_released(kind: ArtifactKind, urn: &str) -> OrchestratorError {
+    OrchestratorError::InvalidContract(format!(
+        "{} '{urn}' has no released version; an agent saved by a member may use released \
+         skills, playbooks and policies only",
+        kind.noun()
+    ))
 }
 
 /// Whose draft is a floating ref allowed to land on.
@@ -490,6 +576,9 @@ fn collect_policy_refs(
             refs.push(r.clone());
         }
     }
+    if let Some(permissions) = &agent.permissions {
+        refs.extend(permissions.advanced.iter().cloned());
+    }
     for policy_ref in refs {
         if policy_ref.resource_id.is_none() {
             continue;
@@ -619,6 +708,12 @@ fn resolve_inner(
 
     let pin = match pin {
         Ok(pin) => pin,
+        Err(OrchestratorError::InvalidContract(msg))
+            if viewer.mode == ResolveMode::ReleasedOnly
+                && msg.ends_with("has no published version") =>
+        {
+            return Err(not_released(kind, urn));
+        }
         // A draft pin that is missing or foreign is an error, never kept as-is.
         Err(err @ OrchestratorError::NotFound(_))
             if resource_ref
@@ -1529,6 +1624,12 @@ mod tests {
         let store = store();
         store.create_user("alice", "alice").expect("alice");
         store.create_user("bob", "bob").expect("bob");
+        // Callers who author; a Member's explicit `-draft` ref is refused.
+        for user in ["alice", "bob"] {
+            store
+                .set_user_role(user, crate::users::UserRole::Publisher)
+                .expect("promote");
+        }
         store
             .publish_playbook_draft_with_owner(&test_playbook(), "alice")
             .expect("alice draft");
@@ -1634,6 +1735,10 @@ mod tests {
         let store = store();
         store.create_user("alice", "alice").expect("alice");
         store.create_user("bob", "bob").expect("bob");
+        // A draft owner who authors; a Member's draft agent runs released-only.
+        store
+            .set_user_role("alice", crate::users::UserRole::Publisher)
+            .expect("promote alice");
         store
             .put_skill_package_with_owner(
                 &package(DIGEST_100, 1, 0, 0, "", SkillChannel::Released),
@@ -2010,5 +2115,241 @@ mod tests {
             v.prerelease = "Draft".to_string();
         }
         released_only(&store, ArtifactKind::Skill, &cased, "alice").expect_err("cased draft");
+    }
+
+    // ---- Wave 2: a Member-owned draft agent runs released-only (MD-3.5) ----
+
+    use crate::users::UserRole;
+
+    fn demote(store: &SqliteWorkflowStore, user: &str) {
+        store.set_user_role(user, UserRole::Member).expect("demote");
+    }
+
+    fn alice_draft_agent(store: &SqliteWorkflowStore, refs: Vec<ResourceRef>) -> AgentSpec {
+        let agent = floating_agent(ALICE_AGENT_URN, refs);
+        store
+            .publish_agent_draft_with_owner(&agent, "alice")
+            .expect("alice agent");
+        agent
+    }
+
+    #[test]
+    fn member_owned_draft_run_pins_the_latest_release_not_the_owners_draft() {
+        let store = store_with_alice_skill();
+        let agent = alice_draft_agent(&store, vec![unversioned_skill()]);
+        let record = |store: &SqliteWorkflowStore| {
+            let mut spec = draft_run_spec(ALICE_AGENT_URN);
+            record_resolved_refs(store, &mut spec, &agent, "alice", false).expect("resolve");
+            pinned_skill(&spec).clone()
+        };
+        // A publisher's draft run takes their draft.
+        assert_eq!(record(&store).version.unwrap().prerelease, "draft");
+        // The demoted publisher's draft run flips to the release.
+        demote(&store, "alice");
+        let pinned = record(&store);
+        assert_eq!(pinned.version.unwrap().prerelease, "");
+        assert_eq!(pinned.digest.unwrap().hex_hash, DIGEST_100);
+    }
+
+    #[test]
+    fn member_owned_draft_run_refuses_unreleased_pins_also_for_an_admin_caller() {
+        let store = store_with_alice_skill();
+        demote(&store, "alice");
+        let missing = ResourceRef {
+            version: Some(Version {
+                major: 9,
+                minor: 9,
+                patch: 9,
+                prerelease: String::new(),
+                build: String::new(),
+            }),
+            digest: Some(Digest {
+                algorithm: SHA256,
+                hex_hash: DIGEST_200.to_string(),
+            }),
+            ..unversioned_skill()
+        };
+        for skill_ref in [missing, draft_ref(SKILL_URN, DIGEST_DRAFT)] {
+            let agent = alice_draft_agent(&store, vec![skill_ref]);
+            for (caller, admin) in [("alice", false), ("bob", true)] {
+                let mut spec = draft_run_spec(ALICE_AGENT_URN);
+                let err = record_resolved_refs(&store, &mut spec, &agent, caller, admin)
+                    .expect_err("refused");
+                let text = err.to_string();
+                assert!(
+                    text.contains("not found in catalog")
+                        || text.contains("drafts are not available"),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_floating_skill_with_no_release_says_released_for_a_member_owned_draft() {
+        let store = store();
+        store.create_user("alice", "alice").expect("alice");
+        store
+            .put_skill_package_with_owner(
+                &package(DIGEST_DRAFT, 1, 0, 0, "draft", SkillChannel::Draft),
+                "alice",
+            )
+            .expect("draft only");
+        let agent = alice_draft_agent(&store, vec![unversioned_skill()]);
+        let mut spec = draft_run_spec(ALICE_AGENT_URN);
+        let err = record_resolved_refs(&store, &mut spec, &agent, "alice", false)
+            .expect_err("no release");
+        assert!(err.to_string().contains("has no released version"), "{err}");
+    }
+
+    #[test]
+    fn who_authors_follows_the_live_role() {
+        let store = store();
+        store.create_user("pat", "pat").expect("pat");
+        // `local` is a Member, a user with no row is not an author, the bootstrap owner always is.
+        assert!(!owner_authors(&store, LOCAL_USER_ID));
+        assert!(!owner_authors(&store, "nobody"));
+        assert!(!owner_authors(&store, "pat"));
+        assert!(owner_authors(&store, crate::users::OPERATOR_USER_ID));
+        for role in [UserRole::Publisher, UserRole::OrgAdmin, UserRole::Operator] {
+            store.set_user_role("pat", role).expect("role");
+            assert!(owner_authors(&store, "pat"), "{role:?}");
+        }
+        assert_eq!(
+            draft_mode_for_owner(&store, LOCAL_USER_ID),
+            ResolveMode::ReleasedOnly
+        );
+        assert_eq!(draft_mode_for_owner(&store, "pat"), ResolveMode::Draft);
+    }
+
+    #[test]
+    fn a_bootstrap_owned_draft_run_stays_draft() {
+        let store = store();
+        let spec = draft_run_spec(ALICE_AGENT_URN);
+        store
+            .publish_agent_draft_with_owner(
+                &floating_agent(ALICE_AGENT_URN, vec![]),
+                crate::users::OPERATOR_USER_ID,
+            )
+            .expect("operator draft");
+        let (owner, mode) = run_resolve_context(&store, &spec, crate::users::OPERATOR_USER_ID);
+        assert_eq!(owner, crate::users::OPERATOR_USER_ID);
+        assert_eq!(mode, ResolveMode::Draft);
+    }
+
+    #[test]
+    fn the_local_owners_draft_run_is_released_only() {
+        let store = store();
+        let spec = draft_run_spec(ALICE_AGENT_URN);
+        store
+            .publish_agent_draft_with_owner(&floating_agent(ALICE_AGENT_URN, vec![]), LOCAL_USER_ID)
+            .expect("local draft");
+        let (owner, mode) = run_resolve_context(&store, &spec, LOCAL_USER_ID);
+        assert_eq!(owner, LOCAL_USER_ID);
+        assert_eq!(mode, ResolveMode::ReleasedOnly);
+    }
+
+    #[test]
+    fn a_members_run_of_a_released_agent_keeps_its_frozen_refs() {
+        // A released agent runs as it was released: a versioned ref the catalog does not
+        // hold (seed or HSP synthetic skill) is kept as-is for a Member caller.
+        let store = store();
+        store.create_user("mia", "mia").expect("member");
+        let frozen = ResourceRef {
+            version: Some(Version {
+                major: 7,
+                minor: 0,
+                patch: 0,
+                prerelease: String::new(),
+                build: String::new(),
+            }),
+            digest: Some(Digest {
+                algorithm: SHA256,
+                hex_hash: DIGEST_200.to_string(),
+            }),
+            ..unversioned_skill()
+        };
+        let agent = test_agent(vec![frozen.clone()]);
+        store
+            .put_agent_released_with_owner(&agent, LOCAL_USER_ID)
+            .expect("released agent");
+        let mut spec = RunSpec::default();
+        record_resolved_refs(&store, &mut spec, &agent, "mia", false).expect("member run");
+        assert_eq!(spec.resolved_refs, vec![frozen]);
+    }
+
+    #[test]
+    fn a_members_explicit_draft_playbook_is_refused_even_on_their_own_draft() {
+        let store = store();
+        store.create_user("mia", "mia").expect("member");
+        store
+            .publish_playbook_draft_with_owner(&test_playbook(), "mia")
+            .expect("mia draft");
+        let version = draft_ref(PLAYBOOK_URN, "").version.expect("v");
+        let digest = store
+            .catalog_pin_at_version("playbooks", PLAYBOOK_URN, &version, "mia", false)
+            .expect("pin")
+            .digest;
+        let mut spec = run_spec();
+        spec.playbook_ref = Some(draft_ref(PLAYBOOK_URN, &digest));
+        let err = record_resolved_refs(&store, &mut spec, &AgentSpec::default(), "mia", false)
+            .expect_err("a member never runs a draft playbook");
+        assert!(
+            err.to_string().contains("drafts are not available"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn advanced_policy_refs_are_recorded_in_every_mode() {
+        let store = store_with_alice_skill();
+        store
+            .put_policy_released_with_owner(
+                POLICY_URN,
+                "permit(principal, action, resource);",
+                "alice",
+            )
+            .expect("policy release");
+        let mut agent = floating_agent(ALICE_AGENT_URN, vec![]);
+        agent.permissions = Some(vam_spec::v1::AgentPermissions {
+            advanced: vec![unversioned_ref(POLICY_URN)],
+            ..Default::default()
+        });
+        store
+            .put_agent_released_with_owner(&agent, "alice")
+            .expect("release");
+        store
+            .publish_agent_draft_with_owner(&agent, "alice")
+            .expect("draft");
+        let record = |draft: bool| {
+            let mut spec = if draft {
+                draft_run_spec(ALICE_AGENT_URN)
+            } else {
+                RunSpec::default()
+            };
+            record_resolved_refs(&store, &mut spec, &agent, "alice", false).expect("record");
+            spec.resolved_refs
+        };
+        for draft in [false, true] {
+            let refs = record(draft);
+            assert_eq!(refs.len(), 1, "draft={draft}");
+            assert!(refs[0].version.is_some() && refs[0].digest.is_some());
+        }
+        demote(&store, "alice");
+        assert_eq!(record(true).len(), 1);
+    }
+
+    #[test]
+    fn a_recorded_draft_pin_fails_closed_at_boot_once_released_only() {
+        let spec = RunSpec {
+            resolved_refs: vec![draft_ref(SKILL_URN, DIGEST_DRAFT)],
+            ..Default::default()
+        };
+        require_no_draft_pins(&spec, ResolveMode::Draft).expect("draft mode");
+        let err = require_no_draft_pins(&spec, ResolveMode::ReleasedOnly).expect_err("closed");
+        assert!(
+            err.to_string().contains("drafts are not available"),
+            "{err}"
+        );
     }
 }

@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension};
 use vam_spec::v1::agent_spec::InstructionSource;
 use vam_spec::v1::{AgentSpec, ResourceRef};
 
-use crate::catalog_resolve::{resolve_ref_for_owner, ArtifactKind, ResolveMode};
+use crate::catalog_resolve::{not_released, resolve_ref_for_owner, ArtifactKind, ResolveMode};
 use crate::error::OrchestratorError;
 use crate::workflow::SqliteWorkflowStore;
 
@@ -109,17 +109,6 @@ fn refs_to_check(spec: &AgentSpec) -> Vec<(ArtifactKind, &ResourceRef)> {
             .map(|r| (ArtifactKind::Policy, r)),
     );
     refs
-}
-
-/// The one message for every ref that is not an existing release, whatever the cause
-/// (missing URN, someone else's draft, the caller's own draft, an explicit `-draft`, a
-/// version with no release, a digest mismatch): nothing to learn about other users' rows.
-fn not_released(kind: ArtifactKind, urn: &str) -> OrchestratorError {
-    OrchestratorError::InvalidContract(format!(
-        "{} '{urn}' has no released version; an agent saved by a member may use released \
-         skills, playbooks and policies only",
-        kind.noun()
-    ))
 }
 
 /// Decision 7 at save: every ref resolves to an existing release
