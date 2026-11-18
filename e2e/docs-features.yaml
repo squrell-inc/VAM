@@ -135,6 +135,17 @@ features:
     arch: [orchestrator/user-isolation]
     proves:
       - member-chats-with-a-released-agent
+  - id: generated-user-ids-and-case-insensitive-login-names
+    area: "Auth and users"
+    surface: "API POST /v1/users, /v1/login, /v1/users/:id/keys; CLI vam keys create --user-id; vamd --rename-user"
+    dev: [getting-started/users-and-roles, getting-started/cli]
+    arch: [orchestrator/user-isolation, orchestrator/api]
+    proves:
+      - email-username-signs-in-in-any-letter-case
+      - new-user-gets-a-generated-id-it-cannot-choose
+      - username-differing-only-in-letter-case-is-refused
+      - user-path-resolves-by-id-then-by-login-name
+      - generated-id-and-email-login-survive-a-restart
   - id: change-your-own-password
     area: "Auth and users"
     surface: "CLI vam passwd; API POST /v1/me/password"

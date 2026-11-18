@@ -617,6 +617,19 @@ fn identity_steps_need_org_aliases_and_sane_arguments() {
     );
 }
 
+const IDENTITY_FORMS: &str = "id: chat-replies
+title: A mixed-case login
+tags: [members]
+needs: process
+given: [org-admin, { piece: org-member, as: person }]
+when:
+  - create-user: { as: person, username: \"fresh-{tag}\", userId: usr_x, status: 400 }
+  - login: { as: person, case: upper }
+then:
+  - identity-request: { as: person, credential: key, path: \"/v1/users/{person.USERNAME}/keys\", status: 200, fields: { userId: \"{person.userId}\" } }
+status: active
+";
+
 const DRAFT_AGENT: &str = "piece: agent-draft\nkind: agent\ndeferred: true\nbody:\n  spec:\n    resourceId: { urn: \"urn:vam:agent:x/{{ns}}/{{name}}\" }\n";
 const SKILL_DRAFT: &str = "piece: skill-draft\nkind: skill\ndeferred: true\nbody:\n  spec:\n    resourceId: { urn: \"urn:vam:skill:x/e2e/{{name}}\" }\n";
 const MEMBER_DRAFTS: &str = "id: chat-replies
@@ -646,6 +659,12 @@ fn drafts_fx(scenario: &str) -> Fx {
 #[test]
 fn member_draft_steps_catalog_is_clean() {
     let f = drafts_fx(MEMBER_DRAFTS);
+    assert!(f.errors().is_empty(), "{:#?}", f.errors());
+}
+
+#[test]
+fn identity_forms_catalog_is_clean() {
+    let f = flood_fx(IDENTITY_FORMS);
     assert!(f.errors().is_empty(), "{:#?}", f.errors());
 }
 
@@ -706,4 +725,47 @@ fn publish_skill_as_needs_an_org_alias_and_release_false_is_not_a_refusal() {
         "publish-skill",
         "`release: false` and `refused: true` do not combine",
     );
+}
+
+#[test]
+fn identity_forms_are_linted() {
+    let f = flood_fx(&IDENTITY_FORMS.replace("case: upper", "case: title"));
+    assert!(
+        f.errors().iter().any(|e| e.contains("title")),
+        "{:#?}",
+        f.errors()
+    );
+    let f = flood_fx(&IDENTITY_FORMS.replace("as: person, username", "as: nobody, username"));
+    f.expect_error("step-alias", "`as: nobody` is not an org piece");
+    let f = flood_fx(&IDENTITY_FORMS.replace("{person.USERNAME}", "{nobody.USERNAME}"));
+    f.expect_error("step-alias", "`{nobody.USERNAME}` names `nobody`");
+    let f = flood_fx(&IDENTITY_FORMS.replace("{person.userId}", "{person.userid}"));
+    f.expect_error("step-placeholder", "`{person.userid}` is not a placeholder");
+    let f = flood_fx(&IDENTITY_FORMS.replace("username: \"fresh-{tag}\"", "username: \" \""));
+    f.expect_error("create-user", "needs a `username`");
+}
+
+#[test]
+fn org_piece_username_is_linted() {
+    let f = flood_fx(IDENTITY_FORMS);
+    f.write(
+        "world/org-email.yaml",
+        "piece: org-email\nkind: org\nrole: Member\nusername: \"Ada+x-{tag}@Example.Test\"\n",
+    );
+    assert!(f.errors().is_empty(), "{:#?}", f.errors());
+    f.write(
+        "world/org-email.yaml",
+        "piece: org-email\nkind: org\nrole: Member\nusername: \"a@b@c-{tag}\"\n",
+    );
+    f.expect_error("piece-body", "`username` belongs to an `org` piece");
+    f.write(
+        "world/org-email.yaml",
+        "piece: org-email\nkind: org\nrole: Member\nusername: \"sp ace\"\n",
+    );
+    f.expect_error("piece-body", "`username` belongs to an `org` piece");
+    f.write(
+        "world/org-email.yaml",
+        "piece: org-email\nkind: secret\nusername: \"fine\"\n",
+    );
+    f.expect_error("piece-body", "`username` belongs to an `org` piece");
 }

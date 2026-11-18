@@ -591,9 +591,15 @@ message UserAccount {
 }
 
 message CreateUserRequest {
+  // The login name: ASCII letters, digits, '.', '-', '_', '+' and at most one '@' (an email
+  // address is fine), at most 254 characters, unique ignoring letter case. It may not start
+  // with "usr_" or be "bootstrap". A taken name is 409.
   string username = 1;
   string password = 2;
   string role = 3;
+  // Deprecated: the node generates every new user's id ("usr_" plus 26 characters), so this
+  // must be empty. A non-empty value is refused with 400 and creates no user. The field number
+  // stays so old clients still decode.
   string user_id = 4;
 }
 
