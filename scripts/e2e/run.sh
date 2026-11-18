@@ -58,7 +58,7 @@ if [ "$fc" -eq 1 ]; then
     exit 2
   fi
 elif [ -z "${VAM_E2E_SKIP_BUILD:-}" ]; then
-  cargo build -q -p vam-orchestrator -p vam-runtime -p vam-cli -p vam-e2e -p vam-schedule \
+  cargo build -q -p vam-orchestrator -p vam-runtime -p vam-cli -p vam-e2e -p vam-schedule -p vam-web \
     --features vam-orchestrator/process-guest,vam-runtime/process-guest
   # The fake-transport notification broker is built on its own and last: a build of the same
   # package without the feature would replace target/debug/vam-notify-broker.
@@ -77,6 +77,9 @@ elif [ -z "${VAM_E2E_SKIP_BUILD:-}" ]; then
   # The notification broker the `notify-broker` piece starts: the fake-transport build (test only).
   cp -f "$target_dir/debug/vam-notify-broker" "$bin_dir/vam-notify-broker"
   export VAM_E2E_NOTIFY_BROKER="$bin_dir/vam-notify-broker"
+  # The web broker, for the `cli` step's `bin: vam-web-broker` (--version).
+  cp -f "$target_dir/debug/vam-web-broker" "$bin_dir/vam-web-broker"
+  export VAM_E2E_WEB_BROKER="$bin_dir/vam-web-broker"
   export VAM_E2E_CLI="$bin_dir/vam"
   export VAM_E2E_VAMD="$bin_dir/vamd"
   export VAMD_PROCESS_GUEST_BIN="$bin_dir/vam-runtime"

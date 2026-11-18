@@ -291,6 +291,86 @@ pub struct CliStep {
     /// The output holds a line `<prefix><secret>`; the secret is kept (never printed) for
     /// `{{secret}}` in later `contains`, `absent` and `absentInFiles` of this and later steps.
     pub capture: Option<String>,
+    /// The program: `vam` (default), `vamd`, `vam-web-broker`, `vam-schedule-broker` or
+    /// `vam-notify-broker`, from the paths `scripts/e2e/run.sh` exports.
+    #[serde(default)]
+    pub bin: CliBin,
+    /// `root`: run in the scratch tree instead of the harness directory.
+    pub cwd: Option<String>,
+    /// Regular expressions the combined output must match (each over the whole trimmed output;
+    /// use `^` and `$` per line with `(?m)`).
+    #[serde(default)]
+    pub matches: Vec<String>,
+    /// Keep the word after `after` in the output as `{{<as>}}` for later steps (may be printed).
+    pub remember: Option<CliRemember>,
+    /// An `org` piece of `given`: the step gets `--host`, `--token` and `VAM_CA_FILE` as that
+    /// identity.
+    #[serde(rename = "as")]
+    pub as_: Option<String>,
+    /// Seconds before the command is killed (default 30); a hang is `product`.
+    pub timeout: Option<u64>,
+    /// A path in the tree: run a copy of `vam` placed there.
+    pub copy_cli: Option<String>,
+    /// Assertions on files in the tree, by path.
+    #[serde(default)]
+    pub files: std::collections::BTreeMap<String, CliFile>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliRemember {
+    #[serde(rename = "as")]
+    pub as_: String,
+    pub after: String,
+}
+
+/// What a `cli` step asserts on one file under the tree.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliFile {
+    pub contains: Option<String>,
+    pub absent: Option<String>,
+    /// The file's bytes are what they were before the step.
+    #[serde(default)]
+    pub unchanged: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub enum CliBin {
+    #[default]
+    #[serde(rename = "vam")]
+    Vam,
+    #[serde(rename = "vamd")]
+    Vamd,
+    #[serde(rename = "vam-web-broker")]
+    WebBroker,
+    #[serde(rename = "vam-schedule-broker")]
+    ScheduleBroker,
+    #[serde(rename = "vam-notify-broker")]
+    NotifyBroker,
+}
+
+impl CliBin {
+    pub fn name(self) -> &'static str {
+        match self {
+            CliBin::Vam => "vam",
+            CliBin::Vamd => "vamd",
+            CliBin::WebBroker => "vam-web-broker",
+            CliBin::ScheduleBroker => "vam-schedule-broker",
+            CliBin::NotifyBroker => "vam-notify-broker",
+        }
+    }
+
+    /// The environment variable `run.sh` exports for this program.
+    pub fn env_var(self) -> &'static str {
+        match self {
+            CliBin::Vam => "VAM_E2E_CLI",
+            CliBin::Vamd => "VAM_E2E_VAMD",
+            CliBin::WebBroker => "VAM_E2E_WEB_BROKER",
+            CliBin::ScheduleBroker => "VAM_E2E_SCHEDULE_BROKER",
+            CliBin::NotifyBroker => "VAM_E2E_NOTIFY_BROKER",
+        }
+    }
 }
 
 /// Where a `cli` step runs: a fresh copy of a fixture directory (`from`, under

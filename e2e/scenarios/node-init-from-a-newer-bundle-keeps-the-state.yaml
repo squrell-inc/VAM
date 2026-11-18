@@ -1,0 +1,48 @@
+id: node-init-from-a-newer-bundle-keeps-the-state
+title: Installing a newer bundle over an older one rebuilds the base and keeps the node's state
+description: >
+  After `vam node init --no-systemd` from the first bundle, the same command from the second
+  bundle on the same tree prints no new admin key (the node already has one), leaves `state.db`
+  and `tls/ca.pem` byte for byte as they were, and rebuilds the base because the runtime
+  changed: the base manifest now names the second runtime's sha256.
+
+  The systemd unit is not asserted: its `ExecStart` names the `--vamd` the step is given, which
+  is the same binary for both bundles, so a newer `vamd` beside `vam` cannot be told apart here.
+  Both bundles sit in the one fixture tree (`kit-1`, `kit-2`) and the second step runs the second
+  copy of `vam`.
+tags: [release]
+needs: process
+given: []
+when:
+  - cli:
+      args: [node, init, --root, "{{root}}", --no-systemd, --vamd, "{{vamd}}"]
+      root: { from: node-init/bundle }
+      cwd: root
+      copyCli: kit-1/vam
+      exit: ok
+      capture: "admin key: "
+      contains:
+        - "done base: built from the kit"
+  - cli:
+      args: [node, init, --root, "{{root}}", --no-systemd, --vamd, "{{vamd}}"]
+      root: { same: true }
+      cwd: root
+      copyCli: kit-2/vam
+      exit: ok
+      contains:
+        - "already has an admin key"
+        - "done base: built from the kit"
+      absent:
+        - "admin key: "
+        - "{{secret}}"
+        - "checkout"
+      files:
+        var/lib/vam/state.db: { unchanged: true }
+        var/lib/vam/tls/ca.pem: { unchanged: true }
+        var/lib/vam/assets/rootfs.base.json:
+          contains: "cf9980a151e8deac990bbbdf81ca36307f6fa7ddb62c48c7cd42d036a0a8b229"
+guards:
+  - vam:crates/vam-cli/src/cmd/node_install.rs
+  - vam:crates/vam-cli/src/cmd/node.rs
+status: pending
+expectFail: { step: when.0, class: product }
