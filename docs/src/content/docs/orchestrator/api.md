@@ -40,7 +40,7 @@ request and response shapes, is the OpenAPI file the node serves.
 | Identity | `/v1/login`, `/v1/login/refresh`, `/v1/logout`, `/v1/me`, `/v1/keys`, `/v1/users` |
 | Catalog | `/v1/agents`, `/v1/skills`, `/v1/playbooks`, `/v1/policies`, `/v1/agent-checks` |
 | Sessions | `/v1/sessions`, and `pause`, `resume`, `terminate`, `snapshots` under `/v1/sessions/{id}` |
-| Runs | `/v1/runs`, and `messages`, `stop`, `cancel`, `events` under `/v1/runs/{id}` |
+| Runs | `/v1/runs` (an agent or playbook by reference only: `inlineAgent` and `inlinePlaybook` are refused with 400, so save with `PUT /v1/agents` or `PUT /v1/playbooks` first), and `messages`, `stop`, `cancel`, `events` under `/v1/runs/{id}` |
 | Approvals | `/v1/approvals`, `/v1/approvals/{id}/decide` |
 | Secrets | `/v1/secrets`, `/v1/org/secrets` |
 | Node | `/v1/health`, `/v1/node` |

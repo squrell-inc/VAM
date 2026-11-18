@@ -8,6 +8,9 @@ proves:
   - member-key-minted-with-catalog-write-cannot-write-the-catalog
   - crates/vam-orchestrator/src/inbox.rs::queued_publisher_key_starts_with_member_scopes_after_demotion
   - member-chats-with-a-released-agent
+  - a-run-with-an-inline-agent-is-refused-and-writes-nothing
+  - a-run-with-an-inline-playbook-is-refused-and-writes-nothing
+  - a-publisher-saves-a-draft-agent-and-runs-it-by-ref
   - crates/vam-orchestrator/tests/api_tests.rs
   - crates/vam-orchestrator/src/secrets.rs::import_env_secrets_are_org_scope_and_ignore_user_rows
   - crates/vam-orchestrator/tests/login_tests.rs

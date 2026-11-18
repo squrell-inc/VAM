@@ -852,7 +852,12 @@ message RestoreSessionResponse {
 
 message CreateRunRequest {
   RunSpec spec = 1;
-  AgentSpec inline_agent = 2;   // Optional inline agent for curl-friendly dev flows.
+  // REFUSED: POST /v1/runs answers 400 to any inline_agent (with or without a resource_id) before
+  // anything is written. Save the agent with PUT /v1/agents and run it by spec.agent_ref. The field
+  // number is kept; it is not reserved or renumbered.
+  AgentSpec inline_agent = 2;
+  // REFUSED: POST /v1/runs answers 400 to any inline_playbook. Save the playbook with
+  // PUT /v1/playbooks and run it by spec.playbook_ref. The field number is kept.
   PlaybookSpec inline_playbook = 3;
   string idempotency_key = 4;
 }

@@ -5477,9 +5477,18 @@ components:
         spec:
           $ref: "#/components/schemas/RunSpec"
         inlineAgent:
-          $ref: "#/components/schemas/AgentSpec"
+          description: >-
+            Refused: any inlineAgent, with or without a resourceId, is answered 400 before anything
+            is written. Save the agent with PUT /v1/agents and run it by spec.agentRef (your draft
+            is version 1.0.0-draft). The field number is kept.
+          allOf:
+            - $ref: "#/components/schemas/AgentSpec"
         inlinePlaybook:
-          $ref: "#/components/schemas/PlaybookSpec"
+          description: >-
+            Refused: any inlinePlaybook is answered 400 before anything is written. Save the
+            playbook with PUT /v1/playbooks and run it by spec.playbookRef. The field number is kept.
+          allOf:
+            - $ref: "#/components/schemas/PlaybookSpec"
         idempotencyKey:
           type: string
 

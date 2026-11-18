@@ -373,7 +373,8 @@ status is class `product`.
 - `identity-request: { as, credential: session | previous-session | key, method, path, status, contains, lacks }`: one
   request (`method` defaults to `get`) with that credential as bearer, judged by exact status. `contains` and
   `lacks` are body substrings (the body must hold the first and not the second), judged after the status; a
-  miss is class `product`.
+  miss is class `product`. `as` naming an `org` piece of role Owner (it has no account) works with
+  `credential: key` only: the request goes out with the bootstrap key.
 
 ### Roles and drafts (`crates/vam-e2e/src/identity.rs`)
 

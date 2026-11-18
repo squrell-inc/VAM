@@ -391,16 +391,31 @@ impl Engine {
     }
 
     pub(super) fn identity_request(&mut self, x: &IdentityRequest) -> Result<(), Fail> {
-        let acc = self.account(&x.as_)?.clone();
+        // An `org` piece of role Owner is no second identity: it has no account, and its key is
+        // the bootstrap key. `credential: key` as such a piece acts as the bootstrap key (an
+        // admin's read of every draft).
+        let owner_key = matches!(x.credential, Credential::Key)
+            && !self.ctx.accounts.contains_key(&x.as_)
+            && self
+                .ctx
+                .pieces
+                .get(&x.as_)
+                .is_some_and(|p| p.kind == PieceKind::Org);
+        let acc = if owner_key {
+            None
+        } else {
+            Some(self.account(&x.as_)?.clone())
+        };
         let (bearer, shown) = match x.credential {
             Credential::Session => (
-                acc.session.clone().map(|s| s.0),
+                acc.and_then(|a| a.session).map(|s| s.0),
                 "a login session (a `login` step before this one)",
             ),
             Credential::PreviousSession => (
-                acc.previous_session.clone().map(|s| s.0),
+                acc.and_then(|a| a.previous_session).map(|s| s.0),
                 "a previous session (two `login` steps before this one)",
             ),
+            Credential::Key if owner_key => (Some(self.api.key().to_string()), "an API key"),
             Credential::Key => (self.key_of(Some(&x.as_))?, "an API key"),
         };
         let bearer =
