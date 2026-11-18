@@ -347,30 +347,117 @@ async fn space_label(c: &Client, space: &str) -> String {
     }
 }
 
+/// The agent and playbook URNs `agent.json` / `playbook.json` carry. Checked before any
+/// request: both need a `resourceId.urn`, and a run file's own `agentRef` / `playbookRef`
+/// must name the same URN (a different one would run something that was never saved).
+fn inline_urns(
+    spec: &RunSpec,
+    agent: Option<&AgentSpec>,
+    playbook: Option<&PlaybookSpec>,
+) -> Result<(Option<String>, Option<String>)> {
+    fn urn_of(id: Option<&ResourceId>) -> Option<String> {
+        id.map(|i| i.urn.clone()).filter(|u| !u.is_empty())
+    }
+    fn ref_urn(r: Option<&ResourceRef>) -> Option<String> {
+        urn_of(r.and_then(|r| r.resource_id.as_ref()))
+    }
+    let agent_urn = match agent {
+        Some(a) => Some(urn_of(a.resource_id.as_ref()).ok_or_else(|| {
+            usage("agent.json needs resourceId.urn: the agent is saved as your draft, then run by that URN")
+        })?),
+        None => None,
+    };
+    let playbook_urn = match playbook {
+        Some(p) => Some(urn_of(p.resource_id.as_ref()).ok_or_else(|| {
+            usage("playbook.json needs resourceId.urn: the playbook is saved as your draft, then run by that URN")
+        })?),
+        None => None,
+    };
+    if let (Some(saved), Some(named)) = (&agent_urn, ref_urn(spec.agent_ref.as_ref())) {
+        if *saved != named {
+            return Err(usage(format!(
+                "the run file's agentRef names {named} but agent.json is {saved}; they must be the same agent"
+            )));
+        }
+    }
+    if let (Some(saved), Some(named)) = (&playbook_urn, ref_urn(spec.playbook_ref.as_ref())) {
+        if *saved != named {
+            return Err(usage(format!(
+                "the run file's playbookRef names {named} but playbook.json is {saved}; they must be the same playbook"
+            )));
+        }
+    }
+    Ok((agent_urn, playbook_urn))
+}
+
+/// A pin to the caller's own draft: the version `PUT /v1/agents` and `PUT /v1/playbooks` write.
+fn draft_ref(urn: &str) -> ResourceRef {
+    ResourceRef {
+        resource_id: Some(ResourceId {
+            urn: urn.to_string(),
+        }),
+        version: Some(vam_spec::v1::Version {
+            major: 1,
+            minor: 0,
+            patch: 0,
+            prerelease: "draft".to_string(),
+            build: String::new(),
+        }),
+        ..Default::default()
+    }
+}
+
+/// vamd's refusal of a save, with one line saying what `--file` needs. The exit code and
+/// HTTP status stay vamd's.
+fn save_refused(err: anyhow::Error, file: &str) -> anyhow::Error {
+    match err.downcast::<output::CliError>() {
+        Ok(mut cli) => {
+            cli.message = format!(
+                "{}\nHint: {file} is saved as your draft, which needs catalog:write; run a released agent with `vam run <agent> -p ...`.",
+                cli.message
+            );
+            cli.into()
+        }
+        Err(other) => other,
+    }
+}
+
+/// `--file` saves what the directory carries (a draft, never a release), then runs the draft
+/// by reference. The run route takes no inline agent or playbook.
 async fn start_run(
     c: &Client,
-    spec: RunSpec,
+    mut spec: RunSpec,
     inline_agent: Option<AgentSpec>,
     inline_playbook: Option<PlaybookSpec>,
     follow: bool,
 ) -> Result<()> {
-    if let Some(agent) = &inline_agent {
-        let req = vam_spec::v1::PutAgentRequest {
-            spec: Some(agent.clone()),
-            ..Default::default()
-        };
-        let _ = c
-            .put_json("/v1/agents", "vam.v1.PutAgentRequest", &req, None)
-            .await;
-    }
-    if let Some(pb) = &inline_playbook {
+    let (agent_urn, playbook_urn) =
+        inline_urns(&spec, inline_agent.as_ref(), inline_playbook.as_ref())?;
+    // The agent may name the playbook, so the playbook is saved first. A refusal ends the
+    // command here: no run is posted.
+    if let Some(pb) = inline_playbook {
         let req = vam_spec::v1::PutPlaybookRequest {
-            spec: Some(pb.clone()),
+            spec: Some(pb),
             ..Default::default()
         };
-        let _ = c
-            .put_json("/v1/playbooks", "vam.v1.PutPlaybookRequest", &req, None)
-            .await;
+        c.put_json("/v1/playbooks", "vam.v1.PutPlaybookRequest", &req, None)
+            .await
+            .map_err(|e| save_refused(e, "playbook.json"))?;
+    }
+    if let Some(agent) = inline_agent {
+        let req = vam_spec::v1::PutAgentRequest {
+            spec: Some(agent),
+            ..Default::default()
+        };
+        c.put_json("/v1/agents", "vam.v1.PutAgentRequest", &req, None)
+            .await
+            .map_err(|e| save_refused(e, "agent.json"))?;
+    }
+    if let Some(urn) = &agent_urn {
+        spec.agent_ref = Some(draft_ref(urn));
+    }
+    if let Some(urn) = &playbook_urn {
+        spec.playbook_ref = Some(draft_ref(urn));
     }
     let idem = if spec.idempotency_key.is_empty() {
         None
@@ -379,8 +466,6 @@ async fn start_run(
     };
     let req = CreateRunRequest {
         spec: Some(spec),
-        inline_agent,
-        inline_playbook,
         ..Default::default()
     };
     let body = c

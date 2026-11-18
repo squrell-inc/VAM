@@ -38,6 +38,14 @@ Mutating calls need an `Idempotency-Key`. The general behaviour is proved by `ap
 Runs page newest first (see [Host API](/orchestrator/api/)). The thread's history, with tool
 results, is read back through the thread routes; proved by `thread-history-lists-tool-results`.
 
+A run names its agent and playbook by `agentRef` and `playbookRef`. A request that carries an
+`inlineAgent` or an `inlinePlaybook`, with any content, is refused with 400 before anything is
+written: save the agent with `PUT /v1/agents` or the playbook with `PUT /v1/playbooks` first, then
+run it by reference (your draft is version `1.0.0-draft`). The run route never writes the
+catalog. Proved by `a-run-with-an-inline-agent-is-refused-and-writes-nothing`,
+`a-run-with-an-inline-playbook-is-refused-and-writes-nothing` and
+`a-publisher-saves-a-draft-agent-and-runs-it-by-ref`.
+
 ## A workspace pins its agent version
 
 A workspace remembers the agent version of its first run, and later runs on it use that version

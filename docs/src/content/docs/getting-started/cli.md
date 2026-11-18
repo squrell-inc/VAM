@@ -186,6 +186,8 @@ vam run --file examples/jira-assistant/run.json --follow
 vam run --file ./examples/bun-assistant --prompt "List all files in workspace" --follow
 ```
 
+An `agent.json` (and a `playbook.json`) in the run file's directory is saved first, as your draft, with `PUT /v1/agents` (and `PUT /v1/playbooks`). That needs `catalog:write`: a publisher or the bootstrap key. If vamd refuses the save, the CLI prints its message and a hint, and no run starts. The run then names the saved draft by `agentRef` (and `playbookRef`) at version `1.0.0-draft`. `POST /v1/runs` itself takes no inline agent or playbook. A rerun after the CLI upgrade lands in the agent's draft Space, so a thread label used before starts fresh. `agent.json` without `resourceId.urn`, or a run file whose `agentRef` names another URN than `agent.json`, exits `2` before any request. To run a released agent, use `vam run <agent> -p ...`.
+
 `--file` is the only way to pass a run file. `vam run start <path>` exits `2` and tells you to use `--file`. `vam run start --file <path>` still loads that file.
 
 ### Continue a thread

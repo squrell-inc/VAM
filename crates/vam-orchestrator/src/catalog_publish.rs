@@ -14,12 +14,14 @@ use vam_spec::validation::Validate;
 use crate::catalog::{
     catalog_channel_from_db, catalog_record_version, CatalogKind, CATALOG_CHANNEL_DRAFT,
     CATALOG_CHANNEL_RELEASED, CATALOG_DRAFT_PRERELEASE, CATALOG_DRAFT_SLOT_MAJOR,
-    CATALOG_DRAFT_SLOT_MINOR, CATALOG_DRAFT_SLOT_PATCH, CATALOG_RELEASED_MAJOR,
-    CATALOG_RELEASED_MINOR, CATALOG_RELEASED_PATCH, CATALOG_RELEASED_PRERELEASE,
+    CATALOG_DRAFT_SLOT_MINOR, CATALOG_DRAFT_SLOT_PATCH, CATALOG_RELEASED_PRERELEASE,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::catalog::{CATALOG_RELEASED_MAJOR, CATALOG_RELEASED_MINOR, CATALOG_RELEASED_PATCH};
 use crate::error::OrchestratorError;
 use crate::workflow::SqliteWorkflowStore;
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn catalog_release_version() -> Version {
     Version {
         major: CATALOG_RELEASED_MAJOR,
@@ -246,6 +248,7 @@ fn upsert_spec_draft(
 }
 
 #[allow(clippy::too_many_arguments)] // flat parameter list is the established call shape; a params struct would change callers
+#[cfg(any(test, feature = "test-support"))]
 fn upsert_spec_released(
     connection: &rusqlite::Connection,
     kind: CatalogKind,
@@ -603,6 +606,7 @@ fn upsert_policy_draft(
 }
 
 #[allow(clippy::too_many_arguments)] // flat parameter list is the established call shape; a params struct would change callers
+#[cfg(any(test, feature = "test-support"))]
 fn upsert_policy_released(
     connection: &rusqlite::Connection,
     urn: &str,
@@ -1096,6 +1100,7 @@ impl SqliteWorkflowStore {
         decode_agent(row)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_agent_released_with_owner(
         &self,
         spec: &AgentSpec,
@@ -1211,6 +1216,7 @@ impl SqliteWorkflowStore {
         decode_playbook(row)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_playbook_released_with_owner(
         &self,
         spec: &PlaybookSpec,
@@ -1312,6 +1318,7 @@ impl SqliteWorkflowStore {
         decode_skill(row)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_skill_released_with_owner(
         &self,
         spec: &SkillManifest,
@@ -1429,6 +1436,7 @@ impl SqliteWorkflowStore {
         Ok(policy_record_from_row(row))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_policy_released_with_owner(
         &self,
         urn: &str,
