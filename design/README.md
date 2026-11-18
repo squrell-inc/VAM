@@ -17,7 +17,6 @@ Several docs below are partly shipped. Their shipped parts are trimmed as each w
 | [Harness](harness.md) | Ablation grid, harness profiles per model class, recursive harnessing (H2–H4). H0 and H1 shipped. | `harness` |
 | [Benchmark](benchmark.md) | Machine-off runs, business task set, on-vs-off table (B1–B3). B0 shipped (`runtime/benchmark-results`). | `harness` |
 | [Isolation verify closeout](isolation-verify-closeout.md) | App-side version pin and model picker, member surfaces. Server side shipped. | `isolation-verify-closeout` |
-| [Member draft agents](member-draft-agents.md) | Members author their own draft agents from released skills, playbooks, policies and connectors; API keys follow the live role; the run route stops releasing inline agents and playbooks (Phases 1–4). | `member-draft-agents` |
 | [Jig](jig.md) | Shipped basics only (`runtime/jig`); the larger E11 plan is a backlog line. | none |
 | [Run receipt](run-receipt.md) | Phase 2: receipt surfaces (app view). Phases 1 and 3 shipped (`security/run-receipt`). | `run-receipt` |
 | [Scenarios](scenarios.md) | UI layer and `--changed` selection (S4–S5); coverage appendix. The rest is in `architecture/testing` and `e2e/README.md`. | `e2e-scenarios` |
