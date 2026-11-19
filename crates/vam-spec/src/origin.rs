@@ -161,10 +161,17 @@ fn urn_domain(urn: &str) -> Option<&str> {
     (!domain.is_empty()).then_some(domain)
 }
 
-/// The caller's default URN namespace: the username lowercased, or `default`
-/// when that is not a valid URN segment.
+/// The caller's default URN namespace. For an email-shaped username (one `@`) it is the part
+/// before the `@`, with any `+tag` dropped, lowercased. Any other username is lowercased as is.
+/// `default` when the result is not a valid URN segment. A name with `+` but no `@` is not
+/// email-shaped: it is not a slug, so it gives `default`.
 pub fn default_namespace(username: &str) -> String {
-    let lowered = username.trim().to_lowercase();
+    let trimmed = username.trim();
+    let base = match trimmed.split_once('@') {
+        Some((local, _)) => local.split_once('+').map_or(local, |(head, _)| head),
+        None => trimmed,
+    };
+    let lowered = base.to_lowercase();
     if is_slug(&lowered) {
         lowered
     } else {
@@ -307,5 +314,24 @@ mod tests {
         assert_eq!(default_namespace(""), "default");
         assert_eq!(default_namespace("bad name"), "default");
         assert_eq!(default_namespace("-x"), "default");
+        // Existing-style names are unchanged.
+        assert_eq!(default_namespace("bootstrap"), "bootstrap");
+        assert_eq!(default_namespace("Ann_Lee"), "ann_lee");
+        assert_eq!(default_namespace("usr_abc"), "usr_abc");
+        assert_eq!(default_namespace("a-b.c"), "a-b.c");
+    }
+
+    #[test]
+    fn default_namespace_for_email_usernames() {
+        assert_eq!(
+            default_namespace("Ada.Lovelace+work@Example.com"),
+            "ada.lovelace"
+        );
+        assert_eq!(default_namespace("bob@example.com"), "bob");
+        assert_eq!(default_namespace("+tag@example.com"), "default");
+        assert_eq!(default_namespace("@example.com"), "default");
+        assert_eq!(default_namespace(".x@example.com"), "default");
+        // `+` without `@` is not email-shaped: not a slug, so `default`.
+        assert_eq!(default_namespace("ann+work"), "default");
     }
 }

@@ -990,11 +990,7 @@ Behaviour changes:
             when.method(Method::GET)
                 .path(explain_path())
                 .query_param("tool", "jira_create_issue")
-                .matches(|req| {
-                    req.query_params
-                        .as_ref()
-                        .is_none_or(|params| params.iter().all(|(key, _)| key != "version"))
-                });
+                .is_true(|req| req.query_params().iter().all(|(key, _)| key != "version"));
             then.status(200)
                 .header("content-type", "application/json")
                 .body(TOOL_EXPLAIN);
@@ -1131,7 +1127,7 @@ Behaviour changes:
                     encode_path_segment(URN)
                 ))
                 .header_exists("Idempotency-Key")
-                .body_contains("skill:nope");
+                .body_includes("skill:nope");
             then.status(400)
                 .header("content-type", "application/json")
                 .body(
@@ -1255,10 +1251,8 @@ Behaviour changes:
                     "/v1/agents/{}/permissions/effective",
                     encode_path_segment(URN)
                 ))
-                .matches(|req| {
-                    req.query_params.as_ref().is_none_or(|params| {
-                        params.iter().all(|(key, _)| key != "version")
-                    })
+                .is_true(|req| {
+                    req.query_params().iter().all(|(key, _)| key != "version")
                 });
             then.status(200)
                 .header("content-type", "application/json")
@@ -1337,9 +1331,8 @@ Behaviour changes:
                 .body(r#"{"tools":{"default":"TOOL_DEFAULT_ASK"}}"#);
         });
         let put = server.mock(|when, then| {
-            when.method(Method::PUT).path(path.clone()).matches(|req| {
-                let body: Value = serde_json::from_slice(req.body.as_deref().unwrap_or_default())
-                    .unwrap_or_default();
+            when.method(Method::PUT).path(path.clone()).is_true(|req| {
+                let body: Value = serde_json::from_slice(&req.body().to_vec()).unwrap_or_default();
                 body["web"]["enabled"] == true && body["tools"]["default"] == "TOOL_DEFAULT_ASK"
             });
             then.status(200)
@@ -1363,9 +1356,8 @@ Behaviour changes:
                 .body(r#"{"web":{"enabled":true}}"#);
         });
         let put = server.mock(|when, then| {
-            when.method(Method::PUT).path(path.clone()).matches(|req| {
-                let body: Value = serde_json::from_slice(req.body.as_deref().unwrap_or_default())
-                    .unwrap_or_default();
+            when.method(Method::PUT).path(path.clone()).is_true(|req| {
+                let body: Value = serde_json::from_slice(&req.body().to_vec()).unwrap_or_default();
                 body.get("web").is_none()
             });
             then.status(200)

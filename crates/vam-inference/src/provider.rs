@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use vam_security::tls_roots::BundledRoots;
 use vam_spec::v1::{
     ErrorStatus, InferenceRequest, InferenceResponseChunk, TokenUsage, ToolCall, ToolSpec,
     VamErrorCode,
@@ -592,10 +593,18 @@ impl Default for OpenAiProvider {
     }
 }
 
+/// A client that trusts the bundled Mozilla roots only (see `vam_security::tls_roots`).
+fn bundled_roots_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .bundled_roots()
+        .build()
+        .unwrap_or_default()
+}
+
 impl OpenAiProvider {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: bundled_roots_client(),
             retry: RetryPolicy::default(),
         }
     }
@@ -1604,7 +1613,7 @@ impl Default for AnthropicProvider {
 impl AnthropicProvider {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: bundled_roots_client(),
             retry: RetryPolicy::default(),
         }
     }

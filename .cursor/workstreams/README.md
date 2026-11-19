@@ -2,7 +2,7 @@
 
 Phase trackers for design → plan → build. Procedure: `.cursor/skills/phased-workstream/SKILL.md`. How an epic phase runs from plan to close (roles, merges, microVM lanes, phase close): `phase-playbook.md`.
 
-New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms and CI hygiene: `working-agreement.md`. Finished phases and trackers are deleted; git history keeps them.
+New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms and CI hygiene: `working-agreement.md`. Finished phases and trackers are deleted; git history keeps them. Branch names in progress logs and closed phases are history: `feat/<slug>` bases are deleted once released, and a few names come from the repository VAM moved from. Cut new work from `main`.
 
 | Slug | Title | Status | Current phase |
 |---|---|---|---|
@@ -16,11 +16,11 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | `run-receipt` | Run receipt (E12): the signed, two-tier record of what a run did; `GET /v1/runs/{id}/receipt`, `vam receipt show/verify` | active | 1 released to `main` 2026-10-26, checklist out; 3 released to `main` 2026-11-10, checklist out; 2 waits on the E5 slice |
 | `work-outside-chat` | Work outside chat (E5 slice): run grants, trigger gateway, Space and thread ids, schedule broker | shipped | 1 and 2 shipped (run grants, trigger gateway, Space and thread ids, `vam.schedule`); docs: `hosted/triggered-runs`, `hosted/schedule` |
 | `notifications` | Notifications (E12 lane, row 7): one per-user record, many surfaces (app, CLI, agent tool; Slack in slice 2) | shipped | slices 1 and 2 shipped (records, API, CLI, agent tool, `vam.notify` with Slack); slice 3 (email, push, digests) backlog; docs: `orchestrator/notifications`, `hosted/notify` |
-| `connectors` | Connectors: connectivity, admin enable and consent, per-user connect; Microsoft 365 and Linear first (`design/connectors.md`) | active | 1 released to `main` 2026-11-08, checklist out; 0 done 2026-11-07 |
+| `connectors` | Connectors: connectivity, admin enable and consent, per-user connect; Microsoft 365 and Linear first (`design/connectors.md`) | active | 5 (admin-supplied client, Box) defined 2026-11-18, breakdown pending; 1 released to `main` 2026-11-08, checklist out; 0 done 2026-11-07 |
 | `machine-base` | Machine base (E7 Phase 1 + install slice, launch row 14): Debian slim default base with Python and git, `requiresRuntime` check, `vam node init` | active | 1 closed in base 2026-11-10 (W0-W5, 5/5 scenarios active); release PR into `main` open |
-| `user-identity` | User identity: self-service password change (`POST /v1/me/password`, `vam passwd`), then opaque user IDs and email usernames | active | 1 closed in base 2026-11-12 (self-service password change); 2 (opaque ids, email usernames) not drafted |
+| `user-identity` | User identity: self-service password change (`POST /v1/me/password`, `vam passwd`), then opaque user IDs and email usernames | active | 1 released to `main` 2026-11-14 (self-service password change); 2 closed in base 2026-11-17 (generated `usr_` ids, case-insensitive email login names); release PR into `main` open |
+| `release-artifacts` | Release artifacts: one workspace version chosen at release time, manual owner-approved release workflow, immutable `v*` tags, an x86_64 node bundle and `vam` for Linux/macOS with SHA256SUMS and attestations, `vam dock` and `vam upgrade`. Phases A, B, Final; Lima and Windows in the next release (`v0.2.0`) | active | A (restructured 2026-11-18; breakdown waiting for the owner) |
 | `skill-list` | Skill list: paged `GET /v1/skills` for the member skill picker (`design/skill-list.md`) | active | 0 |
-
 
 ## Backlog (no tracker)
 
@@ -31,7 +31,7 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | Member `resourceRequirements` cap | Cap a member's `resourceRequirements` once the host honours it. |
 | Member `extends` / `overlay` | Open these fields to members once the run-time merge is wired; refused on a member save today. |
 | Old-repo branch names | Rename `isolation-verify-closeout` decision 9's branch names (`feat/improving-the-vam`); deferred by the owner 2026-11-18. |
-| Member namespace collisions | `Alice` / `alice` and non-slug usernames on `default` share a namespace (documented on `orchestrator/member-agents`); fix with `user-identity` Phase 2's namespace derivation. |
+| Member namespace collisions | Partly fixed by `user-identity` Phase 2: `Alice` / `alice` can no longer coexist. Still shared: email names with one local part (`ada@one.example`, `ada@two.example`, `ada`) and every non-slug name on `default`; documented on `orchestrator/member-agents`. |
 | Agent permissions in OpenAPI | `GET` / `PUT /v1/agents/{urn}/permissions` are missing from `docs/api/openapi.yaml`. |
 | E11 Jig, the larger plan | Queries and mutations, composed components, jig packages and a registry, agent-written `.jig`, Slack and A2UI adapters. The basics are shipped (`docs/src/content/docs/runtime/jig.md`); the earlier plan is in git history. |
 | Primary agent | One default agent per user that asks the other agents the user may run (a delegate broker, depth one). Not started; the earlier proposal is in git history. |

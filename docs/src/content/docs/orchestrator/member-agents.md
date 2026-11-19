@@ -26,6 +26,8 @@ proves:
   - crates/vam-orchestrator/tests/hsp_grants.rs::a_members_grant_naming_a_draft_playbook_is_refused_and_a_publishers_is_not
   - crates/vam-orchestrator/src/member_draft.rs::each_refused_field_is_a_400_naming_it
   - crates/vam-orchestrator/src/member_draft.rs::namespace_new_inside_ok_outside_400_non_slug_username_uses_default
+  - crates/vam-orchestrator/src/member_draft.rs::an_email_username_uses_the_namespace_me_reports_not_the_generated_id
+  - crates/vam-orchestrator/tests/member_draft_agents_tests.rs::an_email_member_saves_in_the_namespace_me_reports_and_not_the_user_id
   - crates/vam-orchestrator/src/member_draft.rs::a_urn_in_my_namespace_owned_by_a_publisher_is_403
   - crates/vam-orchestrator/src/member_draft.rs::the_cap_counts_drafts_only_and_refuses_a_new_row_not_an_edit
   - crates/vam-orchestrator/src/member_draft.rs::cap_parses_a_positive_number_else_the_default
@@ -225,14 +227,22 @@ Proved by `member-lists-skills-and-sees-only-released-rows`,
 
 ## Known limitation: shared namespaces
 
-Two usernames can slug to the same namespace. `Alice` and `alice` are both allowed, because
-usernames are case-sensitive. A username that is not a slug (it starts or ends with `.`, `-` or
-`_`) falls back to the namespace `default`, so all of those users share it.
+The namespace is `defaultNamespace` from `GET /v1/me`, made from the login name only, never from
+the generated user id (see [Model](/authoring/model/)). Two different login names can still give
+the same namespace, and then the members share it:
+
+- Email names with the same local part: `ada@one.example`, `ada@two.example`, `ada+work@one.example`
+  and the plain name `ada` all give `ada`.
+- A name that does not make a valid URN segment gives `default`, so all of those users share it:
+  a name that starts or ends with `.`, `-` or `_`, a `+` without an `@`, or an email whose local
+  part is empty or starts with `+`.
+
+`Alice` and `alice` no longer collide: login names are unique ignoring letter case, so the second
+is refused when the user is created.
 
 Users who share a namespace are not blocked by the namespace check. The owner check still stops an
 overwrite with a 403. But a 200 for a free name against a 403 for a taken one tells a member
-that the name is taken. This is not fixed. The username work in `user-identity` Phase 2 changes
-the same function.
+that the name is taken. This is not fixed.
 
 ## Building a client
 
@@ -282,5 +292,6 @@ The points below are for the frontend. Each one names the call.
 
 - The exact order of checks in a save is read from `publish_agent_draft_restricted`; each check
   has its own test, but no test fixes the order of all six.
-- The "known limitation" on shared namespaces is read from the code
-  (`vam_spec::default_namespace`); no test drives two users into one namespace.
+- The `default` namespace shared by non-slug names is read from the code
+  (`vam_spec::default_namespace`); the email case is driven by
+  `an_email_member_saves_in_the_namespace_me_reports_and_not_the_user_id`.

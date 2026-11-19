@@ -64,7 +64,7 @@ fn mint_owned_key(store: &SqliteWorkflowStore, user_id: &str, scopes: &[&str]) -
 
 async fn response_body(response: axum::response::Response) -> String {
     String::from_utf8(
-        hyper::body::to_bytes(response.into_body())
+        axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap()
             .to_vec(),
@@ -419,6 +419,40 @@ async fn get_me_revoked_api_key_is_401() {
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert!(
         body.contains("UNAUTHENTICATED") || body.contains("Unauthenticated"),
+        "{body}"
+    );
+}
+
+/// An email username keeps its typed case in `username`; the default namespace is the part
+/// before the `@`, without the `+tag`, lowercased. Login works in any letter case.
+#[tokio::test]
+async fn get_me_namespace_for_email_username() {
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let user = store
+        .create_managed_user_generated(
+            "Ada.Lovelace+work@Example.com",
+            "ada-secret",
+            UserRole::Member,
+        )
+        .expect("ada");
+    let app = test_app(app_state_http_only(store));
+    let session = login_token(app.clone(), "ADA.LOVELACE+WORK@EXAMPLE.COM", "ada-secret").await;
+    let (status, body) = get_me(app, Some(&session)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        json["userId"].as_str(),
+        Some(user.user_id.as_str()),
+        "{body}"
+    );
+    assert_eq!(
+        json["username"].as_str(),
+        Some("Ada.Lovelace+work@Example.com"),
+        "{body}"
+    );
+    assert_eq!(
+        json["defaultNamespace"].as_str(),
+        Some("ada.lovelace"),
         "{body}"
     );
 }

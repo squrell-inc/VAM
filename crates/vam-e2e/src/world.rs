@@ -48,6 +48,10 @@ pub struct WorldPiece {
     /// `org` only: the scope list sent to `POST /v1/users/{id}/keys` when the identity's key is
     /// minted. Absent: the role's default scopes.
     pub scopes: Option<Vec<String>>,
+    /// `org` of a member role only: the login name to create the user under, instead of the
+    /// run-unique default. `{tag}` is replaced by a short token unique to the piece, scenario and
+    /// run (eight lowercase hex digits), so two scenarios on one node never clash.
+    pub username: Option<String>,
     /// `agent` and `playbook`: release it after the put.
     #[serde(default)]
     pub release: bool,

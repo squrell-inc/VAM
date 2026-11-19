@@ -60,7 +60,7 @@ pub fn list_route() -> axum::routing::MethodRouter<AppState> {
 pub fn path_routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/v1/workspaces/:id/files/*path",
+            "/v1/workspaces/{id}/files/{*path}",
             get(download_workspace_file).put(put_workspace_file),
         )
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_HTTP_BODY_BYTES))

@@ -129,7 +129,7 @@ fn encode_run_path(run_id: &str) -> String {
 
 async fn response_body(response: axum::response::Response) -> String {
     String::from_utf8(
-        hyper::body::to_bytes(response.into_body())
+        axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap()
             .to_vec(),

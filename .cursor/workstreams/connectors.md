@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: connectors
-current_phase: 4 build done 2026-11-09 (8 scenarios active and green; waves 0–7 merged), real-tenant wave 9 and lane B wait for the owner; 2 and 3 released to main 2026-11-09, checklists out; Phase 1 released, checklist out
+current_phase: 5 breakdown drafted 2026-11-18, awaiting owner approval; 4 build done 2026-11-09 (8 scenarios active and green; waves 0–7 merged), real-tenant wave 9 and lane B wait for the owner; 2 and 3 released to main 2026-11-09, checklists out; Phase 1 released, checklist out
 design_docs:
   - design/connectors.md
   - docs/src/content/docs/runtime/tools.md
@@ -38,6 +38,10 @@ decision record (D1–D22), agreed with the owner 2026-11-07.
 1. One `vamd` node per customer organization (D1).
 2. Squrell owns the OAuth app registrations; customers never see a client
    id. The org admin consents once; each user connects their own account (D3).
+   **Amended 2026-11-18 (owner, D28):** where Squrell has no app and the
+   provider has no dynamic registration (Box, Salesforce, Zendesk), a
+   connector may say the org admin supplies the client id, and the secret
+   when one is needed.
 3. Nothing reaches a member before the node's admin enables it (D4).
    Enabling is an org-admin decision (`users:admin`), not operator-only.
 4. A connector is connectivity only: how a credential is obtained, whose it
@@ -65,6 +69,23 @@ decision record (D1–D22), agreed with the owner 2026-11-07.
 11. Entra: no dynamic registration; never send the RFC 8707 `resource`
     parameter; never send `prompt=consent` on user sign-in; validate the
     token's tenant instead of the templated issuer (design §6.1).
+12. Admin-supplied client (owner, 2026-11-18, D28): `provider.client:
+    "org"`; `clientSecret: "org_vault"` only with it. The secret is an
+    org-scope `connection` vault row pinned to the token endpoint host, written
+    only by an org admin, never returned, never sent to the app, never a guest
+    binding.
+13. Code exchange on the node when a secret is involved (owner, 2026-11-18,
+    D29): the app runs the browser sign-in with PKCE and hands code, verifier
+    and redirect URI to `vamd`, which exchanges at the token endpoint pinned at
+    Enable. Without a secret the app exchanges as today.
+14. Company address (owner, 2026-11-18, D30): one `{subdomain}` parameter
+    under a fixed suffix, entered once at Enable, one DNS label, filled in at
+    Enable; afterwards every host is exact.
+15. Marketplace connectors may declare REST bindings (owner, 2026-11-18, D31),
+    exact hosts, used only inside a tool's declared egress shape.
+16. First proofs (owner, 2026-11-18, D32): Box for Phase 5, Zendesk for
+    Phase 6. The Box listing lives on a `vam-marketplace` branch until Phase 5
+    is released; the team builds and tests it.
 
 ## Status legend
 
@@ -2143,19 +2164,511 @@ Setup: deploy vamd from `main` (after the release), then the app from `main`. Th
 
 Report: "Phase 4 pass", or the step number with a screenshot or the error text.
 
-### Phase 5 — Installable connectors
+### Phase 5 — Admin-supplied client (Box)
 
-**Goal:** developers ship connectors from any trusted marketplace without a
-Squrell release (design D26, §10 Phase 5 row).
-**Depends on:** Phase 4 (marketplace import)
-**Status: folded into Phase 4 (owner, 2026-11-09).** Connectors ship as files in marketplace listings (CN-4.11). What follows stays later: bring-your-own OAuth client and a generic OAuth profile (small follow-up), and the rest of this scope.
-**Plan:** not drafted
-**Scope:** connector as a catalog kind (`urn:vam:connector`); installed and
-built-in connectors merged; qualified connection ids and Squrell-reserved
-ids; the admin's approved capability snapshot (publisher, OAuth app, hosts,
-scopes, MCP server) with re-approval when an upgrade widens it; a generic
-OAuth profile with bring-your-own client (vault-held secret); `vam connector
-init`, `validate`, `test`. Rubric: cost 3 (new trust boundary).
+**Goal:** an org admin enables a connector whose OAuth client they registered
+with the provider, entering the client id and, when asked, the secret; members
+connect from the tile; `vamd` exchanges the code with the vault secret and
+refreshes rotating tokens safely. Marketplace connectors may use it (design
+§13, D28, D29).
+**Depends on:** Phase 4 (marketplace import, released).
+**Status:** defined 2026-11-18 (owner); breakdown drafted 2026-11-18, awaiting owner approval.
+**Plan:** drafted 2026-11-18 by the phase-breakdown agent (below); awaiting owner approval.
+**Scope:** `provider.client` and `clientSecret: "org_vault"` in `vam-spec`
+and the marketplace check; Enable takes `{ clientId, clientSecret? }` (org
+admin only; secret write-only, org-scope `connection` row); the app's connect
+flow uses the node's client id and skips registration; a node route that takes
+code, verifier and redirect URI and exchanges with the secret; refresh with the
+org secret (`RefreshProfile::Mcp`), single flight for single-use refresh
+tokens; the capability summary shows "admin-supplied client"; the admin can
+replace the secret; disable and re-enable keep or clear it (open question).
+**Exit:** scenarios green on a mock provider (no secret in any listing, app
+response or guest binding; rotation under concurrent calls); the Box listing
+from the `vam-marketplace` branch `box-connector` (listing files and a
+team test guide in `docs/listing-box.md`, pushed 2026-11-18) connects and runs on a real Box tenant
+(team, on the owner's word).
+**Rubric:** cost 3 (secret handling, a new route, both repos).
+
+- [ ] CN-5.1 `provider.client` and `clientSecret: "org_vault"` in vam-spec, the marketplace check and the capability summary
+- [ ] CN-5.2 Enable with the admin's client: endpoints pinned at Enable, the secret as an org-scope `connection` row, replace, disable keeps
+- [ ] CN-5.3 The node exchanges the code: one route takes code, verifier and redirect URI and connects the member
+- [ ] CN-5.4 Refresh and revoke with the org secret at the pinned token endpoint; single-use refresh tokens spent once
+- [ ] CN-5.5 the VAM app: client fields at Enable, "admin-supplied client" in the summary, connect without registration
+- [ ] CN-5.6 Squrell marketplace index read from a named branch (staging nodes only), for the team's Box test
+- [ ] CN-5.7 The Box listing ready to tag, and the team's run on a real Box tenant
+
+#### Phase 5 breakdown (phase-breakdown agent, 2026-11-18; awaiting owner approval)
+
+Written against `docs/connectors-org-supplied-client` (one docs commit ahead of
+`origin/main`, which carries the Phase 4 release); `squrell-inc/vam-marketplace`
+branch `box-connector` read; the VAM app not in this checkout (named from the
+Phase 1, 2 and 4 file lists). No product code, build or test was run. Where the
+code and the design differ, the code is the fact.
+
+**Code map (today, checked 2026-11-18).**
+
+- Connector file: `crates/vam-spec/src/connector.rs` `OAuth2Provider { profile,
+  client_id, client_secret: ClientSecret { None, SqurellRelay }, scopes,
+  org_consent }` under `deny_unknown_fields`: a file with `client` fails to
+  parse. `validate_connector` has no client rule.
+- Marketplace check: `crates/vam-spec/src/connector_listing.rs`
+  `check_marketplace_connector` and `parse_marketplace_connector` refuse any
+  `clientSecret` but `none` (text "asks for a client secret"), any profile but
+  `discover`, any `bindings`. The capability summary is
+  `vam-spec/src/package.rs` `ConnectorSummary { publisher, provider, profile,
+  client_id?, client_secret, org_consent, scopes, mcp_url, mcp_host, hosts, tools }`;
+  the import's `summary_digest` (`marketplace/import.rs`) hashes it, so a new
+  summary field makes an update that changes it disable the connector
+  (`reset_connector`) with no further code.
+- Enable: `PUT /v1/connectors/{id}/node` (`api/connectors.rs` `put_node`,
+  `users:admin`, idempotency key) → `connectors.rs` `PutNodeRequest { enabled,
+  consent }` (`deny_unknown_fields`) → `plan_put` → table
+  `node_enabled_connectors`. A disable keeps the recorded consent (Phase 1 Q7).
+  `list_entry` shows the public definition only when enabled and swaps in
+  `effective_client_id` (node env override `VAMD_CONNECTOR_<ID>_CLIENT_ID`, else
+  the file's). `is_configured` refuses Enable for a placeholder client id.
+- Member connect for an MCP connector: the app runs discovery, DCR and PKCE,
+  then `PUT /v1/mcp/connections` with `oauth { resource, authorizationServer,
+  tokenEndpoint, clientId, registrationMethod: dcr|cimd|manual }`
+  (`api/mcp_connections.rs` `ConnectMcpOauthRequest`), then
+  `PUT …/oauth/tokens` with `{ accessToken, refreshToken, clientSecret? }`.
+  `connectors::gate_mcp_write` pins the URL, tools and risk classes to the
+  connector and refuses org scope, but **the token endpoint and client id on
+  the row are whatever the app sent**. A `clientSecret` in the upsert becomes a
+  user-scope `connection` row `mcp_oauth_client_secret_binding_id(id)`
+  (`mcp_registry.rs:779`): today that secret passes through the app.
+- Refresh: MCP rows refresh on a 401 (`host_tools.rs` ~3095): refresh token and
+  the optional client secret read at the row's own scope and owner, then
+  `mcp_oauth_refresh.rs` `RefreshProfile::Mcp` (`resource` on every refresh,
+  `client_secret_post` when given; DNS-pinned token endpoint, no redirects).
+  One gate per (store, scope, owner, connection) (`lock_mcp_credentials`,
+  `McpRefreshGate` with a generation counter) so concurrent calls share one
+  refresh. Revoke on disconnect reads the per-row secret too
+  (`mcp_oauth_refresh.rs` ~524). No early refresh for MCP rows.
+- REST connectors (`microsoft-365`) refresh in `connectors.rs` `check_connection`
+  with the Entra profile; untouched by this phase.
+- Vault: `put_secret_with_owner(binding, value, SecretKind::Connection,
+  &[host])` pins a row to hosts. `GET /v1/secrets` (`api/mod.rs`
+  `list_secrets`) lists every org-scope row's metadata (binding id, kind, an
+  8-hex fingerprint, destinations) to any caller with `secrets:write`;
+  `DELETE /v1/secrets/*id` shows no kind check in the handler (DX-139 refuses
+  writes of the `connection` kind; the wave confirms delete).
+- Marketplace reads: the index (`marketplace.json`) at the remote's default
+  branch head (`fetch.rs` `HEAD_REF`), artifacts only at the tag the index
+  names (M5); `vam catalog import --ref` must equal that tag. Box's URN is
+  under `hub.squrell.cloud`, so only the preconfigured Squrell entry may install
+  it (M3). The `box-connector` branch has no tag and `main`'s index does not
+  name Box: **no node can import the Box listing today** (open question 4).
+- e2e: mock providers `microsoft-login`, `microsoft-graph`, `linear-server`
+  (`crates/vam-e2e/src/connectors.rs`); the `mcp:<https url>` seam key
+  (`PASS_MCP_SERVER_SEAM`) maps an installed connector's MCP URL to a mock;
+  fixture `marketplace-community-connectors` (Bugwatch and three refused
+  listings). No mock serves OAuth metadata, an authorization code or a
+  confidential client. `expect: { runs: { count } }` and `chat { wait: false }`
+  exist.
+- The VAM app: Org settings Connectors workspace
+  (`OrgSettingsConnectorsWorkspace.tsx`), tiles (`ConnectorTiles.tsx`), the
+  MCP OAuth connect flow (discovery, DCR, PKCE, code exchange, token hand-off),
+  Tauri commands in `src-tauri/src/{vamd.rs,lib.rs}`, Marketplace summary
+  (CN-4.8).
+
+**Shared invariants** (every item holds them; the orchestrator checks in review):
+
+- **K1–K7 and M1–M6 hold.**
+- **O1** The org client secret is written only by an org admin
+  (`users:admin`), only through `PUT /v1/connectors/{id}/node`, as one
+  org-scope `connection` row (`connector/<id>/oauth/client-secret`) pinned to
+  the token endpoint host fixed at Enable. No route, list, log, event, error,
+  receipt or app response returns it; it is never a guest binding and never a
+  broker's; `/v1/secrets` neither lists, overwrites nor deletes it.
+- **O2** The secret is sent to one place: the token endpoint (and the
+  revocation endpoint when it is on the same host) pinned at Enable. Never to a
+  URL a member's request, the app or a provider redirect names.
+- **O3** For an `org` client, the client id, authorization endpoint, token
+  endpoint and revocation endpoint a member's connection uses come from the
+  node row, never from the request.
+- **O4** A refresh token is spent once: concurrent calls on one connection
+  share one refresh, and the rotated refresh token is stored before the access
+  token is used.
+- **O5** A connector with `clientSecret: "org_vault"` is never connected with
+  tokens the app exchanged (the app cannot hold the secret): the app-path token
+  upsert is refused for it.
+
+##### Scenario delta
+
+All process mode, mock model. One new runner-hosted provider,
+`mock-filebox-server` (kind `mock-provider`, provider `filebox`, a fictional
+Box-like service): a streamable-HTTP MCP server at `https://mcp.filebox.example/mcp`
+(`search_files`, `read_file`; bearer required) that publishes RFC 9728
+protected-resource metadata pointing at `https://auth.filebox.example`, which
+publishes RFC 8414 metadata (authorize, token, revocation, S256, no
+registration endpoint). The authorize endpoint mints a code for the registered
+client id, redirect URI and S256 challenge (the runner plays the browser); the
+token endpoint is a confidential client (`client_secret_post`), checks code,
+verifier and redirect URI, issues short access tokens and **single-use rotating
+refresh tokens** (a reused one answers `invalid_grant`). It logs field names,
+`grant_type`, `client_id`, and `client-secret=current|old|wrong|none` and
+`refresh=fresh|reused`, never a value. Steps: `mock-provider: { piece, expire:
+true }` (the current access token is refused from now on), `holdToken:
+true|false`, `rotateSecret: true` (the provider's current secret changes; the
+old one is refused). Both seam origins (`mcp:` and a new `oauth:<https
+origin>` key) map to the mock; the `oauth:` key is held out until wave 2 makes
+vamd accept it. The fixture `marketplace-community-connectors` gains two
+listings: `filebox-connector` (installs: `discover`, `client: org`,
+`clientSecret: org_vault`) and `org-secret-without-org-client` (refused).
+Runner steps: `connector-node` gains `client: { clientId, clientSecret: {
+piece, which: current|wrong|rotated } }` (values from the mock, scrubbed);
+`connector-connect` for a connector whose entry says `client: org` plays the
+app: reads the pinned authorize endpoint and client id from `GET
+/v1/connectors`, makes a PKCE pair, gets a code from the mock, and posts code,
+verifier and redirect URI to the node's exchange route (open question 3).
+
+| Scenario | Change | Layer | Given | Why |
+|---|---|---|---|---|
+| `listing-connector-with-an-admin-supplied-client-installs-and-waits-for-its-client` | new | process | `org-admin`, `org-member`, `marketplace-community-connectors` | D28, the marketplace half. The admin adds and refreshes; `filebox-connector`'s summary shows `client: org`, `clientSecret: org_vault` and text "admin-supplied client (with a secret)"; installed, the connector reads `askAdmin` for the member, Unverified, not enabled; `org-secret-without-org-client` is refused with a reason containing `client`; Bugwatch and the three Phase 4 refusals are unchanged. Red at the listing expect (the file does not parse: `client` is unknown), class `product` |
+| `admin-supplied-client-is-set-only-by-an-org-admin-and-never-read-back` | new | process (mock providers) | as above, plus `org-administrator`, `mock-filebox-server` | O1, O3. Enable without a client is refused (409, "client id"); without a secret refused (400, "secret"); a member's Enable with a client is 403; a client on Bugwatch (publisher client) is refused (400). The org administrator enables with id and secret: the entry shows `provider.client: org`, `node.client.clientId`, `node.client.secretSet: true`, the pinned `authorizeEndpoint` and `tokenEndpoint` (host `auth.filebox.example`), `node.client.updatedBy`; `secret-absent` for the secret in `GET /v1/connectors` (admin and member), `GET /v1/secrets` (admin and member), events; a `DELETE /v1/secrets/connector/filebox-connector/oauth/client-secret` is refused. Disable then `{ enabled: true }` alone: `secretSet` still true (open question 1). Red at the first `connector-node` with `client` (unknown field, 400), class `product` |
+| `admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node` | new | process (mock providers) | as above, plus `agent-plain` | D29, the phase goal. Enabled with the client; the member connects through the exchange route: the mock's token endpoint saw one `grant_type=authorization_code` with `client_id=<admin's>`, `client-secret=current`, `code_verifier` and `redirect_uri`; the tile reads `connected`. A read tool runs (`filebox__search_files`); the MCP mock saw the bearer. The app-path token upsert for this connector is refused (400, "exchange"); an MCP connect naming another token endpoint or client id is refused; an exchange with a redirect URI outside the app's is refused and the mock saw no second exchange. `secret-absent` for the client secret and the member's tokens in thread, events, receipt, workspace and every connector and MCP listing. Red at `connector-connect` (no exchange route: 404, `product`) |
+| `rotating-refresh-token-is-spent-once-when-two-tasks-call-at-once` | new | process (mock providers) | as the third | O4 and Box's single-use refresh tokens. Connected; `expire: true`; `holdToken: true`; two chats by the member start with `wait: false` on two threads, each calling the read tool; the MCP mock saw two refused calls; `holdToken: false`; both runs succeed (`runs: { count: 2 }` succeeded); the token endpoint saw **one** `grant_type=refresh_token` with `client-secret=current` and `refresh=reused` count 0. A second `expire` and one more call: one more refresh, `refresh=fresh` (the rotated token was stored). Red at `connector-connect` until the exchange exists, then at the refresh count if the org secret is not sent (`client-secret=none`, `invalid_client`) |
+| `admin-corrects-the-client-secret-and-members-stay-connected` | new | process (mock providers) | as the third | Replace and rotation. Enabled with `which: wrong`: the member's connect is refused with text naming the provider's refusal of "the client id or secret your admin entered", nothing stored (tile `connect`); the admin re-saves with `current` (enabled stays on): the connect works. `rotateSecret: true` at the provider, the admin saves `rotated`; `expire: true`; the next call refreshes with `client-secret=current` (the new one), the member is **not** asked to reconnect. The admin changes the client id: the member's tile reads `needsReconnect` (tokens belong to the old client). Red at `connector-connect` (404), class `product` |
+
+**Existing scenarios whose `then` changes: none.** Checked from `guards` and
+`given`: `community-connector-appears-unverified-and-connects` still sees
+`connector-with-a-secret` (asks for `squrell_relay`) refused with "secret";
+Bugwatch's summary gains fields but its expects read only existing ones; the
+Linear and Microsoft 365 scenarios use no `client` and keep their refresh
+shapes (Entra: no `client_secret`, asserted by
+`expired-microsoft-token-is-refreshed-before-the-call`). **Guards-only
+additions:** `vam:crates/vam-spec/src/connector_listing.rs` on
+`community-connector-appears-unverified-and-connects` and
+`listing-from-an-added-marketplace-installs-as-unverified-within-its-limits`;
+`vam:crates/vam-orchestrator/src/host_tools.rs` on
+`linear-reads-run-without-asking-and-writes-ask` (the refresh path changes);
+`vam:crates/vam-orchestrator/src/api/mcp_connections.rs` on
+`guest-cannot-use-an-mcp-token-placeholder`.
+
+##### Benchmark delta
+
+| Line (`design/benchmark.md` §1) | Baseline on this base | Measured by | Expected after |
+|---|---|---|---|
+| P9 **new task** "the org client secret is read back by a member, the app or the guest" | Not possible (no org secret) | `secret-absent` in the second and third scenarios | 0 bytes, 100% |
+| P6 minutes and clicks from the admin's Enable (client id and secret) to a member's first Box read, real tenant | Not possible | CN-5.7, by hand, team, owner's word | first number recorded |
+
+Mock-measured in CI; the real-tenant line only on the owner's word. The
+orchestrator adds the P9 task to `design/benchmark.md` §1 on approval (docs only).
+
+##### Items
+
+**CN-5.1 `provider.client` and `clientSecret: "org_vault"` in vam-spec, the marketplace check and the summary.**
+- **Scope.** `OAuth2Provider.client: ClientKind { Publisher, Org }`
+  (`#[serde(default)]` = `publisher`, so every existing file parses unchanged);
+  `ClientSecret::OrgVault` (`org_vault`). `validate_connector`: `org_vault`
+  only with `client: org`; `client: org` with a `clientId` in the file is
+  refused (the admin supplies it); `org` with profile `entra` refused
+  (Squrell's client, locked 11). `check_marketplace_connector` and
+  `parse_marketplace_connector`: allow `client: org` with `clientSecret: none |
+  org_vault` (still `discover` + MCP only; `squrell_relay` still refused with
+  the same text). `ConnectorSummary` gains `client` and the summary text "admin-supplied
+  client" / "admin-supplied client (with a secret)", so the import's
+  digest turns a change of either into "Enable again". `vam catalog validate`
+  passes the Box `connector.json` from `box-connector` (copied as a vam-spec test fixture).
+- **Files.** `crates/vam-spec/src/{connector.rs,connector_listing.rs,package.rs}`,
+  `crates/vam-orchestrator/src/marketplace/summary.rs` (text only, if the text
+  lives there), unit tests; JSON schema or docs table for the connector file if one exists
+  (`docs/src/content/docs/authoring/` connector page, `status` frontmatter).
+- **Acceptance.** Unit tests per rule (each refusal names the field); the
+  built-ins and Bugwatch round-trip byte-stable; an update fixture that flips
+  `client` sets the connector back to not enabled (import unit test).
+- **Tests.** `cargo test -p vam-spec`, `cargo test -p vam-orchestrator marketplace`, `scripts/ci/local.sh --fast`.
+- **Turns green.** `listing-connector-with-an-admin-supplied-client-installs-and-waits-for-its-client`.
+- **Decide.** `Decide: NOW — proof 3 (D28, D32: Box cannot be described today), cost 1 (an enum, two rules, one summary field)`
+
+**CN-5.2 Enable with the admin's client.**
+- **Scope.** `PutNodeRequest.client: Option<Option<ClientRequest { client_id,
+  client_secret? }>>` (omitted keeps; `null` clears, only with `enabled:
+  false`). Allowed only for `client: org` connectors (400 otherwise). Enabling
+  an `org` connector needs a stored or given client id (409 "client id"), and
+  for `org_vault` a stored or given secret (400 "secret"). On a body with a
+  client, `vamd` discovers the provider's endpoints from the connector's MCP
+  URL (RFC 9728 protected resource, then RFC 8414 / OIDC metadata) through the
+  SSRF guard (https, public DNS names, no redirects, size and time caps),
+  requires S256, and pins `authorizeEndpoint`, `tokenEndpoint`,
+  `revocationEndpoint?`, `issuer` on the node row (migration: columns on
+  `node_enabled_connectors`, or a `node_connector_clients` table); a failed
+  discovery refuses the save and writes nothing. The secret becomes the
+  org-scope `connection` row `connector/<id>/oauth/client-secret` pinned to the
+  token endpoint host (written last, after the row validates; replaced in
+  place on a new secret). A new secret alone keeps members' connections; a new
+  client id marks every member's connection to the connector `needs_reauth`.
+  Disable keeps the client (open question 1); `client: null` deletes the row and marks
+  connections `needs_reauth`. `list_entry`: for an `org` connector, `node.client
+  { clientId, secretSet, authorizeEndpoint, tokenEndpoint, updatedAt }` (plus
+  `updatedBy` for admins) once set; `provider.clientId` shows the admin's id
+  when enabled; never the secret. `GET /v1/secrets` omits `connector/*/oauth/*`
+  org rows and `DELETE /v1/secrets/…` refuses them. `is_configured` is true for
+  an `org` connector only when its client is stored. OpenAPI for the new body
+  and entry fields.
+- **Files.** `crates/vam-orchestrator/src/{connectors.rs,api/connectors.rs,secrets.rs,api/mod.rs}`,
+  a migration in the store, the discovery helper (new, reusing
+  `vam-security` `ssrf_guard` or the MCP client's pinned fetch), `docs/api/openapi.yaml`,
+  `crates/vam-orchestrator/tests/` (route tests).
+- **Acceptance.** Route tests: every refusal writes nothing; the secret's
+  value is absent from every response body and the audit log of the call; the
+  row's kind is `connection`, scope `org`, destinations = the token host; a
+  member's `PUT` with `client` is 403; re-enable keeps `secretSet`; client-id
+  change flips members' rows.
+- **Tests.** `cargo test -p vam-orchestrator connectors`, `--scenarios admin-supplied-client-is-set-only-by-an-org-admin-and-never-read-back`, `--fast`.
+- **Turns green.** `admin-supplied-client-is-set-only-by-an-org-admin-and-never-read-back`.
+- **Decide.** `Decide: NOW — proof 3 (D28), cost 2 (a body field, a migration, discovery on the host, the vault row)`
+
+**CN-5.3 The node exchanges the code.**
+- **Scope.** New route (open question 3: `POST
+  /v1/connectors/{id}/connection/oauth/code`), the caller's own scope
+  (`secrets:write`, user scope only), idempotency key, body `{ code,
+  codeVerifier, redirectUri }` (`deny_unknown_fields`; no endpoint or client
+  field). Refused unless the connector is `client: org` with `org_vault`,
+  enabled, and its client stored (409/400 with reasons). `redirectUri` must be one of the
+  app's (open question 6). `vamd` posts `authorization_code` with `client_id`,
+  `client_secret` (`client_secret_post`), `code_verifier`, `redirect_uri` and
+  the RFC 8707 `resource` to the pinned token endpoint (same DNS-pinned client
+  as refresh, the secret only after the host matches the row's pinned
+  destination), then creates or replaces the caller's MCP connection row from
+  the connector (URL, tools) and the node row (client id, token and revocation
+  endpoints; registration method `manual`), stores tokens as today (rotated
+  refresh first), and returns the caller's list entry. A provider
+  `invalid_client` answers 409 "the provider refused the client id or secret
+  your admin entered" and writes nothing; `invalid_grant` answers 400. For an
+  `org` connector, `PUT /v1/mcp/connections` refuses an `oauth` block whose
+  token endpoint or client id differ from the node's, and
+  `PUT …/oauth/tokens` refuses for `org_vault` (400, "use the code exchange")
+  and refuses `clientSecret` for any connector-backed row. OpenAPI; the
+  `runtime/tools.md` OAuth section says the node exchanges the code for an
+  admin-supplied client with a secret (D29, page `status` kept `shipped` with a
+  `proves` line for the new scenarios).
+- **Files.** `crates/vam-orchestrator/src/{api/connectors.rs,connectors.rs,api/mcp_connections.rs,mcp_oauth_refresh.rs (token request),mcp_registry.rs}`,
+  `docs/api/openapi.yaml`, `docs/src/content/docs/runtime/tools.md`, route tests.
+- **Acceptance.** Route tests against a loopback token server: form fields and
+  order of writes; nothing written on any refusal; a body with `tokenEndpoint`
+  or `clientId` is 400; responses and errors hold no token or secret.
+- **Tests.** `cargo test -p vam-orchestrator`, `--scenarios admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node`, `--fast`.
+- **Turns green.** `admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node` (with CN-5.4).
+- **Decide.** `Decide: NOW — proof 3 (D29: the secret cannot pass through the app), cost 2 (one route on existing token code)`
+
+**CN-5.4 Refresh and revoke with the org secret.**
+- **Scope.** For a connector-backed row whose connector is `client: org`, the
+  401-refresh (`host_tools.rs`) and the disconnect revoke
+  (`mcp_oauth_refresh.rs`) read the org-scope secret row (not a per-row one)
+  and use the node's pinned token endpoint and client id; a row whose stored
+  endpoint or client id differs from the node's is marked `needs_reauth`
+  without a request. `RefreshProfile::Mcp` keeps `resource`. Single flight:
+  the existing per-connection gate; verify and test that the second waiter
+  sees the new generation and does not refresh, and that the rotated refresh
+  token is stored before the gate is released (O4). A reused-token
+  `invalid_grant` marks `needs_reauth` (existing path). A replaced secret is
+  read on the next refresh (no cache). `invalid_client` on refresh marks
+  `needs_reauth` with `lastRefreshError` naming the client (open question 8).
+- **Files.** `crates/vam-orchestrator/src/{host_tools.rs,mcp_oauth_refresh.rs,mcp_registry.rs,connectors.rs}`, unit tests.
+- **Acceptance.** Unit test: two concurrent refreshes against a single-use
+  token server send one request; the secret is read at org scope; the Entra
+  and plain-MCP shapes are unchanged (existing tests stay green).
+- **Tests.** `cargo test -p vam-orchestrator mcp_oauth host_tools`, `--scenarios rotating-refresh-token-is-spent-once-when-two-tasks-call-at-once,admin-corrects-the-client-secret-and-members-stay-connected`, `--fast`.
+- **Turns green.** `rotating-refresh-token-is-spent-once-when-two-tasks-call-at-once`, `admin-corrects-the-client-secret-and-members-stay-connected`.
+- **Decide.** `Decide: NOW — proof 3 (Box refresh tokens are single-use: without it every member reconnects hourly), cost 1 (a secret source and an endpoint source on an existing path)`
+
+**CN-5.5 the VAM app.**
+- **Scope.** Org settings → Connectors, an `org` connector: Enable asks for
+  the client id and, for `org_vault`, the secret (password field, never
+  prefilled, never stored by the app, never logged; sent once in the `PUT`
+  body); shows `secretSet`, the pinned endpoints and "Replace secret" /
+  "Change client id" (with the warning that members reconnect). The Marketplace
+  and Connectors summaries show "admin-supplied client" (and "with a secret").
+  Member connect for an `org` connector: no discovery or registration; the
+  authorize URL from the entry's `node.client.authorizeEndpoint` and client id,
+  PKCE S256, redirect `squrell://oauth` (or loopback); for `org_vault` it
+  posts code, verifier and redirect URI to the node's exchange route and never
+  exchanges itself; an `org` client without a secret keeps the app exchange
+  (Phase 6). The node's 409 text for a refused client is shown to the member
+  as "ask your admin".
+- **Files.** `src/components/vam/{OrgSettingsConnectorsWorkspace.tsx,ConnectorTiles.tsx}`,
+  the MCP OAuth flow module, `src/types/` connector types, Marketplace summary
+  (CN-4.8 place), `src-tauri/src/{vamd.rs,lib.rs}`, tests.
+- **Acceptance.** Unit tests on fixtures: the secret field is write-only and
+  absent from state after save; connect builds the authorize URL from the
+  entry only; no DCR request for `org`; the exchange call carries no secret.
+- **Tests.** `CI=1 pnpm test`, `pnpm exec tsc --noEmit`, `cargo test --manifest-path src-tauri/Cargo.toml`.
+- **Turns green.** None (unit; team checklist).
+- **Decide.** `Decide: NOW — proof 3 (no admin can enter a client without it), cost 2 (two places on known patterns, one flow change)`
+
+**CN-5.6 Squrell marketplace index read from a named branch (staging nodes only).**
+- **Scope.** Open question 4's default: `VAMD_SQURELL_MARKETPLACE_INDEX_REF`
+  (a branch name, `[A-Za-z0-9._/-]`, no `..`; unset = the default branch head)
+  makes the preconfigured Squrell entry read `marketplace.json` at that
+  branch's head. Artifacts are still installed only at the tag the index
+  names, pinned and never followed (M5 unchanged); the entry shows `indexRef`
+  in `GET /v1/marketplaces` and vamd logs it at start. Added marketplaces
+  cannot set it.
+- **Files.** `crates/vam-orchestrator/src/marketplace/{mod.rs,fetch.rs,store.rs}`,
+  `crates/vam-orchestrator/src/daemon.rs`, `docs/src/content/docs/orchestrator/overview.md` (env table), unit tests.
+- **Acceptance.** Unit tests: index from the named branch, artifacts from the
+  tag only, a bad name refused at start; unset behaves as today (Phase 4
+  marketplace scenarios unchanged).
+- **Tests.** `cargo test -p vam-orchestrator marketplace`, `--fast`.
+- **Turns green.** None (team test path).
+- **Decide.** `Decide: NOW — proof 2 (D32: the team tests Box before release), cost 1 (one ref in the fetch)`
+
+**CN-5.7 The Box listing ready to tag, and the team's run.**
+- **Scope.** On `vam-marketplace` `box-connector`: tool names checked
+  against the live `tools/list` and fixed in `connector.json`, the skill, the
+  playbook and the agent; `requiresNode` set to the first node version with
+  Phase 5; CI's pinned vam commit moved to the Phase 5 merge so `vam catalog
+  validate` passes; `docs/listing-box.md` step 2 rewritten for the import path
+  of CN-5.6 (owner pushes tag `box-v1.0.0-rc.1` on the branch commit). Team
+  run on a real Box tenant, owner's word: Enable with the Box integration's id
+  and secret, member connects, the Box assistant answers from a file, a second
+  refresh after an hour works, disconnect revokes, `secret-absent` checked by
+  hand in the API listings. P6 number recorded.
+- **Files.** vam-marketplace: `listings/box/**`, `.github/workflows/validate.yml`,
+  `docs/listing-box.md`. vam: Phase 5 close block (runbook, team checklist).
+- **Acceptance.** Marketplace CI green on the branch; the team's run passes or
+  its failures land as one fix wave.
+- **Tests.** Marketplace CI; the runbook steps.
+- **Turns green.** None (real tenant).
+- **Decide.** `Decide: NOW — proof 3 (exit criterion), cost 1 (data and a runbook)`
+
+##### Waves
+
+One wave at a time; branches `cn-5/wave-N` into the base (open question 9).
+Wave 1 is the scaffold later waves share (the connector file shape and the
+summary).
+
+| Wave | Items | Turns green | Repo | Model | Budget | Depends on | actions | Status | PR |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | scenarios: 5 files, `mock-filebox-server` (MCP, metadata, authorize, confidential token endpoint, single-use refresh, hold, rotate, expire), two fixture listings, `connector-node.client`, org-client `connector-connect`, `oauth:` seam key held out, README "Connectors" additions, guards-only edits | — (5 red, right reason, class `product`) | vam | Sonnet low | 120 min | — | fast (`vam-e2e`, `e2e/`: `skip-vm-lane`) | [ ] | |
+| 1 | CN-5.1, CN-5.6 | first | vam | Sonnet medium: changes the connector file schema and the marketplace trust check (a community connector may now ask for a secret) and touches the marketplace fetch | 90 min | 0 | fast (`skip-vm-lane`) | [ ] | |
+| 2 | CN-5.2 | second | vam | **Sonnet high**: writes a client secret to the vault from an API body, a migration, and host-side discovery of untrusted endpoints (SSRF). Orchestrator reads the vault write, the redaction and the discovery guard before merge | 150 min | 1 | fast (`skip-vm-lane`) | [ ] | |
+| 3 | CN-5.3, CN-5.4 | third, fourth, fifth | vam | **Sonnet high**: a new route that sends the org secret, the refresh gate for single-use tokens (concurrency), and refusals on the MCP routes (auth). Orchestrator reads where the secret is read and sent, and the gate test | 180 min | 2 | fast (`skip-vm-lane`) | [ ] | |
+| 4 | CN-5.5 | — (unit) | The VAM app | **Sonnet high**: the admin's secret passes through the app once and the sign-in flow changes (no registration, no app-side exchange for this case); a slip logs or keeps the secret | 150 min | 3 | none (app unit only) | [ ] | |
+| 5 | CN-5.7 | — (marketplace CI; real tenant) | vam-marketplace (+ vam close block) | Sonnet low (session supports the team) | 60 min + team's time | 4; a deploy of vamd and the app from the base | marketplace: its own CI; vam: none | [ ] | |
+
+Scoreboard expectation: 0 green after wave 0; 1 after wave 1; 2 after wave 2;
+5 after wave 3; flat in 4–5 (stated so they are not flagged).
+
+**Phase rubric.** `Decide: SLICE — proof 3 (D28, D29, D32: Box and every no-registration provider), cost 3 (secret handling, a new route, both repos) → slice: remote MCP with discovery only; client secret post only (no private-key JWT); no admin notification on a refused client; no early refresh for MCP rows; fixed endpoints and company address in Phase 6`
+
+##### Open questions (each with a default)
+
+1. **Disable and re-enable: keep or clear the client and secret.** Default
+   **keep** (as consent is kept, Phase 1 Q7): a disable stops members at once
+   (`askAdmin`, calls refused) but keeps the client id, the pinned endpoints
+   and the vault row; `{ enabled: true }` restores them and members'
+   connections work again without a reconnect. Clearing is explicit:
+   `client: null` with `enabled: false` deletes the row and marks members'
+   connections `needs_reauth`. Alternative: clear on disable (an admin must
+   re-enter the secret after any pause).
+2. **Does the code exchange for a secret-less org client also move to vamd?**
+   Default **no** (D29 as written): `client: org` with `clientSecret: none`
+   (Zendesk, Salesforce in Phase 6) keeps the app's exchange; the app uses the
+   node's client id and pinned endpoints, and `PUT /v1/mcp/connections` refuses
+   other values (O3). The node route refuses connectors without `org_vault`.
+   Revisit in Phase 6: one path for every org client would also stop the app
+   naming the token endpoint for REST connectors.
+3. **Route names.** Default: Enable stays `PUT /v1/connectors/{id}/node` with
+   a `client: { clientId, clientSecret? }` field; the exchange is `POST
+   /v1/connectors/{id}/connection/oauth/code` with `{ code, codeVerifier,
+   redirectUri }`, answering the caller's list entry (beside the REST
+   connection routes, since the node, not the request, decides the client).
+   Alternatives: `POST /v1/mcp/connections/{id}/oauth/exchange` (MCP route
+   family, but the id would have to be a connector); a separate `PUT
+   /v1/connectors/{id}/node/client` for the secret (cleaner audit, a second
+   admin call).
+4. **How the team imports the unreleased Box listing.** The index is read at
+   the default branch head and artifacts only at tags; the Box URN can only
+   come from the Squrell entry (M3); so the `box-connector` branch cannot be
+   installed today. Default **(a) CN-5.6**: a staging node sets
+   `VAMD_SQURELL_MARKETPLACE_INDEX_REF=box-connector`, the owner pushes tag
+   `box-v1.0.0-rc.1` on the branch commit and the branch index names it;
+   nothing reaches `main` before Phase 5 is released (locked 16). (b) Zero
+   code: a `process-guest` vamd with `VAMD_PROCESS_MARKETPLACE_URLS` mapping the
+   Squrell URL to a local bare clone whose default branch is `box-connector`
+   (works, since Box tools run in vamd, but the team runs a test build). (c)
+   Merge into `main` gated by `requiresNode`: breaks locked 16.
+5. **Where the endpoints come from.** Default: `vamd` discovers them at
+   Enable from the connector's MCP URL (RFC 9728, then RFC 8414 or OIDC),
+   requires https on public names, S256 and a token endpoint, and pins them;
+   they change only when the admin saves the client again (re-discovery). The
+   admin sees the token host before saving. Alternative: the app discovers and
+   sends them at Enable (no host fetch, but the endpoint the secret goes to
+   would be request data).
+6. **Redirect URIs the exchange accepts.** Default: `squrell://oauth` and
+   `http://127.0.0.1:<port>/<path>` only (the app's; the admin registers them
+   at the provider, per `docs/listing-box.md`), else 400. A node setting for
+   more is later.
+7. **Changing the client id.** Default: members' connections to the connector
+   are marked `needs_reauth` (their tokens belong to the old client); a new
+   secret alone keeps them.
+8. **A refused client.** Default: at the exchange, 409 with "the provider
+   refused the client id or secret your admin entered", nothing written; at a
+   refresh, `invalid_client` marks the connection `needs_reauth` with that
+   reason (the existing reconnect notification). An admin notification for a
+   broken client is backlog (`Decide: BACKLOG — proof 1, cost 1`).
+9. **Base branch.** Default: `feat/connectors` re-cut from `main` after this
+   docs branch merges (it was deleted at the Phase 4 release); waves 0–4 merge
+   there, released to `main` at the phase close.
+10. **Unverified connectors with an org secret.** Default: allowed from any
+    trusted marketplace (D28 says marketplace connectors may use it): the secret is the
+    org's own, entered by its admin, sent only to the token host the admin
+    sees at Enable; the summary says "admin-supplied client (with a secret)"
+    beside the Unverified badge. Alternative: Squrell marketplace only.
+11. **The org secret row in `/v1/secrets`.** Default: not listed and not
+    deletable there (members hold `secrets:write` and would see its
+    fingerprint and id); the connector entry's `secretSet` and `updatedAt` are
+    the only view.
+12. **Box facts not yet checked** (tool names, PKCE S256 in Box's metadata,
+    any `scope` value, Box AI enabled). Default: the team checks them on the
+    live server in wave 5 before the tag; the scenarios do not depend on them.
+
+**Risks.**
+
+- A refresh that Box accepts but whose rotated token `vamd` fails to store
+  spends the member's only refresh token: the member reconnects. The store
+  order (refresh token first) and the gate keep the window small; recorded,
+  not fixed.
+- Discovery at Enable is the node's first fetch of a provider metadata URL
+  named by a connector file: it must use the SSRF guard and cap sizes, or a
+  community connector could point the node at an internal address.
+- The app wave is the first time an admin types a secret into the app; the
+  orchestrator checks the app's logs and state stores in review.
+
+**Phase close:** all five scenarios `active` and green; the VAM app unit
+suites on the merged base; Box marketplace CI green on its branch; the team's
+real-tenant run on the owner's word with the P6 number; release (the release PR
+runs the microVM lane once); team checklist out; tag `box-v1.0.0` and the
+listing merged into `vam-marketplace` `main` after the release.
+
+### Phase 6 — Company address and REST from marketplaces (Zendesk)
+
+**Goal:** a connector reaches a per-company host and a marketplace connector
+may be REST with skills (design §13, D30, D31).
+**Depends on:** Phase 5.
+**Status:** defined 2026-11-18 (owner); not started.
+**Scope:** `profile: "oauth"` with fixed `endpoints` for providers without
+metadata; one `tenant` parameter (`{subdomain}`, fixed suffix) entered at
+Enable and filled into endpoints, MCP URL and binding hosts; marketplace REST
+bindings with exact hosts and per-tool egress shapes; the admin sees the filled
+hosts. Salesforce `instance_url` pinning is a candidate item (open question).
+**Exit:** a Zendesk REST listing (connector plus skill) works on a mock and,
+on the owner's word, a real Zendesk instance.
+
+### Phase 7 — Developer kit and API keys
+
+**Goal:** a third-party developer builds, checks and tests a connector without
+a Squrell release; API-token systems can be connected.
+**Depends on:** Phase 6.
+**Status:** defined 2026-11-18 (owner); not started.
+**Scope:** `vam connector init`, `validate`, `test` (mock provider world
+piece, also used by marketplace CI); the `api_key` connection flow (admin- or
+member-entered key, `connection` row, host-side inject only).
+**Exit:** a connector built from nothing passes `validate` and `test` and
+installs from a test marketplace.
 
 ## Explicitly later
 
@@ -2163,6 +2676,8 @@ init`, `validate`, `test`. Rubric: cost 3 (new trust boundary).
 - Verified publishers (namespace proof, signing) for marketplace content.
 - Event subscriptions and the first event source (design §6.6).
 - Teams relay, Google secret relay, GitHub, databases.
+- The connector as its own catalog kind with drafts; qualified connection ids;
+  org-held connections (service accounts). (From the old Phase 5 scope.)
 
 ## Progress log
 
@@ -2219,3 +2734,4 @@ init`, `validate`, `test`. Rubric: cost 3 (new trust boundary).
 | 2026-11-09 | 4 | **Wave 6 merged** (squash, `[skip ci]`, `skip-vm-lane`): connection writes journaled. `vam-network` `WriteTicket` (reserve before the token is read, `commit_send` immediately before dispatch in `broker.rs` and the port-55 MITM path, `answered(status)`), `effect_path.rs` `reserve_write`/`WriteCall` (RAII: dropped after send without an answer → `unknown`), `session_tool_egress.effect_class` (from the skill manifest), lease generation on `record_intent`, `settle_orphaned_sends` after a vamd crash. Crash points: journal write fails → nothing sent (`effect_journal_unavailable`); answer recorded → `REPLAYED` before the PDP, model told "not sent again"; answer lost/5xx → `unknown`, non-idempotent retry asks, idempotent (`calendar_create_event`, Graph `transactionId`) resent under its key; 4xx → `failed`, replayed as failed. No token or body in the journal. Limits: a multi-write call is protected as a whole (a crash between two writes misses the second, never duplicates); a write without a call id is refused; the receipt's `effects` section still reads "not journaled" (E12 Phase 3; the proof here is the tool-call lines + `effect.replayed`). Spec change (orchestrator-approved, per the Scenario delta): `send-interrupted-mid-call-is-not-sent-twice` asserts `effect.replayed` for `mail_send`, "not sent again", receipt one `approved-once` line; it was flaky on the base (one run saw two `sendMail` — a real duplicate). Orchestrator read the commit-before-send sites; re-run: `--fast` **121/121 pass**; the interrupted-send and two effect scenarios 3/3 three times alone; workspace 121 ok, only `hsp_uds`; release gate PASS. **Scoreboard: all 8 Phase 4 scenarios active and green.** 0 fix cycles. Wave 7 (the VAM app) next. |
 | 2026-11-09 | 4 | **Wave 7 merged** (squash, `[skip ci]`): Org settings Marketplace place (users:admin; members see no item, deep link locked), trusted marketplaces with Squrell/Unverified badges, Add (confirm URL and domain), Refresh, Enable/Disable, Remove (409 reason shown); listings with the capability summary (hosts, paths, any-path chip, prefix-write warning, connector publisher/client id/scopes/MCP server); Install and Update always confirm, capability changes shown before and `capabilitiesChanged` after (needs Enable again); Connectors place shows trust, origin, capabilities before Enable; installed rows read-only with badge (operators too). Eight Tauri commands, all writes with `Idempotency-Key`. Listing text rendered as plain text (no raw HTML). Orchestrator re-run: `CI=1 pnpm test` 893/893, `tsc` clean, src-tauri 59/59. **Phase 4 build done:** 8 of 8 scenarios active and green; Phase 4 close block written (scoreboard, owner items, wave 9 runbook, team checklist). Wave 9 and lane B wait for the owner. |
 | 2026-11-09 | 4 | **Release PR opened** on the owner's word: vam `feat/connectors` → `main` (this commit carries no `[skip ci]`, so the release gate, workspace tests, scenarios and the microVM lane run once on Actions; the lane is the first run of the Bun tools in a Firecracker guest), then. Before it: `main` merged into `feat/connectors` by (merge commit; conflicts in the egress code resolved keeping both sides: main's `secret_bound` and oversize refusal, Phase 4's journal ticket and exact paths; clippy 1.97 fixes; orchestrator re-run: 125/125 scenarios, release gate PASS, workspace green but `hsp_uds`). Deploy: vamd first, then the app; no new required env var (`VAMD_MARKETPLACE_DOMAIN` now defaults to `hub.squrell.cloud`; `git` must be on the node or `VAMD_GIT_BIN` set). |
+| 2026-11-18 | 5 | **Breakdown drafted** (phase-breakdown agent), awaiting owner approval: 5 scenarios (process, mock model, new `mock-filebox-server` confidential-client MCP provider), CN-5.1–5.7, waves 0–5 (W2, W3 and the app W4 Sonnet high: the org secret in the vault, the node-side code exchange and single-use refresh, the secret in the app); 12 open questions with defaults (disable keeps the secret; secret-less org clients keep the app exchange; `POST /v1/connectors/{id}/connection/oauth/code`; Box imported on a staging node via a Squrell index branch, CN-5.6). |
