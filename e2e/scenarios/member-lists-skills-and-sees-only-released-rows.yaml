@@ -1,0 +1,30 @@
+id: member-lists-skills-and-sees-only-released-rows
+title: A member listing skills for their agent sees only released skills, and a publisher's draft skill is listed only to that publisher on request
+description: >
+  A released skill is in the catalog and a publisher saves a second skill as a draft. The member's skill
+  list holds the released skill, no draft row and not the publisher's draft, and the member asking for
+  drafts is refused with 403 naming catalog:write. The publisher's default list lacks their draft too;
+  asking for drafts lists it. The admin, asking for drafts, never sees the publisher's draft.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - skill-host-echo
+  - skill-draft-probe
+when:
+  - publish-skill: { piece: skill-draft-probe, as: pub, release: false }
+then:
+  - identity-request: { as: member, credential: key, path: /v1/skills, status: 200, contains: "skill-host-echo-member-lists-skills-and-sees-only-released-rows", lacks: "skill-draft-probe-member-lists-skills-and-sees-only-released-rows" }
+  - identity-request: { as: member, credential: key, path: /v1/skills, status: 200, lacks: "\"channel\":\"DRAFT\"" }
+  - identity-request: { as: member, credential: key, path: "/v1/skills?includeDrafts=true", status: 403, contains: "catalog:write" }
+  - identity-request: { as: pub, credential: key, path: /v1/skills, status: 200, lacks: "skill-draft-probe-member-lists-skills-and-sees-only-released-rows" }
+  - identity-request: { as: pub, credential: key, path: "/v1/skills?includeDrafts=true", status: 200, contains: "skill-draft-probe-member-lists-skills-and-sees-only-released-rows" }
+  - identity-request: { as: admin, credential: key, path: "/v1/skills?includeDrafts=true", status: 200, contains: "skill-host-echo-member-lists-skills-and-sees-only-released-rows", lacks: "skill-draft-probe-member-lists-skills-and-sees-only-released-rows" }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/catalog_auth.rs
+  - vam:crates/vam-orchestrator/src/api/paging.rs
+  - vam:crates/vam-orchestrator/src/catalog.rs
+status: active

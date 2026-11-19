@@ -22,6 +22,7 @@ proves:
   - crates/vam-orchestrator/tests/rate_limit_api_tests.rs
   - crates/vam-orchestrator/src/paging_store_tests.rs::sessions_page_newest_first_and_a_new_session_does_not_shift_the_next_page
   - crates/vam-orchestrator/src/paging_store_tests.rs::runs_page_newest_first_by_rowid_cursor
+  - crates/vam-orchestrator/src/paging_store_tests.rs::skills_page_newest_first_and_a_new_release_does_not_shift_the_next_page
   - crates/vam-orchestrator/tests/api_tests.rs
   - crates/vam-orchestrator/tests/mcp_credentials_stay_host_side.rs::the_secrets_api_cannot_write_the_connection_kind
   - crates/vam-orchestrator/tests/mcp_credentials_stay_host_side.rs::connection_credential_cannot_be_rewritten_as_egress
@@ -29,15 +30,15 @@ proves:
 ---
 
 `vamd` serves a JSON API under `/v1`, over TLS by default (see [Host daemon](/orchestrator/overview/)).
-The routes are in `crates/vam-orchestrator/src/api/mod.rs:95-210`. The complete list, with
+The routes are in `crates/vam-orchestrator/src/api/mod.rs:115-247`. The complete list, with
 request and response shapes, is the OpenAPI file the node serves.
 
 ## OpenAPI and `/docs`
 
-`GET /openapi.yaml` returns the file built into the binary (`api/mod.rs:75,95`; source
+`GET /openapi.yaml` returns the file built into the binary (`api/mod.rs:87,119`; source
 `docs/api/openapi.yaml`). `GET /docs` serves a page that renders it with a pinned Scalar script,
-`@scalar/api-reference@1.74.0` from jsDelivr (`api/mod.rs:96,286`). `/openapi.yaml` needs no key
-(`api/auth.rs:133`).
+`@scalar/api-reference@1.74.0` from jsDelivr (`api/mod.rs:120,328`). `/openapi.yaml` needs no key
+(`api/auth.rs:131`).
 
 ## Route groups
 
@@ -51,17 +52,18 @@ request and response shapes, is the OpenAPI file the node serves.
 | Secrets | `/v1/secrets`, `/v1/org/secrets` |
 | Node | `/v1/health`, `/v1/node` |
 
-The run routes sit behind one wildcard, `/v1/runs/*rest` (`api/mod.rs:187`), and are told apart
-by their last segment (`api/mod.rs:1612-1670`).
+The run routes sit behind one wildcard, `/v1/runs/*rest` (`api/mod.rs:221-224`), and are told apart
+by their last segment (`api/mod.rs:1396-1416`).
 
 `GET /v1/keys` lists the caller's `http` keys (`keys:admin` lists every `http` key). `?holder=broker`
 lists the grants issued to brokers and `?holder=all` both; a grant is listed to its owner only, for
-every role, and any other `holder` is a 400 (`list_keys`, `api/mod.rs:420-440`).
+every role, and any other `holder` is a 400 (`list_keys`, `api/mod.rs:460-490`).
 
 ## Health and node status
 
-`GET /v1/health` and `GET /v1/node` report the node's capacity, draining flag and the isolation it
-runs under (`api/mod.rs:446-481`). Proved by `node-reports-the-isolation-it-runs`.
+`GET /v1/node` reports the node's capacity, draining flag and the isolation it runs under
+(`api/mod.rs:523-570`). `GET /v1/health` returns only a serving status, `NOT_SERVING` while the
+node is not ready or is draining (`api/mod.rs:382-393`). Proved by `node-reports-the-isolation-it-runs`.
 
 `status.build` names the build the node runs: `version` (`0.1.0` on a release build, `0.1.0+dev.14` on any other), `commit` (short sha, `+dirty` when the tree had changes, or `unknown`), `commitDate` (`YYYY-MM-DD`, empty when unknown) and `channel` (`release` or `dev`). An older node has no `build`. `vam node status` prints it; see [CLI](/getting-started/cli/). Proved by `node-status-shows-the-node-and-cli-versions`.
 
@@ -74,7 +76,7 @@ cross-user read is a 404, the same as a missing row. See
 
 ## Rate limits
 
-Limits are on by default (`api/rate_limit.rs:41-62`):
+Limits are on by default (`api/rate_limit.rs:60-72`):
 
 | Limit | Per second | Burst |
 |---|---|---|
@@ -82,21 +84,24 @@ Limits are on by default (`api/rate_limit.rs:41-62`):
 | Creating runs, per key | 2 | 20 |
 | Auth attempts, per address | 5 | 20 |
 
-A refused call is a 429 with a reason header (`rate_limit.rs:28,340`). `VAMD_RATE_LIMIT=off`
+A refused call is a 429 with a reason header (`rate_limit.rs:32,425`). `VAMD_RATE_LIMIT=off`
 turns the limits off; the `VAMD_RATE_LIMIT_*` variables change a value, and zero or a non-number
-keeps the default (`daemon.rs:260-290`). Proved by `api-rate-limits-a-flood` and
+keeps the default (`daemon.rs:274-308`). Proved by `api-rate-limits-a-flood` and
 `rate_limit_api_tests.rs`.
 
 ## Paging
 
-List calls take `pageSize` (default 50, at most 1000) and `pageToken` (`api/paging.rs:14-50`).
-Sessions, runs and approvals page newest first by a cursor, so a new row does not shift the next
-page (tests `sessions_page_newest_first_and_a_new_session_does_not_shift_the_next_page` and
-`runs_page_newest_first_by_rowid_cursor`). A bad `pageSize` is a 400.
+List calls take `pageSize` (default 50, at most 1000) and `pageToken` (`api/paging.rs:13-50`).
+Sessions, runs, approvals and skills (`GET /v1/skills`) page newest first by a cursor, so a new
+row does not shift the next page (tests
+`sessions_page_newest_first_and_a_new_session_does_not_shift_the_next_page`,
+`runs_page_newest_first_by_rowid_cursor` and
+`skills_page_newest_first_and_a_new_release_does_not_shift_the_next_page`). A bad `pageSize`, or
+a `pageToken` from another list, is a 400.
 
 ## Errors
 
-Each error type maps to one status in `api/error.rs:40-234`: 400 bad request, 401 and 403 auth,
+Each error type maps to one status in `api/error.rs:37-250`: 400 bad request, 401 and 403 auth,
 404 missing or foreign row, 409 conflict (it also answers a member past the draft agent cap, see [Member agents](/orchestrator/member-agents/#error-messages)), 412 failed precondition, 502 upstream failure, 503
 node cannot take the call, 504 a stop still settling.
 
@@ -162,7 +167,7 @@ rewritten as egress (`SecretKind::from_proto`, `secrets.rs`). Proved by
 
 A response from a host that holds a session secret is read through a scrub buffer (8 MiB by
 default, `vam-network/src/proxy/mitm.rs:52`). A response over the buffer is refused with a 502
-before any of its bytes reach the guest (`mitm.rs:38`). Proved by
+before any of its bytes reach the guest (`mitm.rs:13-17,380`). Proved by
 `oversize-response-with-a-secret-never-reaches-the-guest`, which uses a 64 KiB buffer so the
 bodies stay small. It proves the host proxy, not the guest's lack of a route.
 

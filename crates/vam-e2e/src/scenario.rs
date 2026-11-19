@@ -227,6 +227,8 @@ pub enum Step {
     ConnectorNode(crate::engine::connectors::ConnectorNode),
     /// `connector-connect: { id, url, piece, tenant, upn, as, refused }`: connects as the app would.
     ConnectorConnect(crate::engine::connectors::ConnectorConnect),
+    /// `api-call: { method, path, as, refused, contains, absent }`: one GET or DELETE as an identity.
+    ApiCall(crate::engine::connectors::ApiCallStep),
     /// `connector-check: { id, as }`: `POST /v1/connectors/{id}/connection/check`.
     ConnectorCheck(crate::engine::connectors::ConnectorCheck),
     /// `publish-skill: { piece, refused, contains }`: publishes and releases a `deferred` skill piece.
@@ -530,6 +532,7 @@ impl<'de> Deserialize<'de> for Step {
             "connector-node" => Step::ConnectorNode(val(v)?),
             "connector-connect" => Step::ConnectorConnect(val(v)?),
             "connector-check" => Step::ConnectorCheck(val(v)?),
+            "api-call" => Step::ApiCall(val(v)?),
             "mock-provider" => Step::MockProvider(val(v)?),
             "edit-agent-draft" => Step::EditAgentDraft(val(v)?),
             "release-agent" => Step::ReleaseAgent(val(v)?),

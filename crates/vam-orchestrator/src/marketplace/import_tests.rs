@@ -50,6 +50,7 @@ fn world(
         ),
         refresh_every: Some(Duration::from_secs(3600)),
         node_version: "0.1.0".into(),
+        squrell_index_ref: None,
     };
     let mut repo = TestRepo::new(fixture, tags);
     edit(&mut repo);
@@ -1263,5 +1264,45 @@ fn a_new_install_never_inherits_an_enabled_flag_left_for_its_id() {
         .put_node_connector(&node_row("bugwatch", true))
         .unwrap();
     w.install(&id, "bugwatch-connector", Mode::Install).unwrap();
+    assert!(!w.store.connector_enabled("bugwatch").unwrap());
+}
+
+#[test]
+fn an_update_that_flips_the_client_or_adds_a_secret_needs_enable_again() {
+    let Some((mut w, id)) = connectors_world(|_| {}) else {
+        return;
+    };
+    w.install(&id, "bugwatch-connector", Mode::Install).unwrap();
+    w.store
+        .put_node_connector(&node_row("bugwatch", true))
+        .unwrap();
+    connect_bugwatch(&w.store, "ada");
+
+    // The publisher's client becomes the org's own (no secret): the admin must supply one.
+    let out = release_connector(&mut w, &id, "bugwatch-connector-v3.0.0", |c| {
+        let p = c["provider"].as_object_mut().unwrap();
+        p.remove("clientId");
+        p.insert("client".into(), "org".into());
+        c["version"] = "3.0.0".into();
+    });
+    assert_eq!(out.capabilities_changed, [BUGWATCH]);
+    assert!(!w.store.connector_enabled("bugwatch").unwrap());
+    assert_eq!(
+        status_of(&w.store, "ada"),
+        crate::mcp_registry::McpOauthStatus::NeedsReauth
+    );
+
+    // Enabled again; the org client now also holds a secret in the vault: again not enabled.
+    w.store
+        .put_node_connector(&node_row("bugwatch", true))
+        .unwrap();
+    let out = release_connector(&mut w, &id, "bugwatch-connector-v3.1.0", |c| {
+        let p = c["provider"].as_object_mut().unwrap();
+        p.remove("clientId");
+        p.insert("client".into(), "org".into());
+        p.insert("clientSecret".into(), "org_vault".into());
+        c["version"] = "3.1.0".into();
+    });
+    assert_eq!(out.capabilities_changed, [BUGWATCH]);
     assert!(!w.store.connector_enabled("bugwatch").unwrap());
 }

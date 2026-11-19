@@ -20,6 +20,7 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | `machine-base` | Machine base (E7 Phase 1 + install slice, launch row 14): Debian slim default base with Python and git, `requiresRuntime` check, `vam node init` | active | 1 closed in base 2026-11-10 (W0-W5, 5/5 scenarios active); release PR into `main` open |
 | `user-identity` | User identity: self-service password change (`POST /v1/me/password`, `vam passwd`), then opaque user IDs and email usernames | active | 1 released to `main` 2026-11-14 (self-service password change); 2 closed in base 2026-11-17 (generated `usr_` ids, case-insensitive email login names); release PR into `main` open |
 | `release-artifacts` | Release artifacts: one workspace version chosen at release time, manual owner-approved release workflow, immutable `v*` tags, an x86_64 node bundle and `vam` for Linux/macOS with SHA256SUMS and attestations, `vam dock` and `vam upgrade`. Phases A, B, Final; Lima and Windows in the next release (`v0.2.0`) | active | A (waves merged; rc.1 close waits for the owner) |
+| `skill-list` | Skill list: paged `GET /v1/skills` for the member skill picker (`design/skill-list.md`) | active | 0 |
 
 ## Backlog (no tracker)
 
@@ -31,6 +32,5 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | Member `extends` / `overlay` | Open these fields to members once the run-time merge is wired; refused on a member save today. |
 | Old-repo branch names | Rename `isolation-verify-closeout` decision 9's branch names (`feat/improving-the-vam`); deferred by the owner 2026-11-18. |
 | Member namespace collisions | Partly fixed by `user-identity` Phase 2: `Alice` / `alice` can no longer coexist. Still shared: email names with one local part (`ada@one.example`, `ada@two.example`, `ada`) and every non-slug name on `default`; documented on `orchestrator/member-agents`. |
-| Agent permissions in OpenAPI | `GET` / `PUT /v1/agents/{urn}/permissions` are missing from `docs/api/openapi.yaml`. |
 | E11 Jig, the larger plan | Queries and mutations, composed components, jig packages and a registry, agent-written `.jig`, Slack and A2UI adapters. The basics are shipped (`docs/src/content/docs/runtime/jig.md`); the earlier plan is in git history. |
 | Primary agent | One default agent per user that asks the other agents the user may run (a delegate broker, depth one). Not started; the earlier proposal is in git history. |

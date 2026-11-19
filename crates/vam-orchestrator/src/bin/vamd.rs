@@ -776,7 +776,16 @@ async fn main() {
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let mk = vam_orchestrator::marketplace::MarketplaceConfig::from_env(&state_dir);
+        let mut mk = vam_orchestrator::marketplace::MarketplaceConfig::from_env(&state_dir);
+        mk.squrell_index_ref =
+            vam_orchestrator::marketplace::MarketplaceConfig::index_ref_from_env()
+                .or_exit("invalid marketplace index ref");
+        if let Some(b) = &mk.squrell_index_ref {
+            tracing::warn!(
+                index_ref = %b,
+                "the Squrell marketplace index is read from this branch, not the default branch: a staging node"
+            );
+        }
         if mk.fetcher.git_bin.is_none() {
             tracing::warn!(
                 "git was not found: marketplaces cannot be read until it is installed (or {} names it)",

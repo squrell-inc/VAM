@@ -191,7 +191,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(delete_playbook_wildcard),
         )
         .merge(skill_packages::skill_package_routes())
-        .route("/v1/skills", put(put_skill))
+        .route("/v1/skills", put(put_skill).get(list_skills))
         .route(
             "/v1/skills/{*rest}",
             get(get_skill_wildcard).merge(catalog_release::skill_release_route()),
@@ -832,6 +832,79 @@ async fn put_policy(
         record: Some(saved),
     };
     let (code, json) = json_response("vam.v1.PutPolicyResponse", &resp)?;
+    Ok(json_http_response(code, json))
+}
+
+/// `?includeDrafts=` on `GET /v1/skills`. Read beside [`paging::PageQuery`].
+#[derive(Debug, Default, serde::Deserialize)]
+struct ListSkillsQuery {
+    #[serde(rename = "includeDrafts")]
+    include_drafts: Option<String>,
+}
+
+impl ListSkillsQuery {
+    /// `true` or `false`; absent is `false`. Anything else, an empty value included, is refused.
+    fn include_drafts(&self) -> Result<bool, OrchestratorError> {
+        match self.include_drafts.as_deref().map(str::trim) {
+            None | Some("false") => Ok(false),
+            Some("true") => Ok(true),
+            Some(_) => Err(OrchestratorError::InvalidContract(
+                "includeDrafts must be true or false".into(),
+            )),
+        }
+    }
+}
+
+/// `GET /v1/skills`: released skill rows, newest first, one page at a time. `includeDrafts=true`
+/// adds the caller's own drafts and needs `catalog:write`. Another user's draft is never listed.
+async fn list_skills(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(page): Query<paging::PageQuery>,
+    Query(flags): Query<ListSkillsQuery>,
+) -> Result<Response, ApiError> {
+    require_catalog_read(&auth)?;
+    let include_drafts = flags.include_drafts()?;
+    if include_drafts {
+        crate::api::catalog_auth::require_own_drafts_listing(&auth)?;
+    }
+    let size = page.size()?;
+    let after =
+        paging::int_triple_cursor(page.cursor("skills")?)?.map(|(created_at, source, rowid)| {
+            crate::catalog::SkillPageKey {
+                created_at,
+                source,
+                rowid,
+            }
+        });
+    let mut rows = state.store.list_skill_records_page(
+        auth.owner_user_id(),
+        include_drafts,
+        size + 1,
+        after,
+    )?;
+    let more = rows.len() > size;
+    rows.truncate(size);
+    let next = match (more, rows.last()) {
+        (true, Some((_, key))) => paging::token(
+            "skills",
+            &[
+                key.created_at.to_string(),
+                key.source.to_string(),
+                key.rowid.to_string(),
+            ],
+        ),
+        _ => String::new(),
+    };
+    let mut records: Vec<_> = rows.into_iter().map(|(record, _)| record).collect();
+    state.store.attach_skill_origins(&mut records)?;
+    let resp = vam_spec::v1::ListSkillsResponse {
+        records,
+        pagination: Some(vam_spec::v1::PaginationResponse {
+            next_page_token: next,
+        }),
+    };
+    let (code, json) = json_response("vam.v1.ListSkillsResponse", &resp)?;
     Ok(json_http_response(code, json))
 }
 
@@ -2078,6 +2151,7 @@ async fn put_secret(
     let kind = SecretKind::from_proto(req.kind)?;
     let scope = resolve_secret_scope(SecretScope::from_proto(req.scope)?, auth.role());
     authorize_org_secret_write(scope, auth.role())?;
+    refuse_connector_row(scope, &req.binding_id)?;
     let idem = if req.idempotency_key.is_empty() {
         Some(idempotency.as_str())
     } else {
@@ -2097,6 +2171,21 @@ async fn put_secret(
     };
     let (code, json) = json_response("vam.v1.PutHostSecretResponse", &resp)?;
     Ok(json_http_response(code, json))
+}
+
+/// A connector's org row (`connector/<id>/oauth/client-secret`) is managed through
+/// `PUT /v1/connectors/{id}/node` only: the secrets API does not read, write or delete it.
+pub(crate) fn refuse_connector_row(
+    scope: SecretScope,
+    binding_id: &str,
+) -> Result<(), OrchestratorError> {
+    if crate::connector_client::is_connector_org_row(scope, binding_id) {
+        return Err(OrchestratorError::InvalidContract(
+            "this secret belongs to a connector and is managed through the connector (PUT /v1/connectors/{id}/node), not the secrets API"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -2129,6 +2218,11 @@ async fn list_secrets(
     if let Some(scope) = filter {
         secrets.retain(|meta| meta.scope == scope);
     }
+    // A connector's org rows (the admin's client secret) are not secrets of the caller: neither
+    // their ids nor their fingerprints are listed (CN-5.2, open question 11).
+    secrets.retain(|meta| {
+        !crate::connector_client::is_connector_org_row(meta.scope, &meta.binding_id)
+    });
     let resp = ListHostSecretsResponse {
         secrets: secrets.iter().map(to_proto_secret).collect(),
     };
@@ -2147,6 +2241,7 @@ async fn get_secret(
         .authorize(&auth, "GetHostSecret", "secrets:write")?;
     let binding_id = percent_decode_path(&id);
     let scope = resolve_secret_scope(requested_secret_scope(&query)?, auth.role());
+    refuse_connector_row(scope, &binding_id)?;
     let meta = state.vault.get_metadata_at(
         scope,
         vault_owner_user_id(scope, auth.owner_user_id()),
@@ -2174,6 +2269,7 @@ async fn delete_secret(
     let binding_id = percent_decode_path(&id);
     let scope = resolve_secret_scope(requested_secret_scope(&query)?, auth.role());
     authorize_org_secret_write(scope, auth.role())?;
+    refuse_connector_row(scope, &binding_id)?;
     let meta = state.vault.delete_secret_at(
         scope,
         vault_owner_user_id(scope, auth.owner_user_id()),

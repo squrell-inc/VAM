@@ -1,0 +1,29 @@
+{
+  "urn": "urn:vam:connector:hub.squrell.cloud/squrell/box",
+  "version": "1.0.0",
+  "displayName": "Box",
+  "publisher": "Box (hosted MCP server)",
+  "description": "Search and browse the member's own Box content and ask questions about files, through Box's hosted MCP server. The org admin enters the client id and secret of the Box MCP server integration their Box admin created. Read-only in this version.",
+  "icon": "box",
+  "provider": {
+    "kind": "oauth2",
+    "profile": "discover",
+    "client": "org",
+    "clientSecret": "org_vault",
+    "scopes": [],
+    "orgConsent": "none"
+  },
+  "connection": { "holder": "user", "multiAccount": false, "label": "Box account" },
+  "mcp": {
+    "url": "https://mcp.box.com",
+    "tools": [
+      { "remote": "search_files_keyword", "sideEffect": "READ_ONLY" },
+      { "remote": "search_files_metadata", "sideEffect": "READ_ONLY" },
+      { "remote": "search_folders_by_name", "sideEffect": "READ_ONLY" },
+      { "remote": "list_folder_content_by_folder_id", "sideEffect": "READ_ONLY" },
+      { "remote": "ai_qa_single_file", "sideEffect": "READ_ONLY" },
+      { "remote": "ai_qa_multi_file", "sideEffect": "READ_ONLY" },
+      { "remote": "ai_qa_hub", "sideEffect": "READ_ONLY" }
+    ]
+  }
+}

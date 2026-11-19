@@ -382,6 +382,14 @@ pub struct PutNodeRequest {
     /// Omitted keeps the recorded consent; `null` clears it (an admin withdrawing consent).
     #[serde(default, deserialize_with = "some_or_null")]
     pub consent: Option<Option<ConsentRequest>>,
+    /// An admin-supplied OAuth client (`provider.client: org`, CN-5.2). Omitted keeps the stored
+    /// client; `null` clears it (only with `enabled: false`). Holds the client secret: its `Debug`
+    /// output redacts it.
+    #[serde(
+        default,
+        deserialize_with = "crate::connector_client::client_some_or_null"
+    )]
+    pub client: Option<Option<crate::connector_client::ClientRequest>>,
 }
 
 fn some_or_null<'de, D>(d: D) -> Result<Option<Option<ConsentRequest>>, D::Error>
@@ -1261,6 +1269,32 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
     Ok(())
 }
 
+/// The node row of `id`, read on the caller's connection or transaction.
+pub(crate) fn node_connector_in(
+    c: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<NodeConnector>, OrchestratorError> {
+    Ok(c.query_row(
+        &format!("SELECT {COLUMNS} FROM node_enabled_connectors WHERE connector_id = ?1"),
+        params![id],
+        row_to_node,
+    )
+    .optional()?)
+}
+
+/// Every node row, read on the caller's connection or transaction.
+pub(crate) fn node_connectors_in(
+    c: &rusqlite::Connection,
+) -> Result<Vec<NodeConnector>, OrchestratorError> {
+    let mut stmt = c.prepare(&format!(
+        "SELECT {COLUMNS} FROM node_enabled_connectors ORDER BY connector_id"
+    ))?;
+    let rows = stmt
+        .query_map([], row_to_node)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 fn row_to_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeConnector> {
     Ok(NodeConnector {
         connector_id: r.get(0)?,
@@ -1310,13 +1344,7 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        Ok(connection
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM node_enabled_connectors WHERE connector_id = ?1"),
-                params![id],
-                row_to_node,
-            )
-            .optional()?)
+        node_connector_in(&connection, id)
     }
 
     pub fn node_connectors(&self) -> Result<Vec<NodeConnector>, OrchestratorError> {
@@ -1324,13 +1352,7 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        let mut stmt = connection.prepare(&format!(
-            "SELECT {COLUMNS} FROM node_enabled_connectors ORDER BY connector_id"
-        ))?;
-        let rows = stmt
-            .query_map([], row_to_node)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        node_connectors_in(&connection)
     }
 
     /// Whether the node has this connector enabled (the gate other waves read).
@@ -1420,27 +1442,46 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        connection.execute(
-            "INSERT INTO node_enabled_connectors (connector_id, enabled, consent_tenant_id,
-                 consent_recorded_at, consent_recorded_by, updated_at, updated_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(connector_id) DO UPDATE SET enabled = excluded.enabled,
-                 consent_tenant_id = excluded.consent_tenant_id,
-                 consent_recorded_at = excluded.consent_recorded_at,
-                 consent_recorded_by = excluded.consent_recorded_by,
-                 updated_at = excluded.updated_at, updated_by = excluded.updated_by",
-            params![
-                row.connector_id,
-                row.enabled as i64,
-                row.consent_tenant_id,
-                row.consent_recorded_at,
-                row.consent_recorded_by,
-                row.updated_at,
-                row.updated_by
-            ],
-        )?;
-        Ok(())
+        put_node_connector_in(&connection, row)
     }
+}
+
+/// Upserts the node row on a connection the caller already holds (inside a transaction, or not).
+/// Whether the node has this connector enabled, read on a connection the caller already holds.
+pub(crate) fn node_enabled_in(c: &Connection, id: &str) -> Result<bool, OrchestratorError> {
+    Ok(c.query_row(
+        "SELECT enabled FROM node_enabled_connectors WHERE connector_id = ?1",
+        params![id],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()?
+    .is_some_and(|enabled| enabled != 0))
+}
+
+pub(crate) fn put_node_connector_in(
+    connection: &Connection,
+    row: &NodeConnector,
+) -> Result<(), OrchestratorError> {
+    connection.execute(
+        "INSERT INTO node_enabled_connectors (connector_id, enabled, consent_tenant_id,
+             consent_recorded_at, consent_recorded_by, updated_at, updated_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(connector_id) DO UPDATE SET enabled = excluded.enabled,
+             consent_tenant_id = excluded.consent_tenant_id,
+             consent_recorded_at = excluded.consent_recorded_at,
+             consent_recorded_by = excluded.consent_recorded_by,
+             updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+        params![
+            row.connector_id,
+            row.enabled as i64,
+            row.consent_tenant_id,
+            row.consent_recorded_at,
+            row.consent_recorded_by,
+            row.updated_at,
+            row.updated_by
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1482,6 +1523,7 @@ mod tests {
                     tenant_id: t.to_string(),
                 })
             }),
+            client: None,
         }
     }
 

@@ -63,6 +63,7 @@ guards:
   - vam:crates/vam-orchestrator/src/api/connectors.rs
   - vam:crates/vam-spec/src/connector.rs
   - vam:crates/vam-spec/src/package.rs
+  - vam:crates/vam-spec/src/connector_listing.rs
 mock:
   - when: { step: read, toolName: bugwatch__list_issues }
     reply: { text: Read. }
