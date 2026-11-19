@@ -1537,9 +1537,11 @@ paths:
       description: |
         Replace the whole `permissions` block of the caller's own draft. The
         request body is the new block, not a merge. Requires `catalog:write`
-        (publisher, org admin, or operator keys) and an `Idempotency-Key`
-        header, the same as `PUT /v1/agents`. Members do not have
-        `catalog:write` by default and get 403. Only the owner may write:
+        or `agents:draft`, and an `Idempotency-Key` header, the same as
+        `PUT /v1/agents`. Every role holds `agents:draft` by default. A caller
+        with `agents:draft` but not `catalog:write` (a member) writes under the
+        member rules: every `advanced` ref must be a released policy, and
+        `capabilityPolicy` or `hitlPolicy` is refused. Only the owner may write:
         another user's draft is 404, including for `users:admin`, and the body
         is not read. A changed body stores a new draft revision. Identical
         bytes leave the revision as it is. The response is the stored block,
@@ -1580,9 +1582,11 @@ paths:
           description: |
             No `Idempotency-Key` header, the agent URN is empty, the body is
             not valid `AgentPermissions` JSON, or a rule does not validate
-            (for example an unparseable target). Nothing is written.
+            (for example an unparseable target), or, for a member, a ref
+            that has no released version or a field a member may not set.
+            Nothing is written.
         "403":
-          description: The caller lacks `catalog:write`.
+          description: The caller has neither `catalog:write` nor `agents:draft`.
         "404":
           description: No draft of this agent, or the draft belongs to another user.
         "409":
