@@ -1,0 +1,24 @@
+piece: agent-member-draft-with-host-echo
+kind: agent
+# Not written at `given` and never released: a `put-draft` step saves it as an identity's draft, under that
+# identity's own namespace (`{{ns}}` is the writer's `defaultNamespace`). The skill ref is floating: it follows
+# the latest release.
+deferred: true
+requires: [skill-host-echo]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/{{ns}}/{{name}}" }
+    displayName: Member draft agent offered the echo tool
+    description: Member draft agent offered the echo tool
+    role: Tester
+    systemInstructions: Use the host tools when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    skillRefs:
+      - resourceId: { urn: "{{urn:skill-host-echo}}" }
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:load_skill", decision: allow }
+          - { target: "builtin:step_complete", decision: allow }
+          - { target: "skill:{{name:skill-host-echo}}/*", decision: allow }

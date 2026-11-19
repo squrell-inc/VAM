@@ -4689,6 +4689,7 @@ dependencies = [
  "vam-core",
  "vam-inference",
  "vam-network",
+ "vam-orchestrator",
  "vam-runtime",
  "vam-security",
  "vam-spec",

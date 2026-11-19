@@ -68,7 +68,7 @@ vam run pr-review-assistant --playbook urn:vam:playbook:local.vam.dev/vam/pr-rev
 
 `put` prints the saved spec on stdout. If the playbook enforces only step tracking, the warning goes to stderr. Publish never rejects a tracking-only playbook.
 
-`vam run` needs the agent to be published first. `examples/jira-assistant/agent.json` is the reference agent: skill URNs, playbook allowlist, and policy refs, with no versions or digests. The concepts those files follow are in [Authoring model](/authoring/model/). The `run.json` files in the examples carry the agent URN and inputs and can be passed with `vam run --file`.
+`vam run <agent>` needs the agent to be saved first. `examples/jira-assistant/agent.json` is the reference agent: skill URNs, playbook allowlist, and policy refs, with no versions or digests. The concepts those files follow are in [Authoring model](/authoring/model/). The `run.json` files in the examples carry the agent URN and inputs and can be passed with `vam run --file`.
 
 ## 6. Decide the gate
 

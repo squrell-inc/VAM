@@ -1233,7 +1233,13 @@ async fn handle_create_session(
                 // Same owner and mode the run recorded its pins with.
                 let (resolve_owner, resolve_mode) = match &run_spec {
                     Some(spec) => {
-                        crate::catalog_resolve::run_resolve_context(&store, spec, &session_owner)
+                        let context = crate::catalog_resolve::run_resolve_context(
+                            &store,
+                            spec,
+                            &session_owner,
+                        );
+                        crate::catalog_resolve::require_no_draft_pins(spec, context.1)?;
+                        context
                     }
                     None => (
                         session_owner.clone(),

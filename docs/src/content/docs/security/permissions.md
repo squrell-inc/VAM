@@ -7,6 +7,7 @@ proves:
   - released-agent-approvals-are-once-only
   - injected-text-cannot-start-a-playbook
   - crates/vam-orchestrator/tests/permissions_api_tests.rs
+  - crates/vam-orchestrator/tests/member_draft_agents_tests.rs
   - crates/vam-orchestrator/tests/legacy_permissions_tests.rs
   - crates/vam-security/tests/pdp_tests.rs
   - crates/vam-security/src/permissions.rs::j1_defaults_allow_read_only_ask_mutable_external_and_open_internet
@@ -44,7 +45,7 @@ and per outbound host, and enforces that decision. The guest cannot change them.
 ## Using them
 
 * `vam agent permissions get <agent> [--effective]` prints the draft, or the decided table.
-* `vam agent permissions set <agent> -f file.json` replaces the owner's draft.
+* `vam agent permissions set <agent> -f file.json` replaces the owner's draft. A member may set permissions on their own draft. Then every ref in `advanced` must be a release, and `capabilityPolicy` and `hitlPolicy` are refused with a 400. A member's draft gets the same defaults as any agent. See [Member agents](/orchestrator/member-agents/).
 * `vam agent permissions web <agent> on|off` turns web search and fetch on or off (off by default).
 * `vam agent permissions presets` lists starting rule sets, served by `GET /v1/permission-presets`.
 * `vam agent migrate` moves a draft off the legacy fields; `vam policy explain` explains a tool or,

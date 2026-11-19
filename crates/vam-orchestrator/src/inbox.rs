@@ -140,9 +140,15 @@ impl QueuedCaller {
         }
     }
 
-    /// The caller again, for the start: the role is read from the user now (a user who
-    /// was deactivated since sends nothing), and a key that was revoked since starts
-    /// nothing. A caller stored without scopes (a merged steer) gets its role's defaults.
+    /// The caller again, for the start, with scopes re-derived now (the queue-time list is
+    /// not trusted, except for a grant holder): the role is read from the user (a user who
+    /// was deactivated since sends nothing); an API key is read again (revoked or gone
+    /// starts nothing) and gets `effective_scopes(key, live role)`; a session token gets the
+    /// live role's defaults, as at authentication. The token row is not read, so an expired
+    /// or revoked session (password change, logout) is treated like a live one: its human
+    /// queued the message and starts it with their live role (as before, not widened). A
+    /// triggered fire (source `Trigger` with a grant credential, set only by the gateway)
+    /// keeps its stored scopes; `recheck_queued_fire` is its gate.
     pub fn to_caller(
         &self,
         store: &SqliteWorkflowStore,
@@ -157,19 +163,25 @@ impl QueuedCaller {
             Err(OrchestratorError::NotFound(_)) => UserRole::from_db(&self.role),
             Err(e) => return Err(e),
         };
-        if !self.session_token && !self.key_id.is_empty() {
-            if let Ok(key) = store.get_api_key(&self.key_id) {
-                if key.revoked_at.is_some() {
-                    return Err(OrchestratorError::PermissionDenied(
-                        "API key has been revoked".to_string(),
-                    ));
-                }
-            }
-        }
-        let scopes = if self.scopes.is_empty() {
+        let grant_holder = self.credential_id.is_some()
+            && matches!(
+                self.source,
+                Some(crate::api::run_start::RunSource::Trigger { .. })
+            );
+        let scopes = if grant_holder {
+            self.scopes.clone()
+        } else if self.session_token || self.key_id.is_empty() {
             crate::keys::default_scopes_for_role(role)
         } else {
-            self.scopes.clone()
+            let key = store.get_api_key(&self.key_id).map_err(|_| {
+                OrchestratorError::PermissionDenied("API key has been revoked".to_string())
+            })?;
+            if key.revoked_at.is_some() {
+                return Err(OrchestratorError::PermissionDenied(
+                    "API key has been revoked".to_string(),
+                ));
+            }
+            crate::keys::effective_scopes(&key, role)
         };
         let run_owner = if crate::owner::is_bootstrap_key(&self.key_id) {
             crate::users::OPERATOR_USER_ID.to_string()
@@ -902,5 +914,164 @@ mod queued_caller_tests {
             .to_caller(&store)
             .unwrap();
         assert_eq!(genuine.owner_user_id, crate::users::OPERATOR_USER_ID);
+    }
+
+    fn mk_store() -> SqliteWorkflowStore {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        store
+            .create_user_with_role("pat", "pat", crate::users::UserRole::Publisher)
+            .unwrap();
+        store
+    }
+
+    fn queued_by(key_id: &str, session: bool) -> QueuedCaller {
+        QueuedCaller {
+            key_id: key_id.into(),
+            name: "k".into(),
+            principal: "p".into(),
+            // Stale queue-time scopes, wider than the live role below.
+            scopes: vec!["catalog:write".into(), "users:admin".into()],
+            owner_user_id: "pat".into(),
+            role: "publisher".into(),
+            session_token: session,
+            source: None,
+            credential_id: None,
+            not_after: None,
+        }
+    }
+
+    fn mint(store: &SqliteWorkflowStore, id: &str, scopes: &[&str], mode: crate::keys::ScopeMode) {
+        let scopes: Vec<String> = scopes.iter().map(|s| s.to_string()).collect();
+        store
+            .create_api_key_owned_with_mode(id, id, &format!("sec-{id}"), "p", &scopes, "pat", mode)
+            .unwrap();
+    }
+
+    fn has(c: &crate::api::run_start::RunCaller, s: &str) -> bool {
+        c.scopes.iter().any(|x| x == s)
+    }
+
+    #[test]
+    fn queued_publisher_key_starts_with_member_scopes_after_demotion() {
+        use crate::keys::{default_scopes_for_role, ScopeMode};
+        use crate::users::UserRole;
+        let store = mk_store();
+        mint(&store, "k1", &["catalog:write"], ScopeMode::Role);
+        store.set_user_role("pat", UserRole::Member).unwrap();
+        let c = queued_by("k1", false).to_caller(&store).unwrap();
+        assert_eq!(c.scopes, default_scopes_for_role(UserRole::Member));
+        assert!(!has(&c, "catalog:write") && !c.users_admin);
+    }
+
+    #[test]
+    fn queued_role_mode_key_widens_on_promotion() {
+        use crate::keys::ScopeMode;
+        use crate::users::UserRole;
+        let store = mk_store();
+        store.set_user_role("pat", UserRole::Member).unwrap();
+        mint(&store, "k1", &["runs:write"], ScopeMode::Role);
+        store.set_user_role("pat", UserRole::OrgAdmin).unwrap();
+        let c = queued_by("k1", false).to_caller(&store).unwrap();
+        assert!(has(&c, "catalog:write") && c.users_admin);
+    }
+
+    #[test]
+    fn queued_explicit_key_stays_narrow_after_promotion() {
+        use crate::keys::ScopeMode;
+        use crate::users::UserRole;
+        let store = mk_store();
+        mint(&store, "k1", &["runs:write"], ScopeMode::Explicit);
+        store.set_user_role("pat", UserRole::OrgAdmin).unwrap();
+        let c = queued_by("k1", false).to_caller(&store).unwrap();
+        assert_eq!(c.scopes, vec!["runs:write".to_string()]);
+        assert!(!c.users_admin);
+    }
+
+    #[test]
+    fn queued_org_admin_session_has_users_admin_only_while_role_holds() {
+        use crate::users::UserRole;
+        let store = mk_store();
+        store.set_user_role("pat", UserRole::OrgAdmin).unwrap();
+        assert!(
+            queued_by("tok", true)
+                .to_caller(&store)
+                .unwrap()
+                .users_admin
+        );
+        store.set_user_role("pat", UserRole::Member).unwrap();
+        let c = queued_by("tok", true).to_caller(&store).unwrap();
+        assert!(!c.users_admin && !has(&c, "users:admin"));
+    }
+
+    #[test]
+    fn queued_session_caller_uses_live_role_defaults_without_a_token_row() {
+        use crate::users::UserRole;
+        let store = mk_store();
+        let c = queued_by("gone-token", true).to_caller(&store).unwrap();
+        assert_eq!(
+            c.scopes,
+            crate::keys::default_scopes_for_role(UserRole::Publisher)
+        );
+    }
+
+    #[test]
+    fn queued_revoked_or_missing_key_starts_nothing() {
+        use crate::keys::ScopeMode;
+        let store = mk_store();
+        mint(&store, "k1", &["runs:write"], ScopeMode::Role);
+        store.revoke_api_key("k1").unwrap();
+        assert!(queued_by("k1", false).to_caller(&store).is_err());
+        assert!(queued_by("never-minted", false).to_caller(&store).is_err());
+    }
+
+    #[test]
+    fn queued_deactivated_user_starts_nothing() {
+        use crate::keys::ScopeMode;
+        let store = mk_store();
+        mint(&store, "k1", &["runs:write"], ScopeMode::Role);
+        store.deactivate_user("pat").unwrap();
+        assert!(queued_by("k1", false).to_caller(&store).is_err());
+        assert!(queued_by("tok", true).to_caller(&store).is_err());
+    }
+
+    #[test]
+    fn queued_grant_holder_keeps_stored_scopes() {
+        let store = mk_store();
+        let mut q = queued_by("grant-1", false);
+        q.scopes = vec!["runs:write".into()];
+        q.credential_id = Some("grant-1".into());
+        q.source = Some(crate::api::run_start::RunSource::Trigger {
+            broker_id: "b9".into(),
+            grant_id: "grant-1".into(),
+            trigger_ref: "t".into(),
+            fire_at: 0,
+            fire_kind: "cron".into(),
+            surface: "api".into(),
+        });
+        let c = q.to_caller(&store).unwrap();
+        assert_eq!(c.scopes, vec!["runs:write".to_string()]);
+    }
+
+    #[test]
+    fn queued_bootstrap_key_keeps_its_stored_row_scopes() {
+        use crate::keys::ScopeMode;
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        let scopes = vec!["keys:admin".to_string(), "node:read".to_string()];
+        store
+            .create_api_key_owned_with_mode(
+                crate::owner::BOOTSTRAP_KEY_ID,
+                "bootstrap",
+                "sec",
+                "User::\"bootstrap\"",
+                &scopes,
+                crate::users::OPERATOR_USER_ID,
+                ScopeMode::Explicit,
+            )
+            .unwrap();
+        let mut q = queued_by(crate::owner::BOOTSTRAP_KEY_ID, false);
+        q.owner_user_id = crate::users::OPERATOR_USER_ID.into();
+        q.role = "operator".into();
+        let c = q.to_caller(&store).unwrap();
+        assert_eq!(c.scopes, scopes);
     }
 }

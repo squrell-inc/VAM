@@ -6,6 +6,7 @@ use vam_spec::v1::{
     AgentRecord, AgentSpec, PlaybookSpec, PolicyRecord, ResourceId, ResourceMetadata, SkillChannel,
     SkillManifest,
 };
+#[cfg(any(test, feature = "test-support"))]
 use vam_spec::validation::Validate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -760,10 +761,12 @@ impl SqliteWorkflowStore {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_agent(&self, spec: &AgentSpec) -> Result<AgentSpec, OrchestratorError> {
         self.put_agent_with_owner(spec, crate::users::LOCAL_USER_ID)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_agent_with_owner(
         &self,
         spec: &AgentSpec,
@@ -815,6 +818,20 @@ impl SqliteWorkflowStore {
             owner_user_id,
             include_foreign_drafts,
         )
+    }
+
+    /// The owner of the agent's draft row, `None` when it has no draft. A run of a draft
+    /// agent resolves in that owner's mode, never a release row's owner.
+    pub(crate) fn agent_draft_owner(&self, urn: &str) -> Result<Option<String>, OrchestratorError> {
+        match self.query_latest_draft_listing(CatalogKind::Agent.table(), urn) {
+            // An unset owner reads as `local`, like the restricted save (a Member).
+            Ok(listing) if listing.owner_user_id.is_empty() => {
+                Ok(Some(crate::users::LOCAL_USER_ID.to_string()))
+            }
+            Ok(listing) => Ok(Some(listing.owner_user_id)),
+            Err(OrchestratorError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn get_agent_at_version(
@@ -944,10 +961,12 @@ impl SqliteWorkflowStore {
             .collect()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_playbook(&self, spec: &PlaybookSpec) -> Result<PlaybookSpec, OrchestratorError> {
         self.put_playbook_with_owner(spec, crate::users::LOCAL_USER_ID)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_playbook_with_owner(
         &self,
         spec: &PlaybookSpec,
@@ -1075,10 +1094,12 @@ impl SqliteWorkflowStore {
         self.get_catalog_message_visible(CatalogKind::Playbook, urn, owner_user_id)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_skill(&self, spec: &SkillManifest) -> Result<SkillManifest, OrchestratorError> {
         self.put_skill_with_owner(spec, crate::users::LOCAL_USER_ID)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_skill_with_owner(
         &self,
         spec: &SkillManifest,
@@ -1112,10 +1133,12 @@ impl SqliteWorkflowStore {
         self.get_catalog_message_visible(CatalogKind::Skill, urn, owner_user_id)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_policy(&self, urn: &str, cedar: &str) -> Result<PolicyRecord, OrchestratorError> {
         self.put_policy_with_owner(urn, cedar, crate::users::LOCAL_USER_ID)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_policy_with_owner(
         &self,
         urn: &str,
@@ -1137,6 +1160,7 @@ impl SqliteWorkflowStore {
         self.release_policy(urn, &crate::catalog_publish::catalog_release_version())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Insert an `examples.local` policy as a tenant-visible **platform** artifact.
     /// Not called on vamd boot; tests use it to stamp `catalog_tier = platform`.
     pub fn put_platform_policy(

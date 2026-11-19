@@ -15,6 +15,7 @@ proves:
   - crates/vam-orchestrator/src/ttl.rs::sweep_ends_idle_sessions_once_and_survives_a_restart
   - crates/vam-orchestrator/src/daemon.rs::vm_node_names_every_missing_variable
   - crates/vam-orchestrator/src/daemon.rs::session_idle_ttl_default_off_and_invalid
+  - crates/vam-orchestrator/src/member_draft.rs::cap_parses_a_positive_number_else_the_default
 ---
 
 `vamd` is the one host process of a node. It serves the HTTP API, keeps the durable state in
@@ -95,6 +96,7 @@ agents from (`manager.rs:176-180`).
 | `VAMD_SECRETS_MASTER_KEY` | Master key for stored secrets. | `secrets.rs:17` |
 | `VAMD_RATE_LIMIT` and `VAMD_RATE_LIMIT_*` | API rate limits, on by default. See [Host API](/orchestrator/api/). | `daemon.rs:260-266` |
 | `VAMD_SESSION_IDLE_TTL_SECS` | Idle session limit. | `daemon.rs:206` |
+| `VAMD_MEMBER_DRAFT_AGENTS_MAX` | Most draft agents one member may own. Default 50. A value that is not a positive whole number keeps 50. A new draft past it is a 409; see [Member agents](/orchestrator/member-agents/). | `bin/vamd.rs:272-276`, `member_draft.rs:30-35` |
 | `VAMD_MARKETPLACE_DOMAIN` / `--marketplace-domain` | The Squrell marketplace domain. Default `hub.squrell.cloud`; set it only on a staging node. Callers cannot create, publish, release or delete artifacts under it; only the catalog import writes it, from the preconfigured Squrell marketplace. Always returned as `marketplaceDomain` on `GET /v1/me`. | `daemon.rs:109`, `daemon.rs:299-310` |
 | `VAMD_GIT_BIN` | Absolute path of the `git` binary vamd uses to read Git marketplaces (default: the first `git` on `PATH`). `git` is needed by marketplaces only: without it `GET /v1/marketplaces` reports `gitAvailable: false`, every read fails with a clear `lastError`, and nothing else is affected. vamd runs it with a cleared environment and an empty `HOME`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, hooks disabled, https only through a loopback guard proxy that dials public addresses on port 443 only, redirects off, no submodules, and it never checks anything out. The cache lives under `<state dir>/marketplaces/`. | `marketplace/mod.rs:67`, `marketplace/mod.rs:111` |
 | `VAMD_MARKETPLACE_REFRESH_SECS` | How often each enabled marketplace is read on its own. Default 21600 (six hours); at least 300; `0` or `off` for on-demand only. Each marketplace keeps its own last-checked time and error. A read only reads: it never installs. | `marketplace/mod.rs:68`, `marketplace/mod.rs:82` |

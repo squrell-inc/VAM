@@ -1,10 +1,10 @@
 # Isolation verify closeout
 
-Brainstorm of record after live UI verify on Lima `vamd` (`feat/improving-the-vam`) plus the VAM app `feature/user-admin-ui`.
+Brainstorm of record after live UI verify on Lima `vamd` plus the VAM app.
 
 Tracker: `.cursor/workstreams/isolation-verify-closeout.md`.
 
-Do **not** merge this into `main`. Implement later, one phase at a time, after a Plan pick.
+Implement later, one phase at a time, after a Plan pick. vam work branches from `main` (tracker decision 9, amended 2026-11-18).
 
 ## What we verified
 
@@ -12,7 +12,7 @@ Isolation is **always on**. Every durable row has `owner_user_id`. There is no `
 
 How to run it on a Mac:
 
-1. Checkout vam `feat/improving-the-vam`.
+1. Check out vam `main`.
 2. Start Lima vamd: `./scripts/start-vamd-lima.sh`.
 3. Optional first admin: `VAMD_BOOTSTRAP_ADMIN=admin` and `VAMD_BOOTSTRAP_ADMIN_PASSWORD=…` (no UI, no email).
 4. Point the VAM app at `http://127.0.0.1:8080`.
@@ -42,9 +42,9 @@ Screenshot error on publisher chat:
 agents 'urn:vam:agent:examples.local/vam/hrms-agent' 1.0.0 not found in catalog
 ```
 
-Cause: the VAM app `feature/user-admin-ui` hardcodes CreateRun `agentRef.version = 1.0.0` in `useVamChat.ts`. Draft catalog rows are `1.0.0-draft`. Host `load_agent_for_run` looks up the exact version. Released `1.0.0` is missing until publish. The publisher (and later members) cannot talk to the agent they just saved.
+Cause: the VAM app hardcodes CreateRun `agentRef.version = 1.0.0` in `useVamChat.ts`. Draft catalog rows are `1.0.0-draft`. Host `load_agent_for_run` looks up the exact version. Released `1.0.0` is missing until publish. The publisher (and later members) cannot talk to the agent they just saved.
 
-`fix/create-run-draft-catalog-pin` in the VAM app is a **sidebar-channel** workaround (`1.0.0-draft` vs unversioned latest released). That is not the product. Do not treat it as the workspace pin.
+A fix branch in the VAM app is a **sidebar-channel** workaround (`1.0.0-draft` vs unversioned latest released). That is not the product. Do not treat it as the workspace pin.
 
 Host today: pinned version → `get_agent_at_version`; no version → **latest released only**. A workspace that pins draft must send the draft version, and the host must load that draft for the owner (not silently rewrite to released).
 
@@ -77,14 +77,14 @@ It **should** let the user pick a model for this run, from the **operator allowl
 
 ## Remaining work (club later)
 
-vam (`feat/improving-the-vam`, not `main`):
+vam:
 
 1. Catalog **GET/list** for any authenticated caller with run rights. Keep PUT/release on `catalog:write` / `publish:grant`. Members see released only.
 2. Stop boot-seeding `examples.local` catalog rows (Cedar policies today; agents/skills if present). Keep user seeds.
 3. CreateRun honors a **workspace pin**, including owner draft. Do not resolve a draft pin to latest released.
 4. Operator **allowed-models** store + HTTP. CreateRun rejects a model outside the list.
 
-The VAM app (`feature/user-admin-ui`):
+The VAM app:
 
 5. Stop hardcoding `1.0.0` on CreateRun.
 6. Create-workspace dialog: agent version select; workspace list/header label.
