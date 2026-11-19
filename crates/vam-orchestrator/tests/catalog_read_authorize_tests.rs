@@ -424,9 +424,16 @@ async fn skills_list_is_released_only_and_drafts_need_catalog_write() {
     );
     assert!(urns.iter().all(|(u, _)| u != &theirs), "{body}");
 
-    let (status, body) = get_as(&app, "/v1/skills?includeDrafts=yes", &publisher).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body.to_string().contains("includeDrafts"), "{body}");
+    for bad in ["yes", "", "%20%20"] {
+        let (status, body) =
+            get_as(&app, &format!("/v1/skills?includeDrafts={bad}"), &publisher).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "includeDrafts={bad:?}: {body}"
+        );
+        assert!(body.to_string().contains("includeDrafts"), "{body}");
+    }
 }
 
 #[tokio::test]

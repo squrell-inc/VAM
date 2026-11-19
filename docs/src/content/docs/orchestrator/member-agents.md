@@ -216,7 +216,8 @@ publisher get a 404, the same as for a missing row, and the other member's list 
   has `channel`, `version`, `ownerUserId`, `catalogTier` and `source` (`package` or `manifest`).
 - **`includeDrafts=true`** adds the caller's own drafts. It needs `catalog:write` in the effective
   scopes (`api/catalog_auth.rs:34`); a member gets 403 `missing required scope 'catalog:write'`. Any
-  value other than `true` or `false` is a 400 `includeDrafts must be true or false`.
+  value other than `true` or `false`, an empty one included, is a 400
+  `includeDrafts must be true or false`.
 - **Another user's draft is never listed**, an org admin's list included.
 - **Paging** as on [HTTP API](/orchestrator/api/#paging): `pageSize`, `pageToken`, newest first.
 
@@ -258,8 +259,11 @@ The points below are for the frontend. Each one names the call.
 4. **Attach parts only by ref**, in `skillRefs`, `defaultPlaybookRef`, `allowedPlaybookRefs` and
    `permissions.advanced`, to released versions. Let the picker offer rows whose `channel` is
    released (`GET /v1/playbooks`, `GET /v1/policies`). For skills, call `GET /v1/skills`: it lists
-   released skills only (see [Listing skills](#listing-skills)), so offer every row it returns. Write
-   the URN alone (floating) or `X.Y.Z`. Never write `-draft`.
+   released skills only (see [Listing skills](#listing-skills)), so offer every row it returns. Each
+   ref is an object with the URN in `resourceId.urn`: write it alone to float, as
+   `{"resourceId": {"urn": "<urn>"}}`, or pin a release with a `version` object, as
+   `{"resourceId": {"urn": "<urn>"}, "version": {"major": 1, "minor": 2, "patch": 0}}`. Never write a
+   `-draft` version.
 5. **Never `PUT` a skill, playbook or policy to attach it.** A member gets
    `missing required scope 'catalog:write'`. A publisher gets
    `only the artifact owner may version this skill`.

@@ -832,10 +832,10 @@ struct ListSkillsQuery {
 }
 
 impl ListSkillsQuery {
-    /// `true` or `false` (absent or empty is `false`); anything else is refused.
+    /// `true` or `false`; absent is `false`. Anything else, an empty value included, is refused.
     fn include_drafts(&self) -> Result<bool, OrchestratorError> {
         match self.include_drafts.as_deref().map(str::trim) {
-            None | Some("") | Some("false") => Ok(false),
+            None | Some("false") => Ok(false),
             Some("true") => Ok(true),
             Some(_) => Err(OrchestratorError::InvalidContract(
                 "includeDrafts must be true or false".into(),
