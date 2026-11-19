@@ -1601,7 +1601,8 @@ paths:
         `capabilityPolicy`, `hitlPolicy`, `instructionArtifact`, `extends`, `overlay` or
         `completionPolicy.evaluatorRefs`; every skill, playbook and policy ref must be a released
         version; a new URN must be under `urn:vam:agent:<registryDomain>/<defaultNamespace>/` (both
-        from `GET /v1/me`); another user's URN is a 403; and a member keeps at most
+        from `GET /v1/me`; no other user holds that namespace, so another member's URN is the same
+        400 whether they saved it or not); a URN in the caller's namespace that another user owns is a 403; and a member keeps at most
         `VAMD_MEMBER_DRAFT_AGENTS_MAX` (default 50) draft agents. The exact messages
         are on the Member agents page of the docs site (orchestrator/member-agents).
       parameters:
@@ -4334,7 +4335,7 @@ components:
           description: This node's registry domain, the org's URN domain. `local.vam.dev` when unconfigured (`VAMD_REGISTRY_DOMAIN`).
         defaultNamespace:
           type: string
-          description: The URN namespace new artifacts of this caller use. The username lowercased; for an email username (one `@`) the part before the `@`, without a `+tag`, lowercased. `default` when that is not a valid URN segment.
+          description: The caller's own URN namespace, held by no other user on this node. Set once when the user is created and kept across renames and restarts. Made from the username (lowercased; for an email username, the part before the `@` without a `+tag`; characters that cannot be in a URN segment become `-`, and `.`, `-`, `_` are trimmed from the ends), plus `-` and a short suffix of `[a-z2-7]` only when that base was already taken. Never `default`. A member's new agent URN must be under it.
         marketplaceDomain:
           type: string
           description: Squrell marketplace domain (`VAMD_MARKETPLACE_DOMAIN`). Omitted when none is set (proto3 JSON drops empty strings).
@@ -4576,6 +4577,11 @@ components:
         deactivated:
           type: boolean
           example: false
+        namespace:
+          type: string
+          readOnly: true
+          description: The user's own URN namespace, the value `GET /v1/me` reports to that user as `defaultNamespace`. Unique on the node, set once at create, kept across renames.
+          example: carol
 
     CreateUserRequest:
       type: object

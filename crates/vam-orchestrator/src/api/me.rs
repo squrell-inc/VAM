@@ -31,20 +31,25 @@ pub async fn get_me(
     auth: AuthContext,
 ) -> Result<Response, ApiError> {
     let user_id = auth.owner_user_id().to_string();
-    let username = match state.store.get_user(&user_id) {
+    // The stored namespace (user-identity decision 17); a principal with no user row keeps the
+    // old derivation from its id, as the member draft rule does.
+    let (username, namespace) = match state.store.get_user(&user_id) {
         Ok(user) => {
             if user.is_deactivated() {
                 return Err(OrchestratorError::Unauthenticated.into());
             }
-            user.username
+            let namespace = user.effective_namespace();
+            (user.username, namespace)
         }
-        Err(OrchestratorError::NotFound(_)) => user_id.clone(),
+        Err(OrchestratorError::NotFound(_)) => {
+            (user_id.clone(), vam_spec::default_namespace(&user_id))
+        }
         Err(e) => return Err(e.into()),
     };
     let domains = crate::registry::registry_domains();
     let resp = GetMeResponse {
         user_id,
-        default_namespace: vam_spec::default_namespace(&username),
+        default_namespace: namespace,
         registry_domain: domains.registry_domain().to_string(),
         marketplace_domain: domains.marketplace_domain().to_string(),
         username,

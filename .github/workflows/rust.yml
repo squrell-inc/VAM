@@ -53,47 +53,46 @@ permissions:
   contents: read
 
 jobs:
-  # Decides whether the microVM lane needs to run. Plain git diff, no
-  # third-party action. Push and workflow_dispatch always run the lane.
+  # Plans the run (scripts/ci/plan.sh; working-agreement.md, CI rule). Push, workflow_dispatch, PRs
+  # into main and fork PRs get the full tier. A PR into any other branch gets the fast tier: checks,
+  # clippy and the tests of the affected crates (scripts/ci/affected-crates.sh); its body's `CI:`
+  # line asks for more. The PR body is untrusted: it reaches the script only through env.
   changes:
     name: changes
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft != true
+    timeout-minutes: 10
     outputs:
-      vm: ${{ steps.filter.outputs.vm }}
+      tier: ${{ steps.plan.outputs.tier }}
+      tests_scope: ${{ steps.plan.outputs.tests_scope }}
+      affected: ${{ steps.plan.outputs.affected }}
+      scenarios: ${{ steps.plan.outputs.scenarios }}
+      lane: ${{ steps.plan.outputs.lane }}
+      vm: ${{ steps.plan.outputs.vm }}
+      release_build: ${{ steps.plan.outputs.release_build }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: VM path filter
-        id: filter
+      - name: Plan
+        id: plan
         env:
-          # A PR carrying `skip-vm-lane` skips the microVM lane (a time saver; Actions is free on
-          # this public repository). Push, workflow_dispatch and release PRs ignore it.
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          # A PR carrying `skip-vm-lane` skips the microVM lane in the full tier (a time saver).
+          # Push, workflow_dispatch and release PRs ignore it.
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          # A release PR: into main from an epic base (feat/*), or labelled `release`.
+          # A release PR: into main from an epic base (feat/*), or labelled `release`. plan.sh
+          # forces the lane on for it (launch audit S4).
           RELEASE: ${{ github.base_ref == 'main' && (startsWith(github.head_ref, 'feat/') || contains(github.event.pull_request.labels.*.name, 'release')) }}
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "vm=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          # A release PR always runs the lane: no path filter, no label (launch audit S4). The
-          # `release lane (microVM)` job below fails it unless the lane is green.
-          if [ "$RELEASE" = "true" ]; then
-            echo "release PR: vm=true"; echo "vm=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          case ",$PR_LABELS," in
-            *,skip-vm-lane,*) echo "skip-vm-lane label: vm=false"; echo "vm=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
-          esac
-          git diff --name-only "origin/${{ github.base_ref }}...HEAD" > "$RUNNER_TEMP/changed.txt"
-          cat "$RUNNER_TEMP/changed.txt"
-          if grep -qE '^(crates/(vam-core|vam-firecracker|vam-runtime|vam-orchestrator|vam-vsock|vam-storage|vam-e2e)/|scripts/e2e/|scripts/build-rootfs[^/]*\.sh$|scripts/release/build-guest\.sh$|scripts/base/|e2e/(scenarios|world)/|proto/|Cargo\.lock$|\.github/workflows/rust\.yml$)' "$RUNNER_TEMP/changed.txt"; then
-            echo "vm=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "vm=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Show output
-        run: echo "vm=${{ steps.filter.outputs.vm }}"
+          # Ignored parts of the CI: line are logged on stderr and listed in the job summary.
+          PLAN_SUMMARY="$GITHUB_STEP_SUMMARY" scripts/ci/plan.sh > "$RUNNER_TEMP/plan.txt"
+          cat "$RUNNER_TEMP/plan.txt"
+          cat "$RUNNER_TEMP/plan.txt" >> "$GITHUB_OUTPUT"
 
   # rustfmt, example JSON protos and the release gate in one job (one checkout,
   # one toolchain, one billed-minute rounding instead of three).
@@ -133,6 +132,9 @@ jobs:
       # into main and on pushes to main.
       - name: Manifests
         run: scripts/e2e/check-manifests.sh
+      # The tier planner: CI: line parser, affected crates, plan (offline, fixture metadata).
+      - name: CI tier script tests
+        run: scripts/ci/test/run.sh
       - name: release gate
         if: github.event_name == 'push' || github.base_ref == 'main'
         run: scripts/e2e/check-release-gate.sh
@@ -167,13 +169,15 @@ jobs:
       - name: clippy (process-guest)
         run: cargo +1.97.0 clippy --workspace --all-targets --features vam-runtime/process-guest,vam-orchestrator/process-guest -- -D warnings
 
-  # Runs the full workspace suite as the non-root runner user, with no exclusions.
+  # Runs the workspace suite as the non-root runner user, with no exclusions; in the fast tier only
+  # the affected crates (`changes` job). The name stays `cargo test (workspace)` for required checks.
   # hsp_uds::uds_socket_acl_deny_fails_fast expects a 0o000 socket to refuse
   # connects, which root bypasses. Do not run this job as root.
   test:
     name: cargo test (workspace)
     runs-on: ubuntu-latest
-    if: ${{ !inputs.lane_only && github.event.pull_request.draft != true }}
+    needs: changes
+    if: ${{ !inputs.lane_only && github.event.pull_request.draft != true && needs.changes.outputs.tests_scope != 'none' }}
     env:
       # The hosted runner has limited disk, and debug info plus incremental state
       # for every test binary makes the target directory large. Run 38075017480
@@ -207,17 +211,31 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
       - name: Put bun on the guest tool PATH
         run: sudo install -m 755 "$(command -v bun)" /usr/local/bin/bun
-      - run: cargo test --workspace --no-fail-fast
+      - name: cargo test
+        env:
+          SCOPE: ${{ needs.changes.outputs.tests_scope }}
+          AFFECTED: ${{ needs.changes.outputs.affected }}
+        run: |
+          if [ "$SCOPE" = affected ]; then
+            args=()
+            for p in $AFFECTED; do args+=(-p "$p"); done
+            echo "affected crates: $AFFECTED"
+            cargo test "${args[@]}" --no-fail-fast
+          else
+            cargo test --workspace --no-fail-fast
+          fi
       - name: Disk after tests
         if: always()
         run: df -h /
 
   # Process-mode scenarios (docs: architecture/testing). The test-only vamd and
   # vam-runtime (process-guest) are built here and never reach the test job.
+  # The full tier runs the smoke set; the fast tier only the scenarios its CI: line names.
   scenarios:
     name: scenarios (smoke)
     runs-on: ubuntu-latest
-    if: ${{ !inputs.lane_only && github.event.pull_request.draft != true }}
+    needs: changes
+    if: ${{ !inputs.lane_only && github.event.pull_request.draft != true && needs.changes.outputs.scenarios != '' }}
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: "0"
@@ -238,8 +256,15 @@ jobs:
         run: |
           scripts/marketplace/check-snapshot.sh
           (cd e2e/world/fixtures/marketplace-squrell && bun test tests)
-      - name: Run smoke scenarios
-        run: scripts/e2e/run.sh --smoke --out "$RUNNER_TEMP/e2e"
+      - name: Run scenarios
+        env:
+          SCENARIOS: ${{ needs.changes.outputs.scenarios }}
+        run: |
+          if [ "$SCENARIOS" = smoke ]; then
+            scripts/e2e/run.sh --smoke --out "$RUNNER_TEMP/e2e"
+          else
+            scripts/e2e/run.sh --scenarios "$SCENARIOS" --out "$RUNNER_TEMP/e2e"
+          fi
       # vamd's state holds names upload-artifact refuses (a colon in
       # drive9/catalog/skills/marketplace:<id>/...), and one refused name fails the whole upload,
       # briefs included. Pack the state into one tarball; summary and briefs stay plain files.
@@ -261,14 +286,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # Boots real Firecracker microVMs (docs: architecture/isolation). Advisory on ordinary PRs; on a
+  # Boots real Firecracker microVMs (docs: architecture/isolation). Full tier: when VM paths change;
+  # fast tier: only with `CI: lane=yes`. Advisory on ordinary PRs; on a
   # release PR (into main from feat/*, or labelled `release`) it always runs and
   # `release lane (microVM)` (end of file) fails the PR unless this job succeeds. Needs no secrets; the VM tests use the mock path only.
   firecracker:
     name: firecracker (microVM, advisory)
     runs-on: ubuntu-latest
     needs: changes
-    if: ${{ needs.changes.outputs.vm == 'true' && github.event.pull_request.draft != true }}
+    if: ${{ needs.changes.outputs.lane == 'true' && github.event.pull_request.draft != true }}
     timeout-minutes: 45
     defaults:
       run:
@@ -609,3 +635,16 @@ jobs:
             echo "::error::a release PR needs a green microVM lane; firecracker job result: $LANE"; exit 1
           fi
           echo "microVM lane green"
+
+  # The release builds a feature-branch PR asked for (`CI: release-build=yes`, or `CI: full` / a fork
+  # PR touching the release path). A PR into main gets them from release-build.yml's own
+  # pull_request trigger instead. The called workflow's assemble job reads pull requests for the
+  # release notes, so this caller grants it the same one extra permission release-build.yml holds.
+  release-build:
+    name: release build (asked for)
+    needs: changes
+    if: ${{ needs.changes.outputs.release_build == 'true' && github.event.pull_request.draft != true }}
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/release-build.yml

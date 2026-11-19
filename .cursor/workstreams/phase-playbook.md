@@ -85,11 +85,14 @@ in the tracker. Never a third cycle at the same model.
    ```markdown
    **Waves**
 
-   | Wave | Items | Turns green | Repo | Model | Budget | Depends on | Status | PR |
-   |---|---|---|---|---|---|---|---|---|
-   | 0 | scenarios | — (red, right reason) | vam | Sonnet low | 45 min | — | [ ] | |
-   | 1 | AX-7.1, AX-7.2 | follow-up-continues-after-stop | vam | Sonnet low | 60 min | 0 | [ ] | |
+   | Wave | Items | Turns green | Repo | Model | Budget | Depends on | CI | Status | PR |
+   |---|---|---|---|---|---|---|---|---|---|
+   | 0 | scenarios | — (red, right reason) | vam | Sonnet low | 45 min | — | `CI: scenarios=follow-up-continues-after-stop` | [ ] | |
+   | 1 | AX-7.1, AX-7.2 | follow-up-continues-after-stop | vam | Sonnet low | 60 min | 0 | `CI: scenarios=follow-up-continues-after-stop lane=yes` | [ ] | |
    ```
+
+   The `CI` column (`Actions` in older trackers) is the wave PR's `CI:` line
+   (§4): its scenarios, plus `lane=yes` when the wave touches a VM path.
 3. **Approval.** The owner approves the breakdown and answers or accepts the open
    question defaults. No wave starts before this.
 4. **Run a wave.** Start one session (`start_session`, `use_worktree: true`,
@@ -102,11 +105,11 @@ in the tracker. Never a third cycle at the same model.
      when unset). Do not make the session rediscover them.
    - **Known local failures** it should not chase: the vam-orchestrator VM and
      session tests that fail on macOS without KVM (CI is the gate for those).
-   - **Actions is the CI gate** (working-agreement.md, 2026-11-17): before
-     pushing, the agent runs `scripts/ci/local.sh --fast` (or
-     `--scenarios a,b`) and the unit tests of the crates it changed, then
-     opens the PR ready for review so the full suite runs on GitHub Actions
-     (free on this public repository). Build settings come from the script; never
+   - **Actions is the CI gate** (working-agreement.md, CI tiers): before
+     pushing, the agent runs `scripts/ci/local.sh --fast --base origin/<base>`
+     (or `--scenarios a,b`), then opens the PR ready for review with the wave
+     row's `CI:` line in its body, so Actions runs the fast tier and the
+     wave's scenarios. Build settings come from the script; never
      another `target` dir. The agent pastes the script's summary into the PR
      body under "Local CI".
    - **Before the final report, stop any monitors or wakeups it started**, so the
@@ -167,14 +170,13 @@ in the tracker. Never a third cycle at the same model.
   (egress, auth, secrets, vsock) read the code, not the summary. Review in a
   worktree detached at the PR head, with `git diff origin/<base>...HEAD -- <paths>`.
 - **Tests.** vam: GitHub Actions is the gate (working-agreement.md,
-  2026-11-17). The orchestrator subscribes to the PR and waits for the CI
+  CI tiers). The orchestrator subscribes to the PR and waits for the CI
   event; every required check on the PR head must be green. A build wave is
-  done when every scenario it names passes: in that Actions run for the
-  scenarios the PR smoke run covers (process scenarios not tagged `slow`,
-  `scripts/e2e/smoke-ids.sh`). The one exception is a named `slow` scenario,
-  which no PR workflow runs yet: the orchestrator itself runs
-  `scripts/ci/local.sh --scenarios <id>` in a worktree detached at the PR head
-  and merges only if it passes; a PR-body claim is not enough. To reproduce a failure,
+  done when every scenario it names passes in that Actions run: the PR body's
+  `CI: scenarios=a,b` line runs exactly those (a wave PR runs no smoke set).
+  The merge gate is the fast tier plus those scenarios green, and the
+  session's local `--fast`. A named `slow` scenario runs through the `CI:`
+  line too (only the smoke set skips `slow`). To reproduce a failure,
   run `scripts/ci/local.sh --full` (or `--scenarios a,b`) in a worktree
   detached at the PR head; "Local CI" in a PR body is a claim, not evidence. The app repo (no CI, the local run is the gate): in a
   worktree detached at the PR head, `CI=1 pnpm test`, `pnpm exec tsc --noEmit`,
@@ -184,10 +186,12 @@ in the tracker. Never a third cycle at the same model.
 - **Contracts.** New Tauri commands are registered in `lib.rs`
   (`generate_handler!`). Endpoint names match what the CLI and the app call.
 - **Session claims are not evidence.** "Tests pass" is re-run, not trusted.
-- **Actions (vam code PRs).** Every non-draft PR runs the full suite on
-  GitHub Actions (free on this public repository): fmt, clippy, workspace
-  tests, smoke, docs, DCO, and the microVM lane when a VM path changed. Wait
-  for the event; do not poll. The advisory lane never blocks a merge. A docs-only PR runs only the `docs` check
+- **Actions (vam code PRs).** A non-draft wave PR runs the fast tier: fmt,
+  checks, clippy, the affected crates' tests (the workspace when a safety net
+  is hit), DCO, plus what its `CI:` line names (`scenarios=`, `tests=workspace`,
+  `lane=yes`, `release-build=yes`, or `full`). The job summary of `changes`
+  shows the plan. A PR into `main` runs the full suite. Wait for the event; do
+  not poll. The advisory lane never blocks a merge. A docs-only PR runs only the `docs` check
   (`.github/workflows/docs.yml`: `vam-e2e check` and `pnpm build`).
 - **Merge.** A merge commit, never a squash (as in working-agreement.md):
   `gh pr merge <N> --merge --match-head-commit <sha>` with the SHA you
@@ -207,14 +211,14 @@ in the tracker. Never a third cycle at the same model.
 
 ## 6. Testing rule and phase close
 
-Changed 2026-10-18: the process-layer scenarios run on every PR in CI and in
-any session with `scripts/e2e/run.sh`. A KVM host is only for scenarios marked
+Changed 2026-11-19: the smoke set runs on PRs into `main`; a wave PR runs the
+scenarios its `CI:` line names. Any session runs them with `scripts/e2e/run.sh`. A KVM host is only for scenarios marked
 `needs: firecracker`.
 
 | When | What |
 |---|---|
 | Every wave | Unit and integration tests of the crates and app areas it changes, `cargo check --workspace`, `tsc`, and the scenarios the wave names (`scripts/e2e/run.sh --scenarios a,b`; `--smoke` for the smoke set). New behaviour comes with tests at the cheapest layer that covers it |
-| Every PR | Before pushing, in the session: `scripts/ci/local.sh --fast` (or the wave's scenarios) and the changed crates' unit tests. Then GitHub Actions runs the full suite on the PR and is the merge gate; release PRs into `main` add the release gate and the lane (§12) |
+| Every PR | Before pushing, in the session: `scripts/ci/local.sh --fast --base origin/<base>` (or the wave's scenarios). The PR body's `CI:` line lists the wave's scenarios (and `lane=yes` for a VM path). GitHub Actions runs the fast tier plus those and is the merge gate; a PR into `main` runs the full suite with the release gate and the lane (§12) |
 | Phase close | All of the phase's scenarios are `active` and green in CI. Scenarios marked `needs: firecracker` run once on a KVM host if the phase touched them. The app: the unit suites on the merged base, once. Then release (§8) and hand the **team checklist** (below) to the team. The next phase starts right away |
 | Lima or live journey runs | Only when the owner asks: one run, at most 15 minutes, at most two fix cycles, then record what is open |
 
@@ -385,8 +389,8 @@ Actions** (free for this public repository). Details in `working-agreement.md`
 orchestrator and wave brief carries:
 
 - **Fast checks, then a ready PR.** Before pushing: `scripts/ci/local.sh
-  --fast` (or `--scenarios a,b` for the wave's own) and the changed crates'
-  unit tests. Then open the PR ready for review; a draft runs no CI.
+  --fast --base origin/<base>` (or `--scenarios a,b` for the wave's own).
+  Then open the PR ready for review with its `CI:` line; a draft runs no CI.
 - **Actions is the gate.** The orchestrator subscribes to the PR, waits for
   the CI event, reviews the diff and merges only on green. `--full` locally
   is only for reproducing a failure. No `[skip ci]`.

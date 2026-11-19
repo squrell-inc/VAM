@@ -14,7 +14,7 @@ scripts/e2e/run.sh --tags chat | --all     # by area, or everything
 One line per scenario, `summary.json` and `briefs/<id>.md` per failure in the
 `--out` directory (default `target/e2e/<time>`). Exit 0 or 1. It builds a
 test-only `vamd` and `vam-runtime` (`process-guest`; guests are host processes,
-mock model only) and runs on any Linux box, no KVM. CI runs `--smoke` on every PR.
+mock model only) and runs on any Linux box, no KVM. CI runs `--smoke` on every PR into `main`; a PR into another branch runs the scenarios its `CI: scenarios=a,b` line names.
 
 ### The microVM lane
 

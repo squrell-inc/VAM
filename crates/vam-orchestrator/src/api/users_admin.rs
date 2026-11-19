@@ -29,7 +29,9 @@ pub fn reset_user_password_route() -> axum::routing::MethodRouter<AppState> {
 }
 
 pub(crate) fn user_account(user: UserRecord) -> UserAccount {
+    let namespace = user.effective_namespace();
     UserAccount {
+        namespace,
         user_id: user.user_id,
         username: user.username,
         role: user.role.as_str().to_string(),

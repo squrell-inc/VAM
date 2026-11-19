@@ -1,0 +1,40 @@
+id: members-whose-names-are-not-slugs-get-namespaces-of-their-own
+title: Two members whose email local parts are not URN segments each get a readable namespace of their own, not default
+description: >
+  One member's local part starts with an underscore, the other's starts and ends with a dot, so
+  neither is a URN segment as typed. Each gets a namespace made from their name with those
+  characters trimmed (never the shared default), saves a draft agent there, and is refused with 400
+  for being outside their namespace when aiming at the other member's agent.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-member-name-not-a-slug, as: ann }
+  - { piece: org-member-name-not-a-slug-other, as: bob }
+  - skill-host-echo
+  - agent-member-draft-with-host-echo
+when:
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: ann, status: 200 }
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: bob, status: 200 }
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: bob, urnOf: ann, status: 400, contains: "(your namespace)" }
+then:
+  - identity-request:
+      as: ann
+      credential: key
+      path: /v1/me
+      status: 200
+      fields:
+        defaultNamespace: { matches: '^ann-[0-9a-f]{8}(-[a-z2-7]{6})?$' }
+  - identity-request:
+      as: bob
+      credential: key
+      path: /v1/me
+      status: 200
+      fields:
+        defaultNamespace: { matches: '^bob-[0-9a-f]{8}(-[a-z2-7]{6})?$' }
+guards:
+  - vam:crates/vam-orchestrator/src/users.rs
+  - vam:crates/vam-orchestrator/src/member_draft.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/me.rs
+  - vam:crates/vam-spec/src/origin.rs
+status: active
