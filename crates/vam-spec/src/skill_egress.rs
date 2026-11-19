@@ -43,6 +43,10 @@ pub fn valid_exact_path(p: &str) -> bool {
 }
 
 fn valid_dns_host(h: &str) -> bool {
+    // A company address host (`{subdomain}.<dns name>`, syntax only): the node fills or drops it.
+    if let Some(rest) = crate::connector::templated_suffix(h) {
+        return valid_dns_host(rest);
+    }
     crate::connector::valid_host(h)
         && !h.contains("..")
         && !h.bytes().all(|b| b.is_ascii_digit() || b == b'.')
@@ -82,7 +86,7 @@ pub fn validate_tool_egress(tool: &ToolSpec, errors: &mut ValidationError) {
             errors.push(
                 format!("egress[{j}].host"),
                 format!(
-                    "Egress host must be an exact lowercase DNS name (no scheme, port, wildcard or IP), got '{}'",
+                    "Egress host must be an exact lowercase DNS name or `{{subdomain}}.<dns name>` (no scheme, port, wildcard or IP), got '{}'",
                     e.host
                 ),
                 "egress_host",
@@ -444,5 +448,28 @@ mod tests {
         let back: SkillManifest =
             crate::encoding::json_to_proto("vam.v1.SkillManifest", &v).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn a_company_address_host_is_accepted_by_syntax_only() {
+        for good in ["{subdomain}.zendesk.com", "{subdomain}.help.example.org"] {
+            assert!(with(|e| e.host = good.into()).validate().is_ok(), "{good}");
+        }
+        for bad in [
+            "{subdomain}",
+            "{subdomain}.com",
+            "a.{subdomain}.zendesk.com",
+            "x{subdomain}.zendesk.com",
+            "{subdomain}.{subdomain}.zendesk.com",
+            "*.zendesk.com",
+            "{other}.zendesk.com",
+            "{subdomain}.zendesk.com:443",
+            "{subdomain}.1.2",
+        ] {
+            assert!(
+                codes(&with(|e| e.host = bad.into())).contains(&"egress_host".to_string()),
+                "{bad}"
+            );
+        }
     }
 }

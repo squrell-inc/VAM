@@ -47,5 +47,4 @@ guards:
   - vam:crates/vam-spec/src/connector_listing.rs
   - vam:crates/vam-spec/src/package.rs
   - vam:crates/vam-spec/src/skill_egress.rs
-status: pending
-expectFail: { step: when.2, class: product }
+status: active

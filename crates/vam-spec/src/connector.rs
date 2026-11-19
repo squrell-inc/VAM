@@ -43,6 +43,10 @@ pub struct Connector {
     pub description: String,
     pub icon: String,
     pub provider: Provider,
+    /// The one parameter a company-address connector asks the admin for at Enable (`{subdomain}`
+    /// under a fixed suffix). Absent for every other connector, so existing files round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<TenantParam>,
     pub connection: ConnectionSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bindings: Option<Vec<Binding>>,
@@ -72,6 +76,9 @@ pub struct OAuth2Provider {
     #[serde(default, skip_serializing_if = "ClientKind::is_publisher")]
     pub client: ClientKind,
     pub client_secret: ClientSecret,
+    /// Fixed sign-in endpoints: required with profile `oauth`, refused with every other profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoints: Option<Endpoints>,
     pub scopes: Vec<String>,
     pub org_consent: OrgConsent,
 }
@@ -83,6 +90,8 @@ pub enum OAuthProfile {
     Discover,
     Google,
     Slack,
+    /// A provider without metadata: the file fixes the endpoints.
+    Oauth,
 }
 
 /// Whose OAuth client a connector signs in with (locked decision 12).
@@ -198,6 +207,26 @@ pub struct McpServer {
     pub tools: Vec<McpTool>,
 }
 
+/// The company address: `name` is always `subdomain`; `{subdomain}` may stand only for the whole
+/// first label of a host, and every templated host is exactly `{subdomain}.<suffix>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TenantParam {
+    pub name: String,
+    pub suffix: String,
+    pub label: String,
+}
+
+/// Fixed sign-in endpoints of a provider that publishes no metadata (profile `oauth`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Endpoints {
+    pub authorize: String,
+    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoke: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct McpTool {
@@ -264,6 +293,134 @@ pub(crate) fn valid_host(h: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
 }
 
+/// `Some(suffix)` for a host written `{subdomain}.<suffix>` (syntax only), `None` for any other
+/// host, a `{subdomain}` anywhere else included.
+pub fn templated_suffix(host: &str) -> Option<&str> {
+    let rest = host.strip_prefix("{subdomain}.")?;
+    (!rest.contains(['{', '}']) && rest.contains('.') && valid_host(rest) && !rest.contains(".."))
+        .then_some(rest)
+}
+
+/// How a host in a file reads: exact (`None`), or `{subdomain}.<suffix>`; anything else is an
+/// error text.
+fn host_form<'a>(what: &str, h: &'a str) -> Result<Option<&'a str>, String> {
+    if h.contains(['{', '}']) {
+        return templated_suffix(h).map(Some).ok_or_else(|| {
+            format!("{what} {h:?}: `{{subdomain}}` may only be the whole first label, as `{{subdomain}}.<suffix>`")
+        });
+    }
+    if valid_host(h) {
+        Ok(None)
+    } else {
+        Err(format!(
+            "{what} {h:?} must be an exact lowercase host (no scheme, port, path or wildcard)"
+        ))
+    }
+}
+
+/// The host of an endpoint or MCP URL as written (`https`, port 443 at most, no query, fragment
+/// or user info). The host may be a template.
+pub(crate) fn url_host<'a>(what: &str, url: &'a str) -> Result<&'a str, String> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| format!("{what} must be an https url"))?;
+    if url.len() > 512 {
+        return Err(format!("{what} is longer than 512 characters"));
+    }
+    if url
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return Err(format!(
+            "{what} must not hold whitespace, control characters or a backslash"
+        ));
+    }
+    if rest.contains('?') || rest.contains('#') {
+        return Err(format!("{what} must not carry a query or a fragment"));
+    }
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.contains('@') {
+        return Err(format!("{what} must not carry user info"));
+    }
+    if rest[authority.len()..].contains(['{', '}']) {
+        return Err(format!("{what} may use `{{subdomain}}` only in its host"));
+    }
+    match authority.rsplit_once(':') {
+        Some((h, "443")) => Ok(h),
+        Some(_) => Err(format!("{what} must use the default https port")),
+        None => Ok(authority),
+    }
+}
+
+/// The company address rules: every `{subdomain}` host is exactly `{subdomain}.<tenant.suffix>`,
+/// and `tenant` is declared if and only if some host uses the template.
+fn check_tenant(c: &Connector) -> Result<(), ConnectorError> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut note = |what: String, host: &str| -> Result<(), ConnectorError> {
+        match host_form(&what, host) {
+            Ok(Some(sfx)) => {
+                found.push((what, sfx.to_string()));
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(e) => bad(e),
+        }
+    };
+    if let Provider::Oauth2(p) = &c.provider {
+        if let Some(e) = &p.endpoints {
+            for (n, u) in [
+                ("endpoints.authorize", Some(&e.authorize)),
+                ("endpoints.token", Some(&e.token)),
+                ("endpoints.revoke", e.revoke.as_ref()),
+            ] {
+                if let Some(u) = u {
+                    let h = url_host(n, u).map_err(ConnectorError::Invalid)?;
+                    note(format!("{n} host"), h)?;
+                }
+            }
+        }
+    }
+    if let Some(m) = c.mcp.as_ref().filter(|m| m.url.contains(['{', '}'])) {
+        let h = url_host("mcp.url", &m.url).map_err(ConnectorError::Invalid)?;
+        note("mcp.url host".into(), h)?;
+    }
+    for b in c.bindings.iter().flatten() {
+        for h in &b.hosts {
+            note(format!("binding {} host", b.name), h)?;
+        }
+    }
+    match (&c.tenant, found.is_empty()) {
+        (None, true) => Ok(()),
+        (None, false) => {
+            bad("`{subdomain}` is used but the file declares no `tenant` (name, suffix, label)")
+        }
+        (Some(_), true) => bad("`tenant` is declared but no host uses `{subdomain}`"),
+        (Some(t), false) => {
+            if t.name != "subdomain" {
+                return bad("tenant.name must be `subdomain`");
+            }
+            if t.label.trim().is_empty()
+                || t.label.len() > 64
+                || t.label.chars().any(char::is_control)
+            {
+                return bad("tenant.label must be 1 to 64 characters on one line");
+            }
+            if !valid_host(&t.suffix) || t.suffix.contains("..") || !t.suffix.contains('.') {
+                return bad("tenant.suffix must be a lowercase DNS name of at least two labels");
+            }
+            for (what, sfx) in &found {
+                if *sfx != t.suffix {
+                    return bad(format!(
+                        "{what} must be `{{subdomain}}.{}`: it is outside the tenant suffix (found suffix `{sfx}`)",
+                        t.suffix
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
     if !valid_urn(&c.urn) {
         return bad(format!("urn must be {URN_PREFIX}<host>/<publisher>/<name>"));
@@ -309,6 +466,14 @@ pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
                     return bad("client `org` cannot use clientSecret `squrell_relay`");
                 }
             }
+            match (p.profile == OAuthProfile::Oauth, &p.endpoints) {
+                (true, None) => return bad("profile `oauth` needs `endpoints` (authorize, token)"),
+                (false, Some(_)) => return bad("`endpoints` is only for profile `oauth`"),
+                _ => {}
+            }
+            if p.profile == OAuthProfile::Oauth && p.client_secret != ClientSecret::None {
+                return bad("profile `oauth` allows no client secret: use `clientSecret: none`");
+            }
             if p.profile == OAuthProfile::Entra {
                 if p.org_consent != OrgConsent::AdminRequired {
                     return bad("entra requires orgConsent admin_required");
@@ -340,10 +505,8 @@ pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
                 return bad(format!("binding {} needs at least one host", b.name));
             }
             for h in &b.hosts {
-                if !valid_host(h) {
-                    return bad(format!(
-                        "binding host {h:?} must be an exact lowercase host (no scheme, port, path or wildcard)"
-                    ));
+                if let Err(e) = host_form("binding host", h) {
+                    return bad(e);
                 }
             }
         }
@@ -362,7 +525,7 @@ pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
             }
         }
     }
-    Ok(())
+    check_tenant(c)
 }
 
 /// The built-in connector definitions, validated at call time.
@@ -638,5 +801,54 @@ mod tests {
             assert_eq!(back, c);
             assert_eq!(serde_json::to_string(&back).unwrap(), s);
         }
+    }
+
+    fn zendesk() -> Value {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/zendesk-shaped-connector.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_zendesk_shaped_file_validates_and_round_trips() {
+        let raw = zendesk().to_string();
+        let c = parse_connector(&raw).unwrap();
+        assert_eq!(c.tenant.as_ref().unwrap().suffix, "zendesk.com");
+        assert_eq!(serde_json::to_value(&c).unwrap(), zendesk());
+    }
+
+    #[test]
+    fn built_ins_and_mcp_files_carry_no_new_fields() {
+        for (name, raw) in BUILTIN_CONNECTOR_FILES {
+            let c = parse_connector(raw).unwrap();
+            let v = serde_json::to_value(&c).unwrap();
+            assert!(v.get("tenant").is_none(), "{name}");
+            assert!(v["provider"].get("endpoints").is_none(), "{name}");
+            assert_eq!(v, serde_json::from_str::<Value>(raw).unwrap(), "{name}");
+        }
+    }
+
+    #[test]
+    fn endpoints_and_tenant_rules_name_their_field() {
+        let mut v = zendesk();
+        v["provider"].as_object_mut().unwrap().remove("endpoints");
+        assert!(err(v).contains("`oauth` needs `endpoints`"));
+        let mut v = m365();
+        v["provider"]["endpoints"] =
+            json!({ "authorize": "https://a.example/a", "token": "https://a.example/t" });
+        assert!(err(v).contains("only for profile `oauth`"));
+        let mut v = zendesk();
+        v["bindings"][0]["hosts"] = json!(["api.{subdomain}.zendesk.com"]);
+        assert!(err(v).contains("whole first label"));
+        let mut v = zendesk();
+        v["bindings"][0]["hosts"] = json!(["{subdomain}.elsewhere.example"]);
+        assert!(err(v).contains("tenant suffix"));
+        let mut v = zendesk();
+        v["tenant"]["label"] = json!(" ");
+        assert!(err(v).contains("tenant.label"));
+        let mut v = zendesk();
+        v["provider"]["clientSecret"] = json!("org_vault");
+        assert!(err(v).contains("no client secret"));
     }
 }
