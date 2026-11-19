@@ -1,0 +1,67 @@
+id: skill-from-the-listing-reaches-only-the-company-host-inside-its-shape
+title: A skill from a marketplace listing reaches only the company's host, inside its declared shape, as the member
+description: >
+  The administrator installed the Ticketdesk listing and enabled it for `acme`; the member connected. The member
+  asks the installed assistant for a ticket. The skill learns its company host from the node, sends only the
+  connector's placeholder through the guest proxy, and the provider at `acme.ticketdesk.example` sees the member's
+  current access token. The thread holds the ticket's subject. A call the assistant aims at another company's host
+  and one aimed at a path outside the tool's declared shape are each refused with a message that names the declared
+  shape, and the other company's instance saw no request. No token is in the thread, the events, the receipt or the
+  workspace.
+tags: [connectors, egress, members]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - org-administrator
+  - marketplace-community-connectors
+  - mock-ticketdesk-server
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: ticketdesk-connector, as: org-admin }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-administrator, tenant: { subdomain: acme }, client: { clientId: e2e-ticketdesk-client } }
+  - connector-connect: { id: ticketdesk, piece: mock-ticketdesk-server, as: org-member }
+  - expect: { connectors: { id: ticketdesk, as: org-member, fields: { state: connected } } }
+  - chat: { text: "e2e-step:read Find the printer ticket", agent: "urn:vam:agent:connectors.community.example/community/ticketdesk-assistant", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-ticketdesk-server, path: /api/v2/search.json, method: GET, count: 1, has: ["host=acme", "bearer=current"], lacks: ["bearer=placeholder"] } }
+  - expect: { thread: { role: tool, contains: Printer on fire } }
+  - chat: { text: "e2e-step:globex Look in the other company", agent: "urn:vam:agent:connectors.community.example/community/ticketdesk-assistant", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: declared shape } }
+  - expect: { mock-requests: { piece: mock-ticketdesk-server, path: "*", with: "host=globex", count: 0 } }
+  - chat: { text: "e2e-step:outside Read the user list", agent: "urn:vam:agent:connectors.community.example/community/ticketdesk-assistant", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: declared shape } }
+  - expect: { mock-requests: { piece: mock-ticketdesk-server, path: /api/v2/users.json, count: 0 } }
+then:
+  - expect: { mock-requests: { piece: mock-ticketdesk-server, path: "/api/v2/*", count: 1 } }
+  - expect: { secret-absent: { secret: mock-ticketdesk-server } }
+guards:
+  - vam:crates/vam-orchestrator/src/connection_egress.rs
+  - vam:crates/vam-orchestrator/src/brokers.rs
+  - vam:crates/vam-orchestrator/src/manager.rs
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-spec/src/skill_egress.rs
+mock:
+  - when: { step: read, toolName: ticket_search }
+    reply: { text: Found the ticket. }
+  - when: { step: read, toolName: load_skill }
+    reply: { toolCall: { name: ticket_search, args: { query: printer } } }
+  - when: { step: read, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: ticketdesk-tickets } } }
+  - when: { step: globex, toolName: ticket_search }
+    reply: { text: The tool was refused. }
+  - when: { step: globex, toolName: load_skill }
+    reply: { toolCall: { name: ticket_search, args: { host: globex.ticketdesk.example, query: printer } } }
+  - when: { step: globex, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: ticketdesk-tickets } } }
+  - when: { step: outside, toolName: ticket_search }
+    reply: { text: The tool was refused. }
+  - when: { step: outside, toolName: load_skill }
+    reply: { toolCall: { name: ticket_search, args: { path: /api/v2/users.json } } }
+  - when: { step: outside, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: ticketdesk-tickets } } }
+status: pending
+expectFail: { step: when.2, class: product }

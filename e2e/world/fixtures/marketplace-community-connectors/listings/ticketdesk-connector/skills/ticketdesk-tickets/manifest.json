@@ -1,0 +1,60 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:skill:connectors.community.example/community/ticketdesk-tickets"
+  },
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "description": "Search and show tickets in the company's Ticketdesk; create one only with the member's approval",
+  "requiresConnector": "urn:vam:connector:connectors.community.example/community/ticketdesk",
+  "tools": [
+    {
+      "name": "ticket_search",
+      "description": "Searches tickets (GET /api/v2/search.json)",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"host\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}}}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "python3",
+        "entrypoint": "./tickets.py"
+      },
+      "egress": [
+        {
+          "binding": "api",
+          "host": "{subdomain}.ticketdesk.example",
+          "methods": [
+            "GET"
+          ],
+          "pathPrefixes": [
+            "/api/v2/search.json",
+            "/api/v2/tickets/"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ticket_create",
+      "description": "Creates a ticket (POST /api/v2/tickets.json); asks the member first",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"subject\":{\"type\":\"string\"},\"host\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}}}",
+      "sideEffect": "SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL",
+      "localExec": {
+        "command": "python3",
+        "entrypoint": "./tickets.py"
+      },
+      "egress": [
+        {
+          "binding": "api",
+          "host": "{subdomain}.ticketdesk.example",
+          "methods": [
+            "POST"
+          ],
+          "paths": [
+            "/api/v2/tickets.json"
+          ]
+        }
+      ],
+      "approvalRequired": true
+    }
+  ]
+}

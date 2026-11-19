@@ -1,0 +1,48 @@
+id: company-address-token-is-refreshed-at-the-filled-endpoint-before-the-call
+title: A company-address connection is refreshed at the filled token endpoint before each call, without a secret
+description: >
+  The member connected Ticketdesk, whose access tokens live a minute and whose refresh tokens are single-use. The
+  member's assistant calls the read tool twice. Before each call the node refreshes the connection at the token
+  endpoint of `acme.ticketdesk.example` (the endpoint filled at Enable), with the admin's client id, no client
+  secret and no resource, and stores the rotated refresh token before it uses the new access token. The provider
+  saw two refreshes, none with a token it had already spent, and the API saw the member's current token on both
+  calls.
+tags: [connectors, egress, members]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - org-administrator
+  - marketplace-community-connectors
+  - mock-ticketdesk-server
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: ticketdesk-connector, as: org-admin }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-administrator, tenant: { subdomain: acme }, client: { clientId: e2e-ticketdesk-client } }
+  - mock-provider: { piece: mock-ticketdesk-server, shortTokens: true }
+  - connector-connect: { id: ticketdesk, piece: mock-ticketdesk-server, as: org-member }
+  - expect: { connectors: { id: ticketdesk, as: org-member, fields: { state: connected } } }
+  - chat: { text: "e2e-step:read Find the printer ticket", agent: "urn:vam:agent:connectors.community.example/community/ticketdesk-assistant", as: org-member }
+  - expect: { run: succeeded }
+  - chat: { text: "e2e-step:read Find the printer ticket once more", agent: "urn:vam:agent:connectors.community.example/community/ticketdesk-assistant", as: org-member }
+  - expect: { run: succeeded }
+then:
+  - expect: { mock-requests: { piece: mock-ticketdesk-server, path: /oauth/tokens, with: "grant_type=refresh_token", count: 2, has: ["host=acme", "client_id=e2e-ticketdesk-client", "client-secret=none", "resource=none", "refresh=fresh"], lacks: ["refresh=reused", "refresh=unknown", "client-secret=present", "resource=present"] } }
+  - expect: { mock-requests: { piece: mock-ticketdesk-server, path: /api/v2/search.json, count: 2, has: ["host=acme", "bearer=current"], lacks: ["bearer=stale", "bearer=placeholder", "bearer=unknown", "bearer=none"] } }
+  - expect: { connectors: { id: ticketdesk, as: org-member, fields: { state: connected } } }
+  - expect: { secret-absent: { secret: mock-ticketdesk-server } }
+guards:
+  - vam:crates/vam-orchestrator/src/connection_egress.rs
+  - vam:crates/vam-orchestrator/src/connector_park.rs
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/mcp_oauth_refresh.rs
+mock:
+  - when: { step: read, toolName: ticket_search }
+    reply: { text: Found the ticket. }
+  - when: { step: read, toolName: load_skill }
+    reply: { toolCall: { name: ticket_search, args: { query: printer } } }
+  - when: { step: read, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: ticketdesk-tickets } } }
+status: pending
+expectFail: { step: when.2, class: product }

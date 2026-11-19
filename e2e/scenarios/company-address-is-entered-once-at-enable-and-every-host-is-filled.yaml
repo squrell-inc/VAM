@@ -1,0 +1,49 @@
+id: company-address-is-entered-once-at-enable-and-every-host-is-filled
+title: The admin enters the company address once at Enable and every host the node uses is filled from it
+description: >
+  The admin enables a connector for a service that every company reaches at its own address. Enabling without an
+  address is refused and names the company address. An address that is not one DNS label (a dot, a leading hyphen,
+  an underscore, 64 letters) is refused. An admin-supplied client without a secret takes no secret: sending one is
+  refused. A member cannot enable it. Nothing reached the provider and nothing was saved by a refusal. The
+  administrator then enables it with the address `acme` and the client id: the admin's and the member's entries
+  show the address, the host `acme.ticketdesk.example` in the connector's binding and the sign-in endpoints on
+  that host, with no template left in any field, and the provider saw no request (the endpoints come from the file,
+  not from discovery). Disabling keeps the address, and enabling again needs none.
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - org-administrator
+  - marketplace-community-connectors
+  - mock-ticketdesk-server
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: ticketdesk-connector, as: org-admin }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-administrator, client: { clientId: e2e-ticketdesk-client }, refused: true, contains: company address }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-administrator, tenant: { subdomain: acme.evil }, client: { clientId: e2e-ticketdesk-client }, refused: true, contains: one DNS label }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-administrator, tenant: { subdomain: "-acme" }, client: { clientId: e2e-ticketdesk-client }, refused: true, contains: one DNS label }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-administrator, tenant: { subdomain: a_b }, client: { clientId: e2e-ticketdesk-client }, refused: true, contains: one DNS label }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-administrator, tenant: { subdomain: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa }, client: { clientId: e2e-ticketdesk-client }, refused: true, contains: one DNS label }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-administrator, tenant: { subdomain: acme }, client: { clientId: e2e-ticketdesk-client, clientSecret: { piece: mock-ticketdesk-server, which: wrong } }, refused: true, contains: secret }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-member, tenant: { subdomain: acme }, client: { clientId: e2e-ticketdesk-client }, refused: true }
+  - expect: { connectors: { id: ticketdesk, as: org-member, fields: { state: askAdmin, node.enabled: false }, absent: [node.tenant] } }
+  - expect: { mock-requests: { piece: mock-ticketdesk-server, path: "*", count: 0 } }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-administrator, tenant: { subdomain: acme }, client: { clientId: e2e-ticketdesk-client } }
+  - expect: { connectors: { id: ticketdesk, as: org-administrator, fields: { node.enabled: true, node.tenant.subdomain: acme, node.tenant.hosts.0: acme.ticketdesk.example, bindings.0.hosts.0: acme.ticketdesk.example, provider.endpoints.authorize: "https://acme.ticketdesk.example/oauth/authorizations/new", provider.endpoints.token: "https://acme.ticketdesk.example/oauth/tokens", node.client.clientId: e2e-ticketdesk-client, node.client.authorizeEndpoint: "https://acme.ticketdesk.example/oauth/authorizations/new", node.client.tokenEndpoint: "https://acme.ticketdesk.example/oauth/tokens" } } }
+  - expect: { connectors: { id: ticketdesk, as: org-member, fields: { state: connect, node.tenant.subdomain: acme, node.tenant.hosts.0: acme.ticketdesk.example, bindings.0.hosts.0: acme.ticketdesk.example, node.client.authorizeEndpoint: "https://acme.ticketdesk.example/oauth/authorizations/new", node.client.tokenEndpoint: "https://acme.ticketdesk.example/oauth/tokens" } } }
+  - expect: { mock-requests: { piece: mock-ticketdesk-server, path: "*", count: 0 } }
+  - connector-node: { id: ticketdesk, enabled: false, as: org-administrator }
+  - connector-node: { id: ticketdesk, enabled: true, as: org-administrator }
+then:
+  - expect: { connectors: { id: ticketdesk, as: org-member, fields: { node.enabled: true, node.tenant.subdomain: acme, node.tenant.hosts.0: acme.ticketdesk.example, bindings.0.hosts.0: acme.ticketdesk.example } } }
+  - expect: { mock-requests: { piece: mock-ticketdesk-server, path: "*", count: 0 } }
+  - expect: { secret-absent: { secret: mock-ticketdesk-server } }
+guards:
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+  - vam:crates/vam-orchestrator/src/connector_client.rs
+  - vam:crates/vam-spec/src/connector.rs
+status: pending
+expectFail: { step: when.2, class: product }
