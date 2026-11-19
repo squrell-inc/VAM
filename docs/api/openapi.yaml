@@ -1678,6 +1678,165 @@ paths:
               schema:
                 $ref: "#/components/schemas/GetAgentResponse"
 
+  /v1/agents/{urn}/permissions:
+    get:
+      summary: Get an agent draft's permissions
+      description: |
+        The `permissions` block of the agent's draft. Callers with `runs:write`
+        or `catalog:write` may read, the same as `GET /v1/agents`. The owner sees
+        their own draft. `users:admin` also sees another user's draft. Any other
+        caller gets 404 for a foreign draft, the same as for a missing one. A
+        draft with no `permissions` block (including a legacy draft that still
+        uses `capabilityPolicy` or `hitlPolicy`) returns an empty object. Only
+        the draft is read. Use `permissions/effective?version=` for a release.
+      parameters:
+        - name: urn
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "urn:vam:agent:local.vam.dev/acme/jira"
+      responses:
+        "200":
+          description: The draft's permissions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentPermissions"
+        "400":
+          description: The agent URN is empty.
+        "403":
+          description: The caller has neither `runs:write` nor `catalog:write`.
+        "404":
+          description: No draft of this agent, or the draft belongs to another user.
+    put:
+      summary: Replace an agent draft's permissions
+      description: |
+        Replace the whole `permissions` block of the caller's own draft. The
+        request body is the new block, not a merge. Requires `catalog:write`
+        or `agents:draft`, and an `Idempotency-Key` header, the same as
+        `PUT /v1/agents`. Every role holds `agents:draft` by default. A caller
+        with `agents:draft` but not `catalog:write` (a member) writes under the
+        member rules: every `advanced` ref must be a released policy, and
+        `capabilityPolicy` or `hitlPolicy` is refused. Only the owner may write:
+        another user's draft is 404, including for `users:admin`, and the body
+        is not read. A changed body stores a new draft revision. Identical
+        bytes leave the revision as it is. The response is the stored block,
+        with tool and host targets in canonical spelling.
+      parameters:
+        - name: urn
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "urn:vam:agent:local.vam.dev/acme/jira"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentPermissions"
+            example:
+              tools:
+                default: bySideEffect
+                rules:
+                  - target: "skill:jira/create_issue"
+                    decision: ask
+              internet:
+                default: deny
+                rules:
+                  - target: "api.atlassian.com"
+                    decision: allow
+      responses:
+        "200":
+          description: Permissions saved on the draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentPermissions"
+        "400":
+          description: |
+            No `Idempotency-Key` header, the agent URN is empty, the body is
+            not valid `AgentPermissions` JSON, or a rule does not validate
+            (for example an unparseable target), or, for a member, a ref
+            that has no released version or a field a member may not set.
+            Nothing is written.
+        "403":
+          description: The caller has neither `catalog:write` nor `agents:draft`.
+        "404":
+          description: No draft of this agent, or the draft belongs to another user.
+        "409":
+          description: |
+            The draft still uses `capabilityPolicy` or `hitlPolicy`. Run
+            `POST /v1/agents/{urn}/permissions/migrate` first. The draft is not
+            changed.
+        "503":
+          description: The node is not ready or is draining.
+
+  /v1/agents/{urn}/permissions/migrate:
+    post:
+      summary: Migrate a legacy agent draft to permissions
+      description: |
+        Convert the caller's own draft from `capabilityPolicy` and `hitlPolicy`
+        to a `permissions` block, store it as a new draft revision, and drop the
+        two legacy fields. Requires `catalog:write` and an `Idempotency-Key`
+        header, the same as `PUT /v1/agents/{urn}/permissions`. Members do not
+        have `catalog:write` by default and get 403. Only the owner may migrate:
+        another user's draft is 404, including for `users:admin`. The request
+        body is ignored.
+
+        The new block starts from tool default `deny` and internet default
+        `deny`. Each tool the capability Cedar decides becomes a tool rule on
+        its canonical target. A tool in `hitlPolicy.monitoredTools`
+        becomes `ask`, unless it was denied. Hosts the agent's skill secrets
+        already allowed become internet `allow` rules. A capability policy with
+        statements that are not tool-list rules stays attached on
+        `permissions.advanced`. A declared policy missing from the catalog falls
+        back to the builtin defaults and is reported in `behaviourChanges`.
+
+        A legacy tool name that maps to no target is a 409, and nothing is
+        written. With `force=true` (or `1`) those names are dropped and listed
+        in `unmapped`.
+      parameters:
+        - name: urn
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "urn:vam:agent:local.vam.dev/acme/jira"
+        - name: force
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["true", "1"]
+          description: Drop unmapped tool names instead of answering 409. Any other value is false.
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "200":
+          description: Draft migrated. The report says what was converted and what changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionsMigrationReport"
+        "400":
+          description: |
+            No `Idempotency-Key` header, the agent URN is empty, the draft has
+            no `resourceId`, or the capability policy's Cedar does not parse.
+            Nothing is written.
+        "403":
+          description: The caller lacks `catalog:write`.
+        "404":
+          description: No draft of this agent, or the draft belongs to another user.
+        "409":
+          description: |
+            The draft does not use `capabilityPolicy` or `hitlPolicy` (nothing to
+            migrate), or some legacy tool names map to no target and `force` was
+            not set. The message lists the unmapped names. The draft is not changed.
+        "503":
+          description: The node is not ready or is draining.
+
   /v1/agents/{urn}/permissions/effective:
     get:
       summary: Effective permissions of an agent
@@ -4839,6 +4998,35 @@ components:
           type: integer
         permissions:
           $ref: "#/components/schemas/AgentPermissions"
+
+    PermissionsMigrationReport:
+      type: object
+      description: Result of `POST /v1/agents/{urn}/permissions/migrate`.
+      required: [converted, keptAdvanced, unmapped, behaviourChanges]
+      properties:
+        converted:
+          type: array
+          description: Canonical targets that received a tool rule.
+          items:
+            type: string
+        keptAdvanced:
+          type: array
+          description: Capability-policy URNs kept on `permissions.advanced`.
+          items:
+            type: string
+        unmapped:
+          type: array
+          description: Legacy tool names that mapped to no target. Non-empty only with `force`; they were dropped.
+          items:
+            type: string
+        behaviourChanges:
+          type: array
+          description: |
+            Plain-language notes on meaning the rules do not carry by themselves.
+            Always includes the note that internet is limited to the sites the
+            agent's secrets already allowed.
+          items:
+            type: string
 
     ListAgentsResponse:
       type: object
