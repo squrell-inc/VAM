@@ -2,6 +2,7 @@
 //!
 //! Host-centric telemetry, distributed tracing context propagation, metric conventions,
 //! zero-I/O pre-spool redaction, and audit kernel for VAM.
+//! (ci-tiers probe: this line only exercises the fast CI tier and is never merged.)
 //!
 //! This crate enforces non-negotiable trust and stability invariants:
 //! - Host-only OTLP export boundary (Decision T3)
