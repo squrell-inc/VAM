@@ -288,6 +288,7 @@ mod tests {
     fn node(store: &SqliteWorkflowStore, enabled: bool, consent: bool) {
         store
             .put_node_connector(&NodeConnector {
+                tenant_subdomain: None,
                 connector_id: "microsoft-365".into(),
                 enabled,
                 consent_tenant_id: consent.then(|| TENANT.to_string()),

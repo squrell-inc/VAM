@@ -648,6 +648,7 @@ mod tests {
     fn connect(f: &Fx) {
         f.store
             .put_node_connector(&NodeConnector {
+                tenant_subdomain: None,
                 connector_id: "microsoft-365".into(),
                 enabled: true,
                 consent_tenant_id: Some(TENANT.into()),
@@ -796,6 +797,7 @@ mod tests {
                     connect(f);
                     f.store
                         .put_node_connector(&NodeConnector {
+                            tenant_subdomain: None,
                             connector_id: "microsoft-365".into(),
                             enabled: false,
                             consent_tenant_id: Some(TENANT.into()),

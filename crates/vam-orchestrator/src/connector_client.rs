@@ -290,6 +290,69 @@ pub fn check_request(
     }
 }
 
+/// A new company address needs the client saved again in the same body: a client is registered in
+/// one provider instance, so one saved under the old address is never used at the new one (409,
+/// nothing written). An address that stays the same, or no client stored, asks for nothing.
+pub fn check_address_change(
+    def: &Connector,
+    stored_address: Option<&str>,
+    new_address: Option<&str>,
+    client_field: &Option<Option<ClientRequest>>,
+    existing: Option<&NodeClient>,
+) -> Result<(), OrchestratorError> {
+    if def.tenant.is_some()
+        && new_address.is_some()
+        && new_address != stored_address
+        && existing.is_some()
+        && client_field.is_none()
+    {
+        return Err(OrchestratorError::Conflict(format!(
+            "`{}` has an OAuth client registered under the previous company address: send `client: {{ clientId }}` again with the new address",
+            connector_id(def)
+        )));
+    }
+    Ok(())
+}
+
+/// True for a REST connector with fixed sign-in endpoints (`profile: oauth`): no discovery runs.
+pub fn is_rest_oauth(def: &Connector) -> bool {
+    matches!(&def.provider, Provider::Oauth2(o) if o.profile == vam_spec::connector::OAuthProfile::Oauth)
+}
+
+/// What discovery would have answered, taken from the connector file's own endpoints (already
+/// filled with the company address). No request is made. The issuer is the token endpoint's origin;
+/// a revoke endpoint is kept only on the token endpoint's host; the connector keeps no secret, so
+/// the auth methods are the defaults and never used.
+pub fn fixed_endpoints(def: &Connector) -> Result<Discovered, OrchestratorError> {
+    let id = connector_id(def);
+    let Provider::Oauth2(o) = &def.provider else {
+        return Err(invalid(format!("`{id}` has no OAuth endpoints")));
+    };
+    let e = o
+        .endpoints
+        .as_ref()
+        .filter(|e| !crate::connectors::url_needs_address(&e.token))
+        .ok_or_else(|| {
+            OrchestratorError::Conflict(format!(
+                "`{id}` needs your company address before it can be enabled"
+            ))
+        })?;
+    let token_host = host_of(&e.token);
+    let revocation_endpoint = e
+        .revoke
+        .clone()
+        .filter(|r| host_of(r).is_some() && host_of(r) == token_host);
+    let issuer = format!("https://{}", token_host.unwrap_or_default());
+    Ok(Discovered {
+        issuer,
+        authorize_endpoint: e.authorize.clone(),
+        token_endpoint: e.token.clone(),
+        revocation_endpoint,
+        token_auth_method: TokenAuthMethod::default(),
+        revocation_auth_method: None,
+    })
+}
+
 /// Whether the connector keeps its secret on the node (the provider must then take it by POST).
 pub fn keeps_secret(def: &Connector) -> bool {
     secret_kind(def) == ClientSecret::OrgVault
@@ -618,8 +681,11 @@ fn set_secret_saved_while_off_in(
 /// again inside its transaction: discovery, between the plan and the write, can take seconds, and
 /// another admin's save can commit in that time.
 pub(crate) struct PlanBasis<'a> {
+    /// The connector file as published (the template, not filled with an address).
     pub def: &'a Connector,
     pub client: Option<&'a NodeClient>,
+    /// The company address stored when the plan was made.
+    pub tenant: Option<&'a str>,
 }
 
 /// The text of the 409 when the state moved under a save.
@@ -774,9 +840,13 @@ impl SqliteWorkflowStore {
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         let tx = c.transaction()?;
-        let def_now = crate::connectors::entry_in(&tx, &node.connector_id)?.map(|e| e.def);
+        let def_now = crate::connectors::entry_in(&tx, &node.connector_id)?.map(|e| e.template);
         let stored = client_in(&tx, &node.connector_id)?;
-        if def_now.as_ref() != Some(basis.def) || !same_client_state(stored.as_ref(), basis.client)
+        let stored_tenant = crate::connectors::node_connector_in(&tx, &node.connector_id)?
+            .and_then(|n| n.tenant_subdomain);
+        if def_now.as_ref() != Some(basis.def)
+            || !same_client_state(stored.as_ref(), basis.client)
+            || stored_tenant.as_deref() != basis.tenant
         {
             return Err(OrchestratorError::Conflict(
                 CLIENT_CHANGED_WHILE_SAVING.into(),
@@ -1560,6 +1630,28 @@ pub(crate) mod test_support {
         .unwrap();
     }
 
+    /// The `zendesk`-shaped company-address connector (`profile: oauth`, `{subdomain}` under
+    /// `zendesk.com`, one REST binding, no secret) as a marketplace installs it.
+    pub(crate) fn install_company_address_rows(store: &SqliteWorkflowStore) {
+        let raw = include_str!("../../vam-spec/tests/fixtures/zendesk-shaped-connector.json");
+        let json: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let urn = json["urn"].as_str().unwrap_or_default().to_string();
+        let c = store.connection.lock().unwrap();
+        c.execute(
+            "INSERT INTO connector_releases (urn, major, minor, patch, digest, spec_bytes, created_at,
+                 updated_at, owner_user_id) VALUES (?1, 1, 0, 0, 'd', ?2, 1, 1, 'system')",
+            params![urn, json.to_string().as_bytes()],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO catalog_origins (kind, urn, major, minor, patch, marketplace_id, listing_id,
+                 git_ref, commit_sha, package_digest, installed_at)
+             VALUES ('connector', ?1, 1, 0, 0, 'm-1', 'zendesk-connector', 'zendesk-v1', 'c', 'd', 1)",
+            [urn],
+        )
+        .unwrap();
+    }
+
     /// A member's connected row for `filebox` on `tag`'s hosts: the node's endpoints, `client_id`,
     /// tokens `A-old` / `R-old`, and the one tool of the connector.
     pub(crate) fn member_row(
@@ -1634,6 +1726,7 @@ pub(crate) mod test_support {
             revision: 0,
         };
         let node = NodeConnector {
+            tenant_subdomain: None,
             connector_id: "filebox".into(),
             enabled: true,
             consent_tenant_id: None,
@@ -1686,6 +1779,7 @@ pub(crate) mod test_support {
                 plan,
                 &format!("https://mcp.{tag}.example/mcp"),
                 &PlanBasis {
+                    tenant: None,
                     def: &def,
                     client: current.as_ref(),
                 },
@@ -1723,6 +1817,7 @@ mod exchange_tests {
 
     fn node(enabled: bool) -> crate::connectors::NodeConnector {
         crate::connectors::NodeConnector {
+            tenant_subdomain: None,
             connector_id: "filebox".into(),
             enabled,
             consent_tenant_id: None,
@@ -1789,6 +1884,7 @@ mod exchange_tests {
         // A commits last, with what it read: refused, and nothing of A's is written (A's plan would
         // have restored c-1 beside B's secret).
         let basis = PlanBasis {
+            tenant: None,
             def: &def,
             client: read_by_a.as_ref(),
         };
@@ -1818,6 +1914,7 @@ mod exchange_tests {
             )
             .unwrap();
         let basis = PlanBasis {
+            tenant: None,
             def: &def,
             client: read_now.as_ref(),
         };
@@ -1828,6 +1925,7 @@ mod exchange_tests {
         // With the state it now has, the same save goes through.
         let def_now = store.connector_entry("filebox").unwrap().unwrap().def;
         let basis = PlanBasis {
+            tenant: None,
             def: &def_now,
             client: read_now.as_ref(),
         };
@@ -2076,6 +2174,7 @@ mod exchange_tests {
                 &clear,
                 &format!("https://mcp.{tag}.example/mcp"),
                 &PlanBasis {
+                    tenant: None,
                     def: &def,
                     client: Some(&earlier),
                 },

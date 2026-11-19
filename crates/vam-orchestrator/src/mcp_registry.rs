@@ -4363,6 +4363,7 @@ mod tests {
         // `linear` is a connector id: its row is offered once the node enables the connector.
         store
             .put_node_connector(&crate::connectors::NodeConnector {
+                tenant_subdomain: None,
                 connector_id: "linear".into(),
                 enabled: true,
                 consent_tenant_id: None,

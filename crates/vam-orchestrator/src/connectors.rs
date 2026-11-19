@@ -193,7 +193,10 @@ pub fn policy_of(id: &str, def: &Connector) -> Option<McpPolicy> {
 /// installed it (CN-4.11). Built-in connectors have no `installed`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectorEntry {
+    /// The connector as the node uses it: the company address (if any) filled in.
     pub def: Connector,
+    /// The connector file as published, with `{subdomain}` still in it.
+    pub template: Connector,
     pub installed: Option<InstalledMeta>,
 }
 
@@ -225,6 +228,7 @@ impl ConnectorEntry {
 
 fn entry_of(i: crate::marketplace::connector_store::InstalledConnector) -> ConnectorEntry {
     ConnectorEntry {
+        template: i.def.clone(),
         installed: Some(InstalledMeta {
             trust: i.trust,
             marketplace_id: i.origin.marketplace,
@@ -244,6 +248,7 @@ pub fn entries_in(c: &Connection) -> Result<Vec<ConnectorEntry>, OrchestratorErr
     let mut out: Vec<ConnectorEntry> = builtin_connectors()
         .into_iter()
         .map(|def| ConnectorEntry {
+            template: def.clone(),
             def,
             installed: None,
         })
@@ -254,18 +259,52 @@ pub fn entries_in(c: &Connection) -> Result<Vec<ConnectorEntry>, OrchestratorErr
             out.push(entry_of(i));
         }
     }
+    // The one place a definition is filled with the node's company address (CN-6.2).
+    let nodes = node_connectors_in(c)?;
+    for e in &mut out {
+        let id = e.id();
+        let sub = nodes
+            .iter()
+            .find(|n| n.connector_id == id)
+            .and_then(|n| n.tenant_subdomain.as_deref());
+        e.def = resolve(&e.template, sub);
+    }
     Ok(out)
+}
+
+/// The connector as the node uses it: `{subdomain}` filled with the node's company address. The
+/// only way code reads a templated definition. With no address the endpoints and bindings are
+/// gone and the MCP URL is still templated (see [`url_needs_address`]).
+pub fn resolve(template: &Connector, subdomain: Option<&str>) -> Connector {
+    vam_spec::connector::fill_subdomain(template, subdomain)
+}
+
+/// True when a URL still holds `{subdomain}`: the connector has no company address yet, so the
+/// URL names no server.
+pub fn url_needs_address(url: &str) -> bool {
+    url.contains(vam_spec::connector::SUBDOMAIN_PLACEHOLDER)
 }
 
 /// The connector with this id: built in, else installed.
 pub fn entry_in(c: &Connection, id: &str) -> Result<Option<ConnectorEntry>, OrchestratorError> {
-    if let Some(def) = builtin(id) {
-        return Ok(Some(ConnectorEntry {
+    let found = if let Some(def) = builtin(id) {
+        Some(ConnectorEntry {
+            template: def.clone(),
             def,
             installed: None,
-        }));
-    }
-    Ok(crate::marketplace::connector_store::installed_by_id_in(c, id)?.map(entry_of))
+        })
+    } else {
+        crate::marketplace::connector_store::installed_by_id_in(c, id)?.map(entry_of)
+    };
+    let Some(mut e) = found else {
+        return Ok(None);
+    };
+    let node = node_connector_in(c, id)?;
+    e.def = resolve(
+        &e.template,
+        node.as_ref().and_then(|n| n.tenant_subdomain.as_deref()),
+    );
+    Ok(Some(e))
 }
 
 /// The policy of the MCP connector with this id (built in or installed), if there is one.
@@ -308,6 +347,11 @@ pub fn gate_mcp_write(
     let Some(policy) = store.mcp_policy(id)? else {
         return Ok(None);
     };
+    if url_needs_address(&policy.url) {
+        return Err(OrchestratorError::PermissionDenied(format!(
+            "the `{id}` connector needs a company address; ask your admin (`vam connectors`)"
+        )));
+    }
     for u in [url, current_url].into_iter().flatten() {
         if u != policy.url {
             return Err(OrchestratorError::InvalidContract(format!(
@@ -370,6 +414,8 @@ pub struct NodeConnector {
     pub consent_tenant_id: Option<String>,
     pub consent_recorded_at: Option<i64>,
     pub consent_recorded_by: Option<String>,
+    /// The company address the admin entered at Enable (`{subdomain}`, CN-6.2). Kept on disable.
+    pub tenant_subdomain: Option<String>,
     pub updated_at: i64,
     pub updated_by: String,
 }
@@ -390,6 +436,23 @@ pub struct PutNodeRequest {
         deserialize_with = "crate::connector_client::client_some_or_null"
     )]
     pub client: Option<Option<crate::connector_client::ClientRequest>>,
+    /// The company address of a connector that declares `tenant`. Omitted keeps the stored one;
+    /// `null` clears it (only with `enabled: false`).
+    #[serde(default, deserialize_with = "tenant_some_or_null")]
+    pub tenant: Option<Option<TenantRequest>>,
+}
+
+fn tenant_some_or_null<'de, D>(d: D) -> Result<Option<Option<TenantRequest>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<TenantRequest>::deserialize(d).map(Some)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TenantRequest {
+    pub subdomain: String,
 }
 
 fn some_or_null<'de, D>(d: D) -> Result<Option<Option<ConsentRequest>>, D::Error>
@@ -423,6 +486,51 @@ fn invalid(msg: impl Into<String>) -> OrchestratorError {
     OrchestratorError::InvalidContract(msg.into())
 }
 
+/// The company address a `PUT` leaves on the node row (CN-6.2).
+///
+/// - `tenant` on a connector that declares none: 400;
+/// - `null` while enabling: 400; `null` with `enabled: false` clears it;
+/// - a value that is not one DNS label: 400 (fixed text, the value is not quoted);
+/// - enabling a connector with `tenant` and no address stored or given: 409.
+///
+/// Omitted keeps the stored address, so a disable and a re-enable need none.
+fn plan_address(
+    def: &Connector,
+    existing: Option<&NodeConnector>,
+    req: &PutNodeRequest,
+) -> Result<Option<String>, OrchestratorError> {
+    let id = connector_id(def);
+    let stored = existing.and_then(|n| n.tenant_subdomain.clone());
+    let Some(param) = &def.tenant else {
+        return match &req.tenant {
+            None => Ok(None),
+            Some(_) => Err(invalid(format!("`{id}` takes no company address"))),
+        };
+    };
+    let address = match &req.tenant {
+        None => stored,
+        Some(None) => {
+            if req.enabled {
+                return Err(invalid(
+                    "the company address is removed only when disabling: send `enabled: false` with `tenant: null`",
+                ));
+            }
+            None
+        }
+        Some(Some(t)) => Some(
+            vam_spec::connector::check_subdomain(&t.subdomain)
+                .map_err(|e| invalid(e.to_string().trim_start_matches("connector invalid: ")))?,
+        ),
+    };
+    if req.enabled && address.is_none() {
+        return Err(OrchestratorError::Conflict(format!(
+            "`{id}` needs your company address before it can be enabled: enter the {} (one DNS label, the first part of an address on {})",
+            param.label, param.suffix
+        )));
+    }
+    Ok(address)
+}
+
 /// Decides a `PUT`: the row to store, or the refusal. Nothing is written here.
 ///
 /// - consent on a connector whose `orgConsent` is `none`: 400; a tenant that is not a GUID: 400;
@@ -452,6 +560,7 @@ pub fn plan_put(
             })?)
         }
     };
+    let address = plan_address(def, existing, req)?;
     if req.enabled && !is_configured(def, cfg) {
         return Err(OrchestratorError::Conflict(format!(
             "`{id}` is not configured on this node: its client id is not set (set {})",
@@ -464,10 +573,12 @@ pub fn plan_put(
         consent_tenant_id: None,
         consent_recorded_at: None,
         consent_recorded_by: None,
+        tenant_subdomain: None,
         updated_at: now,
         updated_by: by.to_string(),
     });
     row.enabled = req.enabled;
+    row.tenant_subdomain = address;
     if clear {
         row.consent_tenant_id = None;
         row.consent_recorded_at = None;
@@ -564,6 +675,15 @@ pub fn list_entry(
         if viewer_is_admin {
             node_view["updatedAt"] = json!(n.updated_at);
         }
+        if let (Some(sub), Some(param)) = (&n.tenant_subdomain, &def.tenant) {
+            if enabled || viewer_is_admin {
+                node_view["tenant"] = json!({
+                    "subdomain": sub,
+                    "label": param.label,
+                    "hosts": vam_spec::connector::filled_hosts(def, sub),
+                });
+            }
+        }
     }
     if enabled {
         let mut public = serde_json::to_value(def).unwrap_or(Value::Null);
@@ -639,7 +759,14 @@ pub fn annotate_source(entry: &mut Value, e: &ConnectorEntry, viewer_is_admin: b
         "packageDigest": m.package_digest,
     });
     if viewer_is_admin || enabled {
-        let summary = vam_spec::package::summarize_connector(&e.def);
+        // Before an address is entered the admin reads the file as published; after it, every host
+        // is the filled one.
+        let shown = if entry["node"]["tenant"].is_object() {
+            &e.def
+        } else {
+            &e.template
+        };
+        let summary = vam_spec::package::summarize_connector(shown);
         if let Some(c) = summary.connector {
             entry["capabilities"] = serde_json::to_value(c).unwrap_or(Value::Null);
         }
@@ -954,6 +1081,13 @@ pub fn rest_connection_state(
         .and_then(|n| n.consent_tenant_id.as_deref())
         .map(|t| t == conn.tenant_id)
         .unwrap_or(true);
+    // A connection made under another company address is not this company's (CN-6.2; the code
+    // exchange writes the address it signed in under as `tenant_id`).
+    let same_address = node
+        .and_then(|n| n.tenant_subdomain.as_deref())
+        .map(|t| t == conn.tenant_id)
+        .unwrap_or(true);
+    let same_tenant = same_tenant && same_address;
     if conn.status == ConnectionStatus::Connected && has_refresh_token && same_tenant {
         CallerState::Connected
     } else {
@@ -1266,6 +1400,19 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
         );
         ",
     )?;
+    // A store from before the company address: every row reads NULL, no address.
+    let has_tenant: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('node_enabled_connectors')
+         WHERE name = 'tenant_subdomain'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_tenant == 0 {
+        connection.execute(
+            "ALTER TABLE node_enabled_connectors ADD COLUMN tenant_subdomain TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -1304,11 +1451,12 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeConnector> {
         consent_recorded_by: r.get(4)?,
         updated_at: r.get(5)?,
         updated_by: r.get(6)?,
+        tenant_subdomain: r.get(7)?,
     })
 }
 
 const COLUMNS: &str = "connector_id, enabled, consent_tenant_id, consent_recorded_at, \
-                       consent_recorded_by, updated_at, updated_by";
+                       consent_recorded_by, updated_at, updated_by, tenant_subdomain";
 
 const CONN_COLUMNS: &str = "owner_user_id, connector_id, status, label, tenant_id, token_endpoint, \
                             scopes_json, expires_at, connected_at, updated_at, last_check_at, last_error";
@@ -1464,13 +1612,14 @@ pub(crate) fn put_node_connector_in(
 ) -> Result<(), OrchestratorError> {
     connection.execute(
         "INSERT INTO node_enabled_connectors (connector_id, enabled, consent_tenant_id,
-             consent_recorded_at, consent_recorded_by, updated_at, updated_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             consent_recorded_at, consent_recorded_by, updated_at, updated_by, tenant_subdomain)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(connector_id) DO UPDATE SET enabled = excluded.enabled,
              consent_tenant_id = excluded.consent_tenant_id,
              consent_recorded_at = excluded.consent_recorded_at,
              consent_recorded_by = excluded.consent_recorded_by,
-             updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+             updated_at = excluded.updated_at, updated_by = excluded.updated_by,
+             tenant_subdomain = excluded.tenant_subdomain",
         params![
             row.connector_id,
             row.enabled as i64,
@@ -1478,7 +1627,8 @@ pub(crate) fn put_node_connector_in(
             row.consent_recorded_at,
             row.consent_recorded_by,
             row.updated_at,
-            row.updated_by
+            row.updated_by,
+            row.tenant_subdomain
         ],
     )?;
     Ok(())
@@ -1517,6 +1667,7 @@ mod tests {
     }
     fn put(enabled: bool, tenant: Option<&str>) -> PutNodeRequest {
         PutNodeRequest {
+            tenant: None,
             enabled,
             consent: tenant.map(|t| {
                 Some(ConsentRequest {
@@ -1532,6 +1683,7 @@ mod tests {
         use crate::marketplace::store::Trust;
         let cfg = placeholder_cfg();
         let builtin_entry = ConnectorEntry {
+            template: linear(),
             def: linear(),
             installed: None,
         };
@@ -1545,6 +1697,7 @@ mod tests {
         def.urn = "urn:vam:connector:market.example.org/acme/bugwatch".into();
         def.publisher = "Acme Tools".into();
         let installed = ConnectorEntry {
+            template: def.clone(),
             def,
             installed: Some(InstalledMeta {
                 trust: Trust::Unverified,
@@ -1577,6 +1730,7 @@ mod tests {
         assert!(member.get("capabilities").is_none());
         // Once enabled the member sees them too.
         let on = NodeConnector {
+            tenant_subdomain: None,
             connector_id: "bugwatch".into(),
             enabled: true,
             consent_tenant_id: None,
@@ -1795,6 +1949,7 @@ mod tests {
     fn set_enabled(store: &SqliteWorkflowStore, enabled: bool) {
         store
             .put_node_connector(&NodeConnector {
+                tenant_subdomain: None,
                 connector_id: "linear".into(),
                 enabled,
                 consent_tenant_id: None,
@@ -2007,6 +2162,7 @@ mod tests {
 
     fn consented_node(tenant: Option<&str>, enabled: bool) -> NodeConnector {
         NodeConnector {
+            tenant_subdomain: None,
             connector_id: "microsoft-365".into(),
             enabled,
             consent_tenant_id: tenant.map(str::to_string),
@@ -2529,5 +2685,246 @@ mod tests {
         );
         show_account(&mut e, CallerState::NeedsReconnect, row.label.as_deref());
         assert_eq!(e["label"], "Needs reconnect");
+    }
+
+    // ---- the company address (CN-6.2) ----------------------------------------------------------
+
+    fn zendesk_def() -> Connector {
+        let raw = include_str!("../../vam-spec/tests/fixtures/zendesk-shaped-connector.json");
+        vam_spec::connector::parse_connector(raw).unwrap()
+    }
+
+    fn put_with(enabled: bool, tenant: Option<Option<&str>>) -> PutNodeRequest {
+        PutNodeRequest {
+            tenant: tenant.map(|t| {
+                t.map(|s| TenantRequest {
+                    subdomain: s.to_string(),
+                })
+            }),
+            ..put(enabled, None)
+        }
+    }
+
+    #[test]
+    fn enabling_needs_an_address_and_a_refusal_writes_no_row() {
+        let (def, cfg) = (zendesk_def(), ConnectorConfig::default());
+        let e = plan_put(&def, &cfg, None, &put_with(true, None), 1, "a").unwrap_err();
+        assert!(matches!(&e, OrchestratorError::Conflict(m) if m.contains("company address")));
+        for bad in ["a.b", "-a", "a_b", "xn--a", &"a".repeat(64)] {
+            let e =
+                plan_put(&def, &cfg, None, &put_with(true, Some(Some(bad))), 1, "a").unwrap_err();
+            assert!(
+                matches!(&e, OrchestratorError::InvalidContract(m) if m.contains("one DNS label") && !m.contains(bad)),
+                "{bad}"
+            );
+        }
+        let row = plan_put(
+            &def,
+            &cfg,
+            None,
+            &put_with(true, Some(Some(" Acme "))),
+            1,
+            "a",
+        )
+        .unwrap();
+        assert_eq!(row.tenant_subdomain.as_deref(), Some("acme"));
+        // Omitted keeps it across a disable and an enable; null clears only a disable.
+        let off = plan_put(&def, &cfg, Some(&row), &put_with(false, None), 2, "a").unwrap();
+        assert_eq!(off.tenant_subdomain.as_deref(), Some("acme"));
+        let on = plan_put(&def, &cfg, Some(&off), &put_with(true, None), 3, "a").unwrap();
+        assert_eq!(on.tenant_subdomain.as_deref(), Some("acme"));
+        assert!(plan_put(&def, &cfg, Some(&on), &put_with(true, Some(None)), 4, "a").is_err());
+        let cleared =
+            plan_put(&def, &cfg, Some(&on), &put_with(false, Some(None)), 4, "a").unwrap();
+        assert_eq!(cleared.tenant_subdomain, None);
+        // A connector with no `tenant` takes none.
+        let e = plan_put(
+            &linear(),
+            &cfg,
+            None,
+            &put_with(false, Some(Some("acme"))),
+            1,
+            "a",
+        )
+        .unwrap_err();
+        assert!(matches!(e, OrchestratorError::InvalidContract(_)));
+    }
+
+    #[test]
+    fn the_resolver_fills_what_the_store_reads_and_the_entry_shows() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        crate::connector_client::test_support::install_company_address_rows(&store);
+        // No address: nothing usable, and the template is still the file as published.
+        let e = store.connector_entry("zendesk").unwrap().unwrap();
+        assert!(e.def.bindings.is_none() && e.template.bindings.is_some());
+        let mut row = NodeConnector {
+            connector_id: "zendesk".into(),
+            enabled: true,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            tenant_subdomain: Some("acme".into()),
+            updated_at: 1,
+            updated_by: "a".into(),
+        };
+        store.put_node_connector(&row).unwrap();
+        let e = store.connector_entry("zendesk").unwrap().unwrap();
+        assert_eq!(
+            e.def.bindings.as_ref().unwrap()[0].hosts,
+            ["acme.zendesk.com"]
+        );
+        assert_eq!(
+            store
+                .connector_entries()
+                .unwrap()
+                .iter()
+                .find(|x| x.id() == "zendesk")
+                .unwrap()
+                .def,
+            e.def
+        );
+        let shown = list_entry(&e.def, &ConnectorConfig::default(), Some(&row), None, false);
+        assert!(!shown.to_string().contains("{subdomain}"), "{shown}");
+        assert_eq!(shown["node"]["tenant"]["hosts"][0], "acme.zendesk.com");
+        // Another company, another read; the stored row is the only input.
+        row.tenant_subdomain = Some("globex".into());
+        store.put_node_connector(&row).unwrap();
+        let e = store.connector_entry("zendesk").unwrap().unwrap();
+        assert_eq!(
+            e.def.bindings.as_ref().unwrap()[0].hosts,
+            ["globex.zendesk.com"]
+        );
+    }
+
+    #[test]
+    fn an_unaddressed_mcp_url_keeps_the_id_reserved() {
+        let mut def = linear();
+        def.tenant = Some(vam_spec::connector::TenantParam {
+            name: "subdomain".into(),
+            suffix: "linear.app".into(),
+            label: "Address".into(),
+        });
+        def.mcp.as_mut().unwrap().url = "https://{subdomain}.linear.app/mcp".into();
+        let none = resolve(&def, None);
+        assert!(url_needs_address(&none.mcp.as_ref().unwrap().url));
+        assert!(policy_of("linear", &none).is_some());
+        let some = resolve(&def, Some("acme"));
+        assert_eq!(
+            some.mcp.as_ref().unwrap().url,
+            "https://acme.linear.app/mcp"
+        );
+        assert!(!url_needs_address(&policy_of("linear", &some).unwrap().url));
+    }
+
+    #[test]
+    fn a_connection_under_another_address_needs_a_reconnect() {
+        let row = ConnectorConnection {
+            owner_user_id: "ada".into(),
+            connector_id: "zendesk".into(),
+            status: ConnectionStatus::Connected,
+            label: None,
+            tenant_id: "acme".into(),
+            token_endpoint: String::new(),
+            scopes: vec![],
+            expires_at: None,
+            connected_at: 1,
+            updated_at: 1,
+            last_check_at: None,
+            last_error: None,
+        };
+        let node = |sub: &str| NodeConnector {
+            tenant_subdomain: Some(sub.into()),
+            ..consented_node(None, true)
+        };
+        assert_eq!(
+            rest_connection_state(&row, Some(&node("acme")), true),
+            CallerState::Connected
+        );
+        assert_eq!(
+            rest_connection_state(&row, Some(&node("globex")), true),
+            CallerState::NeedsReconnect
+        );
+    }
+
+    #[test]
+    fn a_store_from_before_the_address_gets_the_column_and_keeps_its_rows() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE node_enabled_connectors (connector_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+                consent_tenant_id TEXT, consent_recorded_at INTEGER, consent_recorded_by TEXT,
+                updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL);
+             INSERT INTO node_enabled_connectors VALUES ('linear', 1, NULL, NULL, NULL, 5, 'olga');",
+        )
+        .unwrap();
+        initialize_schema(&c).unwrap();
+        initialize_schema(&c).unwrap();
+        let n = node_connector_in(&c, "linear").unwrap().unwrap();
+        assert!(n.enabled && n.tenant_subdomain.is_none() && n.updated_by == "olga");
+    }
+
+    #[test]
+    fn a_write_for_a_connector_with_no_address_is_refused_by_the_gate() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        let raw = include_str!("../../vam-spec/tests/fixtures/zendesk-shaped-connector.json");
+        let mut json: Value = serde_json::from_str(raw).unwrap();
+        json.as_object_mut().unwrap().remove("bindings");
+        json["provider"] = json!({ "kind": "oauth2", "profile": "discover", "client": "org",
+            "clientSecret": "none", "scopes": ["read"], "orgConsent": "none" });
+        json["mcp"] = json!({ "url": "https://{subdomain}.zendesk.com/mcp",
+            "tools": [ { "remote": "search", "sideEffect": "READ_ONLY" } ] });
+        let urn = json["urn"].as_str().unwrap().to_string();
+        {
+            let c = store.connection.lock().unwrap();
+            c.execute(
+                "INSERT INTO connector_releases (urn, major, minor, patch, digest, spec_bytes, created_at,
+                     updated_at, owner_user_id) VALUES (?1, 1, 0, 0, 'd', ?2, 1, 1, 'system')",
+                params![urn, json.to_string().as_bytes()],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO catalog_origins (kind, urn, major, minor, patch, marketplace_id, listing_id,
+                     git_ref, commit_sha, package_digest, installed_at)
+                 VALUES ('connector', ?1, 1, 0, 0, 'm-1', 'z', 'z-v1', 'c', 'd', 1)",
+                [&urn],
+            )
+            .unwrap();
+        }
+        let mut row = NodeConnector {
+            connector_id: "zendesk".into(),
+            enabled: true,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            tenant_subdomain: None,
+            updated_at: 1,
+            updated_by: "a".into(),
+        };
+        store.put_node_connector(&row).unwrap();
+        // The id stays reserved, a hand-added server cannot take it, and nothing connects.
+        assert!(store.mcp_policy("zendesk").unwrap().is_some());
+        let e = gate_mcp_write(&store, "zendesk", None, None).unwrap_err();
+        assert!(
+            matches!(&e, OrchestratorError::PermissionDenied(m) if m.contains("company address"))
+        );
+        let e =
+            gate_mcp_write(&store, "zendesk", Some("https://evil.example/mcp"), None).unwrap_err();
+        assert!(matches!(e, OrchestratorError::PermissionDenied(_)));
+        // With the address the gate passes for the filled URL only.
+        row.tenant_subdomain = Some("acme".into());
+        store.put_node_connector(&row).unwrap();
+        assert!(gate_mcp_write(
+            &store,
+            "zendesk",
+            Some("https://acme.zendesk.com/mcp"),
+            None
+        )
+        .is_ok());
+        assert!(gate_mcp_write(
+            &store,
+            "zendesk",
+            Some("https://{subdomain}.zendesk.com/mcp"),
+            None
+        )
+        .is_err());
     }
 }
