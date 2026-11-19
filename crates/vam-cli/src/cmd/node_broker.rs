@@ -22,6 +22,7 @@ use super::node_init::{self, Line, Status};
 use super::node_install::write_if_changed;
 use crate::client::Client;
 use crate::config::{ConfigFile, ResolvedConfig};
+use vam_spec::v1::{CapabilityManifest, TrustTier};
 
 const STATE_DIR: &str = "/var/lib/vam";
 const ETC_DIR: &str = "/etc/vam";
@@ -269,14 +270,39 @@ fn socket_alive(sock: &Path) -> bool {
     UnixStream::connect(sock).is_ok()
 }
 
-fn wait_for_socket(sock: &Path) -> bool {
-    for _ in 0..50 {
+/// Tries 200 ms apart that a starting broker gets to open its socket (10 s in all).
+const SOCKET_TRIES: u32 = 50;
+
+fn wait_for_socket_tries(sock: &Path, tries: u32) -> bool {
+    for i in 0..tries {
         if socket_alive(sock) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        if i + 1 < tries {
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
     false
+}
+
+fn wait_for_socket(sock: &Path) -> bool {
+    wait_for_socket_tries(sock, SOCKET_TRIES)
+}
+
+/// The systemd unit of one broker (an instance of `vam-broker@.service`).
+fn unit_name(b: Broker) -> String {
+    format!("vam-broker@{}", b.name())
+}
+
+/// After systemd (re)started the broker: wait for its socket, so registration finds it up.
+fn await_unit_socket(unit: &str, sock: &Path, tries: u32) -> Result<()> {
+    if wait_for_socket_tries(sock, tries) {
+        return Ok(());
+    }
+    bail!(
+        "{unit} did not open its socket {}; see `journalctl -u {unit}`",
+        sock.display()
+    )
 }
 
 fn pid_path(root: &Path, b: Broker) -> PathBuf {
@@ -350,25 +376,43 @@ pub(crate) enum Registered {
     Done,
 }
 
-fn tool_names(manifest: &Value) -> Vec<String> {
-    let mut v: Vec<String> = manifest["tools"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|t| t["toolName"].as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    v.sort();
-    v
+/// The manifest as the proto it is, so omitted defaults and key order compare equal.
+fn decode_manifest(v: &Value) -> Option<CapabilityManifest> {
+    vam_spec::encoding::json_to_proto("vam.v1.CapabilityManifest", &v.to_string()).ok()
 }
 
-/// Whether a record from `GET /v1/hosted/brokers` already matches what we would register.
+/// Whether `vamd` gives this manifest a gateway socket: it may request runs, or it declares a
+/// notification channel on a tier that may deliver (core or first-party). The same rule as
+/// `wants_gateway` in `vam-orchestrator/src/gateway.rs` with `tier_may_deliver` in
+/// `notify_gateway.rs`.
+fn needs_gateway(m: &CapabilityManifest) -> bool {
+    m.run_request_permission.is_some()
+        || (m.notification_channel.is_some()
+            && matches!(
+                TrustTier::try_from(m.trust_tier),
+                Ok(TrustTier::Core | TrustTier::FirstParty)
+            ))
+}
+
+/// Whether a record from `GET /v1/hosted/brokers` already matches what we would register: the
+/// whole manifest (secret bindings, egress, tools with their side effects and destinations, the
+/// rest), enabled, at this socket, and holding its gateway socket when it needs one. Anything
+/// else is registered again, since `PUT /v1/hosted/brokers` is what refreshes vamd's approval.
 pub(crate) fn record_matches(record: &Value, manifest: &Value, sock: &str) -> bool {
-    record["manifest"]["brokerId"] == manifest["brokerId"]
+    let (Some(have), Some(want)) = (
+        decode_manifest(&record["manifest"]),
+        decode_manifest(manifest),
+    ) else {
+        return false;
+    };
+    let gateway_ok = !needs_gateway(&want)
+        || record["gatewaySocket"]
+            .as_str()
+            .is_some_and(|g| !g.is_empty());
+    have == want
         && record["enabled"].as_bool().unwrap_or(false)
         && record["unixPath"].as_str() == Some(sock)
-        && tool_names(&record["manifest"]) == tool_names(manifest)
+        && gateway_ok
 }
 
 /// Register one broker, or find it already registered. Returns what happened and the gateway
@@ -418,7 +462,6 @@ pub(crate) struct Plan<'a> {
     pub minted_key: Option<&'a str>,
     pub api_host: Option<&'a str>,
     pub api_token: Option<&'a str>,
-    pub rerun_flags: String,
 }
 
 fn unchanged(step: &str, detail: &str) {
@@ -437,14 +480,65 @@ fn systemctl(args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn print_register_command(b: Broker, why: &str, flags: &str) {
+/// A word the shell reads back as itself: left bare when it holds only safe characters, else
+/// single-quoted.
+fn sh_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:=@%+,".contains(c));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// The command that registers `brokers` later. On the real root it runs as root (`/var/lib/vam`
+/// is `0700`) with `VAM_API_KEY` after `sudo`, which would drop it from the environment
+/// otherwise; `vam` is this binary's absolute path, since `sudo` resets `PATH`. It carries
+/// `--root`, `--no-systemd` and `--host` as given, never `--token` or a key: `<admin key>` stays
+/// a placeholder.
+pub(crate) fn register_command(
+    vam: &Path,
+    root: &Path,
+    no_systemd: bool,
+    host: Option<&str>,
+    brokers: &[Broker],
+) -> String {
+    let real_root = root == Path::new("/");
+    let mut cmd = String::new();
+    if real_root {
+        cmd.push_str("sudo ");
+    }
+    cmd.push_str("VAM_API_KEY=<admin key> ");
+    cmd.push_str(&sh_quote(&vam.display().to_string()));
+    cmd.push_str(" node init");
+    if !real_root {
+        cmd.push_str(" --root ");
+        cmd.push_str(&sh_quote(&root.display().to_string()));
+    }
+    if no_systemd {
+        cmd.push_str(" --no-systemd");
+    }
+    if let Some(h) = host.filter(|h| !h.is_empty()) {
+        cmd.push_str(" --host ");
+        cmd.push_str(&sh_quote(h));
+    }
+    let names: Vec<&str> = brokers.iter().map(|b| b.name()).collect();
+    cmd.push_str(" --broker ");
+    cmd.push_str(&names.join(","));
+    cmd
+}
+
+fn print_register_command(p: &Plan<'_>, b: Broker, why: &str) {
     println!(
         "broker {}: nothing was sent to vamd ({why}). To register it, use an API key that has brokers:admin and run:",
         b.id()
     );
+    let vam = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vam"));
     println!(
-        "  VAM_API_KEY=<admin key> vam node init --broker {}{flags}",
-        b.name()
+        "  {}",
+        register_command(&vam, p.root, p.no_systemd, p.api_host, &[b])
     );
 }
 
@@ -555,7 +649,7 @@ pub(crate) async fn run_brokers(p: Plan<'_>) -> Result<()> {
             "--no-start: nothing is running yet"
         };
         for b in p.brokers {
-            print_register_command(*b, why, &p.rerun_flags);
+            print_register_command(&p, *b, why);
         }
         return Ok(());
     };
@@ -588,7 +682,7 @@ pub(crate) async fn run_brokers(p: Plan<'_>) -> Result<()> {
                 }
             }
             Err(e) if is_connect_error(&e) => {
-                print_register_command(*b, "vamd is not reachable", &p.rerun_flags);
+                print_register_command(&p, *b, "vamd is not reachable");
             }
             Err(e) => return Err(e.context(format!("register {}", b.id()))),
         }
@@ -634,16 +728,18 @@ fn start_broker(
     if p.no_start || !real_root {
         return Ok(());
     }
-    let unit = format!("vam-broker@{}", b.name());
+    let unit = unit_name(b);
     let _ = systemctl(&["daemon-reload"]);
     let active = systemctl(&["is-active", "--quiet", &unit]);
     if !active {
         if !systemctl(&["enable", "--now", &unit]) {
-            bail!("systemctl enable --now {unit} failed");
+            bail!("systemctl enable --now {unit} failed; see `journalctl -u {unit}`");
         }
+        await_unit_socket(&unit, &sock, SOCKET_TRIES)?;
         done(&format!("broker-service {}", b.id()), "enabled and started");
     } else if args_changed || unit_changed {
-        let _ = systemctl(&["restart", &unit]);
+        systemctl_restart(&unit)?;
+        await_unit_socket(&unit, &sock, SOCKET_TRIES)?;
         done(&format!("broker-service {}", b.id()), "restarted");
     } else {
         unchanged(&format!("broker-service {}", b.id()), "enabled and running");
@@ -663,7 +759,16 @@ fn restart_broker(
         return spawn_detached(p.root, b, &dir.join(b.binary()), Some(gateway));
     }
     if real_root && !p.no_start {
-        let _ = systemctl(&["restart", &format!("vam-broker@{}", b.name())]);
+        let unit = unit_name(b);
+        systemctl_restart(&unit)?;
+        await_unit_socket(&unit, &under(p.root, &socket_path(b)), SOCKET_TRIES)?;
+    }
+    Ok(())
+}
+
+fn systemctl_restart(unit: &str) -> Result<()> {
+    if !systemctl(&["restart", unit]) {
+        bail!("systemctl restart {unit} failed; see `journalctl -u {unit}`");
     }
     Ok(())
 }
@@ -821,21 +926,177 @@ mod tests {
         assert_eq!((t.host.as_str(), t.ca), (DEFAULT_HOST, ca));
     }
 
+    /// The web manifest as `vam-web-broker manifest` prints it.
+    fn web_manifest() -> Value {
+        json!({
+            "brokerId": "vam.web",
+            "trustTier": "TRUST_TIER_FIRST_PARTY",
+            "secretBindings": [
+                {"logicalName": "brave-api-key", "vaultKey": "web/brave-api-key", "required": true}
+            ],
+            "egressDomains": ["api.search.brave.com"],
+            "tools": [
+                {"toolName": "web_search", "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+                 "requiredSecrets": ["brave-api-key"], "destinationPolicy": "TOOL_DESTINATION_ALLOWLIST"},
+                {"toolName": "web_fetch", "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+                 "requiredSecrets": [], "destinationPolicy": "TOOL_DESTINATION_PUBLIC_WEB"}
+            ],
+            "labels": {"vam.capability": "web"}
+        })
+    }
+
+    /// The same manifest as vamd lists it: defaults left out, snake_case keys, keys in another
+    /// order.
+    fn web_record() -> Value {
+        let text = r#"{"enabled": true, "unixPath": "/s", "tools": [], "manifest": {
+            "labels": {"vam.capability": "web"},
+            "tools": [
+                {"tool_name": "web_search", "required_secrets": ["brave-api-key"],
+                 "side_effect": "SIDE_EFFECT_CLASS_READ_ONLY"},
+                {"destinationPolicy": "TOOL_DESTINATION_PUBLIC_WEB",
+                 "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY", "toolName": "web_fetch"}
+            ],
+            "egressDomains": ["api.search.brave.com"],
+            "secretBindings": [
+                {"required": true, "vaultKey": "web/brave-api-key", "logicalName": "brave-api-key"}
+            ],
+            "trustTier": "TRUST_TIER_FIRST_PARTY",
+            "brokerId": "vam.web"
+        }}"#;
+        serde_json::from_str(text).unwrap()
+    }
+
     #[test]
-    fn a_record_that_matches_is_left_alone() {
-        let manifest = json!({"brokerId": "vam.web", "tools": [
-            {"toolName": "web_search"}, {"toolName": "web_fetch"}]});
-        let rec = json!({"manifest": {"brokerId": "vam.web", "tools": [
-            {"toolName": "web_fetch"}, {"toolName": "web_search"}]},
-            "unixPath": "/s", "enabled": true});
+    fn an_equal_manifest_with_defaults_dropped_and_keys_reordered_matches() {
+        let (manifest, rec) = (web_manifest(), web_record());
         assert!(record_matches(&rec, &manifest, "/s"));
         assert!(!record_matches(&rec, &manifest, "/other"));
         let mut off = rec.clone();
         off["enabled"] = json!(false);
         assert!(!record_matches(&off, &manifest, "/s"));
-        let mut fewer = rec.clone();
-        fewer["manifest"]["tools"] = json!([{"toolName": "web_search"}]);
-        assert!(!record_matches(&fewer, &manifest, "/s"));
+        let mut no_path = rec.clone();
+        no_path.as_object_mut().unwrap().remove("unixPath");
+        assert!(!record_matches(&no_path, &manifest, "/s"));
+        let mut garbled = rec.clone();
+        garbled["manifest"] = json!({"brokerId": 7});
+        assert!(!record_matches(&garbled, &manifest, "/s"));
+    }
+
+    #[test]
+    fn a_manifest_change_without_a_tool_rename_does_not_match() {
+        type Change = (&'static str, fn(&mut Value));
+        let rec = web_record();
+        let changes: [Change; 7] = [
+            ("secretBindings logical name", |m| {
+                m["secretBindings"][0]["logicalName"] = json!("brave-key")
+            }),
+            ("secretBindings required", |m| {
+                m["secretBindings"][0]["required"] = json!(false)
+            }),
+            ("vaultKey", |m| {
+                m["secretBindings"][0]["vaultKey"] = json!("web/brave-api-key-2")
+            }),
+            ("egressDomains", |m| {
+                m["egressDomains"] = json!(["api.search.brave.com", "example.com"])
+            }),
+            ("sideEffect", |m| {
+                m["tools"][1]["sideEffect"] = json!("SIDE_EFFECT_CLASS_MUTABLE_EXTERNAL")
+            }),
+            ("destinationPolicy", |m| {
+                m["tools"][1]["destinationPolicy"] = json!("TOOL_DESTINATION_ALLOWLIST")
+            }),
+            ("requiredSecrets", |m| {
+                m["tools"][1]["requiredSecrets"] = json!(["brave-api-key"])
+            }),
+        ];
+        for (what, change) in changes {
+            let mut manifest = web_manifest();
+            change(&mut manifest);
+            assert!(decode_manifest(&manifest).is_some(), "{what}: decodes");
+            assert!(!record_matches(&rec, &manifest, "/s"), "{what}");
+        }
+    }
+
+    #[test]
+    fn a_record_that_needs_a_gateway_and_has_none_does_not_match() {
+        let manifest = json!({
+            "brokerId": "vam.schedule",
+            "trustTier": "TRUST_TIER_FIRST_PARTY",
+            "tools": [{"toolName": "schedule_create"}],
+            "runRequestPermission": {"grantTools": ["schedule_create"], "surface": "schedule"}
+        });
+        let mut rec = json!({"manifest": manifest.clone(), "unixPath": "/s", "enabled": true});
+        assert!(!record_matches(&rec, &manifest, "/s"), "no gatewaySocket");
+        rec["gatewaySocket"] = json!("");
+        assert!(
+            !record_matches(&rec, &manifest, "/s"),
+            "empty gatewaySocket"
+        );
+        rec["gatewaySocket"] = json!("/run/vam/gw/vam.schedule.sock");
+        assert!(record_matches(&rec, &manifest, "/s"));
+
+        // A channel broker needs one on a tier that may deliver, and not on any other.
+        let channel = json!({
+            "brokerId": "vam.notify",
+            "trustTier": "TRUST_TIER_FIRST_PARTY",
+            "notificationChannel": {"channel": "slack", "surface": "slack"}
+        });
+        let rec = json!({"manifest": channel.clone(), "unixPath": "/s", "enabled": true});
+        assert!(!record_matches(&rec, &channel, "/s"));
+        let mut third = channel.clone();
+        third["trustTier"] = json!("TRUST_TIER_THIRD_PARTY");
+        let rec = json!({"manifest": third.clone(), "unixPath": "/s", "enabled": true});
+        assert!(record_matches(&rec, &third, "/s"));
+        // The web broker never needs one.
+        assert!(record_matches(&web_record(), &web_manifest(), "/s"));
+    }
+
+    #[test]
+    fn the_register_command_runs_this_vam_as_root_with_the_key_after_sudo() {
+        let vam = Path::new("/opt/vam/bin/vam");
+        assert_eq!(
+            register_command(vam, Path::new("/"), false, None, &[Broker::Web]),
+            "sudo VAM_API_KEY=<admin key> /opt/vam/bin/vam node init --broker web"
+        );
+        assert_eq!(
+            register_command(
+                vam,
+                Path::new("/"),
+                true,
+                Some("https://node.example:8080"),
+                &[Broker::Web, Broker::Schedule]
+            ),
+            "sudo VAM_API_KEY=<admin key> /opt/vam/bin/vam node init --no-systemd \
+             --host https://node.example:8080 --broker web,schedule"
+        );
+        // A redirected root is the caller's own tree: no sudo, and every path quoted.
+        assert_eq!(
+            register_command(
+                Path::new("/home/a b/vam's/vam"),
+                Path::new("/tmp/my root"),
+                true,
+                None,
+                &[Broker::Notify]
+            ),
+            r#"VAM_API_KEY=<admin key> '/home/a b/vam'\''s/vam' node init --root '/tmp/my root' --no-systemd --broker notify"#
+        );
+        assert_eq!(
+            register_command(vam, Path::new("/srv/n"), false, Some(""), &[Broker::Web]),
+            "VAM_API_KEY=<admin key> /opt/vam/bin/vam node init --root /srv/n --broker web"
+        );
+    }
+
+    #[test]
+    fn a_broker_unit_that_never_opens_its_socket_points_to_its_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("web.sock");
+        let unit = unit_name(Broker::Web);
+        assert_eq!(unit, "vam-broker@web");
+        let e = await_unit_socket(&unit, &sock, 1).unwrap_err().to_string();
+        assert!(e.contains("journalctl -u vam-broker@web"), "{e}");
+        assert!(e.contains(&sock.display().to_string()), "{e}");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        assert!(await_unit_socket(&unit, &sock, 1).is_ok());
     }
 
     #[tokio::test]

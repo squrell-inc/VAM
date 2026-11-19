@@ -50,13 +50,13 @@ Names are `web`, `schedule` and `notify`, comma separated or repeated. Without `
 * With `--no-systemd`, `node init` starts each broker itself, detached, and writes `/var/lib/vam/brokers/<name>.log` and `<name>.pid`. Nothing restarts it. A re-run leaves a running broker alone, and restarts it only when its arguments changed.
 * Sockets are `/var/lib/vam/brokers/<name>.sock`, mode `0600`. Schedule and notify keep their state in `/var/lib/vam/brokers/<name>/`.
 * Registration is `PUT /v1/hosted/brokers` with the manifest the broker prints (`vam-<name>-broker manifest`). It uses the admin key the first run mints, else `--token`, `VAM_API_KEY` or your signed-in config.
-* With no key, the files are written, nothing is registered, and `node init` prints the command to run for each broker, then exits `0`:
+* With no key, the files are written, nothing is registered, and `node init` prints the command to run for each broker, then exits `0`. It runs the same `vam` by its absolute path, as root, with the key after `sudo` (which would drop it otherwise), and keeps `--root`, `--no-systemd` and `--host` when you gave them. Put an admin key in place of `<admin key>`:
 
 ```bash
-VAM_API_KEY=<admin key> vam node init --broker web
+sudo VAM_API_KEY=<admin key> /path/to/vam node init --broker web
 ```
 
-Run it again whenever you like. Registration is idempotent, a re-run changes only what differs, and it never removes a broker you did not name. `sudo vam node init --check --broker web` names a broker binary missing beside `vam`, with the fix, and changes nothing.
+Run it again whenever you like. Registration is idempotent, a re-run changes only what differs, and it never removes a broker you did not name. A broker counts as registered only when `vamd` holds its whole manifest (secret bindings, egress domains, each tool's side effect and destination), at its socket, with the gateway socket it needs; otherwise it is registered again, which refreshes the approval. With systemd, `node init` waits for each broker it starts or restarts to open its socket, and names `journalctl -u vam-broker@<name>` when one does not. `sudo vam node init --check --broker web` names a broker binary missing beside `vam`, with the fix, and changes nothing.
 
 ## Brokers that exist
 

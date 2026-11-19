@@ -5,9 +5,10 @@ description: >
   with `vam-web-broker` beside the copied `vam`, writes the broker's argument file under
   `etc/vam/` (no secret in it) and registers it through the API: `done broker vam.web:
   registered`. Notify and schedule are left alone (the shared node's schedule broker piece
-  already registers `vam.schedule`). A second run reports `ok (unchanged)`. A run on the same tree
-  without a key changes nothing and prints the command that registers the broker. The runner
-  deletes the `vam.web` registration at cleanup, so it reaches no later scenario.
+  already registers `vam.schedule`). A second run finds the whole manifest registered and
+  reports `ok (unchanged) broker vam.web: registered`, with no new registration. A run on the
+  same tree without a key changes nothing and prints the command that registers the broker. The
+  runner deletes the `vam.web` registration at cleanup, so it reaches no later scenario.
 tags: [release]
 needs: process
 given:
@@ -33,7 +34,8 @@ when:
       cleanupBrokers: [vam.web]
       as: org-admin
       exit: ok
-      contains: ["ok (unchanged)"]
+      contains: ["ok (unchanged) broker vam.web: registered"]
+      absent: ["done broker vam.web"]
   - cli:
       args: [node, init, --root, "{{root}}", --no-systemd, --broker, web, --vamd, "{{vamd}}"]
       root: { same: true }
