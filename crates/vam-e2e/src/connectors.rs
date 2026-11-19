@@ -68,9 +68,9 @@ const TICKETDESK_SUFFIX: &str = "ticketdesk.example";
 /// The client ids the ticketdesk provider has registered start with this.
 const TICKETDESK_CLIENT_PREFIX: &str = "e2e-ticketdesk-client";
 /// Add the `rest:<https origin>` keys to the seam: the egress gate answers
-/// `<company>.ticketdesk.example` from the company's listener. Held out until the node accepts the
-/// key (CN-6.4; a default vamd, and today's, refuse the whole variable on an unknown key).
-pub const PASS_REST_SEAM: bool = false;
+/// `<company>.ticketdesk.example` from the company's listener. On since CN-6.4 (a default vamd, and
+/// one from before it, refuse the whole variable on an unknown key).
+pub const PASS_REST_SEAM: bool = true;
 
 /// The MCP URL of the `bugwatch` connector in the `marketplace-community-connectors` fixture.
 pub const COMMUNITY_MCP_URL: &str = "https://mcp.bugwatch.example/mcp";

@@ -1254,6 +1254,20 @@ async fn handle_create_session(
                     &resolve_owner,
                     resolve_mode,
                 )?;
+                // A skill that needs a company-address connector learns its host from a file
+                // next to its manifest (CN-6.5). It must be written here, into the staged tree
+                // `materialize` builds the guest's skills drive from, not after it. The names
+                // come from the agent's skill URNs.
+                let skill_urns: Vec<String> = agent
+                    .skill_refs
+                    .iter()
+                    .filter_map(|r| r.resource_id.as_ref().map(|id| id.urn.clone()))
+                    .collect();
+                crate::skill_connector_file::write_connector_files(
+                    &store,
+                    &overlay_root,
+                    &skill_urns,
+                )?;
             }
         }
 
@@ -1408,10 +1422,19 @@ async fn handle_create_session(
             // What each skill tool declared it may reach through a connection, as of this boot.
             // The skills' cards, checked once for this session (a run reads only these).
             crate::skill_cards::seed_session(&session_id_catalog, &skills_dir);
-            store_catalog.record_tool_egress(
-                &session_id_catalog,
-                &crate::connection_egress::parse_skill_shapes(&skills_dir),
-            )?;
+            // A templated shape host is filled with the node's company address here (CN-6.4); with
+            // the connectors unreadable nothing is filled, and every templated shape is dropped.
+            let shapes = crate::connection_egress::parse_skill_shapes(&skills_dir);
+            let shapes = match (
+                store_catalog.connector_entries(),
+                store_catalog.node_connectors(),
+            ) {
+                (Ok(entries), Ok(nodes)) => {
+                    crate::connection_egress::fill_skill_shapes(shapes, &entries, &nodes)
+                }
+                _ => crate::connection_egress::fill_skill_shapes(shapes, &[], &[]),
+            };
+            store_catalog.record_tool_egress(&session_id_catalog, &shapes)?;
             // Guest tool name -> permission target, kept for the life of the
             // session and stamped on approvals (AX-5.3b).
             crate::session_targets::assemble_session_targets(

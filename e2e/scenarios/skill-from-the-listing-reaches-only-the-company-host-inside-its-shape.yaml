@@ -63,5 +63,4 @@ mock:
     reply: { toolCall: { name: ticket_search, args: { path: /api/v2/users.json } } }
   - when: { step: outside, stepStart: true }
     reply: { toolCall: { name: load_skill, args: { skill: ticketdesk-tickets } } }
-status: pending
-expectFail: { step: when.8, class: product }
+status: active

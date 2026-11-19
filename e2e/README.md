@@ -894,7 +894,7 @@ loopback `Host`, so the listener is what names the company (`host=<company>` in 
   them all. One ticketdesk piece per scenario.
 - Seam: `oauth:https://acme.ticketdesk.example` and `…globex…` are on (`PASS_OAUTH_SEAM`; the node already accepts any
   https origin). `rest:https://<company>.ticketdesk.example` (the egress gate answers the company's host from the same
-  listener) is **held out**: `PASS_REST_SEAM` (`connectors.rs`) is `false` until the node accepts the key.
+  listener) is on (`PASS_REST_SEAM`, `connectors.rs`, since CN-6.4): vamd accepts the key and the gate dials the listener for that host.
 - `connector-node` takes `tenant: { subdomain }`, sent as written in `PUT /v1/connectors/{id}/node` (so the scenario tests
   what the node refuses). A node that accepted a `tenant` is sent `tenant: null` at cleanup with the client.
 - `connector-connect` with a ticketdesk `piece` plays the app for a `client: org` connector with no secret: it reads

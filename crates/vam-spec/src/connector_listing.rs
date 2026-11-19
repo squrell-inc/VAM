@@ -225,6 +225,18 @@ fn check_marketplace_bindings(c: &Connector, id: &str) -> Result<(), ConnectorEr
                 b.name, b.placeholder
             ));
         }
+        // `vamsec_<id>_<name>` can equal a built-in placeholder (id `m365`, name `graph`), and two
+        // bindings with one placeholder are refused by the swap for both (T4).
+        if crate::connector::builtin_connectors()
+            .iter()
+            .flat_map(|c| c.bindings.iter().flatten())
+            .any(|x| x.placeholder == b.placeholder)
+        {
+            return bad(format!(
+                "binding `{}` placeholder `{}` is a Squrell connector's: a connector cannot take another's placeholder",
+                b.name, b.placeholder
+            ));
+        }
         if b.hosts.len() > 4 {
             return bad(format!("binding `{}` may name at most 4 hosts", b.name));
         }
@@ -814,6 +826,17 @@ mod tests {
         v["bindings"][0]["name"] = json!("Api");
         v["bindings"][0]["placeholder"] = json!("vamsec_zendesk_Api");
         assert!(err(v).contains("binding name"));
+    }
+
+    #[test]
+    fn a_binding_cannot_take_a_built_in_placeholder_through_a_matching_id_and_name() {
+        // `vamsec_<id>_<name>` is exactly the built-in `vamsec_m365_graph` for id `m365`.
+        let mut v = zendesk();
+        v["urn"] = json!("urn:vam:connector:connectors.example/pub/m365");
+        v["bindings"][0]["name"] = json!("graph");
+        v["bindings"][0]["placeholder"] = json!("vamsec_m365_graph");
+        let e = err(v);
+        assert!(e.contains("Squrell connector's"), "{e}");
     }
 
     #[test]
