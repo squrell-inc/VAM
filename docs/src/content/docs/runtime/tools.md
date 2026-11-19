@@ -107,6 +107,22 @@ A connection uses one of two auth modes: `static` (the default) or `oauth`.
   The one exception is a connector whose client the org admin supplied, with a secret
   (`clientSecret: org_vault`, below): there the node exchanges the code.
 
+### The connector file for a company address (REST, `profile: "oauth"`)
+
+A provider that gives every company its own host (`<company>.example.com`) and publishes no discovery metadata
+is described in the connector file, not discovered. `provider.profile: "oauth"` carries fixed
+`provider.endpoints { authorize, token, revoke? }` (`https`, port 443 at most, no query, fragment or user info) and
+needs `client: "org"` with `clientSecret: "none"` (a secret with fixed endpoints is not available yet). A
+top-level `tenant { name: "subdomain", suffix, label }` names the one parameter the admin will enter at Enable:
+`{subdomain}` may stand only for the whole first label of a host, and every templated host (in `endpoints`,
+`mcp.url` and `bindings[].hosts`) is exactly `{subdomain}.<suffix>`, where the suffix has at least two labels on a
+public DNS name. A file with a template and no `tenant`, or the reverse, is refused. A marketplace connector may
+declare 1 to 8 REST `bindings` (1 to 4 hosts each, `value: access_token`, `inject: bearer`) whose placeholder is
+exactly `vamsec_<connector id>_<binding name>`; a skill's `egress[].host` may be `{subdomain}.<dns name>` and a
+listing is refused when that is not the suffix of the connector it ships. The listing's capability summary shows
+the admin the sign-in endpoints, the bindings, the company address (label and suffix) and the templated hosts.
+Entering the address at Enable, signing in and attaching the member's token to these hosts are not yet built.
+
 ### The admin's client: the node exchanges the code
 
 A connector with `provider.client: "org"` and `clientSecret: "org_vault"` uses the OAuth client its org admin

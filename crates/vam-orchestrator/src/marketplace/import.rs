@@ -15,14 +15,15 @@
 //!    shared package check (`vam_spec::package::check_dir`). Its URN must be under the
 //!    marketplace's own `publisherDomain` and, for an added marketplace, that domain must not be
 //!    one the node reserves (M3). A connector file is held to the limits of a marketplace
-//!    connector (`vam_spec::connector_listing`): remote MCP with discovery, no secret, no
-//!    Squrell id.
+//!    connector (`vam_spec::connector_listing`): remote MCP with discovery, or REST bindings with
+//!    profile `oauth` and the org's client; no Squrell secret, no Squrell id. A skill's company
+//!    address host must be the suffix of the connector the listing ships.
 //! 4. Refs inside the listing are frozen to the listing's own artifacts (version and digest); a
 //!    ref to anything the listing does not ship is refused. An agent must carry `permissions`.
 //! 5. One transaction writes the released rows (connectors, skills, then playbooks, then agents)
 //!    with owner `marketplace:<id>`, tier `marketplace`, their origin and the install record. A
 //!    failing artifact leaves no row. A connector that is new, or whose capability summary differs
-//!    from the installed one (publisher, client id, scopes, MCP server or tools), is set back to
+//!    from the installed one (publisher, client id, scopes, MCP server or tools, bindings, endpoints, company address), is set back to
 //!    **not enabled** in the same transaction and its members' connections are marked
 //!    `needs_reauth`: the admin enables it again, the members connect again.
 //!
@@ -315,6 +316,7 @@ fn prepare(
             skill,
         });
     }
+    check_templated_skill_hosts(&out, &listing.id)?;
     // One URN is one artifact.
     let mut seen = std::collections::BTreeSet::new();
     for p in &out {
@@ -684,6 +686,51 @@ struct PlanCtx<'a> {
     owner: &'a str,
     skills: Pins,
     playbooks: Pins,
+}
+
+/// A skill that names a company address host (`{subdomain}.<suffix>`) must require a connector this
+/// listing ships whose own company address has that suffix: a listing cannot aim a skill at a host
+/// its connector does not own (T1, T2).
+fn check_templated_skill_hosts(
+    prepared: &[Prepared],
+    listing_id: &str,
+) -> Result<(), OrchestratorError> {
+    for p in prepared.iter().filter(|p| p.kind == ArtifactKind::Skill) {
+        let hosts: Vec<&str> = p
+            .checked
+            .summary
+            .tools
+            .iter()
+            .flat_map(|t| t.egress.iter().map(|e| e.host.as_str()))
+            .filter(|h| h.contains('{'))
+            .collect();
+        if hosts.is_empty() {
+            continue;
+        }
+        let required = &p.checked.summary.requires_connector;
+        let suffix = prepared.iter().find_map(|c| match &c.checked.spec {
+            CheckedSpec::Connector(def) if &c.checked.urn == required => {
+                def.tenant.as_ref().map(|t| t.suffix.as_str())
+            }
+            _ => None,
+        });
+        for h in hosts {
+            let ok = suffix.is_some_and(|sfx| {
+                vam_spec::connector::templated_suffix(h).is_some_and(|got| got == sfx)
+            });
+            if !ok {
+                return Err(invalid(format!(
+                    "listing `{listing_id}`: skill {} names the host `{h}`, which is not the company address ({}) of the connector it requires: a templated host must be `{{subdomain}}.<suffix>` of the connector the listing ships",
+                    p.checked.urn,
+                    suffix.map_or_else(
+                        || "no connector of this listing with a company address".to_string(),
+                        |sfx| format!("suffix `{sfx}`")
+                    )
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// SHA-256 of the artifact's capability summary, in words an admin reviewed before installing.

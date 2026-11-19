@@ -1306,3 +1306,83 @@ fn an_update_that_flips_the_client_or_adds_a_secret_needs_enable_again() {
     assert_eq!(out.capabilities_changed, [BUGWATCH]);
     assert!(!w.store.connector_enabled("bugwatch").unwrap());
 }
+
+// ---- REST listings with a company address (CN-6.1) ----------------------------------------------
+
+const TICKETDESK_TAGS: [&str; 3] = [
+    "ticketdesk-connector-v1.0.0",
+    "company-address-outside-its-suffix-v1.0.0",
+    "rest-connector-with-a-foreign-placeholder-v1.0.0",
+];
+const TICKETDESK_SKILL: &str =
+    "listings/ticketdesk-connector/skills/ticketdesk-tickets/manifest.json";
+const TICKETDESK: &str = "urn:vam:connector:connectors.community.example/community/ticketdesk";
+
+fn ticketdesk_world(edit: impl FnOnce(&mut TestRepo)) -> Option<(World, String)> {
+    let w = world(
+        "marketplace-community-connectors",
+        &TICKETDESK_TAGS,
+        CONNECTOR_URL,
+        edit,
+    )?;
+    let row = add_blocking(
+        &w.store,
+        &w.cfg,
+        CONNECTOR_URL,
+        "connectors.community.example",
+        "admin",
+    )
+    .unwrap();
+    Some((w, row.id))
+}
+
+#[test]
+fn a_rest_listing_with_a_company_address_installs_not_enabled() {
+    let Some((w, id)) = ticketdesk_world(|_| {}) else {
+        return;
+    };
+    let out = w
+        .install(&id, "ticketdesk-connector", Mode::Install)
+        .unwrap();
+    assert_eq!(out.artifacts.len(), 3);
+    let e = w.store.connector_entry("ticketdesk").unwrap().unwrap();
+    assert_eq!(e.def.urn, TICKETDESK);
+    assert_eq!(e.trust_word(), "unverified");
+    assert!(e.def.mcp.is_none() && e.def.tenant.is_some());
+    assert!(!w.store.connector_enabled("ticketdesk").unwrap());
+}
+
+#[test]
+fn a_listing_whose_host_or_placeholder_is_not_the_connectors_own_is_refused() {
+    let Some((w, id)) = ticketdesk_world(|_| {}) else {
+        return;
+    };
+    for (listing, why) in [
+        ("company-address-outside-its-suffix", "suffix"),
+        ("rest-connector-with-a-foreign-placeholder", "placeholder"),
+    ] {
+        let e = w.install(&id, listing, Mode::Install).unwrap_err();
+        assert!(e.to_string().contains(why), "{listing}: {e:?}");
+    }
+    assert_eq!(w.count("connector_releases", "%"), 0);
+}
+
+#[test]
+fn a_skill_host_outside_its_connectors_suffix_is_refused() {
+    let Some((w, id)) = ticketdesk_world(|repo| {
+        let path = repo.work_dir().join(TICKETDESK_SKILL);
+        let text = std::fs::read_to_string(path).unwrap().replace(
+            "{subdomain}.ticketdesk.example",
+            "{subdomain}.elsewhere.example",
+        );
+        repo.write(&[(TICKETDESK_SKILL, &text)]);
+        repo.tag("ticketdesk-connector-v1.0.0");
+    }) else {
+        return;
+    };
+    let e = w
+        .install(&id, "ticketdesk-connector", Mode::Install)
+        .unwrap_err();
+    assert!(e.to_string().contains("suffix"), "{e:?}");
+    assert!(w.store.connector_entry("ticketdesk").unwrap().is_none());
+}
