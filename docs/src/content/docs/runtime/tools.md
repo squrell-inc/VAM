@@ -131,7 +131,14 @@ client, the enable and the connector's server are still what the code was exchan
 next, and the member's connector entry is the answer.
 
 The local checks (body, redirect URI, code and verifier syntax, the connector, the enable, the saved client and
-secret) run before the request and write nothing. After the provider has accepted the code it cannot be used again,
+secret) run before the request and write nothing; the enable is checked again once the member's credential gate is
+held, before the secret is read (a connector turned off while the request waited is a 403 and nothing is sent).
+Just before the code is sent, the node records the exchange under
+the member, the connector and the request's `Idempotency-Key` (`connector_code_exchanges`, the key's SHA-256, kept a
+week): a request repeated with the same key, because the first answer was lost, never presents the code to the
+provider again (RFC 6749 §4.1.2: a provider refuses a reused code and may revoke the tokens the first exchange
+issued). It is a 409 that is not retryable, whatever became of the first request; the app reads the connection
+state (`GET /v1/connectors`) and starts a new sign-in, with a new key, if it is not connected. After the provider has accepted the code it cannot be used again,
 so what can still fail says so: a client replaced (even replaced and then put back, judged by the client's
 revision), or the connector turned off, while the provider was answering is a 409 and nothing is stored; a failure to save is a 502 that replaces nothing and says to sign in again; tools that
 cannot be read leave the sign-in stored but the connection `needsReconnect`, with the notification open and parked
@@ -164,7 +171,10 @@ and the revoke on disconnect use the node's endpoints, client id and the org sec
 replaced secret is used by the next refresh); the revoke authenticates the way the provider's
 `revocation_endpoint_auth_methods_supported` says (the same choice as for the token endpoint), with
 `client_secret_basic` when the provider omits the field (RFC 8414 §2's default), and as the token endpoint does when
-the list has nothing this node can use or the client was saved before the field was read; a row whose client id or endpoint differs from the node's is
+the list has nothing this node can use or the client was saved before the field was read. The revoke picks the
+node's client by the grant's client id and token endpoint, not by the connector's current URL, so the row a
+connector update left on its previous server (revoked once its replacement commits, or on disconnect) is revoked
+with the org secret too when its grant is the admin's current client; a row whose client id or endpoint differs from the node's is
 marked `needs_reauth` without a request, and `invalid_client` on a refresh marks it `needs_reauth` naming the
 admin's client, unless the admin saved the client again while the provider was answering: then the refusal was
 of a secret no longer saved and nothing is recorded for it. When that save only replaced the secret of the same

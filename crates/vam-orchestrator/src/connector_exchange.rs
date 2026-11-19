@@ -48,6 +48,8 @@ pub(crate) struct CodeConnect<'a> {
     pub(crate) org: &'a OrgConnector,
     pub(crate) client: &'a NodeClient,
     pub(crate) request: &'a CodeExchangeRequest,
+    /// The request's Idempotency-Key: recorded before the code is sent, so a repeat never sends it.
+    pub(crate) idempotency_key: &'a str,
 }
 
 /// The failure of the exchange as the API tells it. Every text is fixed: no code, verifier, secret,
@@ -87,6 +89,16 @@ fn superseded(connector_id: &str) -> OrchestratorError {
     ))
 }
 
+/// The 409 when a request with the same Idempotency-Key already sent its code. Not retryable: the
+/// code is not sent twice, whatever became of the first request.
+fn already_submitted(connector_id: &str) -> ApiError {
+    let mut e = ApiError::from(OrchestratorError::Conflict(format!(
+        "this sign-in for `{connector_id}` was already submitted with this Idempotency-Key and its code is not sent again: read the connection state (GET /v1/connectors), and sign in again if it is not connected"
+    )));
+    e.retryable = false;
+    e
+}
+
 /// The 502 when the provider spent the code but the node could not save the connection. Not
 /// retryable: the same request carries the same spent code, so the member starts a new sign-in.
 /// (Other MCP errors keep the global mapping, which is retryable.)
@@ -115,7 +127,8 @@ fn no_refresh_token() -> ApiError {
 /// gate). Blocking.
 ///
 /// 1. every refusal that needs no network: the row of another server under the connector's id;
-/// 2. the org secret, host-checked, and the one POST to the pinned token endpoint;
+/// 2. the org secret, host-checked, the exchange recorded under its Idempotency-Key (a repeat is a
+///    409 and sends nothing), and the one POST to the pinned token endpoint;
 /// 3. only then the write, one transaction: it re-checks the client, the enable and the connector's
 ///    server, replaces the row and both tokens (and removes a previous server's row), and the
 ///    gate's generation is bumped after the commit. A failure to save after the provider spent the
@@ -127,6 +140,10 @@ pub(crate) fn exchange_and_connect(
     gate: &mut McpCredentialWriteGuard,
 ) -> Result<Connected, ApiError> {
     let id = c.connector_id;
+    // The route checked the enable before it waited for the gate: an admin may have turned the
+    // connector off meanwhile. Checked again now, before the secret is read or the code sent (the
+    // commit checks it once more).
+    crate::connectors::gate_mcp_write(store, id, None, None)?;
     let existing = match store.get_mcp_connection(SecretScope::User, c.owner, id) {
         Ok(row) => Some(row),
         Err(OrchestratorError::NotFound(_)) => None,
@@ -162,6 +179,12 @@ pub(crate) fn exchange_and_connect(
             }
             e => e,
         })?;
+    // The exchange is recorded before the code leaves the node: a request repeated with the same
+    // key (its first answer was lost) sends nothing. The credential gate already serializes the
+    // two; this is what keeps the second from presenting the code again.
+    if !store.claim_code_exchange(c.owner, id, c.idempotency_key, now_secs())? {
+        return Err(already_submitted(id));
+    }
     let grant = CodeGrant {
         token_endpoint: &c.client.token_endpoint,
         client_id: &c.client.client_id,

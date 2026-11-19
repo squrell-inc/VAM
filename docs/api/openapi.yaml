@@ -1345,7 +1345,12 @@ paths:
         enable, the saved client and secret) run before the request and write nothing. Once
         the provider has accepted the code it cannot be used again, so a client must never
         retry with the same code: what can fail after that is a 409 or 502 below, each says
-        whether to sign in again or to refresh the connection. The answer is the caller's
+        whether to sign in again or to refresh the connection. The node records the exchange
+        under the caller, the connector and the `Idempotency-Key` before it sends the code, so
+        a request repeated with the same key (its first answer was lost) never presents the
+        code again: it is a 409, not retryable, whatever became of the first request, and the
+        app reads the connection state (`GET /v1/connectors`). A request refused by the local
+        checks records nothing. A new sign-in uses a new key. The answer is the caller's
         list entry: no code, verifier, secret or token is in it or in any error.
       parameters:
         - name: id
@@ -1400,6 +1405,9 @@ paths:
             refused the client id or secret the admin entered, or the admin changed the client (or
             turned the connector off) while the provider was answering. Nothing was written, and the
             member signs in again.
+            A request with an `Idempotency-Key` whose exchange was already sent (not retryable):
+            the code is not sent again and nothing is written; read the connection state
+            (`GET /v1/connectors`) and sign in again, with a new key, if it is not connected.
             After the sign-in is stored: the connection changed while its tools were being read (a
             later sign-in or a disconnect of the same connection). This sign-in was saved and then
             replaced or removed; the code is spent. Read the connection's state again

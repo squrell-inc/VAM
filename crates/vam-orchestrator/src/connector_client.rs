@@ -447,6 +447,16 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), Orchestra
             connector_id TEXT PRIMARY KEY,
             last_revision INTEGER NOT NULL
         );
+        -- One row per code exchange the node was about to send (CN-5.3), written before the code
+        -- goes to the provider: a request repeated with the same Idempotency-Key never sends its
+        -- code again. The key is stored as its SHA-256.
+        CREATE TABLE IF NOT EXISTS connector_code_exchanges (
+            owner_user_id TEXT NOT NULL,
+            connector_id TEXT NOT NULL,
+            key_digest TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (owner_user_id, connector_id, key_digest)
+        );
         ",
     )?;
     // A store from before the method was pinned: every saved client posts its secret, as it did.
@@ -633,13 +643,82 @@ fn same_client_state(a: Option<&NodeClient>, b: Option<&NodeClient>) -> bool {
     }
 }
 
+/// How long a code exchange's Idempotency-Key is remembered. An authorization code lives minutes;
+/// a week covers any retry of a lost answer by far.
+const CODE_EXCHANGE_KEY_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+
 impl SqliteWorkflowStore {
+    /// Records that `owner`'s code exchange for `connector_id` with this Idempotency-Key is about to
+    /// send its code. `false`: a request with the same key already got this far, so its code was
+    /// (or is being) sent, and this one must not send it again (RFC 6749 §4.1.2: a provider may
+    /// revoke the tokens of a code that is presented twice). Keys older than
+    /// [`CODE_EXCHANGE_KEY_TTL_SECS`] are forgotten here.
+    pub(crate) fn claim_code_exchange(
+        &self,
+        owner: &str,
+        connector_id: &str,
+        idempotency_key: &str,
+        now: i64,
+    ) -> Result<bool, OrchestratorError> {
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(idempotency_key.as_bytes()));
+        let c = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        c.execute(
+            "DELETE FROM connector_code_exchanges WHERE created_at < ?1",
+            params![now.saturating_sub(CODE_EXCHANGE_KEY_TTL_SECS)],
+        )?;
+        let inserted = c.execute(
+            "INSERT OR IGNORE INTO connector_code_exchanges
+                 (owner_user_id, connector_id, key_digest, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![owner, connector_id, digest, now],
+        )?;
+        Ok(inserted == 1)
+    }
+
     pub fn node_client(&self, id: &str) -> Result<Option<NodeClient>, OrchestratorError> {
         let c = self
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         client_in(&c, id)
+    }
+
+    /// The node row and the client of `id`, in one read: never a node row of one save with the
+    /// client of another.
+    pub(crate) fn node_connector_and_client(
+        &self,
+        id: &str,
+    ) -> Result<(Option<crate::connectors::NodeConnector>, Option<NodeClient>), OrchestratorError>
+    {
+        let c = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        Ok((
+            crate::connectors::node_connector_in(&c, id)?,
+            client_in(&c, id)?,
+        ))
+    }
+
+    /// Every node row and every client, in one read (the listing's snapshot).
+    pub(crate) fn node_connectors_and_clients(
+        &self,
+    ) -> Result<(Vec<crate::connectors::NodeConnector>, Vec<NodeClient>), OrchestratorError> {
+        let c = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let nodes = crate::connectors::node_connectors_in(&c)?;
+        let mut stmt = c.prepare(&format!(
+            "SELECT {COLUMNS} FROM node_connector_clients ORDER BY connector_id"
+        ))?;
+        let clients = stmt
+            .query_map([], row_to_client)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((nodes, clients))
     }
 
     pub fn node_clients(&self) -> Result<Vec<NodeClient>, OrchestratorError> {
@@ -683,7 +762,7 @@ impl SqliteWorkflowStore {
         plan: &ClientPlan,
         mcp_url: &str,
         basis: &PlanBasis<'_>,
-    ) -> Result<Vec<String>, OrchestratorError> {
+    ) -> Result<NodeSave, OrchestratorError> {
         let sealed = match &plan.write {
             ClientWrite::Set {
                 secret: Some(s), ..
@@ -806,9 +885,29 @@ impl SqliteWorkflowStore {
                 )?;
             }
         }
+        // What this save committed, read in its own transaction: the answer to the save shows
+        // exactly this, whatever another save writes after the commit.
+        let saved_node = crate::connectors::node_connector_in(&tx, &node.connector_id)?
+            .unwrap_or_else(|| node.clone());
+        let saved_client = client_in(&tx, &node.connector_id)?;
         tx.commit()?;
-        Ok(cleared)
+        Ok(NodeSave {
+            cleared,
+            node: saved_node,
+            client: saved_client,
+        })
     }
+}
+
+/// What [`SqliteWorkflowStore::put_node_with_client`] committed.
+#[derive(Debug)]
+pub(crate) struct NodeSave {
+    /// Members whose refused-client mark the save cleared (their parked runs go on).
+    pub(crate) cleared: Vec<String>,
+    /// The node row as committed.
+    pub(crate) node: crate::connectors::NodeConnector,
+    /// The client as committed (`None`: the connector has none).
+    pub(crate) client: Option<NodeClient>,
 }
 
 // ---- what the node does with the client (CN-5.3, CN-5.4) ----------------------------------------
@@ -873,6 +972,39 @@ impl SqliteWorkflowStore {
         Ok(match self.org_connector(&conn.connection_id)? {
             Some(org) if org.mcp_url == conn.url => RowClient::Org(Box::new(org)),
             _ => RowClient::Own,
+        })
+    }
+
+    /// Whose client revokes a member's MCP row's refresh token. As [`Self::row_client`], and also a
+    /// user-scope row on another URL than the connector's (the connector's server moved) whose
+    /// grant was issued to the node's current client: the same client id and token endpoint. That
+    /// grant belongs to the admin's client, so a provider that requires client authentication at
+    /// revocation (RFC 7009 §2.1) needs the org secret to revoke it; sent without it, the revoke is
+    /// refused while the row is deleted, and the token stays valid at the provider.
+    ///
+    /// Refresh keeps [`Self::row_client`]: a row on the connector's old URL was marked
+    /// `needs_reauth` when the server moved, is never refreshed, and is replaced by the next
+    /// sign-in.
+    pub(crate) fn revoke_client(
+        &self,
+        conn: &crate::mcp_registry::McpConnection,
+    ) -> Result<RowClient, OrchestratorError> {
+        let own = self.row_client(conn)?;
+        if matches!(own, RowClient::Org(_)) || conn.scope != SecretScope::User {
+            return Ok(own);
+        }
+        let Some(grant) = conn.oauth.as_ref() else {
+            return Ok(own);
+        };
+        Ok(match self.org_connector(&conn.connection_id)? {
+            Some(org)
+                if org.client.as_ref().is_some_and(|node| {
+                    node.client_id == grant.client_id && node.token_endpoint == grant.token_endpoint
+                }) =>
+            {
+                RowClient::Org(Box::new(org))
+            }
+            _ => own,
         })
     }
 }
@@ -1559,6 +1691,7 @@ pub(crate) mod test_support {
                 },
             )
             .unwrap()
+            .cleared
     }
 }
 
