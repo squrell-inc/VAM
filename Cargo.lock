@@ -4476,7 +4476,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vam-cli"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4503,7 +4503,7 @@ dependencies = [
 
 [[package]]
 name = "vam-core"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bytes",
  "prost",
@@ -4518,7 +4518,7 @@ dependencies = [
 
 [[package]]
 name = "vam-e2e"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4540,7 +4540,7 @@ dependencies = [
 
 [[package]]
 name = "vam-firecracker"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bytes",
  "httparse",
@@ -4554,7 +4554,7 @@ dependencies = [
 
 [[package]]
 name = "vam-inference"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4575,7 +4575,7 @@ dependencies = [
 
 [[package]]
 name = "vam-network"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4612,7 +4612,7 @@ dependencies = [
 
 [[package]]
 name = "vam-notify"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "clap",
@@ -4643,7 +4643,7 @@ dependencies = [
 
 [[package]]
 name = "vam-orchestrator"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4702,7 +4702,7 @@ dependencies = [
 
 [[package]]
 name = "vam-runtime"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bytes",
  "ed25519-dalek",
@@ -4728,7 +4728,7 @@ dependencies = [
 
 [[package]]
 name = "vam-schedule"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4758,7 +4758,7 @@ dependencies = [
 
 [[package]]
 name = "vam-security"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -4778,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "vam-spec"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "once_cell",
  "prost",
@@ -4798,7 +4798,7 @@ dependencies = [
 
 [[package]]
 name = "vam-storage"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4821,7 +4821,7 @@ dependencies = [
 
 [[package]]
 name = "vam-telemetry"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "ed25519-dalek",
  "opentelemetry",
@@ -4847,7 +4847,7 @@ dependencies = [
 
 [[package]]
 name = "vam-vsock"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "bytes",
  "ed25519-dalek",
@@ -4866,7 +4866,7 @@ dependencies = [
 
 [[package]]
 name = "vam-web"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "clap",
