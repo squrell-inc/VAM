@@ -78,6 +78,10 @@ decision record (D1–D22), agreed with the owner 2026-11-07.
     D29): the app runs the browser sign-in with PKCE and hands code, verifier
     and redirect URI to `vamd`, which exchanges at the token endpoint pinned at
     Enable. Without a secret the app exchanges as today.
+    **Amended (owner, 2026-11-19, Phase 6 open question 1):** the node
+    exchanges for every `client: org` connector, MCP or REST, with or without
+    a secret; a secret-less client sends no secret. The app no longer
+    exchanges for org clients (CN-6.3, CN-6.6).
 14. Company address (owner, 2026-11-18, D30): one `{subdomain}` parameter
     under a fixed suffix, entered once at Enable, one DNS label, filled in at
     Enable; afterwards every host is exact.
@@ -2661,7 +2665,8 @@ listing merged into `vam-marketplace` `main` after the release.
 **Goal:** a connector reaches a per-company host and a marketplace connector
 may be REST with skills (design §13, D30, D31).
 **Depends on:** Phase 5.
-**Status:** defined 2026-11-18 (owner); not started.
+**Status:** breakdown approved 2026-11-19 (owner: recommendations 1 and 2 and every open-question default as written); wave 0 started.
+**Plan:** drafted 2026-11-19 by the phase-breakdown agent (below).
 **Scope:** `profile: "oauth"` with fixed `endpoints` for providers without
 metadata; one `tenant` parameter (`{subdomain}`, fixed suffix) entered at
 Enable and filled into endpoints, MCP URL and binding hosts; marketplace REST
@@ -2669,6 +2674,571 @@ bindings with exact hosts and per-tool egress shapes; the admin sees the filled
 hosts. Salesforce `instance_url` pinning is a candidate item (open question).
 **Exit:** a Zendesk REST listing (connector plus skill) works on a mock and,
 on the owner's word, a real Zendesk instance.
+**Rubric:** cost 3 (a new sign-in profile, marketplace REST trust, the egress
+swap for installed connectors, three repos).
+
+- [ ] CN-6.1 The connector file: `profile: oauth` with fixed `endpoints`, one `tenant` parameter, marketplace REST bindings, templated skill egress hosts, the capability summary
+- [ ] CN-6.2 Enable with a company address: one DNS label, filled once into every host; the admin's client pinned to the filled endpoints
+- [ ] CN-6.3 The node exchanges the code for every admin-supplied client (secret or not) and keeps a REST connection for `profile: oauth`; refresh at the filled token endpoint
+- [ ] CN-6.4 The egress swap for installed connectors: filled bindings and shapes, per-host token rows, unique placeholders
+- [ ] CN-6.5 A skill learns its company host without a guest change
+- [ ] CN-6.6 the VAM app: the company address at Enable, the filled hosts, one connect path for admin-supplied clients
+- [ ] CN-6.7 The Zendesk listing on a `vam-marketplace` branch, and the team's run on a real Zendesk instance
+- [ ] CN-6.8 (candidate, backlog) Salesforce `instance_url` checked against the company address
+
+#### Phase 6 breakdown (phase-breakdown agent, 2026-11-19; awaiting owner approval)
+
+Written against `docs/connectors-p6-breakdown`, cut from `origin/feat/connectors`
+at 5d020be (equal to `main`, which carries the Phase 5 release).
+`squrell-inc/vam-marketplace` read with `git ls-remote` (branches `main`,
+`box-connector`; no Zendesk branch yet). The VAM app is not in this checkout
+(named from the Phase 5 file lists). No product code, build or test was run.
+Where the code and the design differ, the code is the fact (table at the end).
+
+**Code map (today, checked 2026-11-19).**
+
+- Connector file: `crates/vam-spec/src/connector.rs` `OAuth2Provider { profile,
+  client_id, client, client_secret, scopes, org_consent }` under
+  `deny_unknown_fields` (63-77); `OAuthProfile` is `entra | discover | google |
+  slack` (79-86): a file with `profile: oauth`, `endpoints` or `tenant` does not
+  parse. `validate_connector` (267-366) wants exact lowercase binding hosts
+  (`valid_host` 259-265, used at 342-347) and an `https` MCP URL; nothing fills
+  a parameter. `Binding { name, placeholder, value: access_token, inject:
+  bearer|header|query, hosts }` (170-192).
+- Marketplace check: `connector_listing.rs` `check_marketplace_connector`
+  refuses every profile but `discover` (229-239) and any `bindings` (264-266,
+  "remote MCP only"), and needs an MCP server whose host is a full public DNS
+  name (`check_mcp_server_url` 110-165, which also refuses internal suffixes).
+  `parse_marketplace_connector` (293-330) names a bad profile before parsing.
+  Summary: `vam-spec/src/package.rs` `ConnectorSummary` (541-567), whose
+  `hosts` is "the MCP server's" only; `summarize_connector` (712-) knows no REST
+  hosts. A change of the summary's digest resets Enable on update
+  (`marketplace/import.rs` `reset_connector`, 864-).
+- Skill egress: `vam-spec/src/skill_egress.rs` requires `egress[].host` to be an
+  exact DNS name (`valid_dns_host` 45-49, used at 80-89): a skill cannot write
+  `{subdomain}.zendesk.com`. Shapes are parsed host-side at session boot from
+  the materialized skills (`manager.rs` 1411-1414 →
+  `connection_egress::parse_skill_shapes` 78-125).
+- Enable: `PUT /v1/connectors/{id}/node` (`api/connectors.rs` 32, `put_node`)
+  → `PutNodeRequest { enabled, consent, client }` (`connectors.rs` 378-393,
+  `deny_unknown_fields`) → `plan_put` (431-490). `consent.tenantId` is the
+  Entra tenant GUID (`parse_tenant_guid` 410-421): the word "tenant" is already
+  on the wire. For `client: org` the handler discovers endpoints from
+  `def.mcp.url` (`api/connectors.rs` 181-190, `connector_discovery::discover`)
+  and pins them in `node_connector_clients` (`connector_client.rs` `NodeClient`,
+  `plan_client` 321-387). No path pins endpoints from the file.
+- `list_entry` (`connectors.rs` 536-590) copies the raw definition's
+  `provider`, `bindings` and `mcp` into an enabled entry: a template would show
+  unfilled.
+- The org client is MCP-only: `org_connector` returns `None` without an MCP
+  policy (`connector_client.rs` 938-963). The exchange route `POST
+  /v1/connectors/{id}/connection/oauth/code` (`api/connectors.rs` 440-)
+  refuses any connector without `org_vault` (459-467, "signs in with the app's
+  own exchange") and writes an MCP row (`connector_exchange.rs`); `code_form`
+  always adds `resource` and, for `client_secret_post`, the secret
+  (`mcp_oauth_refresh.rs` 525-543); `exchange_authorization_code` requires a
+  secret (549-560). The app-path token upsert is refused only for `org_vault`
+  (`api/mcp_connections.rs` 1101).
+- REST connections are Entra-only: `entra_provider` (`connectors.rs` 737-754);
+  `PUT /v1/connectors/{id}/connection` takes app-exchanged tokens plus an id
+  token whose `tid` must equal the consent (`plan_connection` 814-870); the
+  token host is hard-coded `login.microsoftonline.com` (863, 1140); the access
+  token is pinned to the first host of the first binding only (850-857,
+  1146-1152); refresh is `EntraRefresher(tenant, client_id, scope,
+  refresh_token)` (974-982) and `RefreshProfile` has `Mcp` and `Entra` only
+  (`mcp_oauth_refresh.rs` 116-123). Single flight per (owner, connector):
+  `lock_connection` (`connectors.rs` 1211-) and `ensure_fresh`
+  (`connection_egress.rs` 267-305).
+- The egress swap knows built-in connectors only: `builtin_bindings()`
+  (`connection_egress.rs` 44-60), used by `SessionConnectionSource::new` (339;
+  built at `brokers.rs` 1087); `token_for` finds the definition in
+  `builtin_connectors()` (407-410), `connector_id_of` too (586-595). Only
+  `inject: bearer` with `value: access_token` attaches (419-423). The intent
+  park, by contrast, reads every entry (`connector_park.rs` 70) and uses the
+  Entra refresher (155-156). A marketplace REST connector's binding would be
+  parked on, then never attached.
+- Guest tools: `vam-runtime/src/exec.rs` clears the environment and sets a
+  fixed list (543-605); `LocalExecSpec.env_vars` is parsed
+  (`vam-runtime/src/skills.rs` 380-409) and never applied. A skill has no way
+  to learn a per-company host today.
+- e2e: mock providers `microsoft-login`, `microsoft-graph`, `linear-server`,
+  `filebox` (`crates/vam-e2e/src/connectors.rs`); seam keys `mcp:<url>`,
+  `oauth:<origin>` and the fixed `microsoft-graph` (`process_mode.rs` 150-180),
+  the Graph key served by the egress gate (`brokers.rs` 1133-1138, process-guest
+  only). No key maps an arbitrary REST host. Fixture
+  `marketplace-community-connectors`: six listings, all MCP.
+
+**Shared invariants** (every item holds them; the orchestrator checks in review):
+
+- **K1–K7, M1–M6 and O1–O5 hold.** The Entra path is unchanged (K4): no
+  `resource`, the consent tenant, the id-token check.
+- **T1** The company address is set only by an org admin (`users:admin`),
+  only through `PUT /v1/connectors/{id}/node`, as one DNS label under the suffix
+  the connector file fixes. It is filled in once, at that save; afterwards every
+  host the node uses (sign-in endpoints, MCP URL, binding hosts, the hosts of
+  tool shapes) is exact. No member request, token response, provider answer or
+  skill changes a host.
+- **T2** A binding's access token is attached only to a request whose host is
+  one of that connector's filled binding hosts, inside the calling tool's filled
+  shape, for an enabled connector, from the member's own `connection` row pinned
+  to that host.
+- **T3** Codes and refresh tokens go only to the token endpoint filled at
+  Enable. A connection made under another address or client is never refreshed
+  (`needs_reconnect`, no request).
+- **T4** A marketplace binding's placeholder is `vamsec_<connector id>_<binding
+  name>`: unique on the node by construction; no installed connector can claim
+  a built-in placeholder.
+- **T5** The company address is not a secret and may appear in entries, events
+  and receipts; tokens never do.
+
+##### Scenario delta
+
+All process mode, mock model. One new runner-hosted provider,
+`mock-ticketdesk-server` (kind `mock-provider`, provider `ticketdesk`, a
+fictional Zendesk-like service) on one loopback listener for any
+`<company>.ticketdesk.example` (the scenarios use `acme` and `globex`): fixed
+OAuth endpoints and **no metadata** (`GET /oauth/authorizations/new` mints a
+code for a client id starting `e2e-ticketdesk-client`, the redirect URI and an
+S256 challenge, 302; `POST /oauth/tokens` is a public client: it refuses a
+`client_secret`, checks single-use codes with verifier and redirect URI, and
+issues access tokens and rotating refresh tokens), and a REST API (`GET
+/api/v2/search.json`, `GET /api/v2/tickets/{id}.json`, `POST
+/api/v2/tickets.json`) that needs the current bearer for **that** company. It
+logs field names, `host=<company>`, `grant_type`, `client_id`,
+`redirect_uri`, `client-secret=none|present`, `resource=none|present`,
+`refresh=fresh|reused`, `method=` and
+`bearer=current|stale|placeholder|unknown|none`, never a value. Step
+`mock-provider: { piece, shortTokens: true }` makes new access tokens live
+60 s (inside the node's 120 s swap window, so every call refreshes first).
+Seam: `oauth:https://acme.ticketdesk.example` (and `globex`), an existing key;
+a new `rest:<https origin>` key for the API, held out until wave 4 makes vamd
+accept it (as `oauth:` was in Phase 5). The fixture
+`marketplace-community-connectors` gains `ticketdesk-connector`: connector
+`ticketdesk` (`profile: oauth`, `endpoints` on
+`https://{subdomain}.ticketdesk.example`, `tenant { name: subdomain, suffix:
+ticketdesk.example, label: "Ticketdesk address" }`, `client: org`,
+`clientSecret: none`, binding `api` / `vamsec_ticketdesk_api` on
+`{subdomain}.ticketdesk.example`), a skill `ticketdesk-tickets` with a read
+tool (`GET`, prefixes `/api/v2/search.json` and `/api/v2/tickets/`) and a
+create tool (`POST` exact `/api/v2/tickets.json`, approval required) whose
+shapes name `{subdomain}.ticketdesk.example`, and an agent. Two refused
+listings: `company-address-outside-its-suffix` (a binding on
+`{subdomain}.elsewhere.example`) and `rest-connector-with-a-foreign-placeholder`
+(placeholder `vamsec_m365_graph`). Runner steps: `connector-node` gains
+`tenant: { subdomain }`; `connector-connect` with a ticketdesk `piece` plays
+the app (reads `node.client.authorizeEndpoint` and `node.client.clientId`, PKCE,
+gets a code, posts `{ code, codeVerifier, redirectUri }` to the node's exchange
+route); `via: tokens` sends tokens to `PUT /v1/connectors/{id}/connection`.
+
+| Scenario | Change | Layer | Given | Why | Red point (today) |
+|---|---|---|---|---|---|
+| `rest-listing-with-a-company-address-installs-and-shows-its-hosts` | new | process | `org-admin`, `org-member`, `marketplace-community-connectors` | D31, the marketplace half. The listing's summary shows `profile: oauth`, `client: org`, "admin-supplied client", the company-address label and suffix, the binding host `{subdomain}.ticketdesk.example` and the skill's egress entries; a member cannot install; the admin installs (connector `askAdmin`, Unverified, not enabled; skill and agent installed read-only); the two refusals name `suffix` and `placeholder`; Bugwatch, Filebox and the four earlier refusals read as before | the `listings` expect on `ticketdesk-connector` (its summary is an `error`: profile `oauth` is unknown), class `product` |
+| `company-address-is-entered-once-at-enable-and-every-host-is-filled` | new | process (mock providers) | as above, plus `org-administrator`, `mock-ticketdesk-server` | D30, T1. Enable without an address is 409 ("company address"); `acme.evil`, `-acme`, `a_b` and 64 letters are 400 ("one DNS label"); a client secret is 400 ("secret"); a member's Enable is 403. The administrator enables with `tenant { subdomain: acme }` and the client id: admin and member entries show `node.tenant.subdomain: acme`, `node.tenant.hosts.0: acme.ticketdesk.example`, `bindings.0.hosts.0`, and `node.client.authorizeEndpoint` and `tokenEndpoint` on `https://acme.ticketdesk.example/`; no field holds `{subdomain}`; the mock saw no request (no discovery). Disable, then `{ enabled: true }`: the address is kept | `marketplace-install` (refused: the connector does not parse), class `product` |
+| `member-connects-a-company-address-connector-through-the-node-without-a-secret` | new | process (mock providers) | as the second | Phase 5 open question 2 (open question 1 below), T3. The member connects: the token endpoint at `host=acme` saw one `grant_type=authorization_code` with `client_id=e2e-ticketdesk-client`, `code_verifier`, `redirect_uri=squrell://oauth`, `client-secret=none`, `resource=none`; the tile reads `connected`. `via: tokens` is refused (400, "exchange"). The admin changes the address to `globex` (saving the client again): the member's tile reads `needsReconnect` and the mock saw nothing at `host=globex`. `secret-absent` for the tokens in every listing and event | `marketplace-install`; after waves 1–2, `connector-connect` (the route answers 400 "signs in with the app's own exchange"), class `product` |
+| `skill-from-the-listing-reaches-only-the-company-host-inside-its-shape` | new | process (mock providers) | as the second (the agent comes from the listing) | D31, T2, the phase exit on a mock. The member chats with the installed agent: the read tool's request reached `host=acme` with `bearer=current` and no `bearer=placeholder`; the thread holds the mock ticket's subject; a call the agent aims at `globex.ticketdesk.example` and one at a path outside the shape are refused (the tool message holds `declared shape`) and the mock saw nothing at `host=globex`; `secret-absent` in thread, events, receipt and workspace | `marketplace-install`; after wave 3, the read tool (the swap answers "unknown connector"), class `product` |
+| `company-address-token-is-refreshed-at-the-filled-endpoint-before-the-call` | new | process (mock providers) | as the fourth | Rotating refresh for a REST connector that is not Entra. `shortTokens: true`; connect; two tool calls: the token endpoint at `host=acme` saw two `grant_type=refresh_token` with `client_id`, `client-secret=none`, `resource=none`, `refresh=fresh`, and `refresh=reused` count 0 (the rotated token was stored before the access token was used); the API saw `bearer=current` both times | `marketplace-install`; then the first tool call, class `product` |
+
+**Existing scenarios whose `then` changes: none.** Checked from `guards`
+and `given`: the Filebox scenarios keep `org_vault` and the exchange with the
+secret; `community-connector-appears-unverified-and-connects` still sees
+`unknown-profile-connector` (profile `generic`) refused with "profile" and
+`connector-with-a-secret` with "secret"; the Microsoft 365 scenarios keep the
+Entra connection route and refresh shape. **Guards-only additions:**
+`vam:crates/vam-orchestrator/src/connection_egress.rs` on
+`skill-reads-microsoft-graph-as-the-member-without-holding-a-token` and
+`tool-declared-as-a-read-cannot-send-mail`;
+`vam:crates/vam-orchestrator/src/connector_exchange.rs` and
+`vam:crates/vam-orchestrator/src/mcp_oauth_refresh.rs` on
+`admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node`;
+`vam:crates/vam-orchestrator/src/connectors.rs` on
+`expired-microsoft-token-is-refreshed-before-the-call` and
+`microsoft-365-connection-stays-in-the-consented-tenant`;
+`vam:crates/vam-spec/src/skill_egress.rs` on
+`listing-from-an-added-marketplace-installs-as-unverified-within-its-limits`.
+
+##### Benchmark delta
+
+| Line (`design/benchmark.md` §1) | Baseline on this base | Measured by | Expected after |
+|---|---|---|---|
+| P6 **new task** "a marketplace REST skill reads a company-address service as the member", 0 secret bytes in guest output | Not possible (no marketplace REST connector) | `secret-absent` in the fourth and fifth scenarios | 0 bytes, 100% |
+| P9 **new task** "a marketplace skill aims its connection at another company's host or outside its shape" fails safely | Not possible | the fourth scenario | 100% refused; the provider saw nothing |
+| P6 minutes and clicks from the admin's Enable (address and client id) to a member's first Zendesk read, real instance | Not possible | CN-6.7, by hand, team, owner's word | first number recorded |
+
+Mock-measured in CI; the real-instance line only on the owner's word. The
+orchestrator adds the two new tasks to `design/benchmark.md` §1 on approval
+(docs only).
+
+##### Items
+
+**CN-6.1 The connector file: `profile: oauth`, `endpoints`, `tenant`, marketplace REST bindings, templated shape hosts, the summary.**
+- **Scope.** `OAuthProfile::Oauth` (`oauth`) with `OAuth2Provider.endpoints:
+  Option<Endpoints { authorize, token, revoke? }>` (required with `oauth`,
+  refused with every other profile; `https`, port 443, no query, fragment or
+  user info). `Connector.tenant: Option<TenantParam { name: "subdomain",
+  suffix, label }>` (one parameter; `name` must be `subdomain`). `{subdomain}`
+  may appear only as the whole first label of a host, and a templated host must
+  be exactly `{subdomain}.<suffix>`: in `endpoints`, `mcp.url` and binding
+  hosts; a template without `tenant`, or `tenant` with no template, is refused.
+  The suffix: at least two labels, the DNS rules of `check_mcp_server_url`
+  (`connector_listing.rs` 141-163), no internal suffix. Phase 6 slice: `oauth`
+  needs `client: org` and `clientSecret: none` (open question 6).
+  `check_marketplace_connector` and `parse_marketplace_connector`: allow
+  `oauth`; allow `bindings` (1 to 8, each with 1 to 4 hosts, `value:
+  access_token`, `inject: bearer`, placeholder exactly `vamsec_<id>_<name>` with
+  `name` of `[a-z0-9_]{1,32}`, T4); MCP connectors stay `discover`; every
+  binding or endpoint host is exact or `{subdomain}.<suffix>`; the MCP URL is
+  checked on its filled form with a sample label. Skill egress
+  (`skill_egress.rs`): `egress[].host` may be `{subdomain}.<dns name>` (syntax
+  only; the node fills or drops it, CN-6.4); the marketplace import refuses a
+  listing whose skill's templated host is not its connector's
+  `{subdomain}.<suffix>`. `ConnectorSummary` gains `bindings [{ name, hosts }]`,
+  `endpoints`, `tenant { label, suffix }`, `hosts` = the MCP host or the binding
+  hosts (templated), and the text "company address: <label> (…<suffix>)"; the
+  digest turns any change into "Enable again". The `import.rs` module doc
+  (17-19) is corrected. Docs: the connector file authoring page, `status` kept.
+- **Files.** `crates/vam-spec/src/{connector.rs,connector_listing.rs,package.rs,skill_egress.rs}`,
+  `crates/vam-orchestrator/src/marketplace/{import.rs,summary.rs}`, unit tests,
+  the connector authoring docs page.
+- **Acceptance.** Unit tests per rule (each refusal names its field); the
+  built-ins, Bugwatch and Filebox round-trip byte-stable; a Zendesk-shaped file
+  (a vam-spec test fixture) validates; `{subdomain}` in a middle label, a
+  one-label suffix, `*.` hosts, a built-in placeholder and `oauth` with
+  `org_vault` are refused.
+- **Tests.** `cargo test -p vam-spec`, `cargo test -p vam-orchestrator marketplace`, `scripts/ci/local.sh --fast --base origin/feat/connectors`.
+- **Turns green.** `rest-listing-with-a-company-address-installs-and-shows-its-hosts`.
+- **Decide.** `Decide: SLICE — proof 3 (D30, D31, D32: Zendesk cannot be described today), cost 2 (connector schema, marketplace trust rule, skill egress host form) → slice: oauth with an org client and no secret, bearer access-token bindings, one subdomain parameter; header/query inject, publisher client ids on oauth and secrets with fixed endpoints: backlog, trigger "a listing that needs one"`
+
+**CN-6.2 Enable with a company address.**
+- **Scope.** `PutNodeRequest.tenant: Option<Option<TenantRequest { subdomain
+  }>>` (omitted keeps; `null` clears, only with `enabled: false`; 400 on a
+  connector without `tenant`). Enabling a connector with `tenant` needs a
+  stored or given address (409 "company address"). The subdomain is trimmed and
+  lowercased, then must be one DNS label: 1-63 of `[a-z0-9-]`, no leading or
+  trailing `-`, no `xn--` prefix (400 "one DNS label"; open question 3). Stored
+  on the node row (migration: `tenant_subdomain` on `node_enabled_connectors`).
+  One pure function `resolve(def, node) -> Connector` fills every
+  `{subdomain}` and is the only way code reads a templated definition:
+  `list_entry` (filled `bindings`, `mcp`, `provider.endpoints`, plus
+  `node.tenant { subdomain, hosts }`), `policy_of` and `gate_mcp_write` (the MCP
+  URL), Enable's discovery URL. A templated definition with no address
+  resolves to nothing usable (no MCP policy, no binding). For `profile: oauth`
+  with `client: org`, Enable with `client: { clientId }` pins `authorize`,
+  `token` and `revoke` from the **filled file endpoints** (no discovery, no
+  fetch; `issuer` = the token endpoint's origin); `org_connector` and
+  `OrgConnector` stop requiring an MCP policy (a REST variant). A new address
+  must come with the client saved again in the same body (409 otherwise: the
+  client was registered in the old instance) and marks members' connections
+  (REST and MCP) `needs_reconnect`; disable keeps the address (as consent,
+  Phase 1 Q7). OpenAPI for the body and entry fields.
+- **Files.** `crates/vam-orchestrator/src/{connectors.rs,connector_client.rs,api/connectors.rs}`,
+  `connector_discovery.rs` (call site only), the store migration,
+  `docs/api/openapi.yaml`, route tests.
+- **Acceptance.** Route tests: each refusal writes nothing; the entry never
+  holds `{subdomain}` once an address is set; a member sees the filled hosts
+  once enabled; an address change flips members' rows and needs the client; no
+  network request at Enable for `oauth`; the Filebox (discovery) path
+  unchanged.
+- **Tests.** `cargo test -p vam-orchestrator connectors`, `--scenarios company-address-is-entered-once-at-enable-and-every-host-is-filled`, `--fast`.
+- **Turns green.** `company-address-is-entered-once-at-enable-and-every-host-is-filled`.
+- **Decide.** `Decide: SLICE — proof 3 (D30), cost 2 (a body field, a migration, one resolver on every read) → slice: one subdomain per node, set at Enable; per-member addresses and a second parameter: cut, trigger "a provider whose members sit in different instances"`
+
+**CN-6.3 The node exchanges the code for every admin-supplied client, and keeps REST connections for `profile: oauth`.**
+- **Scope.** Open question 1's default. The exchange route accepts any
+  enabled `client: org` connector with its client saved, secret or not (the
+  `keeps_secret` filter at `api/connectors.rs` 459-467 goes). Without a secret,
+  `exchange_authorization_code` takes `Option<&SecretString>` and sends no
+  `client_secret` and no Authorization header; `resource` is sent for MCP
+  connectors only (a `CodeGrant` profile mirroring `RefreshProfile`, so no code
+  path can add `resource` to an `oauth` request). For an MCP connector the
+  route writes the MCP row as today; for `profile: oauth` it writes the REST
+  connection: the `connector_connections` row (the address it was made under,
+  the filled token endpoint, no label: open question 9), the refresh token
+  pinned to the token host, the access token pinned to **every** filled binding
+  host. `PUT /v1/connectors/{id}/connection` stays Entra-only and refuses an
+  `oauth` connector (400 "use the code exchange"); `PUT …/oauth/tokens` and an
+  `oauth` block on `PUT /v1/mcp/connections` are refused for every `client:
+  org` connector (O5 widened). Refresh: `RefreshProfile::Oauth { scope }` (no
+  `resource`, no secret; `scope` only if the file lists scopes), sent to the
+  node client's filled token endpoint with its client id; the refresher becomes
+  a target the caller builds (Entra or Oauth), never a URL from a member's row;
+  `refresh_connection` and `rest_connection_state` compare the row's address
+  and token endpoint with the node's (else `needs_reconnect`, no request; T3);
+  `POST …/connection/check` works for `oauth`. Disconnect deletes the rows and
+  revokes only when the file declares `endpoints.revoke` (RFC 7009, no secret;
+  open question 10). `runtime/tools.md` (OAuth section): the node also
+  exchanges for an admin-supplied client without a secret.
+- **Files.** `crates/vam-orchestrator/src/{api/connectors.rs,connector_exchange.rs,connector_client.rs,connectors.rs,mcp_oauth_refresh.rs,api/mcp_connections.rs}`,
+  `docs/api/openapi.yaml`, `docs/src/content/docs/runtime/tools.md`, route and
+  unit tests.
+- **Acceptance.** Form tests: no `client_secret`, no Basic header and no
+  `resource` for `oauth`; the Filebox form byte-identical; the Entra refresh
+  form unchanged. Route tests against a loopback token server: nothing written
+  on any refusal; the rotated refresh token stored before the access token; a
+  row made under `acme` is never refreshed once the address is `globex`.
+- **Tests.** `cargo test -p vam-orchestrator`, `--scenarios member-connects-a-company-address-connector-through-the-node-without-a-secret,admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node`, `--fast`.
+- **Turns green.** `member-connects-a-company-address-connector-through-the-node-without-a-secret`.
+- **Decide.** `Decide: SLICE — proof 3 (the exit needs a member connected, and the node cannot bind app-held tokens to the address without an id token), cost 2 (a widened route and a refresh profile) → slice: one exchange path for org clients, no account label, revoke only when RFC 7009 is declared`
+
+**CN-6.4 The egress swap for installed connectors.**
+- **Scope.** `SessionConnectionSource` is built from every enabled connector
+  (built-in and installed), resolved with the node's address at session boot
+  (`brokers.rs` 1087): bindings with filled hosts. `token_for` and
+  `connector_id_of` read the session's resolved set, not
+  `builtin_connectors()`; a binding whose connector has no address resolves to
+  nothing (its placeholder stays reserved, so the request is refused, not
+  forwarded). The boot step that records shapes fills a templated shape host
+  from the required connector's address and drops a shape whose suffix is not
+  that connector's. The access-token row check accepts any filled binding host
+  (CN-6.3 pins the row to all of them). Refresh before swap and the intent park
+  use the CN-6.3 target (`connector_park.rs` 155-156); single flight unchanged.
+  A placeholder claimed by two resolved bindings refuses the swap for both (the
+  backstop for T4). Process-guest seam: vamd accepts `rest:<https origin>` keys
+  and the gate answers those origins from loopback (as the Graph key,
+  `brokers.rs` 1133-1138); the runner turns `PASS_REST_SEAM` on.
+- **Files.** `crates/vam-orchestrator/src/{connection_egress.rs,brokers.rs,connector_park.rs,manager.rs (shape record),process_mode.rs}`,
+  `crates/vam-e2e/src/connectors.rs` (switch on), unit tests.
+- **Acceptance.** Unit tests: an installed binding attaches only on its filled
+  host and inside the filled shape; another company's host and an unfilled
+  template are refused before any token read; a disabled installed connector
+  attaches nothing; the built-in Graph tests unchanged; two requests at once
+  make one refresh for an `oauth` connection.
+- **Tests.** `cargo test -p vam-orchestrator connection_egress connector_park process_mode`, `--scenarios skill-from-the-listing-reaches-only-the-company-host-inside-its-shape,company-address-token-is-refreshed-at-the-filled-endpoint-before-the-call,skill-reads-microsoft-graph-as-the-member-without-holding-a-token,tool-declared-as-a-read-cannot-send-mail`, `--fast`.
+- **Turns green.** `skill-from-the-listing-reaches-only-the-company-host-inside-its-shape`, `company-address-token-is-refreshed-at-the-filled-endpoint-before-the-call` (with CN-6.5).
+- **Decide.** `Decide: NOW — proof 3 (P1, P6: without it a marketplace binding is parked on and never attached; T2 is the security floor), cost 1 (files Phase 2 built, new tests, no new surface)`
+
+**CN-6.5 A skill learns its company host.**
+- **Scope.** Open question 7's default: when a session's skills are
+  materialized (`manager.rs`, inside `vam_storage::with_skills_writable`,
+  before the skills digest), the node writes `.vam/connector.json` into each
+  skill directory whose manifest's `requiresConnector` names an enabled
+  connector with an address: `{ "connector": "<id>", "hosts": { "<binding>":
+  "<filled host>" } }`. Not a secret (T5); no guest code changes (the tool
+  reads a file next to its manifest). The e2e fixture skill and the Zendesk
+  skill read it. The skill authoring docs page says where the file is.
+- **Files.** `crates/vam-orchestrator/src/manager.rs` (or a small module it
+  calls), unit tests, the skill authoring docs page.
+- **Acceptance.** Unit test: the file appears only for skills that require a
+  connector with an address, holds no token or vault id, and a skill without
+  `requiresConnector` is unchanged; the microVM lane green (the skills drive
+  changes).
+- **Tests.** `cargo test -p vam-orchestrator manager`, the fourth scenario, `--fast`; the lane on the PR.
+- **Turns green.** with CN-6.4.
+- **Decide.** `Decide: NOW — proof 3 (a skill cannot address the company's host otherwise), cost 1 (one host-written file at boot, no guest code)`
+
+**CN-6.6 the VAM app.**
+- **Scope.** Org settings → Connectors, a connector with `tenant`: Enable asks
+  for the company address as `[ acme ].<suffix>` under the file's label (the
+  suffix fixed), lowercases it and checks one DNS label before sending; for
+  `client: org` with `clientSecret: none`, the client id only (no secret
+  field). After save the card shows `node.tenant.hosts` and the filled
+  endpoints ("Squrell will reach acme.zendesk.com"); "Change address" warns that
+  members reconnect and asks for the client id again. The Marketplace summary
+  shows "company address: <label> (…<suffix>)" and the templated hosts. Member
+  connect: for **every** `client: org` connector the app builds the authorize
+  URL from `node.client.authorizeEndpoint` and the client id, PKCE S256, and
+  posts code, verifier and redirect URI to the node's exchange route (the
+  app-side exchange for org clients goes; the `Idempotency-Key` reuse from
+  Squrell-App #13 stays).
+- **Files.** `src/components/vam/{OrgSettingsConnectorsWorkspace.tsx,ConnectorTiles.tsx}`,
+  the MCP OAuth flow module, `src/types/` connector types, the Marketplace
+  summary, `src-tauri/src/{vamd.rs,lib.rs}`, tests.
+- **Acceptance.** Unit tests on fixtures: the address field refuses a dot or an
+  underscore; the authorize URL comes from the entry only; the app sends no
+  token request for any `client: org` connector.
+- **Tests.** `CI=1 pnpm test`, `pnpm exec tsc --noEmit`, `cargo test --manifest-path src-tauri/Cargo.toml`.
+- **Turns green.** None (unit; team checklist).
+- **Decide.** `Decide: SLICE — proof 3 (no admin can enter an address without it), cost 2 (two screens and a flow change) → slice: address, client id, filled hosts, one connect path; a live preview of the hosts before save: backlog`
+
+**CN-6.7 The Zendesk listing, and the team's run.**
+- **Scope.** On `squrell-inc/vam-marketplace`, branch `zendesk-connector`
+  (from `main`): `listings/zendesk/` with `connector.json` (`profile: oauth`;
+  `endpoints.authorize`
+  `https://{subdomain}.zendesk.com/oauth/authorizations/new`,
+  `endpoints.token` `https://{subdomain}.zendesk.com/oauth/tokens`; `tenant {
+  name: subdomain, suffix: zendesk.com, label: "Zendesk subdomain" }`;
+  `client: org`, `clientSecret: none`; scopes from Zendesk's docs, read first;
+  binding `api` / `vamsec_zendesk_api` on `{subdomain}.zendesk.com`), a skill
+  `zendesk-tickets` (Bun TypeScript on the m365 pattern, reads
+  `.vam/connector.json`: search tickets, show a ticket, create a ticket with
+  approval by exact path; open question 8), a support assistant agent, Bun
+  tests, and `docs/listing-zendesk.md` (create the OAuth client in Admin Center
+  with PKCE and the redirect `squrell://oauth`, Enable, connect). `requiresNode`
+  = the first node version with Phase 6; CI's pinned vam commit moved to the
+  Phase 6 merge so `vam catalog validate` passes; the owner tags
+  `zendesk-v1.0.0-rc.1`; a staging node imports it with
+  `VAMD_SQURELL_MARKETPLACE_INDEX_REF=zendesk-connector` (CN-5.6). Team run on a
+  real Zendesk instance, owner's word: Enable with the subdomain and client id,
+  member connects, the assistant answers from a ticket, a refresh after expiry
+  works, another subdomain is refused, P6 number recorded. Zendesk facts (PKCE
+  for a local client, refresh-token rotation and lifetimes, scope names) are
+  checked against Zendesk's primary docs before the tag (design §13.2 is
+  research).
+- **Files.** vam-marketplace: `listings/zendesk/**`, `marketplace.json` (the
+  branch index), `.github/workflows/validate.yml`, `docs/listing-zendesk.md`.
+  vam: the Phase 6 close block (runbook, team checklist).
+- **Acceptance.** Marketplace CI green on the branch; the team's run passes or
+  its failures land as one fix wave.
+- **Tests.** Marketplace CI; the runbook steps.
+- **Turns green.** None (real instance).
+- **Decide.** `Decide: NOW — proof 3 (exit criterion), cost 1 (data, a skill on the m365 pattern, a runbook)`
+
+**CN-6.8 (candidate) Salesforce `instance_url`.**
+- **Scope (no wave).** Salesforce returns `instance_url` in the token
+  response, and REST goes there. Within D30 it fits as the company address:
+  `tenant { suffix: my.salesforce.com }` with the admin's My Domain label; at
+  the exchange and every refresh the node requires `instance_url` to equal
+  `https://<filled host>`, else it refuses and stores nothing. No per-member
+  host, no host learned from a token response. Sandboxes
+  (`*.sandbox.my.salesforce.com`) need a second suffix: cut.
+- **Decide.** `Decide: BACKLOG — proof 1 (D32 names Zendesk; no Salesforce listing is planned), cost 1 (one check on files this phase touches); trigger "a Salesforce listing is scheduled"`
+
+##### Waves
+
+One wave at a time; branches `cn-6/wave-N` into `feat/connectors` (open
+question 14). Wave 1 is the scaffold later waves share (the connector file and
+the summary). The VM-path flag comes from the files each wave touches
+(`vam-runtime`, `vam-core`, `vam-vsock`, `vam-storage`, `vam-firecracker`, or
+what the guest reads from the skills drive): only wave 4 changes what a guest
+reads.
+
+| Wave | Items | Turns green | Repo | Model | Budget | Depends on | CI | VM path | Status | PR |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | scenarios: 5 files, `mock-ticketdesk-server` (fixed endpoints, public-client token endpoint, rotating refresh, REST API per company, `shortTokens`), the listing fixture (connector, skill, agent) and two refused listings, `connector-node.tenant`, ticketdesk `connector-connect` and `via: tokens`, the `rest:` seam key held out, README "Connectors" additions, guards-only edits | — (5 red, right reason, class `product`) | vam | Sonnet low | 120 min | — | `CI: scenarios=rest-listing-with-a-company-address-installs-and-shows-its-hosts,company-address-is-entered-once-at-enable-and-every-host-is-filled,member-connects-a-company-address-connector-through-the-node-without-a-secret,skill-from-the-listing-reaches-only-the-company-host-inside-its-shape,company-address-token-is-refreshed-at-the-filled-endpoint-before-the-call lane=no release-build=no` | no | [ ] | |
+| 1 | CN-6.1 | first | vam | Sonnet medium: changes the connector file schema, the marketplace trust check (a community connector may now have tokens attached to guest requests) and the skill egress rules in `vam-spec` | 120 min | 0 | `CI: scenarios=rest-listing-with-a-company-address-installs-and-shows-its-hosts,listing-connector-with-an-admin-supplied-client-installs-and-waits-for-its-client,community-connector-appears-unverified-and-connects,listing-from-an-added-marketplace-installs-as-unverified-within-its-limits tests=workspace lane=no release-build=no` | no | [ ] | |
+| 2 | CN-6.2 | second | vam | Sonnet medium: a new API body field, a migration, and one resolver on every read of a definition across three modules | 120 min | 1 | `CI: scenarios=company-address-is-entered-once-at-enable-and-every-host-is-filled,admin-supplied-client-is-set-only-by-an-org-admin-and-never-read-back,connectors-reach-members-only-after-an-org-admin-enables-them lane=no release-build=no` | no | [ ] | |
+| 3 | CN-6.3 | third | vam | **Sonnet high**: the code exchange and refresh for a new profile (where codes and refresh tokens are sent, T3) and refusals on three connection routes (auth). Orchestrator reads the token forms and the endpoint source before merge | 150 min | 2 | `CI: scenarios=member-connects-a-company-address-connector-through-the-node-without-a-secret,admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node,rotating-refresh-token-is-spent-once-when-two-tasks-call-at-once,expired-microsoft-token-is-refreshed-before-the-call,microsoft-365-connection-stays-in-the-consented-tenant lane=no release-build=no` | no | [ ] | |
+| 4 | CN-6.4, CN-6.5 | fourth, fifth | vam | **Sonnet high**: the egress swap that attaches a member's token to guest requests, now for marketplace connectors (T2, T4), and a host-written file in the skills drive. Orchestrator reads `token_for`, the shape fill and the placeholder check | 180 min | 3 | `CI: scenarios=skill-from-the-listing-reaches-only-the-company-host-inside-its-shape,company-address-token-is-refreshed-at-the-filled-endpoint-before-the-call,skill-reads-microsoft-graph-as-the-member-without-holding-a-token,tool-declared-as-a-read-cannot-send-mail,skill-needing-microsoft-365-asks-the-member-to-connect-first lane=yes release-build=no` | **yes** (skills drive) | [ ] | |
+| 5 | CN-6.6 | — (unit) | The VAM app (`squrell-inc/Squrell-App`, base `feature/connectors`, re-cut from the app's `main` if gone) | Sonnet medium: two admin screens and the sign-in flow of every admin-supplied client change; no secret passes through the app here | 120 min | 4 | none (app unit only) | no | [ ] | |
+| 6 | CN-6.7 | — (marketplace CI; real instance) | vam-marketplace (+ vam close block) | Sonnet low (the session supports the team) | 60 min + the team's time | 5; a deploy of vamd and the app from the base | marketplace: its own CI; vam: none | no | [ ] | |
+
+Budget: 870 min of agent time (14.5 h) plus the team's run. Scoreboard
+expectation: 0 green after wave 0; 1 after wave 1; 2 after wave 2; 3 after
+wave 3; 5 after wave 4; flat in 5–6 (stated so they are not flagged).
+
+**Phase rubric.** `Decide: SLICE — proof 3 (D30, D31, D32: the exit), cost 3 (a new sign-in profile, marketplace REST trust, the swap for installed connectors, three repos) → slice: oauth with an org client and no secret; one subdomain at Enable; bearer access-token bindings; the node's exchange for org clients; a host-written hosts file; reads plus one exact-path create in the Zendesk skill. Backlog: secrets with fixed endpoints (with the admin's token auth method), header/query inject, account labels, path templates in shapes, Salesforce instance_url (CN-6.8)`
+
+##### Open questions (each with a default)
+
+1. **Phase 5 open question 2 (deferred here): does the code exchange for a
+   secret-less org client move to `vamd`?** Default **yes, for every
+   `client: org` connector, MCP or REST** (CN-6.3). Reasons from the code:
+   (a) the only app-token route for REST, `PUT /v1/connectors/{id}/connection`,
+   trusts tokens because an Entra id token's `tid` equals the recorded consent
+   (`connectors.rs` 814-870); Zendesk returns no id token, so the node could not
+   tell tokens from `acme.zendesk.com` from tokens of any other instance, and T3
+   would rest on the app. An exchange at the endpoint the node filled is the
+   proof. (b) Everything the exchange needs exists: pinned endpoints on the
+   node row, single-spend idempotency (`claim_code_exchange`), the redirect-URI
+   check (`check_code_exchange`), the DNS-pinned, no-redirect token client; the
+   change is the `keeps_secret` filter (`api/connectors.rs` 459-467) and a form
+   without a secret. (c) Refresh is the node's anyway (`refresh_connection`),
+   so the app never needs the token endpoint. (d) One app path for every org
+   client removes the request-borne token endpoint and client id that O3
+   polices on `PUT /v1/mcp/connections`. Cost: `vamd` sees a public client's
+   single-use code and verifier for a moment (`runtime/tools.md` amended
+   again). Alternative: keep D29 as written (the app exchanges without a
+   secret) and add an `oauth` variant of `PUT …/connection`, with no way to bind
+   the tokens to the address. Taking the default **edits locked decision 13**
+   on approval: "the node exchanges the code for every admin-supplied client;
+   without a secret it sends none".
+2. **Names.** File: top-level `tenant: { name: "subdomain", suffix, label }`
+   and `provider.endpoints { authorize, token, revoke? }` (design §13.3).
+   Wire: `PUT …/node` body `tenant: { subdomain }`; entry `node.tenant {
+   subdomain, hosts }`. `consent.tenantId` (Entra) is another object and keeps
+   its name. Alternative: `companyAddress` on the wire, to avoid "tenant" twice.
+3. **Tenant validation.** Default: the admin's value is trimmed and
+   lowercased, then one DNS label: 1-63 of `[a-z0-9-]`, no leading or trailing
+   `-`, no `xn--` prefix (no look-alikes), else 400. The suffix is fixed per
+   connector by the file (at least two labels, public DNS rules, no internal
+   suffix, not editable at Enable); `{subdomain}` only as the whole first label;
+   every templated host is exactly `{subdomain}.<suffix>`. No public-suffix
+   list: the admin sees the filled hosts before members use them, and the
+   two-label minimum stops `{subdomain}.com`. The node does not probe the filled
+   host at Enable (Zendesk publishes no metadata; the first member sign-in is
+   the check).
+4. **Changing the address.** Default: the client id must be saved again in the
+   same body (a client lives in one instance); every member's connection reads
+   `needs_reconnect`; an old refresh token is never sent to the new host.
+   Disable keeps the address.
+5. **Salesforce `instance_url`.** Default **defer** (CN-6.8, backlog). When it
+   comes, it is a check (the token response's `instance_url` must equal the
+   filled My Domain host), never a host learned from a response.
+6. **Secrets with fixed endpoints, and the admin's token auth method (Phase 5
+   close backlog, CodeRabbit thread 4619996438 on #52).** Default: **does not
+   land here.** Phase 6's `oauth` profile allows `clientSecret: none` only
+   (Zendesk and Salesforce need none), so no auth method is chosen; discovery
+   keeps deciding for `discover` (Box). Trigger: the first fixed-endpoint
+   provider that needs a secret; then the method is declared in the file
+   (`endpoints.tokenAuthMethod`), not chosen by the admin.
+   `Decide: BACKLOG — proof 1, cost 1` (unchanged).
+7. **How a skill learns its company host.** Nothing carries a per-node value
+   to a tool today (`exec.rs` clears the environment; `env_vars` is never
+   applied). Default **(a)** CN-6.5: the node writes `.vam/connector.json` next
+   to the skill's manifest at boot (host-side, no guest code; the lane runs).
+   (b) The gate fills a literal `{subdomain}` in the guest's target URL before
+   the envelope screens (no file, but a rewrite inside the security gate).
+   (c) The runtime applies a host-supplied environment variable (a guest
+   change, cost 3).
+8. **Zendesk writes.** Exact `paths` cannot name `/api/v2/tickets/{id}.json`,
+   and a write by prefix publishes with a warning (`skill_egress.rs` 15-18).
+   Default: the first Zendesk skill reads (search, show) and creates a ticket
+   (`POST` exact `/api/v2/tickets.json`); updates and comments wait for one
+   `{id}` segment in exact paths (`Decide: BACKLOG — proof 1, cost 1`, trigger
+   "the team's run asks for ticket updates").
+9. **Account label for an `oauth` connection.** Default: none in Phase 6 (the
+   tile says "Connected"); a label read from a declared path with the member's
+   token is backlog (`Decide: BACKLOG — proof 1, cost 1`).
+10. **Revoke on disconnect.** Default: only when the file declares
+    `endpoints.revoke` (RFC 7009, no secret). Zendesk's token delete API is not
+    RFC 7009, so the rows are deleted and the grant expires at Zendesk.
+11. **Placeholders.** Default: a marketplace binding's placeholder must be
+    `vamsec_<connector id>_<binding name>` (T4), unique by construction since
+    the import already refuses a taken connector id; any other value is refused
+    at install.
+12. **MCP URL templating.** Default: in scope through the resolver (CN-6.2),
+    proved by unit tests only (no listing uses it yet). Alternative: refuse
+    `{subdomain}` in `mcp.url` until a provider needs it.
+13. **Where the Zendesk listing lives.** Default: `vam-marketplace` branch
+    `zendesk-connector` under Squrell's URN (as Box), imported on a staging
+    node through CN-5.6's index ref; merged into `main` and tagged
+    `zendesk-v1.0.0` after the Phase 6 release (locked 16's pattern).
+14. **Base branch.** Default: `feat/connectors` (fast-forwarded to `main` at
+    5d020be); waves 0–4 merge there and the app wave into the app's
+    `feature/connectors`; released to `main` at the phase close.
+
+**Risks.**
+
+- Zendesk's OAuth facts (PKCE for local clients, refresh rotation, scopes) are
+  research (design §13.2); wave 6 checks them before the tag. The scenarios do
+  not depend on them.
+- The swap's definition set moves from a compiled list to the store (CN-6.4):
+  a slip there attaches a token for a connector the admin disabled. The
+  orchestrator reads the enabled and address checks in `token_for` before merge.
+- A per-node address makes the skills digest per node (CN-6.5), so golden
+  snapshots keyed on it are shared less. Recorded, not fixed.
+
+**Design vs code** (the code is the fact; the last column says what moves).
+
+| Design says | Code does | Moves |
+|---|---|---|
+| §4 `McpServer.url` "may contain {tenant}" | No templating: `validate_connector` wants a plain `https` URL (`connector.rs` 351-354), the marketplace a full DNS name (`connector_listing.rs` 110-165). §13.1 admits it; §4 names the parameter `{tenant}`, §13.3 and D30 `{subdomain}` | design §4 to `{subdomain}` (docs, at the close) |
+| §4 `OAuth2Provider.profile` without `oauth`; `clientSecret: none \| squrell_relay` | `client` and `org_vault` exist (`connector.rs` 65-122); no `oauth`, no `endpoints`, `deny_unknown_fields` (63-64) | code (CN-6.1); design §4 refreshed at the close |
+| §5 the swap "finds the session owner's connection for that connector" | Built-in connectors only: `builtin_bindings()` (`connection_egress.rs` 44), `token_for` (407), `connector_id_of` (586-595), built at `brokers.rs` 1087 | code (CN-6.4) |
+| §4 `inject: "bearer" \| "header" \| "query"`; §5 Zendesk in "Swap" mode | Only `bearer` with `access_token` attaches (`connection_egress.rs` 419-423) | the slice; header/query backlog |
+| §4 binding `hosts: string[]` | The access token is pinned to the first host of the first binding (`connectors.rs` 850-857, 1146-1152) | code (CN-6.3) |
+| §13.3 "after Enable every host is exact … token routing unchanged"; D29 "without a secret the app keeps exchanging" | REST connections are Entra-only (`connectors.rs` 737-754, 814-870; token host fixed at 863 and 1140; `RefreshProfile` Mcp/Entra, `mcp_oauth_refresh.rs` 116-123); the org client is MCP-only (`connector_client.rs` 938-963; discovery from `def.mcp.url`, `api/connectors.rs` 181-190); the exchange always sends `resource` and needs a secret (`mcp_oauth_refresh.rs` 525-560) | code (CN-6.2, CN-6.3); locked 13 edited if open question 1's default is taken |
+| §13.3 `{subdomain}` in "endpoints, `mcp.url` and binding hosts" | Skills name hosts too, and `egress[].host` must be an exact DNS name (`skill_egress.rs` 45-49, 80-89): a Zendesk skill cannot declare its host. The design is silent | design §13.3 adds shape hosts; code (CN-6.1, CN-6.4) |
+| (silent) how skill code learns the host | No per-node value reaches a tool: `exec.rs` 543-605; `env_vars` parsed (`skills.rs` 380-409), never applied | design gains a line (open question 7); code (CN-6.5) |
+| §11 Q8 exact paths for writes | An exact path has no segment template, so `/api/v2/tickets/{id}.json` cannot be a declared write (`skill_egress.rs` 32-43) | open question 8 (backlog) |
+| `marketplace/import.rs` module doc (17-19): a marketplace connector is "remote MCP with discovery, no secret" | Since Phase 5 `org_vault` is allowed (`connector_listing.rs` 11, 303-313) | doc comment fixed in wave 1 |
+| `ConnectorSummary.hosts` "the MCP server's" (`package.rs` 564-565) | Right today, wrong once REST listings exist | code (CN-6.1) |
+
+**Phase close:** all five scenarios `active` and green; the VAM app unit
+suites on the merged base; Zendesk marketplace CI green on its branch; the
+team's real-instance run on the owner's word with the P6 number; release (the
+release PR runs the microVM lane once); team checklist out; tag
+`zendesk-v1.0.0` and the listing merged into `vam-marketplace` `main` after the
+release.
 
 ### Phase 7 — Developer kit and API keys
 
@@ -2754,3 +3324,5 @@ installs from a test marketplace.
 | 2026-11-18 | 5 | **Wave 4 merged** (squrell-inc/Squrell-App #11, squash into `feature/connectors`, base recreated from app `main` 0e47c90). Orchestrator re-ran at the PR head: `CI=1 yarn test` 1170 pass / 1 fail / 2 skipped, the one failure (`AgentCreationCycle.test.tsx` MCP selection) also fails on the untouched base 0e47c90 (pre-existing, not this wave); `tsc --noEmit` clean; agent ran Playwright 16/16. Review: the admin secret lives only in an uncontrolled password input and a request object cleared in `finally`, never in state, storage, URL, logs or toasts; members never send one; the new Tauri command `exchange_connector_code` does not log and encodes the path segment. Not verified here: `cargo test` for `src-tauri` (gdk/webkit missing in the container) and the real `squrell://` deep-link return — both go to the CN-5.7 Box run on a desktop build. **Open for the owner:** (1) web deployments cannot connect an `org_vault` connector: the node accepts only `squrell://oauth` and `http://127.0.0.1:<port>/…` as redirect URIs (open question 6) and the web app's origin is neither; (2) on desktop a 400 and a 403 both arrive as `ConnectError::Forbidden`, so the app tells them apart by message text (heuristic; a structured error code from vamd would fix it). **Backlog:** `CONNECTOR_MANAGED_MCP_IDS` in the app is hard-coded to `["linear"]`, so marketplace connectors' MCP rows (e.g. `filebox`, `box`) still show in the generic MCP list; no "remove client" button (`client: null` with `enabled: false` is supported by the body builder). Plan corrections: the app uses yarn (not pnpm) and has no `e2e:typecheck` script; component paths are `components/org/` and `components/mcp/`. ~20 min agent + review. |
 | 2026-11-18 | 5 | **Release review of #52 fixed** (branch `cn-5-review` into `feat/connectors`). Each finding has a failing-before test: (1) the Enable write re-checks the saved client (id, token endpoint, `secret_set`, `updated_at`) and the connector definition inside its transaction and answers 409 "the client changed while saving; save again" when another admin's save moved either; (2) the exchange commit re-reads the client, the enable and the connector's server and stores nothing (409 "sign in again") for a client replaced or a connector turned off mid-exchange; (3) the member's row, the refresh token and the access token are one transaction (`commit_connector_connection`), sealed first, the gate generation bumped after; a failed save after the spent code says to sign in again; (4) tool adoption is conditional on the credential generation the write left (the gate is kept alive by a `CredentialGeneration` handle: a gate with no holder is dropped, and its counter with it) and never upserts a missing row; (5) **decision: no path re-adopted tools** (the 401 refresh only refreshes tokens, the tools-refresh route treats a vetted tool added to an empty pin as drift needing approval), so a sign-in whose tools cannot be read is stored but left `needs_reauth` with the fixed reason `TOOLS_PENDING_REASON` (calls fail fast, the notification stays open, parked runs stay parked) and `POST /v1/mcp/connections/{id}/refresh` adopts the vetted tools (the same first pin the connect makes), puts the row back to `connected`, resolves the notification and resumes the runs, in that order; the app's own token upsert takes the same path; (6) saving a corrected secret for the same client clears `needs_reauth` only on rows whose reason is the refused admin client (`CLIENT_REFUSED_REASON`), resolves their notification and resumes their runs; a revoked grant still needs a sign-in; new scenario `admin-corrects-a-refused-client-secret-and-the-member-is-not-asked-to-reconnect` (the existing correction scenario never reached a refused refresh); (7) a moved connector's old row and tokens go in the same commit as the new grant, after it; (8) **decision: pin the token authentication method at Enable** (`client_secret_post` when listed, else `client_secret_basic` when listed or omitted, per RFC 8414 §2; neither is a 409), column `token_auth_method` on `node_connector_clients` (migration default `client_secret_post`), used by the exchange, refresh and revoke (HTTP Basic carries the form-urlencoded id and secret, the form has no `client_secret`); (9) the protected-resource `resource` must be a string naming the identifier its well-known URL was built from (the root fallback is judged against the root identifier); (10) enabling with `Keep` needs `secret_set` for an `org_vault` connector; (11) the saved id is compared trimmed; (12) a named-branch read and a pinned-tag check ask only for tags, never `HEAD` or the index branch. Minors fixed: the issuer is compared and stored exactly as named (RFC 8414), the secret's destination check and its ciphertext come from one read, the node body's parse error is fixed for every failure, the OpenAPI and `runtime/tools.md` sentences name their proofs (or say not proved), the runner rejects a second filebox piece, a non-filebox alias for a filebox secret, `expire` with `revoke`, and a refused-connect `contains` it ignored, keeps every rotated secret in the leak set, refuses a refresh on a revoked mock and judges a held refresh on the secret current when released, and `secret-absent` waits for the run before it collects values. The runner now clears a connector's client before its marketplace is removed (after that the clear was a 404, so every scenario left its client and vault secret on the vamd) and records a client only when the node accepted it. Declined (reasons in the PR): the discovery deadline on every fetch, per-grant access tokens in the filebox mock, a retry record for a failed client clear (it is reported instead), and extra assertions in the three existing scenarios (no scenario was edited). |
 | 2026-11-19 | 5 | **Released to `main`** (owner): VAM #52 merged as 4f24c41, Squrell-App #12 as bb4ee15, after CodeRabbit rounds 1–6 were fixed (#68, #70, #71, #73, #74; main merged in by #72). Remaining CodeRabbit item (admin choice of the token auth method) and the known trade-offs logged under "Phase 5 close"; CN-5.7 (Box real tenant, team) does not block Phase 6. |
+| 2026-11-19 | 6 | **Breakdown drafted** (phase-breakdown agent), awaiting owner approval: 5 scenarios (process, mock model, new `mock-ticketdesk-server` fixed-endpoint public-client REST provider per company), CN-6.1–6.8 (6.8 Salesforce `instance_url` backlog), waves 0–6 (W3 and W4 Sonnet high: the exchange and refresh for `profile: oauth`, the egress swap for installed connectors; W4 runs the microVM lane), 14 open questions with defaults (the node exchanges the code for every admin-supplied client, editing locked 13 on approval; the token auth method stays backlog). |
+| 2026-11-19 | 6 | **Breakdown approved** (owner): the node exchanges for every org client (locked decision 13 amended), Salesforce `instance_url` deferred (CN-6.8 backlog), all open-question defaults accepted (subdomain one DNS label, no token auth method this phase, reads plus ticket create). Wave 0 started. |
