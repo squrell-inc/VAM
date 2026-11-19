@@ -96,6 +96,15 @@ fn openapi_has_generated_ids_and_case_insensitive_login_names() {
         .as_str()
         .unwrap();
     assert!(ns.contains("`+tag`"), "{ns}");
+    for needle in ["no other user", "kept across renames", "Never `default`"] {
+        assert!(ns.contains(needle), "defaultNamespace lacks {needle}: {ns}");
+    }
+    let account_ns = &schemas["UserAccount"]["properties"]["namespace"];
+    assert_eq!(account_ns["readOnly"].as_bool(), Some(true));
+    assert!(account_ns["description"]
+        .as_str()
+        .unwrap()
+        .contains("defaultNamespace"));
 }
 
 #[test]

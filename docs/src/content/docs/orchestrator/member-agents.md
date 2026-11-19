@@ -14,6 +14,10 @@ proves:
   - a-run-with-an-inline-agent-is-refused-and-writes-nothing
   - a-run-with-an-inline-playbook-is-refused-and-writes-nothing
   - a-publisher-saves-a-draft-agent-and-runs-it-by-ref
+  - members-with-the-same-email-local-part-get-their-own-namespaces
+  - members-whose-names-are-not-slugs-get-namespaces-of-their-own
+  - member-namespaces-stay-apart-across-a-restart
+  - crates/vam-orchestrator/tests/user_namespace_tests.rs
   - crates/vam-orchestrator/tests/member_draft_agents_tests.rs
   - crates/vam-orchestrator/tests/catalog_read_authorize_tests.rs::member_put_own_agent_draft_is_200_outside_namespace_is_400
   - crates/vam-orchestrator/tests/workspace_pin_tests.rs::member_can_pin_own_draft
@@ -105,11 +109,14 @@ object. Both need an `Idempotency-Key`. In member mode, `vamd` checks these in o
    no release. It tells a member nothing about other people's rows.
 4. **Namespace.** A new URN must be under
    `urn:vam:agent:<registryDomain>/<defaultNamespace>/`. Both values are on `GET /v1/me`. The
+   namespace is the member's own: no other user holds it (see [Namespaces](#namespaces)), so
+   another member's URN is this 400 whether that member saved it or not. The
    check runs when the caller owns no row of that URN, so an edit of your own draft skips it
    (`namespace_new_inside_ok_outside_400_non_slug_username_gets_its_own`, and
    `member_put_own_agent_draft_is_200_outside_namespace_is_400`).
-5. **Owner.** A URN another user owns is a 403
-   (`a_urn_in_my_namespace_owned_by_a_publisher_is_403`).
+5. **Owner.** A URN in your namespace that another user owns is a 403
+   (`a_urn_in_my_namespace_owned_by_a_publisher_is_403`). Only a publisher's row, or a row saved
+   before namespaces were made unique, can be there.
 6. **Cap.** A member keeps at most `VAMD_MEMBER_DRAFT_AGENTS_MAX` agent drafts (default 50, see
    [Host daemon](/orchestrator/overview/)). A new URN past the cap is a 409. An edit is not
    counted (`the_cap_counts_drafts_only_and_refuses_a_new_row_not_an_edit`).
@@ -200,16 +207,41 @@ A draft agent is read by its owner and by a caller with `users:admin`. Another m
 publisher get a 404, the same as for a missing row, and the other member's list does not show it
 (`member-draft-agent-is-private-and-in-the-members-namespace`).
 
-## Known limitation: shared namespaces
+## Namespaces
 
-Two usernames can slug to the same namespace. `Alice` and `alice` are both allowed, because
-usernames are case-sensitive. A username that is not a slug (it starts or ends with `.`, `-` or
-`_`) falls back to the namespace `default`, so all of those users share it.
+Each user has one namespace, and no other user on the node has the same one. `GET /v1/me`
+reports it as `defaultNamespace`; an org admin sees it as `namespace` on `GET /v1/users`.
 
-Users who share a namespace are not blocked by the namespace check. The owner check still stops an
-overwrite with a 403. But a 200 for a free name against a 403 for a taken one tells a member
-that the name is taken. This is not fixed. The username work in `user-identity` Phase 2 changes
-the same function.
+- **Set once.** `vamd` picks it when the user is created and never changes it: not on a rename
+  (`vamd --rename-user`), a restart or a role change.
+- **Made from the username.** Lowercased; for an email username, the part before the `@` without
+  a `+tag`. Characters that cannot be in a URN segment become `-`, and `.`, `-` and `_` are
+  trimmed from the ends, so `_Ann@example.com` gives `ann`. Never `default`.
+- **A suffix only when needed.** When another user already holds that base, it is reserved
+  (`default`, `local`, `operator`, `bootstrap`), or another user owns catalog rows under it, the
+  namespace is the base, `-` and six characters of `[a-z2-7]` worked out from the user id:
+  `ann.lee@north.test` and `ann.lee@south.test` get `ann.lee` and, for example, `ann.lee-k3f2qa`.
+  The suffix is fixed for the user and says nothing about other users.
+
+Because no two members share a namespace, a new URN in someone else's namespace is the namespace
+400 whether or not they saved it. A member cannot tell a taken name from a free one.
+
+**Upgrading a node.** On its first start after the upgrade, `vamd` gives every existing user a
+namespace. When users shared one before (an email local part at two domains, or a username that
+was not a slug, which used to give `default`), the user who saved first under it keeps it, and
+the others get the suffix. `vamd` logs one line for each user whose namespace changed:
+
+```text
+namespace for user <user id> (<username>) is now <new namespace>; was shared as <old namespace>
+```
+
+Nothing moves. A user who got a new namespace still owns, opens and edits every draft they saved
+under the old one (an edit skips the namespace check). Their new agents go under the new one.
+
+Proved by `members-with-the-same-email-local-part-get-their-own-namespaces`,
+`members-whose-names-are-not-slugs-get-namespaces-of-their-own`,
+`member-namespaces-stay-apart-across-a-restart` and `user_namespace_tests.rs` (the upgrade, a free
+and a taken name answering alike, a rename, concurrent creates, the reserved names).
 
 ## Building a client
 
@@ -221,7 +253,8 @@ The points below are for the frontend. Each one names the call.
    need `agents:draft`. Skill, playbook and policy authoring need `catalog:write`. "Release"
    needs `catalog:write` and `publish:grant`. Read `/v1/me` again after a role change or a 403.
 3. **Build the new agent URN** as `urn:vam:agent:<registryDomain>/<defaultNamespace>/<name>` from
-   `GET /v1/me`.
+   `GET /v1/me`. Read `defaultNamespace`; do not work it out from the username, because it may
+   carry a suffix.
 4. **Attach parts only by ref**, in `skillRefs`, `defaultPlaybookRef`, `allowedPlaybookRefs` and
    `permissions.advanced`, to released versions. Let the picker offer rows whose `channel` is
    released (`GET /v1/playbooks`, `GET /v1/policies` and the skill package list). Write the URN alone (floating)
@@ -245,8 +278,10 @@ The points below are for the frontend. Each one names the call.
   preview agree whoever starts it.
 - One message covers every ref that is not a release, so a member learns nothing about other
   users' rows.
-- The namespace check comes before the owner check, so a foreign URN outside the member's
-  namespace answers like a free one.
+- The namespace check comes before the owner check, and no two users share a namespace, so
+  another member's URN answers like a free one.
+- A namespace is stored, not worked out from the username on each call, so a rename never moves
+  a member away from their drafts.
 - Rejected: giving members `catalog:write` and filtering by kind (one missed route would be a
   privilege escalation); comparing stored scopes with role sets to find a "default" key (breaks
   when a role's set changes); rewriting key rows on promotion (misses other paths and races
@@ -258,5 +293,3 @@ The points below are for the frontend. Each one names the call.
 
 - The exact order of checks in a save is read from `publish_agent_draft_restricted`; each check
   has its own test, but no test fixes the order of all six.
-- The "known limitation" on shared namespaces is read from the code
-  (`vam_spec::default_namespace`); no test drives two users into one namespace.

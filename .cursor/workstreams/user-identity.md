@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: user-identity
-current_phase: 3 (one namespace per user) approved 2026-11-18; wave 0 done, wave 1 in progress; 1 and 2 released to main
+current_phase: 3 (one namespace per user) waves 0-2 done 2026-11-19; phase close next (`--full`, release with member-draft-agents); 1 and 2 released to main
 base_branch: claude/wizardly-feynman-d5ch88 (phase 3; carries feat/member-draft-agents merged into main)
 design_docs:
   - design/user-identity.md
@@ -79,7 +79,7 @@ Phase 3, one namespace per user (owner, 2026-11-18: proposals locked as drafted,
     outside `[a-z0-9._-]` become `-`; ends trimmed of `.`, `-`, `_`; at most 254, the username limit,
     so a slug name is never cut (changed from 48 on 2026-11-18 in wave 1: the cut changed long slug
     names that keep their value today, `new-user-gets-a-generated-id-it-cannot-choose`; nothing
-    limits a URN segment's length); empty is `user`).
+    limits a URN segment's length; owner confirmed 2026-11-19); empty is `user`).
     Taken (another user holds it, it is reserved: `default`, `local`, `operator`, `bootstrap`, or
     a catalog row under it is owned by another user): `<base>-<6 of [a-z2-7] from a SHA-256 of the
     user id>`, then 10, then 16 characters. No counter. Never `default` for a new user.
@@ -423,7 +423,7 @@ after that release, or the owner releases both together.
 **Plan:** drafted 2026-11-18 (design `design/user-identity.md` §6); wave 0 written and proven red
 in the same session at the owner's request. **Approved 2026-11-18**: decisions 17–21 locked, open
 questions on their defaults, wave 1 built on this branch. Decision 18 edited in wave 1 (base cap 48
-→ 254), for the owner to confirm.  
+→ 254), confirmed by the owner 2026-11-19.  
 **Exit:** the three new scenarios `active` and green and the changed one green; the migration and
 rule tests below pass; `scripts/ci/local.sh --full` green on the base;
 `orchestrator/member-agents.md` has no "Known limitation" section and says how namespaces are
@@ -433,7 +433,7 @@ assigned and migrated.
 - [x] Scenarios land pending, red for the right reason (W0)
 - [x] Stored namespace, assignment at create, migration of existing users (W1)
 - [x] `/v1/me` and the member draft rule read the stored namespace (W1)
-- [ ] Docs drop the limitation; OpenAPI, proto comments, docs-features row (W2)
+- [x] Docs drop the limitation; OpenAPI, proto comments, docs-features row (W2)
 
 Decisions 17–21 are locked (owner, 2026-11-18): see "Locked decisions".
 
@@ -497,7 +497,7 @@ two concurrent creates with one base get two namespaces (`api_tests.rs`); the ba
   keeps it). Turns green: `members-with-the-same-email-local-part-get-their-own-namespaces`,
   `members-whose-names-are-not-slugs-get-namespaces-of-their-own`,
   `member-namespaces-stay-apart-across-a-restart`.
-- [ ] `UI-3.4` — Docs and contract: `orchestrator/member-agents.md` (drop "Known limitation" and
+- [x] `UI-3.4` — Docs and contract: `orchestrator/member-agents.md` (drop "Known limitation" and
   its "Not proved here" line; "Saving" step 4 and "Building a client" point 3 say the namespace
   is the user's own and stable; a "Namespaces" section on assignment and migration, with the log
   line), `authoring/model.md` namespace paragraph, `orchestrator/user-isolation.md` `/v1/me` row,
@@ -515,7 +515,7 @@ two concurrent creates with one base get two namespaces (`api_tests.rs`); the ba
 | 0 docs | design §6 + this breakdown | — | vam | orchestrator | 30 min | — | none | [x] | this branch |
 | 0 | `UI-3.0` | — (pending, red for the right reason) | vam | Sonnet 5.5 low (YAML and world pieces only) | 45 min | 0 docs | none | [x] | this branch |
 | 1 | `UI-3.1`, `UI-3.2`, `UI-3.3` | the three new scenarios | vam | Sonnet 5.5 high (schema migration of existing users and the member write boundary) | 120 min | 0, owner approval, member-draft-agents released or synced | none | [x] | this branch |
-| 2 | `UI-3.4` | — (keeps them green) | vam | Sonnet 5.5 medium (OpenAPI test in `vam-spec` plus docs) | 60 min | 1 | none | [ ] | |
+| 2 | `UI-3.4` | — (keeps them green) | vam | Sonnet 5.5 medium (OpenAPI test in `vam-spec` plus docs) | 60 min | 1 | none | [x] | this branch |
 
 **Open questions** (each with a default)
 
@@ -574,3 +574,4 @@ Report: "Phase 3 pass", or the step number with the error text.
 | 2026-11-17 | 2 | Owner merged hotfix #16 into `main` (a8cf6ab). `main` merged back (#18): one conflict in `update_username` (kept the base validator); the hotfix's reserved check removed from `validate_user_id` where the merge put it; new test for a first admin with a legacy `usr_` name. `--full` green, 4532 tests, smoke 145/145. **Phase 2 closed in base**: 5/5 scenarios active and green, 0 fix cycles in the phase. Release PR into `main` next. |
 | 2026-11-18 | 3 | Phase 3 opened (one namespace per user, from the member-draft-agents backlog row): design §6, breakdown, proposed decisions 17–21. Branch merges `feat/member-draft-agents` into `main` (41af8b0; 16 hunks in `crates/vam-e2e` and four docs pages; `vam-e2e` tests and `check` green). W0: five world pieces, three new scenarios pending, one `then` changed (spec change for the owner). `run.sh --scenarios` six: 3 red (right reason: 403 `only the artifact owner may version this agent` at the `urnOf` step), 3 pass. Scoreboard: 0 green, 3 red (right reason), 0 fix cycles, about 2 h (disk allowance ran out twice; a full `cargo test -p vam-orchestrator` and the e2e build do not fit together in `target/debug`). |
 | 2026-11-18 | 3 | Owner locked 17–21 (defaults kept). W1 (a54e5c4): `users.namespace` with a unique partial index, assignment under the insert lock, backfill on every open (first claimant keeps it; others suffixed; one log line per move), `/v1/me`, the member draft rule and `UserAccount.namespace` read it. Decision 18 edited: base cap 48 → 254 (the cut changed long slug names; `new-user-gets-a-generated-id-it-cannot-choose` caught it), for the owner to confirm. Unit test `…_non_slug_username_uses_default` renamed `…_gets_its_own` (it pinned the old fallback). Tests: vam-spec origin 12, orchestrator lib 1833, `api_tests` 178, `me_tests`, `member_draft_agents_tests`, Phase 2 migration and clash tests, new `user_namespace_tests` 5; `--smoke` 159/159. Not run: clippy, `--full`. Scoreboard: 3 green, 0 red, 1 fix cycle (the cap), about 1.5 h. |
+| 2026-11-19 | 3 | Owner confirmed decision 18's 254 cap. W2: `member-agents.md` drops "Known limitation" for a "Namespaces" section (assignment, suffix, upgrade and log line, drafts that do not move), Saving steps 4–5, client point 3, design notes, "Not proved here" line removed; `authoring/model.md`, `users-and-roles.md`, `orchestrator/api.md`, `user-isolation.md`; OpenAPI `GetMeResponse.defaultNamespace`, `UserAccount.namespace` (read only), `PUT /v1/agents` text, and the `openapi_yaml.rs` assertions; `docs-features.yaml` row `one-namespace-per-user`; backlog row removed. Checks: `vam-spec` `openapi_yaml` 4, `vam-e2e check`, `docs_check` 26, `pnpm build` (79 pages), clippy `-D warnings` on vam-spec, vam-orchestrator, vam-e2e (1.97.0). Not run: `--full`. Scoreboard: 3 green (kept), 0 red, 0 fix cycles, about 40 min. |
