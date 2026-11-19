@@ -582,8 +582,8 @@ mod tests {
             )
             .expect("email member");
         assert!(ada.user_id.starts_with("usr_"), "{}", ada.user_id);
-        // The rule and `GET /v1/me` ask the same function for the same username.
-        assert_eq!(vam_spec::default_namespace(&ada.username), "ada.lovelace");
+        // The rule and `GET /v1/me` read the same stored namespace.
+        assert_eq!(ada.namespace.as_deref(), Some("ada.lovelace"));
         save(
             &store,
             &ada.user_id,
@@ -600,7 +600,8 @@ mod tests {
                 "{err}"
             );
         }
-        // An email name that is not a slug in its local part uses `default`.
+        // An email name whose local part leaves nothing gets a namespace of its own, never
+        // `default` (user-identity decision 18).
         let odd = store
             .create_managed_user_generated(
                 "+tag@example.com",
@@ -608,12 +609,21 @@ mod tests {
                 crate::users::UserRole::Member,
             )
             .expect("odd email");
+        assert_eq!(odd.namespace.as_deref(), Some("user"));
         save(
             &store,
             &odd.user_id,
-            &agent("urn:vam:agent:local.vam.dev/default/odd-email"),
+            &agent("urn:vam:agent:local.vam.dev/user/odd-email"),
         )
-        .expect("default namespace");
+        .expect("own namespace");
+        message(
+            save(
+                &store,
+                &odd.user_id,
+                &agent("urn:vam:agent:local.vam.dev/default/odd-email"),
+            )
+            .expect_err("`default` is nobody's namespace"),
+        );
     }
 
     #[test]
