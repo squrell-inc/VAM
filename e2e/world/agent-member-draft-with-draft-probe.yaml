@@ -1,0 +1,23 @@
+piece: agent-member-draft-with-draft-probe
+kind: agent
+# Not written at `given` and never released: a `put-draft` step saves it as an identity's draft, in that
+# identity's namespace. It names `skill-draft-probe` with a floating ref, a skill that is a draft until a
+# `publish-skill` step releases it (or never).
+deferred: true
+requires: [skill-draft-probe]
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/{{ns}}/{{name}}" }
+    displayName: Member draft agent offered the draft probe skill
+    description: Member draft agent offered the draft probe skill
+    role: Tester
+    systemInstructions: Use the host tools when asked. Finish with task_complete.
+    allowAnyPlaybook: true
+    skillRefs:
+      - resourceId: { urn: "{{urn:skill-draft-probe}}" }
+    permissions:
+      tools:
+        default: deny
+        rules:
+          - { target: "builtin:load_skill", decision: allow }
+          - { target: "skill:{{name:skill-draft-probe}}/*", decision: allow }

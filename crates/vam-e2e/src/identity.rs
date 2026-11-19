@@ -1,12 +1,13 @@
 //! The steps that act as a user with a password: `login`, `change-password`,
-//! `identity-request` and `create-user`. An `org` piece keeps its username, user id and generated password in
-//! memory (`Account`); nothing here prints, logs or briefs a password or a token.
+//! `identity-request`, `create-user`, `put-draft` and `set-role`. An `org` piece keeps its
+//! username, user id and generated password in memory (`Account`); nothing here prints, logs or briefs a password or a token.
 //!
 //! This module is a child of `engine`, so it reads the engine's private state; the shared
 //! runner files only register the steps.
 
 use super::{conn, secret_hex, Engine, Fail, Secret};
 use crate::scenario::Class;
+use crate::world::PieceKind;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -119,7 +120,7 @@ pub enum Credential {
     Key,
 }
 
-/// `identity-request: { as, credential, method, path, status, fields }`
+/// `identity-request: { as, credential, method, path, status, contains, lacks, fields }`
 ///
 /// `path` and the string values of `fields` may hold `{<alias>.userId}`, `{<alias>.username}`
 /// and `{<alias>.USERNAME}` (the login name upper-cased) of any `org` identity in `given`; in
@@ -135,9 +136,50 @@ pub struct IdentityRequest {
     pub path: String,
     /// The exact status vamd must answer.
     pub status: u16,
+    /// A substring the response body must contain (judged after the status).
+    pub contains: Option<String>,
+    /// A substring the response body must not contain (judged after the status).
+    pub lacks: Option<String>,
     /// Dotted paths into the JSON body, matched as in other `fields` (exact, `contains`,
     /// `matches`, `present`, `absent`).
     pub fields: Option<std::collections::BTreeMap<String, serde_yaml::Value>>,
+}
+
+/// `put-draft: { piece, as, status, contains }`
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutDraft {
+    /// Alias of a `playbook` or `agent` world piece in `given` (usually `deferred`).
+    pub piece: String,
+    /// The identity that writes it; omitted means the bootstrap key.
+    #[serde(rename = "as")]
+    pub as_: Option<String>,
+    /// The exact status vamd must answer.
+    pub status: u16,
+    /// A substring the response body must contain.
+    pub contains: Option<String>,
+    /// Alias of an `org` piece: the body's URN is the one an earlier `put-draft` of this piece as
+    /// that identity wrote, so this identity aims at another's agent.
+    #[serde(rename = "urnOf")]
+    pub urn_of: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoleChange {
+    /// `POST /v1/users/{id}/publish-grant`.
+    Publisher,
+    /// `DELETE /v1/users/{id}/publish-grant`.
+    Member,
+}
+
+/// `set-role: { as, role }`
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetRole {
+    #[serde(rename = "as")]
+    pub as_: String,
+    pub role: RoleChange,
 }
 
 /// `create-user: { as, username, userId, status, contains }`: `POST /v1/users` with a fresh
@@ -227,6 +269,34 @@ pub(super) struct Account {
     pub previous: Option<Secret>,
     pub session: Option<Secret>,
     pub previous_session: Option<Secret>,
+}
+
+/// Replaces each `{{urn:<piece>:<as>}}` in `text` with what `lookup(piece, as)` finds
+/// (percent-encoded with `encode`). `Err` names the first one with no URN. `{{urn:<piece>}}`
+/// (no identity) is left alone: the world substitution owns it.
+pub fn expand_urns(
+    text: &str,
+    encode: bool,
+    mut lookup: impl FnMut(&str, &str) -> Option<String>,
+) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("{{urn:") {
+        let after = &rest[i + 6..];
+        let Some(j) = after.find("}}") else { break };
+        let inner = &after[..j];
+        out.push_str(&rest[..i]);
+        match inner.split_once(':') {
+            Some((piece, who)) => {
+                let urn = lookup(piece, who).ok_or_else(|| inner.to_string())?;
+                out.push_str(&if encode { crate::api::seg(&urn) } else { urn });
+            }
+            None => out.push_str(&rest[i..i + 6 + j + 2]),
+        }
+        rest = &after[j + 2..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 fn product(expected: impl Into<String>, observed: impl Into<String>) -> Fail {
@@ -472,16 +542,31 @@ impl Engine {
     }
 
     pub(super) fn identity_request(&mut self, x: &IdentityRequest) -> Result<(), Fail> {
-        let acc = self.account(&x.as_)?.clone();
+        // An `org` piece of role Owner is no second identity: it has no account, and its key is
+        // the bootstrap key. `credential: key` as such a piece acts as the bootstrap key (an
+        // admin's read of every draft).
+        let owner_key = matches!(x.credential, Credential::Key)
+            && !self.ctx.accounts.contains_key(&x.as_)
+            && self
+                .ctx
+                .pieces
+                .get(&x.as_)
+                .is_some_and(|p| p.kind == PieceKind::Org);
+        let acc = if owner_key {
+            None
+        } else {
+            Some(self.account(&x.as_)?.clone())
+        };
         let (bearer, shown) = match x.credential {
             Credential::Session => (
-                acc.session.clone().map(|s| s.0),
+                acc.and_then(|a| a.session).map(|s| s.0),
                 "a login session (a `login` step before this one)",
             ),
             Credential::PreviousSession => (
-                acc.previous_session.clone().map(|s| s.0),
+                acc.and_then(|a| a.previous_session).map(|s| s.0),
                 "a previous session (two `login` steps before this one)",
             ),
+            Credential::Key if owner_key => (Some(self.api.key().to_string()), "an API key"),
             Credential::Key => (self.key_of(Some(&x.as_))?, "an API key"),
         };
         let bearer =
@@ -499,7 +584,6 @@ impl Engine {
                 ))
             }
         };
-        let path = self.expand(&x.path, true)?;
         let fields = match &x.fields {
             Some(f) => Some(
                 f.iter()
@@ -510,6 +594,25 @@ impl Engine {
         };
         let write = method != reqwest::Method::GET;
         let body = (method == reqwest::Method::POST).then(|| json!({}));
+        // `{<alias>.userId}` placeholders first, then `{{urn:<piece>:<as>}}`.
+        let path = self.expand(&x.path, true)?;
+        let path = self.expand_draft_urns(&path, true)?;
+        let contains = x
+            .contains
+            .as_deref()
+            .map(|t| {
+                self.expand(t, false)
+                    .and_then(|t| self.expand_draft_urns(&t, false))
+            })
+            .transpose()?;
+        let lacks = x
+            .lacks
+            .as_deref()
+            .map(|t| {
+                self.expand(t, false)
+                    .and_then(|t| self.expand_draft_urns(&t, false))
+            })
+            .transpose()?;
         let want = format!(
             "{} {} as `{}` with {} answers {}",
             x.method.to_uppercase(),
@@ -526,11 +629,19 @@ impl Engine {
             .api
             .call(method, &path, body.as_ref(), Some(&bearer), write)
             .map_err(conn)?;
+        let seen = scrub(&format!("{} {}", r.status, r.body), &[&bearer]);
         if r.status != x.status {
-            return Err(product(
-                want,
-                scrub(&format!("{} {}", r.status, r.body), &[&bearer]),
-            ));
+            return Err(product(want, seen));
+        }
+        if let Some(sub) = &contains {
+            if !r.body.contains(sub.as_str()) {
+                return Err(product(format!("{want} with `{sub}`"), seen));
+            }
+        }
+        if let Some(sub) = &lacks {
+            if r.body.contains(sub.as_str()) {
+                return Err(product(format!("{want} without `{sub}`"), seen));
+            }
         }
         if let Some(fields) = fields {
             let bad = super::field_problems(&r.json(), &fields);
@@ -540,6 +651,74 @@ impl Engine {
                     scrub(&bad.join("; "), &[&bearer]),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Writes a draft of the piece as `as`. The URN's `{{name}}` becomes
+    /// `<piece>-<as>-<scenario>-<runTag>`, so each identity writes a row of its own and an owner
+    /// check never decides the answer.
+    pub(super) fn put_draft(&mut self, p: &PutDraft, scenario_id: &str) -> Result<(), Fail> {
+        let key = self.key_of(p.as_.as_deref())?;
+        let (kind, body) =
+            self.draft_body_of(&p.piece, p.as_.as_deref(), p.urn_of.as_deref(), scenario_id)?;
+        let coll = match kind {
+            PieceKind::Playbook => "playbooks",
+            PieceKind::Agent => "agents",
+            _ => {
+                return Err(scenario(
+                    format!("`{}` is a playbook or agent piece", p.piece),
+                    format!("kind {kind:?}"),
+                ))
+            }
+        };
+        let path = format!("/v1/{coll}");
+        let want = format!(
+            "PUT {path} as {} answers {}{}",
+            p.as_
+                .as_deref()
+                .map(|a| format!("`{a}`"))
+                .unwrap_or_else(|| "the bootstrap key".into()),
+            p.status,
+            p.contains
+                .as_deref()
+                .map(|s| format!(" with `{s}`"))
+                .unwrap_or_default()
+        );
+        let r = self
+            .api
+            .put_as(key.as_deref(), &path, &body)
+            .map_err(conn)?;
+        let seen = match &key {
+            Some(k) => scrub(&format!("{} {}", r.status, r.body), &[k]),
+            None => format!("{} {}", r.status, r.body),
+        };
+        if r.status != p.status {
+            return Err(product(want, seen));
+        }
+        if let Some(sub) = &p.contains {
+            if !r.body.contains(sub.as_str()) {
+                return Err(product(want, seen));
+            }
+        }
+        Ok(())
+    }
+
+    /// Promotes or demotes an `org` identity as the bootstrap key. A refusal is the harness's
+    /// failure, not the product's: the role change is arrangement, not the thing under test.
+    pub(super) fn set_role(&mut self, s: &SetRole) -> Result<(), Fail> {
+        let user_id = self.account(&s.as_)?.user_id.clone();
+        let path = format!("/v1/users/{}/publish-grant", crate::api::seg(&user_id));
+        let (verb, r) = match s.role {
+            RoleChange::Publisher => ("POST", self.api.post(&path, &json!({})).map_err(conn)?),
+            RoleChange::Member => ("DELETE", self.api.delete(&path).map_err(conn)?),
+        };
+        if !r.ok() {
+            return Err(Fail::new(
+                Class::Harness,
+                format!("{verb} {path} for `{}` is accepted", s.as_),
+                format!("{} {}", r.status, r.body),
+            ));
         }
         Ok(())
     }
@@ -641,11 +820,71 @@ mod tests {
         assert!(
             serde_yaml::from_str::<IdentityRequest>("{ as: m, path: /v1/me, status: 1 }").is_err()
         );
+        assert_eq!((x.contains, x.lacks), (None, None));
+        let x: IdentityRequest = serde_yaml::from_str(
+            "{ as: m, credential: key, path: /v1/me, status: 200, contains: a, lacks: b }",
+        )
+        .unwrap();
+        assert_eq!(
+            (x.contains.as_deref(), x.lacks.as_deref()),
+            (Some("a"), Some("b"))
+        );
         let x: IdentityRequest = serde_yaml::from_str(
             "{ as: m, credential: key, path: /v1/me, status: 200, fields: { userId: { matches: '^usr_' } } }",
         )
         .unwrap();
         assert_eq!(x.fields.map(|f| f.len()), Some(1));
+    }
+
+    #[test]
+    fn put_draft_and_set_role_parse_and_reject_unknown_keys() {
+        let p: PutDraft = serde_yaml::from_str("{ piece: probe, status: 403 }").unwrap();
+        assert_eq!((p.as_.as_deref(), p.contains.as_deref()), (None, None));
+        let p: PutDraft =
+            serde_yaml::from_str("{ piece: probe, as: m, status: 403, contains: x }").unwrap();
+        assert_eq!(
+            (p.as_.as_deref(), p.contains.as_deref()),
+            (Some("m"), Some("x"))
+        );
+        assert!(serde_yaml::from_str::<PutDraft>("{ as: m, status: 200 }").is_err());
+        assert!(serde_yaml::from_str::<PutDraft>("{ piece: p, status: 200, lacks: x }").is_err());
+        let p: PutDraft =
+            serde_yaml::from_str("{ piece: probe, as: m2, urnOf: m1, status: 400 }").unwrap();
+        assert_eq!(p.urn_of.as_deref(), Some("m1"));
+        let p: PutDraft = serde_yaml::from_str("{ piece: probe, status: 200 }").unwrap();
+        assert_eq!(p.urn_of, None);
+        assert!(serde_yaml::from_str::<PutDraft>("{ piece: p, status: 200, urn_of: m1 }").is_err());
+
+        let r: SetRole = serde_yaml::from_str("{ as: m, role: publisher }").unwrap();
+        assert_eq!(r.role, RoleChange::Publisher);
+        let r: SetRole = serde_yaml::from_str("{ as: m, role: member }").unwrap();
+        assert_eq!(r.role, RoleChange::Member);
+        assert!(serde_yaml::from_str::<SetRole>("{ as: m, role: owner }").is_err());
+        assert!(serde_yaml::from_str::<SetRole>("{ role: member }").is_err());
+    }
+
+    #[test]
+    fn urn_placeholders_expand_per_identity_and_encode_in_paths() {
+        let find = |piece: &str, who: &str| {
+            (piece == "probe" && who == "pub").then(|| "urn:vam:agent:h/e2e/probe-pub".to_string())
+        };
+        assert_eq!(
+            expand_urns("/v1/agents/{{urn:probe:pub}}/versions", true, find).unwrap(),
+            "/v1/agents/urn%3Avam%3Aagent%3Ah%2Fe2e%2Fprobe-pub/versions"
+        );
+        assert_eq!(
+            expand_urns("a {{urn:probe:pub}} b {{urn:probe:pub}}", false, find).unwrap(),
+            "a urn:vam:agent:h/e2e/probe-pub b urn:vam:agent:h/e2e/probe-pub"
+        );
+        assert_eq!(
+            expand_urns("{{urn:probe:member}}", false, find).unwrap_err(),
+            "probe:member"
+        );
+        // The world's own `{{urn:<piece>}}` and plain text pass through.
+        assert_eq!(
+            expand_urns("x {{urn:probe}} {{name}} {{urn:", false, find).unwrap(),
+            "x {{urn:probe}} {{name}} {{urn:"
+        );
     }
 
     #[test]

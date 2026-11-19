@@ -1,6 +1,11 @@
 ---
 title: Playbooks (playbook.json)
 description: Author a host-tracked playbook with steps, outcomes, and preconditions. Prose-only procedures belong in skills.
+status: shipped
+proves:
+  - crates/vam-cli/tests/playbook_put_cli.rs
+  - matching-request-starts-the-playbook
+  - gate-decided-finishes-the-run
 ---
 
 Read [Authoring model](/authoring/model/) for how a playbook attaches to an agent, how `requires` resolves, and `vam agent check`. This page is the playbook file.
@@ -220,7 +225,7 @@ A playbook may declare skills and capabilities the procedure needs. `requires` i
 }
 ```
 
-Write each skill as a URN. Leave `version` and `digest` off. On a draft run the host resolves that URN to the agent owner's draft of the skill when one exists, otherwise to the latest release. Release of the playbook freezes the URN to a version and a digest. A skill that exists only as a draft blocks that release.
+Write each skill as a URN. Leave `version` and `digest` off. On a draft run the host resolves that URN to the agent owner's draft of the skill when one exists and the owner authors by live role (publisher or above), otherwise to the latest release. A member-owned draft always gets the latest release; see [Member agents](/orchestrator/member-agents/#running-it). Release of the playbook freezes the URN to a version and a digest. A skill that exists only as a draft blocks that release.
 
 `capabilities` uses the same tokens as a skill manifest: `tool:`, `egress:`, `secret:`, or `fs:` plus a non-empty remainder. They describe what the procedure claims to need. They do not grant the call.
 

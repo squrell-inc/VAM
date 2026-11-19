@@ -1,6 +1,25 @@
 ---
 title: VAM CLI Command Reference
 description: Complete reference for the vam command-line client — managing runs, approvals, secrets, sessions, keys, and catalog specs.
+status: shipped
+proves:
+  - node-reports-the-isolation-it-runs
+  - crates/vam-orchestrator/tests/api_tests.rs
+  - crates/vam-orchestrator/tests/login_tests.rs
+  - member-changes-own-password-and-signs-in-with-the-new-one
+  - crates/vam-orchestrator/src/paging_store_tests.rs::runs_page_newest_first_by_rowid_cursor
+  - crates/vam-cli/tests/cli_tests.rs
+  - crates/vam-cli/tests/agent_check_cli.rs
+  - plain-chat-gets-a-reply
+  - crates/vam-orchestrator/tests/evidence_pack_test.rs
+  - crates/vam-orchestrator/tests/workspace_files_tests.rs
+  - crates/vam-orchestrator/tests/trajectory_replay_test.rs
+  - a-publisher-saves-a-draft-agent-and-runs-it-by-ref
+  - email-username-signs-in-in-any-letter-case
+  - new-user-gets-a-generated-id-it-cannot-choose
+  - username-differing-only-in-letter-case-is-refused
+  - user-path-resolves-by-id-then-by-login-name
+  - generated-id-and-email-login-survive-a-restart
 ---
 
 The **`vam`** binary (`crates/vam-cli`) is a control-plane client that communicates exclusively with the `vamd` daemon via HTTP REST APIs. It enforces a strict security boundary by never directly touching Firecracker, cgroups, or host SQLite databases.
@@ -186,6 +205,8 @@ vam run --file examples/jira-assistant/run.json --follow
 vam run --file ./examples/bun-assistant --prompt "List all files in workspace" --follow
 ```
 
+An `agent.json` (and a `playbook.json`) in the run file's directory is saved first, as your draft, with `PUT /v1/agents` (and `PUT /v1/playbooks`). `agent.json` needs `agents:draft` (every role has it; a member's agent must be in their namespace and use released parts, see [Member agents](/orchestrator/member-agents/)) or `catalog:write`. `playbook.json` needs `catalog:write`: a publisher or the bootstrap key. The example run files use `local.vam.dev/vam/…` URNs, which are outside a member's namespace. If vamd refuses the save, the CLI prints its message and a hint, and no run starts. The run then names the saved draft by `agentRef` (and `playbookRef`) at version `1.0.0-draft`. `POST /v1/runs` itself takes no inline agent or playbook. A rerun after the CLI upgrade lands in the agent's draft Space, so a thread label used before starts fresh. `agent.json` without `resourceId.urn`, or a run file whose `agentRef` names another URN than `agent.json`, exits `2` before any request. To run a released agent, use `vam run <agent> -p ...`.
+
 `--file` is the only way to pass a run file. `vam run start <path>` exits `2` and tells you to use `--file`. `vam run start --file <path>` still loads that file.
 
 ### Continue a thread
@@ -334,6 +355,8 @@ Manage low-level microVM session instances (useful for debugging and state inspe
 
 Publish, inspect, and validate declarative specification files in the orchestrator catalog. Repo `examples/` trees are samples on disk; a fresh vamd catalog is empty until you `put` them.
 
+A member may `vam agent put` and `vam agent permissions set` an agent in their own namespace, built from released parts. Skills, playbooks, policies and release need a publisher. See [Member agents](/orchestrator/member-agents/).
+
 ```bash
 # Register an agent specification
 vam agent put examples/jira-assistant/agent.json
@@ -423,7 +446,7 @@ For a full publish → run walkthrough on Mac + Lima, see [Publish a Skill Packa
 
 ## 6. API Keys & Authorization (`vam keys`)
 
-Manage long-lived API keys. Minted keys bind to a user. `--user-id` takes a user id or a login name (any letter case; an id wins if both match). The first-start **bootstrap key is operator-only** (`keys:admin`, `brokers:admin`, plus `users:admin` and `publish:grant`); tenant keys never receive `keys:admin` or `brokers:admin`. Empty scope lists use the owner's role defaults (`member` / `publisher` / `org_admin` / `operator`). CI should keep using `VAM_API_KEY` (the bootstrap or another operator key). Org-admin `publish:grant` grant/revoke is `POST`/`DELETE /v1/users/{id}/publish-grant`. Catalog ownership reassignment is `POST /v1/catalog/reassign-owner`. User create/list/deactivate is `POST`/`GET /v1/users` and `POST /v1/users/{id}/deactivate`. Deactivate does not unpublish.
+Manage long-lived API keys. Minted keys bind to a user. `--user-id` takes a user id or a login name (any letter case; an id wins if both match). The first-start **bootstrap key is operator-only** (`keys:admin`, `brokers:admin`, plus `users:admin` and `publish:grant`); tenant keys never receive `keys:admin` or `brokers:admin`. An empty scope list follows the owner's live role (`member` / `publisher` / `org_admin` / `operator`); a list is capped by the live role. CI should keep using `VAM_API_KEY` (the bootstrap or another operator key). Org-admin `publish:grant` grant/revoke is `POST`/`DELETE /v1/users/{id}/publish-grant`. Catalog ownership reassignment is `POST /v1/catalog/reassign-owner`. User create/list/deactivate is `POST`/`GET /v1/users` and `POST /v1/users/{id}/deactivate`. Deactivate does not unpublish.
 
 ```bash
 # Create a new API key with a descriptive label (bound to the caller)

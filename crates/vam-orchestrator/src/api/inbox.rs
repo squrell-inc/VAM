@@ -71,7 +71,6 @@ pub struct Candidate<'a> {
     pub state: &'a AppState,
     pub caller: &'a RunCaller,
     pub spec: &'a RunSpec,
-    pub has_inline: bool,
     pub requested_urn: Option<&'a str>,
     pub workspace_id: &'a str,
     pub thread_ref: &'a str,
@@ -468,7 +467,7 @@ pub fn admit(c: Candidate<'_>) -> Result<Admit, ApiError> {
     // A message to a running task carries only a prompt. A triggered fire is a whole run
     // that waits its turn, so it keeps its playbook and inputs.
     if !triggered {
-        if c.has_inline || c.spec.playbook_ref.is_some() {
+        if c.spec.playbook_ref.is_some() {
             return Err(invalid("a message to a running task carries only a prompt").into());
         }
         if let Some(key) = foreign_input(c.spec) {

@@ -26,7 +26,7 @@ use vam_spec::v1::{AgentPermissions, AgentSpec, SideEffectClass, SkillManifest, 
 use vam_spec::{mcp_server_id, validate_agent_permissions};
 
 use crate::catalog_publish::load_agent_draft;
-use crate::catalog_resolve::{resolve_ref_visible, ArtifactKind, ResolveMode};
+use crate::catalog_resolve::{resolve_ref_visible, run_resolve_context, ArtifactKind, ResolveMode};
 use crate::error::OrchestratorError;
 use crate::mcp_registry::{
     mcp_tool_side_effect, mcp_tool_source_rule, plan_mcp_tools, McpConnection,
@@ -159,6 +159,8 @@ struct LoadedAgent {
     origin: String,
     resolve_owner: String,
     mode: ResolveMode,
+    /// The loaded agent is a draft (an explicit `-draft` version, or no version).
+    is_draft: bool,
 }
 
 struct PreparedTool {
@@ -179,7 +181,7 @@ pub fn effective_permissions(
     let prepared = visible_tools(store, &loaded, caller_user_id, include_foreign_drafts)?;
     let legacy = uses_legacy_policy(&loaded.spec);
     let (tools, internet) = if legacy {
-        let cedar = legacy_cedar(store, &loaded.spec, urn, &loaded.resolve_owner)?;
+        let cedar = legacy_cedar(store, &loaded.spec, urn, &loaded.resolve_owner, loaded.mode)?;
         (legacy_rows(urn, &loaded, &prepared, &cedar)?, None)
     } else {
         let permissions = permissions_of(&loaded.spec);
@@ -436,7 +438,7 @@ fn legacy_tool_explanation(
     row: &crate::session_targets::SessionToolTarget,
     source: &str,
 ) -> Result<PermissionExplanation, OrchestratorError> {
-    let cedar = legacy_cedar(store, &loaded.spec, urn, &loaded.resolve_owner)?;
+    let cedar = legacy_cedar(store, &loaded.spec, urn, &loaded.resolve_owner, loaded.mode)?;
     let named = [NamedTool {
         name: row.tool_name.clone(),
         side_effect: Some(row.side_effect),
@@ -642,52 +644,53 @@ fn load_agent(
             let spec =
                 store.get_agent_at_version_visible(urn, &version, caller, include_foreign)?;
             let version_label = version_label(&version);
+            // The owner and mode a run of this agent resolves in.
+            let (resolve_owner, mode) =
+                run_resolve_context(store, &run_spec_for(urn, &version), caller);
             Ok(LoadedAgent {
                 spec,
                 origin: format!("agent v{version_label}"),
                 version_label,
-                resolve_owner: caller.to_string(),
-                mode: ResolveMode::Release,
+                resolve_owner,
+                mode,
+                is_draft: version.prerelease == "draft",
             })
         }
         None => {
             let spec = load_agent_draft(store, urn, caller, include_foreign)?;
+            let draft = Version {
+                major: 1,
+                minor: 0,
+                patch: 0,
+                prerelease: "draft".to_string(),
+                build: String::new(),
+            };
+            let (resolve_owner, mode) =
+                run_resolve_context(store, &run_spec_for(urn, &draft), caller);
             Ok(LoadedAgent {
                 spec,
                 version_label: "draft".into(),
                 origin: "agent draft".into(),
-                resolve_owner: draft_owner(store, urn, caller, include_foreign)?,
-                mode: ResolveMode::Draft,
+                resolve_owner,
+                mode,
+                is_draft: true,
             })
         }
     }
 }
 
-fn draft_owner(
-    store: &SqliteWorkflowStore,
-    urn: &str,
-    caller: &str,
-    include_foreign: bool,
-) -> Result<String, OrchestratorError> {
-    if !include_foreign {
-        return Ok(caller.to_string());
+/// The run spec a run of `urn` at `version` would carry, for [`run_resolve_context`].
+fn run_spec_for(urn: &str, version: &Version) -> vam_spec::v1::RunSpec {
+    vam_spec::v1::RunSpec {
+        agent_ref: Some(vam_spec::v1::ResourceRef {
+            resource_id: Some(vam_spec::v1::ResourceId {
+                urn: urn.to_string(),
+            }),
+            version: Some(version.clone()),
+            ..Default::default()
+        }),
+        ..Default::default()
     }
-    let records = store.list_agent_records_visible(caller, true)?;
-    for record in records {
-        let matches = record
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.resource_id.as_ref())
-            .is_some_and(|id| id.urn == urn);
-        let is_draft = record
-            .version
-            .as_ref()
-            .is_some_and(|version| version.prerelease == "draft");
-        if matches && is_draft {
-            return Ok(record.owner_user_id);
-        }
-    }
-    Ok(caller.to_string())
 }
 
 fn visible_tools(
@@ -932,7 +935,7 @@ fn source_rule_for(
 fn provenance_for(loaded: &LoadedAgent, caller: &str) -> RunProvenance {
     RunProvenance {
         agent_origin: loaded.origin.clone(),
-        owner_draft_run: loaded.mode == ResolveMode::Draft && loaded.resolve_owner == caller,
+        owner_draft_run: loaded.is_draft && loaded.resolve_owner == caller,
     }
 }
 
@@ -949,9 +952,10 @@ fn legacy_cedar(
     agent: &AgentSpec,
     urn: &str,
     owner: &str,
+    mode: ResolveMode,
 ) -> Result<String, OrchestratorError> {
     let base = match capability_policy_urn(agent) {
-        Some(policy_urn) => load_legacy_policy(store, agent, &policy_urn, owner)?,
+        Some(policy_urn) => load_legacy_policy(store, agent, &policy_urn, owner, mode)?,
         None => DEFAULT_BUILTIN_FALLBACK_POLICY.to_string(),
     };
     let monitored = monitored_tools_from_agent(agent);
@@ -968,12 +972,33 @@ fn load_legacy_policy(
     agent: &AgentSpec,
     policy_urn: &str,
     owner: &str,
+    mode: ResolveMode,
 ) -> Result<String, OrchestratorError> {
-    let pinned = agent
+    let policy_ref = agent
         .capability_policy
         .as_ref()
-        .and_then(|policy| policy.policy_ref.as_ref())
-        .and_then(|reference| reference.version.as_ref());
+        .and_then(|policy| policy.policy_ref.as_ref());
+    if mode == ResolveMode::ReleasedOnly {
+        // The run pins this ref through the same resolver; show the Cedar it will load.
+        let pinned = match policy_ref {
+            Some(reference) => {
+                resolve_ref_visible(store, ArtifactKind::Policy, reference, owner, mode, false)
+                    .ok()
+                    .and_then(|pinned| pinned.reference.version)
+            }
+            None => None,
+        };
+        let looked_up = match pinned {
+            Some(version) => store.get_policy_at_version_visible(policy_urn, &version, owner),
+            None => store.get_policy(policy_urn),
+        };
+        return match looked_up {
+            Ok(record) => Ok(record.cedar),
+            Err(OrchestratorError::NotFound(_)) => Ok(DEFAULT_BUILTIN_FALLBACK_POLICY.to_string()),
+            Err(err) => Err(err),
+        };
+    }
+    let pinned = policy_ref.and_then(|reference| reference.version.as_ref());
     if let Some(version) = pinned {
         match store.get_policy_at_version_visible(policy_urn, version, owner) {
             Ok(record) => return Ok(record.cedar),
@@ -981,7 +1006,12 @@ fn load_legacy_policy(
             Err(err) => return Err(err),
         }
     }
-    match store.get_policy_visible(policy_urn, owner) {
+    let looked_up = if mode == ResolveMode::Draft {
+        store.get_policy_visible(policy_urn, owner)
+    } else {
+        store.get_policy(policy_urn)
+    };
+    match looked_up {
         Ok(record) => Ok(record.cedar),
         Err(OrchestratorError::NotFound(_)) => match store.get_policy(policy_urn) {
             Ok(record) => Ok(record.cedar),
@@ -1117,6 +1147,37 @@ mod tests {
         );
         assert_eq!(default_label("skill:jira/*"), None);
         assert_eq!(default_label("approvalRequired"), None);
+    }
+
+    #[test]
+    fn a_members_own_draft_is_released_only_and_stays_an_owner_draft_run() {
+        use vam_spec::v1::{agent_spec::InstructionSource, ResourceId};
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store.create_user("mia", "mia").expect("member");
+        let urn = "urn:vam:agent:local.vam.dev/mia/mine";
+        let agent = AgentSpec {
+            resource_id: Some(ResourceId {
+                urn: urn.to_string(),
+            }),
+            display_name: "Mine".to_string(),
+            description: "test".to_string(),
+            role: "tester".to_string(),
+            instruction_source: Some(InstructionSource::SystemInstructions("go".to_string())),
+            ..Default::default()
+        };
+        store
+            .publish_agent_draft_with_owner(&agent, "mia")
+            .expect("draft");
+        let loaded = load_agent(&store, "mia", false, urn, None).expect("load");
+        assert_eq!(loaded.mode, ResolveMode::ReleasedOnly);
+        assert!(provenance_for(&loaded, "mia").owner_draft_run);
+        // A publisher's draft is Draft mode, and still an owner draft run.
+        store
+            .set_user_role("mia", crate::users::UserRole::Publisher)
+            .expect("promote");
+        let loaded = load_agent(&store, "mia", false, urn, None).expect("load");
+        assert_eq!(loaded.mode, ResolveMode::Draft);
+        assert!(provenance_for(&loaded, "mia").owner_draft_run);
     }
 
     #[test]
