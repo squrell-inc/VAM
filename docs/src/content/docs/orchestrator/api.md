@@ -11,6 +11,7 @@ proves:
   - vamd-refuses-plain-http-by-default
   - api-rate-limits-a-flood
   - node-reports-the-isolation-it-runs
+  - node-status-shows-the-node-and-cli-versions
   - oversize-response-with-a-secret-never-reaches-the-guest
   - member-changes-own-password-and-signs-in-with-the-new-one
   - password-change-signs-out-every-session-and-keeps-api-keys
@@ -63,6 +64,8 @@ every role, and any other `holder` is a 400 (`list_keys`, `api/mod.rs:460-490`).
 `GET /v1/node` reports the node's capacity, draining flag and the isolation it runs under
 (`api/mod.rs:523-570`). `GET /v1/health` returns only a serving status, `NOT_SERVING` while the
 node is not ready or is draining (`api/mod.rs:382-393`). Proved by `node-reports-the-isolation-it-runs`.
+
+`status.build` names the build the node runs: `version` (`0.1.0` on a release build, `0.1.0+dev.14` on any other), `commit` (short sha, `+dirty` when the tree had changes, or `unknown`), `commitDate` (`YYYY-MM-DD`, empty when unknown) and `channel` (`release` or `dev`). An older node has no `build`. `vam node status` prints it; see [CLI](/getting-started/cli/). Proved by `node-status-shows-the-node-and-cli-versions`.
 
 ## Auth
 

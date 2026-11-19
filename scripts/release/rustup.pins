@@ -1,0 +1,8 @@
+# rustup-init, pinned by sha256 (scripts/release/install-rust.sh; Linux glibc hosts and containers
+# where rustup is not already installed). One line per platform:
+#   platform  version  url  sha256
+# Read 2026-11-18: each hash is the sha256 of the downloaded file and equals the one published
+# beside it (<url>.sha256) on static.rust-lang.org. To bump: change the version in both URLs and
+# both hashes. The toolchain itself (1.97.0) is verified by rustup against Rust's signed manifests.
+linux-x86_64 1.29.3 https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
+linux-aarch64 1.29.3 https://static.rust-lang.org/rustup/archive/1.29.3/aarch64-unknown-linux-gnu/rustup-init 9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282

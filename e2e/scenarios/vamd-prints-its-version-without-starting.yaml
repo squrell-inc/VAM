@@ -1,0 +1,23 @@
+id: vamd-prints-its-version-without-starting
+title: vamd --version prints one line and starts nothing, even beside a broken config
+description: >
+  `vamd --version`, run in a directory whose `.env` holds half of a TLS pair (which would stop a
+  start), exits 0 within the timeout and prints one line `vamd <version> (<commit>)`. It reads no
+  env file and opens nothing: no state, no TLS material and no key appear in the tree.
+tags: [release]
+needs: process
+given: []
+when:
+  - cli:
+      bin: vamd
+      args: [--version]
+      cwd: root
+      root: { from: version/bad-config }
+      timeout: 10
+      exit: ok
+      unchanged: true
+      matches:
+        - '^vamd \d+\.\d+\.\d+(-rc\.\d+)?(\+dev(\.\d+)?)? \([0-9a-f]{7,}(\+dirty)?( \d{4}-\d{2}-\d{2})?\)$'
+guards:
+  - vam:crates/vam-orchestrator/src/bin/vamd.rs
+status: active

@@ -18,6 +18,7 @@ guards:
   - vam:crates/vam-runtime/src/main.rs
   - vam:scripts/base/Dockerfile
   - vam:scripts/base/pins
+  - vam:scripts/release/build-guest.sh
   - vam:scripts/build-rootfs.sh
 mock:
   - when: { step: write, afterTool: write_file }

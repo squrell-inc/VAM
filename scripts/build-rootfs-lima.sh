@@ -49,24 +49,10 @@ fi
 source "\$HOME/.cargo/env" 2>/dev/null || true
 rustup target add aarch64-unknown-linux-musl 2>/dev/null || true
 
-if [ -z "\${CC_aarch64_unknown_linux_musl:-}" ] && ! command -v aarch64-linux-musl-gcc >/dev/null 2>&1; then
-  if command -v musl-gcc >/dev/null 2>&1; then
-    export CC_aarch64_unknown_linux_musl="musl-gcc"
-  elif command -v gcc >/dev/null 2>&1; then
-    export CC_aarch64_unknown_linux_musl="gcc"
-  fi
-fi
-
 mkdir -p /tmp/lima "\$CACHE_DIR"
 
 echo "=== Building static VAM runtime binary (aarch64 musl) ==="
-RUSTFLAGS="-C target-feature=+crt-static" CARGO_TARGET_DIR="\$CARGO_TARGET_DIR" cargo build \\
-  --manifest-path "\$WORKSPACE_ROOT/Cargo.toml" \\
-  --target aarch64-unknown-linux-musl \\
-  --bin vam-runtime \\
-  --release
-
-BINARY_PATH="\$CARGO_TARGET_DIR/aarch64-unknown-linux-musl/release/vam-runtime"
+BINARY_PATH="\$(CARGO_TARGET_DIR="\$CARGO_TARGET_DIR" "\$WORKSPACE_ROOT/scripts/release/build-guest.sh" --target aarch64)"
 
 echo "=== Creating staging directory ==="
 sudo rm -rf "\$STAGING_DIR"

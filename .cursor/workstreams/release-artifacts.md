@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: release-artifacts
-current_phase: A (restructured 2026-11-18; waiting for the owner's approval of the breakdown)
+current_phase: A (all waves merged into feat/release-artifacts-a 2026-11-18; the close, RA-A.15, waits for the owner)
 base_branch: main (cross-cutting; Phase A from feat/release-artifacts-a, Phase B from feat/release-artifacts-b, one release PR each)
 design_docs:
   - design/release-artifacts.md
@@ -432,7 +432,7 @@ binaries, attestations), with no line yet.
 
 #### Items
 
-- [ ] **RA-A.1 Build info, read in the binary crates.**
+- [x] **RA-A.1 Build info, read in the binary crates.**
   - **Scope.** The rules are pure functions in one std-only file,
     `crates/vam-spec/build_info_logic.rs`: channel `release` only when
     `VAM_BUILD_CHANNEL=release`, the version then `CARGO_PKG_VERSION` exactly; otherwise
@@ -462,7 +462,7 @@ binaries, attestations), with no line yet.
   - **Turns green** (with RA-A.2): `cli-prints-its-version-and-commit`.
   - `Decide: NOW — locked decision 3 (not scored)`
 
-- [ ] **RA-A.2 Every binary prints it.**
+- [x] **RA-A.2 Every binary prints it.**
   - **Scope.** `vamd --version` (and `-V`) handled first in `main`, before `dotenvy::dotenv()`
     (`vamd.rs:157`): prints `BuildInfo::line("vamd")`, exits 0, reads no env file, opens nothing.
     The three brokers: `version` from the macro in their `#[command]`. `vamd`'s `main` builds its
@@ -481,7 +481,7 @@ binaries, attestations), with no line yet.
   - **Turns green:** `cli-prints-its-version-and-commit`, `vamd-prints-its-version-without-starting`.
   - `Decide: NOW — locked decision 3 (not scored)`
 
-- [ ] **RA-A.3 The node reports its build; `vam node status` shows both.**
+- [x] **RA-A.3 The node reports its build; `vam node status` shows both.**
   - **Scope.** Proto `NodeStatus`: `NodeBuild build = 16;` with `version`, `commit`,
     `commit_date`, `channel`. `get_node` fills it from the daemon's `BuildInfo` (an API test
     passes a fixed one). OpenAPI `NodeStatus` gains `build` and the three fields it already lacks
@@ -500,7 +500,7 @@ binaries, attestations), with no line yet.
   - **Turns green:** `node-status-shows-the-node-and-cli-versions`.
   - `Decide: NOW — locked decision 3 (not scored)`
 
-- [ ] **RA-A.4 `scripts/release/prepare.sh <version>`.**
+- [x] **RA-A.4 `scripts/release/prepare.sh <version>`.**
   - **Scope.** `scripts/release/lib.sh`, shared with the guards (RA-A.6): parse `X.Y.Z[-rc.N]`,
     compare by semver (an rc sorts below its final), list `v*` tags. `prepare.sh` refuses a
     malformed version, a version not greater than every `v*` tag and a dirty tree; sets
@@ -519,7 +519,7 @@ binaries, attestations), with no line yet.
   - **Tests.** `scripts/release/test/run.sh`.
   - `Decide: NOW — locked decision 2 (not scored)`
 
-- [ ] **RA-A.5 `deny.toml` advisories and bans.**
+- [x] **RA-A.5 `deny.toml` advisories and bans.**
   - **Scope.** `[advisories]` (RustSec database, `yanked = "deny"`, each `ignore` with id, reason
     and a review date), `[bans]` (deny `openssl` and `openssl-sys`, `wildcards = "deny"`,
     `multiple-versions = "warn"`: 34 duplicates today), `[sources]` (crates.io only,
@@ -532,7 +532,7 @@ binaries, attestations), with no line yet.
   - **Tests.** `cargo deny check`, `scripts/e2e/check-release-gate.sh`.
   - `Decide: NOW — locked decision 5 (guard 7) and design §5.4 (not scored)`
 
-- [ ] **RA-A.6 The guard script and its tests.**
+- [x] **RA-A.6 The guard script and its tests.**
   - **Scope.** `scripts/release/guards.sh`: bash, git and jq; inputs only from the environment
     (`VERSION`, `COMMIT`, `DRY_RUN`, `REF`, `REPO`); one function per guard (design §4.2), each
     failing with its reason; the GitHub API through `gh api`, or a fixture directory
@@ -550,7 +550,7 @@ binaries, attestations), with no line yet.
   - **Tests.** `scripts/release/test/run.sh`.
   - `Decide: NOW — locked decision 5 (not scored)`
 
-- [ ] **RA-A.7 `release.yml` skeleton, the workflow lint, `rust.yml` fixes.**
+- [x] **RA-A.7 `release.yml` skeleton, the workflow lint, `rust.yml` fixes.**
   - **Scope.** `.github/workflows/release.yml`: `on: workflow_dispatch` only (`version`, `commit`,
     `dry_run` default `true`), top-level `permissions: {}`, `concurrency: { group: release,
     cancel-in-progress: false }`. Job `validate` (`contents: read`, `actions: read`): checkout with
@@ -572,7 +572,7 @@ binaries, attestations), with no line yet.
   - **Tests.** `scripts/release/test/run.sh`; `actionlint .github/workflows/*.yml`.
   - `Decide: NOW — locked decisions 4, 5, 8, 9 (not scored)`
 
-- [ ] **RA-A.8 One way to build the guest init.**
+- [x] **RA-A.8 One way to build the guest init.**
   - **Scope.** `scripts/release/build-guest.sh [--target x86_64|aarch64] [--out PATH]` with the
     flags of `build-rootfs.sh:42-57` exactly (tracker open question 9: no `release-guest`
     profile). `build-rootfs.sh` and `build-rootfs-lima.sh` call it. `guest_build_guards.rs` checks
@@ -586,7 +586,7 @@ binaries, attestations), with no line yet.
   - **Tests.** `cargo test -p vam-runtime --test guest_build_guards`; the lane.
   - `Decide: NOW — locked decision 11 ("built exactly as build-rootfs.sh builds it") (not scored)`
 
-- [ ] **RA-A.9 `build-rootfs.sh --runtime PATH`; the recipe stays a Vamfile.**
+- [x] **RA-A.9 `build-rootfs.sh --runtime PATH`; the recipe stays a Vamfile.**
   - **Scope.** Inject the given binary (checked: a static ELF for the target architecture) without
     cargo or `musl-gcc`; the recipe directory relative to the script, so it runs from
     `share/vam/base/`; staging in `mktemp -d`; `sudo` only when not root.
@@ -602,7 +602,7 @@ binaries, attestations), with no line yet.
   - **Tests.** `cargo test -p vam-runtime --test guest_build_guards`; the recipe test; the lane.
   - `Decide: NOW — locked decision 13 (not scored)`
 
-- [ ] **RA-A.10 The build matrix, the kit, the reusable workflow.**
+- [x] **RA-A.10 The build matrix, the kit, the reusable workflow.**
   - **Scope.** First a short local spike (about 10 minutes): `cargo zigbuild --target
     x86_64-unknown-linux-gnu.2.34` of `vamd` and the notify broker (`aws-lc-sys`, bundled
     SQLite), wrapped by `cargo auditable`, and `objdump -T` of the result (zig from PyPI's pinned
@@ -635,7 +635,7 @@ binaries, attestations), with no line yet.
     about 10 minutes); the PR run.
   - `Decide: NOW — locked decisions 8, 11, 13 (not scored)`
 
-- [ ] **RA-A.11 `vam node init --kit DIR`.**
+- [x] **RA-A.11 `vam node init --kit DIR`.**
   - **Scope.** Default: the `share/vam/base/` beside the running `vam` when it holds
     `manifest.json`; precedence per open question 7. Checks the kit's files against
     `manifest.json`; runs the kit's `build-rootfs.sh --runtime <bundle>/vam-runtime` with
@@ -649,7 +649,7 @@ binaries, attestations), with no line yet.
     `node-init-from-a-newer-bundle-keeps-the-state`.
   - `Decide: NOW — locked decision 13 (not scored)`
 
-- [ ] **RA-A.12 `assemble`.**
+- [x] **RA-A.12 `assemble`.**
   - **Scope.** A job in `release-build.yml` (so PR runs prove it): download the build artifacts;
     `SHA256SUMS`; `scripts/release/scan.sh` (gitleaks over the extracted archives with
     `.gitleaks.toml`, the string scans, the refused names; one list shared with
@@ -666,7 +666,7 @@ binaries, attestations), with no line yet.
   - **Tests.** `scripts/release/test/run.sh`; the PR run.
   - `Decide: NOW — locked decisions 10, 12 (not scored)`
 
-- [ ] **RA-A.13 The `publish` job.**
+- [x] **RA-A.13 The `publish` job.**
   - **Scope.** First, confirm on GitHub's documentation (REST "create a release", `gh release
     create`) that a draft release does not create its tag until it is published; record the
     source in the PR. Job in `release.yml`: `environment: release`; `permissions: contents:
@@ -689,7 +689,7 @@ binaries, attestations), with no line yet.
   - **Tests.** `scripts/release/test/run.sh`.
   - `Decide: NOW — locked decisions 6, 7, 9, 10 (not scored)`
 
-- [ ] **RA-A.14 Docs.** New `getting-started/releases.md` (sidebar in `docs/astro.config.mjs`;
+- [x] **RA-A.14 Docs.** New `getting-started/releases.md` (sidebar in `docs/astro.config.mjs`;
   which archive for which machine, verify, install a node from the bundle, the rc's own URLs per
   open question 13); `installation.md` leads with the release (the source build second);
   `windows-wsl.md` (the Linux `vam` and node bundle inside WSL2); `cli.md` (`vam --version`, the
@@ -708,14 +708,14 @@ binaries, attestations), with no line yet.
 
 | Wave | Items | Turns green | Repo | Model | Budget | Depends on | Status | PR |
 |---|---|---|---|---|---|---|---|---|
-| 0 | scenarios (+ the runner `cli` fields Phase A uses) | — (pending, red for the right reason) | vam | Sonnet low | 75 min | — (lane A1) | [ ] | |
-| 1 | RA-A.1, RA-A.2, RA-A.3 | `cli-prints-its-version-and-commit`, `vamd-prints-its-version-without-starting`, `node-status-shows-the-node-and-cli-versions` | vam | Sonnet medium: crosses `vam-spec`, `vam-cli`, `vam-orchestrator` and three brokers, and adds a proto field and an API shape | 180 min | 0 (lane A1) | [ ] | |
-| 2 | RA-A.4, RA-A.5, RA-A.6, RA-A.7 | — (release script tests, guard tests, workflow lint, `cargo deny check`) | vam | Sonnet high: the guards decide what can be published, and the workflow's permissions are the release boundary | 180 min | — (lane A2) | [ ] | |
-| 3 | RA-A.8, RA-A.9 | — (the lane boots the guest built by `build-guest.sh` and injected with `--runtime`) | vam | Sonnet low | 90 min | — (lane A3) | [ ] | |
-| 4 | RA-A.10 | — (the PR's `release-build.yml` run builds every `v0.1.0` asset; glibc ≤ 2.34) | vam | Sonnet medium: four runner OSes, zigbuild with C dependencies and path remapping the plan cannot fully specify | 180 min | 2, 3 (lane A2) | [ ] | |
-| 5 | RA-A.11 | `node-init-from-a-release-bundle-needs-no-checkout`, `node-init-from-a-newer-bundle-keeps-the-state` | vam | Sonnet medium: precedence and stamp rules the plan cannot fully specify | 120 min | 0, 1 (`node.rs`), 3 (`--runtime`) (lane A1) | [ ] | |
-| 6 | RA-A.12, RA-A.13 | — (PR run: `SHA256SUMS`, notes, scans; publish lint and fixture tests) | vam | Sonnet high: write permissions, tag creation and attestation | 180 min | 4 (lane A2) | [ ] | |
-| 7 | RA-A.14 | — | vam | Sonnet low | 60 min | 1, 5; beside 6 (lane A1) | [ ] | |
+| 0 | scenarios (+ the runner `cli` fields Phase A uses) | — (pending, red for the right reason) | vam | Sonnet low | 75 min | — (lane A1) | [x] | #31 |
+| 1 | RA-A.1, RA-A.2, RA-A.3 | `cli-prints-its-version-and-commit`, `vamd-prints-its-version-without-starting`, `node-status-shows-the-node-and-cli-versions` | vam | Sonnet medium: crosses `vam-spec`, `vam-cli`, `vam-orchestrator` and three brokers, and adds a proto field and an API shape | 180 min | 0 (lane A1) | [x] | #41 |
+| 2 | RA-A.4, RA-A.5, RA-A.6, RA-A.7 | — (release script tests, guard tests, workflow lint, `cargo deny check`) | vam | Sonnet high: the guards decide what can be published, and the workflow's permissions are the release boundary | 180 min | — (lane A2) | [x] | #32 |
+| 3 | RA-A.8, RA-A.9 | — (the lane boots the guest built by `build-guest.sh` and injected with `--runtime`) | vam | Sonnet low | 90 min | — (lane A3) | [x] | #30 |
+| 4 | RA-A.10 | — (the PR's `release-build.yml` run builds every `v0.1.0` asset; glibc ≤ 2.34) | vam | Sonnet medium: four runner OSes, zigbuild with C dependencies and path remapping the plan cannot fully specify | 180 min | 2, 3 (lane A2) | [x] | #47 |
+| 5 | RA-A.11 | `node-init-from-a-release-bundle-needs-no-checkout`, `node-init-from-a-newer-bundle-keeps-the-state` | vam | Sonnet medium: precedence and stamp rules the plan cannot fully specify | 120 min | 0, 1 (`node.rs`), 3 (`--runtime`) (lane A1) | [x] | #48 |
+| 6 (split: 6a RA-A.12, 6b RA-A.13) | RA-A.12, RA-A.13 | — (PR run: `SHA256SUMS`, notes, scans; publish lint and fixture tests) | vam | Sonnet high: write permissions, tag creation and attestation | 180 min | 4 (lane A2) | [x] | #56, #64 |
+| 7 | RA-A.14 | — | vam | Sonnet low | 60 min | 1, 5; beside 6 (lane A1) | [x] | #55 |
 | close | RA-A.15 | — (`v0.1.0-rc.1` published and verified) | vam | orchestrator and owner | 150 min | A release merged; prepare PR; the owner's §9 settings | [ ] | |
 
 Lane (the microVM lane runs on the PR): W0 yes (`crates/vam-e2e`, `e2e/`), W1 yes
@@ -1147,3 +1147,4 @@ Each has a default; see design §10 for the reasoning.
 | 2026-11-17 | — | Owner review: version chosen at release time by a prepare PR (no post-release bump, dev builds `+dev.N`); Phase 3 gains broker install and `build-rootfs.sh --runtime`; recipe kept inside the Vamfile grammar (decision 13); new Phase 4 (aarch64 node for Lima) and Phase 5 (`vam dock`, `vam upgrade`); walkthrough in design §11. Still waiting for approval |
 | 2026-11-17 | 0-6 | **Breakdowns of all phases drafted** (phase-breakdown agent, Opus 5.5 high; the owner asked for the whole plan in one pass with parallel lanes; Phases 3-6 are drafts re-validated at phase start), waiting for the owner. New "Execution plan": one `feat/` base per phase, P1.W1-W2 ride the P0 release so `release.yml` reaches `main` early, lanes A-F with a file-order table, 12 owner gates, rc.1-rc.4 then `v0.1.0`, about 47 h on the critical path (about 88 h serial). Scenario delta: P0 4 new; P1 3 guards-only; P2 none (lint, scratch rehearsal, verified rc.1); P3 4 new, 2 changed; P4 none new (arm64 run of three `node-init-*`, Lima run); P5 3 new; P6 none. Waves: P0 4 (low, medium, medium, low), P1 4 + close (high, low, medium, medium), P2 1 + close (high), P3 8 (low ×3, medium ×3, high, low), P4 3 + close (low, medium, low), P5 5 + close (low, medium, high, medium, low), P6 1 + close (low). Found in the code: `hsp.rs:489` is a test and `Register` carries no broker version back (RA-3.5); the Debian pin is already multi-arch; `rust.yml` cancels `main` push runs; guard 7 makes a run about 40 min; no `latest` release during the rcs; `node init` cannot register brokers without a key on a re-run (RA-3.6). Scoreboard: 0 green, 0 red (not written), 0 fix cycles |
 | 2026-11-18 | A, B, Final | **Plan restructured on the owner's decision** after an independent review (phase-breakdown agent, Opus 5.5 high), waiting for the owner's approval. Review findings: rc.1 was not installable (no kit until old Phase 3); guard 7 repeated the release gate the push run already ran (`rust.yml:121-123`); a dry run before each publish duplicated the approval gate; each of seven phases carried its own release overhead. Now: **Phase A** (rc.1: version identity, release scripts and workflow, `build-guest.sh` and `--runtime`, reusable `release-build.yml` with the kit, `vam node init --kit`, publish; 8 waves: low, medium, high, low, medium, medium, high, low), **Phase B** (rc.2: `vam dock`, `vam upgrade`, `install.sh`, `--broker` via the API; 6 waves: low, medium, high, medium, medium, low; own cloud session from day one), **Final** (`v0.1.0`, upgrade rc.2 to `v0.1.0` recorded), and **`v0.2.0`** (Lima and Windows, a minor; not broken down). Decisions changed: 3 (build info read in binary crates only), 5 (guard 7 is now `cargo deny check advisories`; builds beside `validate`), 7 (draft targets the commit, tag at publish; no scratch rehearsal, no routine dry run), 8 (reusable build workflow; AlmaLinux 9 fallback), 10 (SBOM files deferred), 11 (no proto asset; aarch64 and Windows to `v0.2.0`), 14 (brokers registered through the API), 15 (Windows to `v0.2.0`). Scenario delta: A 5 new + 3 guards-only; B 4 new + 1 changed; Final none. Estimate: about 21 h on the critical path (was 47 h), about 45 h serial (was 88 h). Scoreboard: 0 green, 0 red (not written), 0 fix cycles |
+| 2026-11-18 | A | **Phase A waves all merged into `feat/release-artifacts-a`** (orchestrator; wave agents Sonnet, medium or high). W3 #30 (`build-guest.sh`, `build-rootfs.sh --runtime`); W0 #31 (5 pending scenarios, runner `cli` fields); W2 #32 (prepare, guards, `release.yml`, `deny.toml`); W1 #41 (build info, `--version`, `GET /v1/node` `build`, `vam node status`); W4 #47 (`release-build.yml`, every v0.1.0 asset); W5 #48 (`vam node init --kit`); W7 #55 (releases page, version docs); W6 split on its plan turn into W6a #56 (`assemble`: scan, `SHA256SUMS`, notes) and W6b #64 (`publish`: draft, attest, verify, publish). Sync #59 took `main` (#34 shellcheck fixes; #37 reqwest 0.13, axum 0.8, tonic/prost 0.14, rustls 0.23, rusqlite 0.43) and dropped 13 `deny.toml` ignores. Owner rulings recorded: decision 8's AlmaLinux 9 container used for every Linux gnu build (zig's linker rejects cargo-auditable's `--undefined`); cargo-audit 0.23.0 (0.21 fails on CVSS 4.0 entries); attest action `actions/attest@1e69f48a` (v4.2.2) in `release.yml`'s publish job, verified with `--signer-workflow` and `--source-ref refs/heads/main` (not `--source-digest`, which is the dispatch commit); the unremapped guest init (decision 11) may hold cargo registry and build-script `out/` paths, every other build path fails the scan; `RELEASE_NOTES.md` is attested too. CI fixes found on the way: BSD `wc` padding, GITHUB_PATH reaching only later steps, static-pie wording in `file`, `cargo audit`'s `--ignore` before `bin`, the quinn/rustix bumps lost in the lock merge. Scoreboard: Phase A scenarios 5 green of 5 (`cli-prints-its-version-and-commit`, `vamd-prints-its-version-without-starting`, `node-status-shows-the-node-and-cli-versions`, `node-init-from-a-release-bundle-needs-no-checkout`, `node-init-from-a-newer-bundle-keeps-the-state`), 0 red; fix cycles: W4 4, W5 1, W6a 1, sync 1; two macOS runner cancellations re-run once each; wall time: all waves on 2026-11-18 |

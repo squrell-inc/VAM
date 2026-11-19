@@ -11,7 +11,6 @@ getting-started/macos-lima.md
 getting-started/platform-tour.md
 getting-started/project-status.md
 getting-started/quickstart.md
-getting-started/windows-wsl.md
 index.mdx
 integrations/egress-proxy-deepdive.md
 integrations/jira-assistant-walkthrough.md

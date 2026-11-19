@@ -478,6 +478,14 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   before and after; `capture: "<prefix>"` keeps the word after the prefix as `{{secret}}` for
   later checks and never prints it. A wrong exit or output is `product`; a missing binary or
   variable is `env`.
+  More `cli` fields: `bin` (`vam` by default; `vamd`, `vam-web-broker`, `vam-schedule-broker` or
+  `vam-notify-broker` from the paths `run.sh` exports, a missing one is `env`); `cwd: root` (run in
+  the scratch tree); `matches` (regexes the output must match); `remember: { as, after }` (keeps the
+  word after `after` as `{{<as>}}` for later steps; unlike `capture` it may be printed); `as: <org
+  alias>` (passes `--host`, `--token` and `VAM_CA_FILE`); `timeout` (seconds, default 30; a hang is
+  `product`); `copyCli: <path in tree>` (runs a copy of `vam` placed there); and `files: { <path>:
+  { contains, absent, unchanged } }` (assertions on files in the tree; `unchanged` compares with the
+  file before the step).
 - A `fields` path segment `key=value` picks the array element whose `key` is that string
   (`status.base.runtimes.name=python.version`).
 - `publish-skill`'s `contains` takes one string or a list (all must be in the refusal).

@@ -1,0 +1,8 @@
+# File names that never ship: not in the public export (scripts/export-public.sh) and not in any
+# release archive (scripts/release/scan.sh). One shell glob per line, matched against the file's
+# base name; blank lines and # comments are ignored. One list, so the two cannot drift.
+# Guest images and kernels are built locally; env and log files hold local state.
+*.ext4
+vmlinux*
+.env
+*.log

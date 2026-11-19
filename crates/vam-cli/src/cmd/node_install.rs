@@ -35,6 +35,7 @@ pub struct Options {
     pub base_sha256: Option<String>,
     pub host_name: Option<String>,
     pub checkout: Option<PathBuf>,
+    pub kit: Option<PathBuf>,
 }
 
 fn under(root: &Path, abs: &str) -> PathBuf {
@@ -169,21 +170,156 @@ fn find_vamd(opt: Option<&Path>) -> Result<PathBuf> {
 }
 
 /// A checkout holds `scripts/build-rootfs.sh`: the explicit one, the cwd, or above the binary.
-fn find_checkout(opt: Option<&Path>) -> Option<PathBuf> {
+fn find_checkout_in(opt: Option<&Path>, cwd: Option<&Path>, exe: Option<&Path>) -> Option<PathBuf> {
     let ok = |p: &Path| p.join("scripts/build-rootfs.sh").is_file();
     if let Some(p) = opt {
         return ok(p).then(|| p.to_path_buf());
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        if ok(&cwd) {
-            return Some(cwd);
+    if let Some(cwd) = cwd {
+        if ok(cwd) {
+            return Some(cwd.to_path_buf());
         }
     }
-    let exe = std::env::current_exe().ok()?;
-    exe.ancestors()
+    exe?.ancestors()
         .skip(1)
         .find(|p| ok(p))
         .map(Path::to_path_buf)
+}
+
+/// Where the base image is built from, after `--base` (handled before this).
+#[derive(Debug, PartialEq, Eq)]
+enum Source {
+    Kit(PathBuf),
+    Checkout(PathBuf),
+    None,
+}
+
+/// The kit beside the running `vam`: `share/vam/base/` holding `manifest.json`.
+fn implicit_kit(exe: Option<&Path>) -> Option<PathBuf> {
+    let dir = exe?.parent()?.join("share/vam/base");
+    dir.join("manifest.json").is_file().then_some(dir)
+}
+
+/// The order: `--kit`, `--checkout`, the kit beside `vam`, a checkout found from the cwd or the
+/// binary. A bundle install (kit found) never looks for a checkout.
+fn pick_source(
+    kit: Option<&Path>,
+    checkout: Option<&Path>,
+    cwd: Option<&Path>,
+    exe: Option<&Path>,
+) -> Source {
+    if let Some(k) = kit {
+        return Source::Kit(k.to_path_buf());
+    }
+    if checkout.is_some() {
+        return find_checkout_in(checkout, cwd, exe).map_or(Source::None, Source::Checkout);
+    }
+    if let Some(k) = implicit_kit(exe) {
+        return Source::Kit(k);
+    }
+    find_checkout_in(None, cwd, exe).map_or(Source::None, Source::Checkout)
+}
+
+/// A node kit: `share/vam/base/` as the bundle ships it, checked against its `manifest.json`
+/// (`{"name", "version", "files": {"<path>": "<sha256>"}}`).
+struct Kit {
+    dir: PathBuf,
+    manifest_sha: String,
+    files: usize,
+}
+
+impl Kit {
+    /// Every listed file must exist with its sha256; anything else fails naming the file.
+    fn load(dir: &Path) -> Result<Kit> {
+        let mpath = dir.join("manifest.json");
+        let bytes = std::fs::read(&mpath).with_context(|| format!("read {}", mpath.display()))?;
+        let v: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("{} is not valid JSON", mpath.display()))?;
+        let files = v["files"].as_object().ok_or_else(|| {
+            anyhow!(
+                "{}: `files` must be a map of path to sha256",
+                mpath.display()
+            )
+        })?;
+        for (rel, want) in files {
+            let rp = Path::new(rel);
+            if rp.is_absolute() || rp.components().any(|c| c.as_os_str() == "..") {
+                bail!("{}: the path {rel} leaves the kit", mpath.display());
+            }
+            let want = want
+                .as_str()
+                .ok_or_else(|| anyhow!("{}: {rel} has no sha256", mpath.display()))?;
+            let f = dir.join(rp);
+            if !f.is_file() {
+                bail!(
+                    "kit file {} is listed in the manifest but missing",
+                    f.display()
+                );
+            }
+            let got = sha256_path(&f)?;
+            if !got.eq_ignore_ascii_case(want) {
+                bail!(
+                    "kit file {} does not match its manifest (sha256 {got}, listed {want})",
+                    f.display()
+                );
+            }
+        }
+        let builder = dir.join("build-rootfs.sh");
+        if !builder.is_file() {
+            bail!("kit file {} is missing", builder.display());
+        }
+        Ok(Kit {
+            dir: dir.to_path_buf(),
+            manifest_sha: sha256_bytes(&bytes),
+            files: files.len(),
+        })
+    }
+
+    /// The bundled guest init: `vam-runtime` beside `vam`, else at the bundle top above the kit.
+    fn runtime(&self, exe: Option<&Path>) -> Result<PathBuf> {
+        let beside = exe.and_then(|e| e.parent()).map(|d| d.join("vam-runtime"));
+        let top = self.dir.join("../../../vam-runtime");
+        [beside, Some(top)]
+            .into_iter()
+            .flatten()
+            .find(|p| p.is_file())
+            .ok_or_else(|| anyhow!("no vam-runtime beside vam or at the top of the bundle"))
+    }
+
+    /// Keys the base to the kit manifest and the runtime, so the same bundle is `unchanged`.
+    fn stamp(&self, runtime_sha: &str) -> String {
+        let mut h = Sha256::new();
+        h.update(b"kit\n");
+        h.update(self.manifest_sha.as_bytes());
+        h.update(b"\n");
+        h.update(runtime_sha.as_bytes());
+        format!(
+            "kit:{}",
+            h.finalize()
+                .iter()
+                .map(|x| format!("{x:02x}"))
+                .collect::<String>()
+        )
+    }
+}
+
+/// The `--check` line for the kit, or `None` when no kit is in play.
+pub(crate) fn kit_line(explicit: Option<&Path>) -> Option<Line> {
+    let exe = std::env::current_exe().ok();
+    let dir = explicit
+        .map(Path::to_path_buf)
+        .or_else(|| implicit_kit(exe.as_deref()))?;
+    let fix = "re-extract the node bundle; do not edit the files under share/vam/base";
+    Some(match Kit::load(&dir) {
+        Err(e) => node_init::problem("kit", node_init::Status::Wrong, format!("{e:#}"), fix),
+        Ok(k) => match k.runtime(exe.as_deref()) {
+            Err(e) => node_init::problem("kit", node_init::Status::Missing, format!("{e:#}"), fix),
+            Ok(_) => node_init::good(
+                "kit",
+                format!("{} matches its manifest ({} files)", dir.display(), k.files),
+            ),
+        },
+    })
 }
 
 /// A hash of what goes into the image: the build script, the base files, the guest runtime
@@ -203,6 +339,7 @@ fn build_stamp(checkout: &Path) -> String {
     }
     let mut files = vec![
         checkout.join("scripts/build-rootfs.sh"),
+        checkout.join("scripts/release/build-guest.sh"),
         checkout.join("Cargo.lock"),
     ];
     walk(&checkout.join("scripts/base"), &mut files);
@@ -367,19 +504,56 @@ async fn step_base(root: &Path, o: &Options) -> Result<()> {
         done("base", "placed the given base image and its manifest");
         return Ok(());
     }
-    let checkout = find_checkout(o.checkout.as_deref());
-    let want_stamp = checkout.as_deref().map(build_stamp);
+    let exe = std::env::current_exe().ok();
+    let source = pick_source(
+        o.kit.as_deref(),
+        o.checkout.as_deref(),
+        std::env::current_dir().ok().as_deref(),
+        exe.as_deref(),
+    );
     let have_stamp = std::fs::read_to_string(&stamp_file).ok();
+    let built = image.is_file() && manifest.is_file() && valid;
+    if let Source::Kit(dir) = &source {
+        let kit = Kit::load(dir)?;
+        let runtime = kit.runtime(exe.as_deref())?;
+        let want = kit.stamp(&sha256_path(&runtime)?);
+        let stale = have_stamp.as_deref().is_some_and(|h| h.trim() != want);
+        if built && !stale {
+            unchanged("base", "the base image matches the kit");
+            return Ok(());
+        }
+        println!("building the base image from the kit (this takes a while) ...");
+        let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let status = Command::new("bash")
+            .arg(abs(&kit.dir).join("build-rootfs.sh"))
+            .arg("--runtime")
+            .arg(abs(&runtime))
+            .current_dir(&kit.dir)
+            .env("VAM_ROOTFS_OUT", abs(&image))
+            .status()
+            .context("run the kit's build-rootfs.sh (needs docker and e2fsprogs)")?;
+        if !status.success() {
+            bail!("the kit's build-rootfs.sh failed ({status})");
+        }
+        write_if_changed(&stamp_file, want.as_bytes(), 0o644)?;
+        done("base", "built from the kit");
+        return Ok(());
+    }
+    let checkout = match source {
+        Source::Checkout(c) => Some(c),
+        _ => None,
+    };
+    let want_stamp = checkout.as_deref().map(build_stamp);
     let stale = matches!((&want_stamp, &have_stamp), (Some(w), Some(h)) if w.trim() != h.trim());
-    if image.is_file() && manifest.is_file() && valid && !stale {
+    if built && !stale {
         unchanged("base", "the base image matches its manifest");
         return Ok(());
     }
     let Some(checkout) = checkout else {
-        bail!("the base image is missing and no checkout was found to build it from: run from the repository, pass --checkout DIR, or pass --base PATH|URL --base-sha256 SHA");
+        bail!("the base image is missing and nothing to build it from was found: run from a node bundle, pass --kit DIR, pass --checkout DIR, or pass --base PATH|URL --base-sha256 SHA");
     };
     if root != Path::new("/") {
-        bail!("refusing to build the base image under --root: pass --base PATH --base-sha256 SHA");
+        bail!("refusing to build the base image from a checkout under --root: pass --kit DIR or --base PATH --base-sha256 SHA");
     }
     println!("building the base image (this takes a while) ...");
     let status = Command::new("bash")
@@ -706,6 +880,7 @@ esac\n",
             base_sha256: None,
             host_name: Some("node.example".into()),
             checkout: None,
+            kit: None,
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -758,6 +933,7 @@ esac\n",
             base_sha256: None,
             host_name: None,
             checkout: None,
+            kit: None,
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -766,5 +942,94 @@ esac\n",
         assert!(rt.block_on(run_install(o)).is_err());
         assert!(tree(&root).is_empty());
         assert!(!root.join("var").exists());
+    }
+
+    fn make_kit(top: &Path, builder: &str) -> PathBuf {
+        let kit = top.join("share/vam/base");
+        std::fs::create_dir_all(&kit).unwrap();
+        std::fs::write(kit.join("build-rootfs.sh"), builder).unwrap();
+        let m = format!(
+            "{{\"name\":\"vam/base:2\",\"version\":\"t\",\"files\":{{\"build-rootfs.sh\":\"{}\"}}}}",
+            sha256_bytes(builder.as_bytes())
+        );
+        std::fs::write(kit.join("manifest.json"), m).unwrap();
+        kit
+    }
+
+    #[test]
+    fn kit_validation_names_the_bad_file() {
+        let t = tempfile::tempdir().unwrap();
+        let kit = make_kit(t.path(), "a");
+        assert_eq!(Kit::load(&kit).unwrap().files, 1);
+        std::fs::write(kit.join("build-rootfs.sh"), "b").unwrap();
+        let e = format!("{:#}", Kit::load(&kit).err().unwrap());
+        assert!(
+            e.contains("build-rootfs.sh") && e.contains("does not match"),
+            "{e}"
+        );
+        std::fs::remove_file(kit.join("build-rootfs.sh")).unwrap();
+        assert!(format!("{:#}", Kit::load(&kit).err().unwrap()).contains("missing"));
+        for bad in [
+            "not json",
+            r#"{"files":["build-rootfs.sh"]}"#,
+            r#"{"files":{"../x":"00"}}"#,
+        ] {
+            std::fs::write(kit.join("manifest.json"), bad).unwrap();
+            assert!(Kit::load(&kit).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_kit_stamp_follows_the_manifest_and_the_runtime() {
+        let t = tempfile::tempdir().unwrap();
+        let kit = Kit::load(&make_kit(t.path(), "a")).unwrap();
+        assert_eq!(kit.stamp("r1"), kit.stamp("r1"));
+        assert_ne!(kit.stamp("r1"), kit.stamp("r2"));
+        let t2 = tempfile::tempdir().unwrap();
+        let other = Kit::load(&make_kit(t2.path(), "b")).unwrap();
+        assert_ne!(kit.stamp("r1"), other.stamp("r1"));
+        assert!(kit.stamp("r1").starts_with("kit:"));
+    }
+
+    #[test]
+    fn the_source_order_is_kit_checkout_implicit_kit_implicit_checkout() {
+        let t = tempfile::tempdir().unwrap();
+        let bundle = t.path().join("bundle");
+        let kit = make_kit(&bundle, "a");
+        let exe = bundle.join("vam");
+        let repo = t.path().join("repo");
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::write(repo.join("scripts/build-rootfs.sh"), "x").unwrap();
+        let other = t.path().join("other");
+        let pick = |k: Option<&Path>, c: Option<&Path>, cwd: Option<&Path>| {
+            pick_source(k, c, cwd, Some(&exe))
+        };
+        let explicit_kit = t.path().join("k");
+        assert_eq!(
+            pick(Some(&explicit_kit), Some(&repo), Some(&repo)),
+            Source::Kit(explicit_kit.clone())
+        );
+        assert_eq!(
+            pick(None, Some(&repo), Some(&other)),
+            Source::Checkout(repo.clone())
+        );
+        assert_eq!(pick(None, Some(&other), None), Source::None);
+        // the kit beside vam beats a checkout in the cwd; a bundle never looks for one
+        assert_eq!(pick(None, None, Some(&repo)), Source::Kit(kit));
+        let loose = t.path().join("loose/vam");
+        assert_eq!(
+            pick_source(None, None, Some(&repo), Some(&loose)),
+            Source::Checkout(repo)
+        );
+        assert_eq!(pick_source(None, None, None, Some(&loose)), Source::None);
+    }
+
+    #[test]
+    fn a_newer_bundle_repoints_the_unit_and_only_the_unit() {
+        let old = unit_text("/opt/vam-1/vamd");
+        let new = unit_text("/opt/vam-2/vamd");
+        assert_ne!(old, new);
+        assert!(new.contains("ExecStart=/opt/vam-2/vamd\n"));
+        assert_eq!(old.replace("vam-1", "vam-2"), new);
     }
 }

@@ -1,0 +1,30 @@
+id: node-status-shows-the-node-and-cli-versions
+title: The node and the CLI each name the build they run
+description: >
+  `GET /v1/node` reports `status.build` with a version that carries `+dev`, a commit, and the
+  channel `dev`. `vam node status`, signed in as an org admin, prints a line `node: vamd <version>
+  (<commit>) dev` and a line `cli: vam <version> (<commit>)`, does not warn that minor versions
+  differ, and never says `release`.
+tags: [release]
+needs: process
+given:
+  - org-admin
+when:
+  - expect:
+      node:
+        fields:
+          status.build.version: { matches: '\+dev' }
+          status.build.commit: { present: true }
+          status.build.channel: dev
+then:
+  - cli:
+      as: org-admin
+      args: [node, status]
+      root: { from: version/empty }
+      exit: ok
+      contains: ["node: vamd ", "cli: vam "]
+      absent: ["minor versions differ", "release"]
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-cli/src/cmd/node.rs
+status: active
