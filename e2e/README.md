@@ -782,11 +782,11 @@ broker started). Tag `notifications`; a scenario that waits for the wall clock a
 
 ## Connectors (`crates/vam-e2e/src/connectors.rs`)
 
-Connector scenarios use two runner-hosted loopback providers (std-only HTTP, started once per run when a
-scenario `given`s a `mock-provider` piece). Tag `connectors`. Token values are made by the runner, kept in memory,
+Connector scenarios use four runner-hosted loopback listeners (Microsoft login, Microsoft Graph, Linear and the
+filebox service; std-only HTTP, started once per run when a scenario `given`s a `mock-provider` piece). Tag `connectors`. Token values are made by the runner, kept in memory,
 added to the scrub list and never printed or logged; a listing that holds one fails the `connectors` expect.
 
-- World piece `kind: mock-provider`, `provider: microsoft-login | microsoft-graph | linear-server`. `microsoft-login` serves
+- World piece `kind: mock-provider`, `provider: microsoft-login | microsoft-graph | linear-server | filebox`. `microsoft-login` serves
   `POST /{tenant}/oauth2/v2.0/token` for `refresh_token` grants it was told about, logs form field **names** (and the
   values of `client_id`, `grant_type`, `scope` only), and answers `invalid_grant` once revoked. `linear-server` is a
   streamable-HTTP MCP server at `/mcp` (`list_issues`, `get_issue`, `save_issue`, `save_comment` and the unvetted
@@ -801,7 +801,8 @@ added to the scrub list and never printed or logged; a listing that holds one fa
   (`PUT /v1/mcp/connections`, then `…/oauth/tokens`) with the id, the `url` (or the provider's address with `piece`)
   and, for the Linear mock, its bearer. Rows made (MCP rows, and the `microsoft-365` connection by `DELETE …/connection`) are removed at cleanup as the same identity.
 - `connector-check: { id, as }`: `POST /v1/connectors/{id}/connection/check`; must answer 2xx.
-- `mock-provider: { piece, revoke }`: with `revoke: true` the provider refuses everything from then on.
+- `mock-provider: { piece, revoke }`: with `revoke: true` the provider refuses everything from then on. A filebox
+  piece also takes `expire: true`, `holdToken: true | false` and `rotateSecret: true` (see "Admin-supplied clients").
 - `expect: { connectors: { id, as, fields, absent } }`: the entry of `GET /v1/connectors` for the caller; `fields`
   are dotted paths with exact values, `absent` are paths that must not exist. A 404 or a missing entry is `product`.
 - `expect: { mock-requests: { piece, path, has, lacks, count } }`: what the provider saw at `path`. `has`/`lacks`
@@ -817,6 +818,53 @@ added to the scrub list and never printed or logged; a listing that holds one fa
   authority host (`login.microsoftonline.com`) to the mocks, for the MCP client and the token refresh; every other URL
   keeps the SSRF rules.
 
+### Admin-supplied clients (filebox, `mock-filebox-server`)
+
+For connectors whose OAuth client the org's admin registered with the provider (`client: org`, `clientSecret:
+org_vault`). `mock-provider` with `provider: filebox` is a fictional Box-like service on one loopback listener, for
+three hosts: the MCP server `https://mcp.filebox.example/mcp` (`search_files`, `get_file_content`; bearer required), RFC 9728
+metadata (`/.well-known/oauth-protected-resource[/mcp]`, naming `https://auth.filebox.example`) and RFC 8414 metadata
+(`/.well-known/oauth-authorization-server`: authorize, token, revocation, S256, `client_secret_post`, **no**
+registration endpoint). `GET /authorize` mints a code for a client id starting `e2e-filebox-client`, the redirect URI
+and the S256 challenge and answers a 302 (the runner plays the browser). `POST /token` is a confidential client: it
+needs the current client secret (else 401 `invalid_client`), single-use codes checked with verifier and redirect URI,
+and **single-use rotating refresh tokens** (a spent one answers `invalid_grant`). `POST /revoke` answers 200.
+
+- It logs form field names, the values of `client_id`, `grant_type`, `redirect_uri` and `resource`,
+  `client-secret=current|old|wrong|none`, `refresh=fresh|reused|unknown`, and for the MCP server `authorization`,
+  `authorization-expired`, `authorization-wrong`, `method=<rpc>`, `tool=<name>` and `tool-ok=<name>` (a call the
+  provider answered). Never a secret value.
+- `mock-provider: { piece, expire: true }`: the current access token is refused from now on (until a refresh).
+  `holdToken: true` makes the token endpoint log a refresh request and then wait (at most 30 s); `false` releases it.
+  While held, an MCP call with an expired token is logged on arrival and answered 401 only on release: the node makes a
+  caller that starts during a refresh wait for it, so this is what keeps two tasks in flight on the same expired token.
+  Runs of one agent and member share a workspace and queue behind each other, so two overlapping tasks use two agents.
+  `rotateSecret: true`: the provider's client secret changes and the old one is refused (`client-secret=old`).
+- The client secret, a value the provider never held, the rotated secret and every token it issued are in the scrub
+  list; `expect: { secret-absent: { secret: <piece alias> } }` judges all of them.
+- Seam: `mcp:https://mcp.filebox.example/mcp` is mapped to the mock with the other `mcp:` keys. The key
+  `oauth:https://auth.filebox.example` (discovery, exchange and refresh at the pinned endpoints; every URL on that
+  origin keeps its path) is on (`PASS_OAUTH_SEAM`, `connectors.rs`). The `/.well-known/` metadata of an `mcp:` server
+  is answered by the same mock, so Enable's discovery runs the real code against it.
+- `connector-node` takes `client: { clientId, clientSecret: { piece, which: current | rotated | wrong } }`, sent as
+  `client: { clientId, clientSecret }` in the body (the secret value comes from the mock, never printed; leave
+  `clientSecret` out to send none), and `contains` (the refusal's body holds the text). A node with a client is sent
+  `client: null` at cleanup so the org secret does not outlive the scenario.
+- `connector-connect` with a filebox `piece` plays the app (D29): it reads `node.client.clientId`,
+  `node.client.authorizeEndpoint`, `node.client.tokenEndpoint` and `mcp.url` from the caller's `GET /v1/connectors`
+  entry (a missing field is `product`), makes a PKCE pair, asks the mock's authorize endpoint (the pinned endpoint's
+  path) for a code and posts `{ code, codeVerifier, redirectUri }` to `POST /v1/connectors/{id}/connection/oauth/code`.
+  `redirectUri` (default `squrell://oauth`) overrides the redirect URI. `via: tokens` plays an app that holds the
+  tokens itself: `PUT /v1/mcp/connections` (`tokenEndpoint` and `clientId` override the node's values) and then
+  `PUT …/oauth/tokens`; with `refused: true` either step may refuse, and `contains` must be in that body.
+- `api-call: { method, path, as, refused, contains, absent }`: one `GET` (default) or `DELETE` as an identity. Without
+  `refused` the answer is 2xx; with it 400, 403 or 409 (a 404 or 405 is a missing route) and the body holds `contains`.
+  `absent: <filebox piece alias>`: no form of that piece's secrets is in the answer body.
+- `expect: { connectors }` fields also take `{ present: true }` and `{ contains: text }`.
+- Fixture `marketplace-community-connectors` also lists `filebox-connector` (connector `filebox`: `discover`, `client:
+  org`, `clientSecret: org_vault`, `search_files` and `read_file`, MCP `https://mcp.filebox.example/mcp`) and
+  `org-secret-without-org-client` (`org_vault` without `client: org`, refused).
+
 ### Skills that call Microsoft Graph as the member
 
 - `mock-provider` with `provider: microsoft-graph` serves `GET /v1.0/me/messages` (two fixed messages) and
@@ -826,7 +874,9 @@ added to the scrub list and never printed or logged; a listing that holds one fa
   stale from the start.
 - `connector-connect` takes `expiresIn` (seconds, `microsoft-365`): sent as `expiresIn` in the connection body.
   `expect: { secret-absent: { secret: microsoft-365 } }` judges the connection's access and refresh tokens.
-- `mock-requests` takes `method` and `path: "*"` (any path), and `count: 0` passes when nothing was seen.
+- `mock-requests` takes `method` and `path: "*"` (any path), and `count: 0` passes when nothing was seen. `with: <field>`
+  keeps only the requests that carry that field before `count`, `atLeast`, `has` and `lacks` judge them
+  (`with: grant_type=refresh_token, count: 1`).
 - `skill` pieces take `files: { <path in the package>: <path under e2e/world/fixtures> }`, packed next to `SKILLS.md`
   and `manifest.json`. `skill-m365-probe` uses it for `probe.py` (python3 stdlib): it reads `{ method, path }` from
   stdin and calls Graph through the guest proxy with `X-Target-Url` and only the placeholder `vamsec_m365_graph`.
@@ -884,11 +934,12 @@ same commit SHAs in every scenario: a node that remembers a tag's commit must no
   `with-a-connector`, `claims-the-squrell-name` (an artifact under `hub.squrell.cloud`) and `claims-the-org-name`
   (an artifact under `local.vam.dev`, the e2e registry domain). Overlay `marketplace-community-broken/` (an index
   that is not JSON).
-- `marketplace-community-connectors`: added by an admin, domain `connectors.community.example`. Four listings that ship a
+- `marketplace-community-connectors`: added by an admin, domain `connectors.community.example`. Six listings that ship a
   connector file (`connector.json`, the `spec/connectors/*.json` format): `bugwatch-connector` (installs: remote MCP at
   `https://mcp.bugwatch.example/mcp` with discovery) and three that must be refused with a reason
   (`reserved-connector-id` takes the id `linear`, `unknown-profile-connector` names the profile `generic`,
-  `connector-with-a-secret` asks for `squrell_relay`). Overlay `marketplace-community-connectors-update/` is the tag
+  `connector-with-a-secret` asks for `squrell_relay`), and two for admin-supplied clients (`filebox-connector` installs,
+  `org-secret-without-org-client` is refused; see "Admin-supplied clients"). Overlay `marketplace-community-connectors-update/` is the tag
   `bugwatch-connector-v1.1.0` whose connector asks for one more scope and one more tool. The runner maps the Bugwatch MCP
   URL to the `linear-server` mock through the `mcp:<https url>` key of the connector seam (`PASS_MCP_SERVER_SEAM`), so
   `connector-connect: { id: bugwatch, url: "https://mcp.bugwatch.example/mcp", piece: mock-linear-server }` connects the

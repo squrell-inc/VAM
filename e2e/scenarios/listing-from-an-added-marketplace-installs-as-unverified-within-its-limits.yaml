@@ -38,5 +38,6 @@ then:
 guards:
   - vam:crates/vam-orchestrator/src/catalog_tier.rs
   - vam:crates/vam-spec/src/origin.rs
+  - vam:crates/vam-spec/src/connector_listing.rs
   - vam:crates/vam-orchestrator/src/skill_package_admit.rs
 status: active
