@@ -25,7 +25,7 @@ pub enum PieceKind {
     /// scenario starts (`fixture` names the directory under `e2e/world/fixtures`).
     #[serde(rename = "workspace-seed")]
     WorkspaceSeed,
-    /// A runner-hosted loopback provider (`provider`: `microsoft-login`, `microsoft-graph`, `linear-server` or `filebox`).
+    /// A runner-hosted loopback provider (`provider`: `microsoft-login`, `microsoft-graph`, `linear-server`, `filebox` or `ticketdesk`).
     /// The runner makes its tokens in memory and never prints them.
     #[serde(rename = "mock-provider")]
     MockProvider,
@@ -90,7 +90,7 @@ pub struct WorldPiece {
     /// (vamd reports the path only once the broker is registered).
     #[serde(default)]
     pub restart_with_gateway: bool,
-    /// `mock-provider` only: `microsoft-login`, `microsoft-graph`, `linear-server` or `filebox`.
+    /// `mock-provider` only: `microsoft-login`, `microsoft-graph`, `linear-server`, `filebox` or `ticketdesk`.
     pub provider: Option<String>,
     /// `skill` only: extra files packed into the package, `{ "path in the package": "path under
     /// e2e/world/fixtures" }` (a script a `localExec` tool runs).

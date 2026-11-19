@@ -28,6 +28,7 @@ guards:
   - vam:crates/vam-orchestrator/src/brokers.rs
   - vam:crates/vam-network/src/broker.rs
   - vam:crates/vam-network/src/secrets.rs
+  - vam:crates/vam-orchestrator/src/connection_egress.rs
 mock:
   - when: { step: ask, toolName: m365_probe_search }
     reply: { text: Found two messages. }

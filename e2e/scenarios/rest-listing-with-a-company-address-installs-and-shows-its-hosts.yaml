@@ -1,0 +1,51 @@
+id: rest-listing-with-a-company-address-installs-and-shows-its-hosts
+title: A marketplace listing for a per-company REST service shows the admin its hosts before it installs
+description: >
+  A listing ships a connector for a service every company reaches at its own address (`<company>.ticketdesk.example`),
+  a skill that reads and creates tickets, and an assistant. Before installing, the listing shows the admin what it
+  asks for: a sign-in with fixed endpoints, an admin-supplied client without a secret, the company address the admin
+  will enter (its label and the fixed suffix), the one host the connector reaches with a member's token, and the
+  skill's egress on that host. A member cannot install it; the admin does. Installed, the connector reads "ask your
+  admin" for a member, marked Unverified, not enabled, and the skill and the assistant are installed read-only. A
+  listing whose binding host is outside its suffix is refused with a reason that names the suffix, and one whose
+  placeholder belongs to another connector with a reason that names the placeholder. Bugwatch, Filebox and the four
+  earlier refusals read as before.
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - marketplace-community-connectors
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: ticketdesk-connector, as: org-admin, fields: { installed: null, summary.connectors.0.publisher: Community Tools Ltd, summary.connectors.0.profile: oauth, summary.connectors.0.client: org, summary.connectors.0.clientText: admin-supplied client, summary.connectors.0.clientSecret: none, summary.connectors.0.tenant.label: Ticketdesk address, summary.connectors.0.tenant.suffix: ticketdesk.example, summary.connectors.0.bindings.0.name: api, summary.connectors.0.bindings.0.hosts.0: "{subdomain}.ticketdesk.example", summary.connectors.0.hosts.0: "{subdomain}.ticketdesk.example", summary.egress.0.host: "{subdomain}.ticketdesk.example" } } }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: filebox-connector, as: org-admin, fields: { installed: null, summary.connectors.0.mcpHost: mcp.filebox.example, summary.connectors.0.client: org, summary.connectors.0.clientSecret: org_vault } } }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-admin, fields: { installed: null, summary.connectors.0.mcpHost: mcp.bugwatch.example, summary.connectors.0.clientSecret: none } } }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: ticketdesk-connector, as: org-member, refused: true }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: ticketdesk-connector, as: org-admin }
+  - expect: { connectors: { id: ticketdesk, as: org-member, fields: { state: askAdmin, source: marketplace, trust: unverified, publisher: Community Tools Ltd, origin.listing: ticketdesk-connector, origin.ref: ticketdesk-connector-v1.0.0, node.enabled: false } } }
+  - expect: { catalog: { kind: skill, urnPrefix: "urn:vam:skill:connectors.community.example/community/ticketdesk-tickets", as: org-admin, count: 1, fields: { tier: marketplace, readOnly: true, origin.listing: ticketdesk-connector } } }
+  - expect: { catalog: { kind: agent, urnPrefix: "urn:vam:agent:connectors.community.example/community/ticketdesk-assistant", as: org-admin, count: 1, fields: { tier: marketplace, readOnly: true, origin.listing: ticketdesk-connector } } }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: company-address-outside-its-suffix, as: org-admin, refused: true, contains: suffix }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: rest-connector-with-a-foreign-placeholder, as: org-admin, refused: true, contains: placeholder }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: org-secret-without-org-client, as: org-admin, refused: true, contains: client }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: reserved-connector-id, as: org-admin, refused: true, contains: linear }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: unknown-profile-connector, as: org-admin, refused: true, contains: profile }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: connector-with-a-secret, as: org-admin, refused: true, contains: secret }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-admin }
+then:
+  - expect: { connectors: { id: ticketdesk, as: org-member, fields: { state: askAdmin, trust: unverified, node.enabled: false } } }
+  - expect: { connectors: { id: ticketdesk, as: org-admin, fields: { capabilities.profile: oauth, capabilities.client: org, capabilities.clientSecret: none } } }
+  - expect: { connectors: { id: bugwatch, as: org-member, fields: { state: askAdmin, trust: unverified } } }
+  - expect: { connectors: { id: linear, as: org-member, fields: { state: askAdmin, source: builtin, trust: squrell }, absent: [origin] } }
+guards:
+  - vam:crates/vam-orchestrator/src/marketplace/import.rs
+  - vam:crates/vam-orchestrator/src/marketplace/summary.rs
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-spec/src/connector.rs
+  - vam:crates/vam-spec/src/connector_listing.rs
+  - vam:crates/vam-spec/src/package.rs
+  - vam:crates/vam-spec/src/skill_egress.rs
+status: pending
+expectFail: { step: when.2, class: product }
