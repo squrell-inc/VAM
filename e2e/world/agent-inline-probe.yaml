@@ -1,0 +1,13 @@
+piece: agent-inline-probe
+kind: agent
+# Not written at `given` and never released: a `put-draft` step saves it as an identity's draft, or a
+# `chat` with `inline:` sends it inside the run (which vamd refuses). The body is `agent-plain`.
+deferred: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/{{name}}" }
+    displayName: Plain chat agent
+    description: Plain chat agent
+    role: Tester
+    systemInstructions: Answer briefly. Finish with task_complete.
+    allowAnyPlaybook: true

@@ -1,0 +1,37 @@
+id: a-run-with-an-inline-playbook-is-refused-and-writes-nothing
+title: A run that carries an inline playbook is refused with 400 for a member and a publisher, and no playbook row exists afterwards
+description: >
+  POST /v1/runs takes a playbook by reference only. An inlinePlaybook is refused with 400 telling the caller
+  to save it with PUT /v1/playbooks first, and nothing is written: the admin finds no playbook under either
+  caller's URN. A plain chat of the member on a released agent is untouched.
+tags: [members, chat, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - agent-plain
+  - playbook-draft-probe
+when:
+  - chat: { agent: agent-plain, inlinePlaybook: playbook-draft-probe, as: pub, inputs: { topic: cats }, text: "e2e-step:pp Hello", refused: true }
+  - expect: { refused: true, status: 400, contains: "PUT /v1/playbooks" }
+  - chat: { agent: agent-plain, inlinePlaybook: playbook-draft-probe, as: member, inputs: { topic: cats }, text: "e2e-step:pm Hello", refused: true }
+  - expect: { refused: true, status: 400, contains: "PUT /v1/playbooks" }
+then:
+  - identity-request: { as: admin, credential: key, path: "/v1/playbooks/{{urn:playbook-draft-probe:pub}}", status: 404 }
+  - identity-request: { as: admin, credential: key, path: "/v1/playbooks/{{urn:playbook-draft-probe:member}}", status: 404 }
+  - chat: { agent: agent-plain, as: member, text: "e2e-step:mq Hello" }
+  - expect: { run: succeeded }
+guards:
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/catalog.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/inbox.rs
+mock:
+  - when: { step: pp }
+    reply: { text: hello }
+  - when: { step: pm }
+    reply: { text: hello }
+  - when: { step: mq }
+    reply: { text: hello }
+status: active

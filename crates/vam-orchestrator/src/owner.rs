@@ -646,6 +646,72 @@ pub(crate) fn require_matching_urn_owner(
     Ok(())
 }
 
+/// True when `caller` owns at least one row of `urn` in `table` (any channel). An unset or
+/// empty owner column reads as `local`, like [`resolved_owner`]. `caller` must already be
+/// resolved. Used by the restricted agent save, which holds the store lock.
+pub(crate) fn caller_owns_any_row(
+    connection: &Connection,
+    table: &str,
+    urn: &str,
+    caller: &str,
+) -> Result<bool, OrchestratorError> {
+    if !is_safe_ident(table) {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "unsafe table name '{table}'"
+        )));
+    }
+    connection
+        .query_row(
+            &format!(
+                "SELECT 1 FROM {table}
+                 WHERE urn = ?1 AND COALESCE(NULLIF(owner_user_id, ''), '{LOCAL_USER_ID}') = ?2
+                 LIMIT 1"
+            ),
+            [urn, caller],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(OrchestratorError::Database)
+}
+
+/// [`require_matching_urn_owner`] for the restricted agent save: a row whose owner is unset
+/// or empty counts as owned by `local`, so nobody but `local` can claim it. First writer (no
+/// rows) is allowed. `caller` must already be resolved.
+pub(crate) fn require_strict_urn_owner(
+    connection: &Connection,
+    table: &str,
+    urn: &str,
+    caller: &str,
+    noun: &str,
+) -> Result<(), OrchestratorError> {
+    if !is_safe_ident(table) {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "unsafe table name '{table}'"
+        )));
+    }
+    let existing: Option<String> = connection
+        .query_row(
+            &format!(
+                "SELECT COALESCE(NULLIF(owner_user_id, ''), '{LOCAL_USER_ID}') FROM {table}
+                 WHERE urn = ?1
+                 ORDER BY CASE channel WHEN 'released' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END,
+                          updated_at DESC
+                 LIMIT 1"
+            ),
+            [urn],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(OrchestratorError::Database)?;
+    match existing {
+        Some(owner) if owner != caller => Err(OrchestratorError::PermissionDenied(format!(
+            "only the artifact owner may version this {noun}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 fn is_safe_ident(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

@@ -2,15 +2,10 @@
 # passes is an error, so this list only shrinks. Each docs wave deletes its pages' lines.
 README.md
 authoring/agent-package.md
-authoring/agent-spec.md
-authoring/model.md
-authoring/playbook-spec.md
 authoring/playbook-tutorial.md
 authoring/publish-skill.md
-authoring/run-spec.md
 authoring/skill-manifest.md
 core/prerequisites.md
-getting-started/cli.md
 getting-started/introduction.md
 getting-started/macos-lima.md
 getting-started/platform-tour.md

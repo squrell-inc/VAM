@@ -62,6 +62,23 @@ pub fn check(root: &Path) -> Vec<CheckError> {
                 format!("duplicate piece `{}`", w.piece),
             ));
         }
+        if w.scopes.is_some() && w.kind != PieceKind::Org {
+            errors.push(CheckError::new(
+                &p,
+                "piece-body",
+                "`scopes` belongs only to an `org` piece".to_string(),
+            ));
+        }
+        if w.scopes
+            .as_ref()
+            .is_some_and(|l| l.is_empty() || l.iter().any(|s| s.trim().is_empty()))
+        {
+            errors.push(CheckError::new(
+                &p,
+                "piece-body",
+                "`scopes` needs at least one non-empty entry".to_string(),
+            ));
+        }
         if w.egress.is_some() && w.kind != PieceKind::Secret {
             errors.push(CheckError::new(
                 &p,
@@ -181,6 +198,15 @@ pub fn check(root: &Path) -> Vec<CheckError> {
                 ));
             }
         }
+        // `{{ns}}` is the namespace of the identity that writes the piece: only a `put-draft` (or an
+        // inline `chat`) knows it, so a piece that `given` writes or publishes cannot carry it.
+        if text.contains("{{ns}}") && !w.written_by_step() {
+            errors.push(CheckError::new(
+                &p,
+                "piece-body",
+                "`{{ns}}` belongs only to a piece a step writes (a `deferred` playbook, or a `deferred` agent without `release`)",
+            ));
+        }
         for r in &w.requires {
             if cat.piece(r).is_none() {
                 errors.push(CheckError::new(
@@ -299,8 +325,12 @@ fn check_scenario(
     let mut secret_aliases = BTreeSet::new();
     let mut mock_aliases = BTreeSet::new();
     let mut mkt_aliases = BTreeSet::new();
+    let mut kinds: std::collections::BTreeMap<String, PieceKind> = Default::default();
     for g in &s.given {
         let (piece, alias) = (g.piece(), g.alias());
+        if let Some(w) = cat.piece(piece) {
+            kinds.insert(alias.to_string(), w.kind);
+        }
         if cat
             .piece(piece)
             .is_some_and(|w| w.kind == PieceKind::GitMarketplace)
@@ -348,6 +378,8 @@ fn check_scenario(
 
     // Steps: expect families, alias references, chat labels.
     let mut chat_labels = BTreeSet::new();
+    // (piece, identity) pairs an earlier `put-draft` wrote, for `urnOf`.
+    let mut put_drafts: BTreeSet<(String, String)> = BTreeSet::new();
     for (pos, step) in s.steps() {
         match step {
             Step::Chat(c) => {
@@ -359,6 +391,41 @@ fn check_scenario(
                     c.agent().filter(|a| !a.starts_with("urn:vam:agent:")),
                 );
                 refer_org(errors, p, &pos, &org_aliases, c.identity());
+                for (field, alias, want) in [
+                    ("inline", c.inline(), PieceKind::Agent),
+                    ("inlinePlaybook", c.inline_playbook(), PieceKind::Playbook),
+                ] {
+                    let Some(a) = alias else { continue };
+                    refer(errors, p, &pos, &aliases, Some(a));
+                    if kinds.get(a).is_some_and(|k| *k != want) {
+                        errors.push(CheckError::new(
+                            p,
+                            "chat",
+                            format!("{pos}: `{field}: {a}` must name a {want:?} piece"),
+                        ));
+                    }
+                    if !c.refused() {
+                        errors.push(CheckError::new(
+                            p,
+                            "chat",
+                            format!("{pos}: `{field}` needs `refused: true` (vamd accepts no inline agent or playbook)"),
+                        ));
+                    }
+                }
+                if c.inputs().is_some_and(|m| !m.is_empty()) && c.inline_playbook().is_none() {
+                    errors.push(CheckError::new(
+                        p,
+                        "chat",
+                        format!("{pos}: `inputs` is read with `inlinePlaybook` only"),
+                    ));
+                }
+                if c.inline().is_some() && c.agent().is_some() {
+                    errors.push(CheckError::new(
+                        p,
+                        "chat",
+                        format!("{pos}: `inline` and `agent` are exclusive"),
+                    ));
+                }
                 match c.label() {
                     Some(l) => {
                         lint(errors, p, "label", &l);
@@ -420,6 +487,15 @@ fn check_scenario(
                             format!("{pos}: `mock-requests.path` must start with `/`"),
                         ));
                     }
+                }
+                if e.status.is_some()
+                    && (e.refused != Some(true) || !(100..600).contains(&e.status.unwrap_or(0)))
+                {
+                    errors.push(CheckError::new(
+                        p,
+                        "expect",
+                        format!("{pos}: `status` is an HTTP status read with `refused: true`"),
+                    ));
                 }
                 if e.families() != 1 {
                     errors.push(CheckError::new(p, "expect", format!("{pos}: an expect needs exactly one of run, event, approval, gate, step, file, thread, refused, node, receipt, plain-http, vmm, secret-absent, flood, grant, fire, spaces, threads, runs, scheduled-runs, ledger, notifications, notification-summary, connectors, mock-requests, marketplaces, listings, catalog, agent-stats, release-diff (has {})", e.families())));
@@ -635,7 +711,16 @@ fn check_scenario(
                     errors.push(CheckError::new(p, "step", format!("{pos}: {m}")));
                 }
             }
-            Step::PublishSkill(_) => {}
+            Step::PublishSkill(x) => {
+                refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
+                if !x.release && x.refused {
+                    errors.push(CheckError::new(
+                        p,
+                        "publish-skill",
+                        format!("{pos}: `release: false` and `refused: true` do not combine (a refused publish releases nothing)"),
+                    ));
+                }
+            }
             Step::Cli(x) => {
                 if x.args.is_empty() {
                     errors.push(CheckError::new(
@@ -764,11 +849,28 @@ fn check_scenario(
             }
             Step::IdentityRequest(x) => {
                 refer_org(errors, p, &pos, &org_aliases, Some(&x.as_));
-                refer_placeholders(errors, p, &pos, &org_aliases, &x.path);
+                for text in [Some(&x.path), x.contains.as_ref(), x.lacks.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    let _ = crate::engine::identity::expand_urns(text, false, |piece, who| {
+                        refer(errors, p, &pos, &aliases, Some(piece));
+                        refer_org(errors, p, &pos, &org_aliases, Some(who));
+                        Some(String::new())
+                    });
+                    refer_placeholders(errors, p, &pos, &org_aliases, text);
+                }
                 if let Some(f) = &x.fields {
                     for ph in crate::engine::identity::field_placeholders(f) {
                         refer_placeholders(errors, p, &pos, &org_aliases, &format!("{{{ph}}}"));
                     }
+                }
+                if x.contains.as_deref() == Some("") || x.lacks.as_deref() == Some("") {
+                    errors.push(CheckError::new(
+                        p,
+                        "identity-request",
+                        format!("{pos}: `contains` and `lacks` are not empty"),
+                    ));
                 }
                 if !x.path.starts_with('/')
                     || !["get", "post", "put", "patch", "delete"]
@@ -782,6 +884,38 @@ fn check_scenario(
                     ));
                 }
             }
+            Step::PutDraft(x) => {
+                refer(errors, p, &pos, &aliases, Some(&x.piece));
+                refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
+                if let Some(other) = x.urn_of.as_deref() {
+                    refer_org(errors, p, &pos, &org_aliases, Some(other));
+                    if x.as_.as_deref() == Some(other) {
+                        errors.push(CheckError::new(
+                            p,
+                            "put-draft",
+                            format!("{pos}: `urnOf` names another identity than `as`"),
+                        ));
+                    }
+                    if !put_drafts.contains(&(x.piece.clone(), other.to_string())) {
+                        errors.push(CheckError::new(
+                            p,
+                            "put-draft",
+                            format!("{pos}: `urnOf: {other}` needs an earlier `put-draft` of `{}` as `{other}`", x.piece),
+                        ));
+                    }
+                }
+                if let Some(who) = x.as_.as_deref() {
+                    put_drafts.insert((x.piece.clone(), who.to_string()));
+                }
+                if !(100..600).contains(&x.status) {
+                    errors.push(CheckError::new(
+                        p,
+                        "put-draft",
+                        format!("{pos}: `status` must be an HTTP status"),
+                    ));
+                }
+            }
+            Step::SetRole(x) => refer_org(errors, p, &pos, &org_aliases, Some(&x.as_)),
             Step::CatalogWrite(x) => {
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
                 if !matches!(x.kind.as_str(), "agent" | "playbook" | "skill") {

@@ -4,6 +4,8 @@ description: Agents, skills, skill packages, playbooks and policies as catalog e
 status: shipped
 proves:
   - released-agent-approvals-are-once-only
+  - member-draft-agent-is-private-and-in-the-members-namespace
+  - crates/vam-orchestrator/tests/member_draft_agents_tests.rs
   - member-chats-with-a-released-agent
   - crates/vam-orchestrator/tests/agent_check_tests.rs
   - crates/vam-orchestrator/tests/allowed_models_tests.rs
@@ -15,22 +17,22 @@ policies. Each entry is named by a URN. The host stores them in SQLite, stamped 
 
 ## Routes
 
-| Entry | Write and list | Release |
-|---|---|---|
-| Agent | `PUT`, `GET /v1/agents` | `api/catalog_release.rs` |
-| Skill | `PUT /v1/skills`, reads by URN | `catalog_release::skill_release_route` (`api/mod.rs:169`) |
-| Playbook | `PUT`, `GET /v1/playbooks` | `catalog_release::playbook_release_route` (`api/mod.rs:163`) |
-| Policy | `PUT`, `GET /v1/policies` | `catalog_release::policy_release_route` (`api/mod.rs:156`) |
+| Entry | Write and list | Who writes | Release |
+|---|---|---|---|
+| Agent | `PUT`, `GET /v1/agents` | `catalog:write`, or `agents:draft` under the [member rules](/orchestrator/member-agents/) | `api/catalog_release.rs` |
+| Skill | `PUT /v1/skills`, reads by URN | `catalog:write` | `catalog_release::skill_release_route` (`api/mod.rs:169`) |
+| Playbook | `PUT`, `GET /v1/playbooks` | `catalog:write` | `catalog_release::playbook_release_route` (`api/mod.rs:163`) |
+| Policy | `PUT`, `GET /v1/policies` | `catalog:write` | `catalog_release::policy_release_route` (`api/mod.rs:156`) |
 
 Routes: `api/mod.rs:142-169`.
 
 ## Drafts and releases
 
 An owner keeps one draft of an entry. A **release** snapshots that draft at a version and needs
-the owner and a live `publish:grant` (publisher, org admin or operator). After the first write,
+`catalog:write`, a live `publish:grant` (publisher, org admin or operator) and ownership of the row. After the first write,
 only the owner can change an entry; another user's write is a 403. A caller reads their own
 drafts and every released version; an org admin reading with `users:admin` also sees other
-people's drafts. A run that names an agent without a version uses the latest release. A member
+people's drafts. A member owns the draft agents they save, and only the owner and a caller with `users:admin` can read them (`member-draft-agent-is-private-and-in-the-members-namespace`). The rules for those drafts are on [Member agents](/orchestrator/member-agents/). A run that names an agent without a version uses the latest release. A member
 can chat with a released agent (`member-chats-with-a-released-agent`), and a released agent's
 approvals are once-only (`released-agent-approvals-are-once-only`).
 

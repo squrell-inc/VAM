@@ -181,7 +181,9 @@ guard_7() {
     rm -rf "$wt"; record 7 "advisories" FAIL "cannot check out $COMMIT to scan it"; return
   fi
   read -r -a deny <<< "${GUARDS_CARGO_DENY:-cargo deny}"
-  out="$(cd "$wt/tree" && "${deny[@]}" check advisories 2>&1)"; rc=$?
+  # --exclude-dev: dev-dependencies are never shipped, and cargo-deny 0.21's graph builder panics on
+  # vam-orchestrator's renamed self dev-dependency (test-support); release binaries also get cargo audit bin.
+  out="$(cd "$wt/tree" && "${deny[@]}" --exclude-dev check advisories 2>&1)"; rc=$?
   git worktree remove --force "$wt/tree" >/dev/null 2>&1; rm -rf "$wt"
   if [ "$rc" = 0 ]; then record 7 "advisories" pass "cargo deny check advisories is clean at $COMMIT"
   else record 7 "advisories" FAIL "cargo deny check advisories failed at $COMMIT (exit $rc):

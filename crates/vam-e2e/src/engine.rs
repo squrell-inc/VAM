@@ -188,6 +188,13 @@ struct Ctx {
     order: Vec<String>,
     runs: Vec<RunRec>,
     last_refusal: Option<String>,
+    /// The HTTP status of that refusal, when the step knows it.
+    last_refusal_status: Option<u16>,
+    /// The URN a `put-draft` or an inline `chat` step wrote or tried, by (piece alias, identity
+    /// alias or `bootstrap`).
+    drafts: HashMap<(String, String), String>,
+    /// `defaultNamespace` per identity alias (or `bootstrap`), for `{{ns}}`.
+    namespaces: HashMap<String, String>,
     /// A wait ended on the step or scenario budget (not on the product failing).
     budget_timeout: bool,
     threads: u32,
@@ -588,7 +595,10 @@ impl Engine {
                 | PieceKind::MockProvider
                 | PieceKind::GitMarketplace => "",
             };
-            if !coll.is_empty() {
+            // A deferred playbook, or a deferred agent that is not released, is written by a
+            // `put-draft` step, as an identity.
+            let skip_put = wp.written_by_step();
+            if !coll.is_empty() && !skip_put {
                 let r = self.api.put(&format!("/v1/{coll}"), &body).map_err(conn)?;
                 if !r.ok() {
                     return Err(Fail::new(
@@ -619,6 +629,7 @@ impl Engine {
             self.make_identity(
                 alias,
                 wp.role.as_deref().unwrap_or("Owner"),
+                wp.scopes.as_deref(),
                 &name,
                 wp.username.as_deref(),
             )?;
@@ -663,6 +674,7 @@ impl Engine {
         &mut self,
         alias: &str,
         role: &str,
+        scopes: Option<&[String]>,
         name: &str,
         template: Option<&str>,
     ) -> Result<(), Fail> {
@@ -723,12 +735,13 @@ impl Engine {
                 )
             })?
             .to_string();
+        let mut key_body = json!({ "name": "e2e" });
+        if let Some(list) = scopes {
+            key_body["scopes"] = json!(list);
+        }
         let r = self
             .api
-            .post(
-                &format!("/v1/users/{}/keys", seg(&user_id)),
-                &json!({ "name": "e2e" }),
-            )
+            .post(&format!("/v1/users/{}/keys", seg(&user_id)), &key_body)
             .map_err(conn)?;
         // The success body carries the secret: it is never printed.
         let secret = r.json()["secret"].as_str().unwrap_or_default().to_string();
@@ -1136,9 +1149,20 @@ impl Engine {
     ) -> Result<(), Fail> {
         let key = self.key_of(identity)?;
         let r = self.post_run(&body, budget, key.as_deref())?;
+        // A start that sent an inline agent or playbook is expected to be refused: accepting it
+        // fails the step, once the run it started has ended (so no guest is left running).
+        let inline = body.get("inlineAgent").is_some() || body.get("inlinePlaybook").is_some();
+        let accepted_inline = (r.ok() && inline).then(|| {
+            Fail::new(
+                Class::Product,
+                "the start with an inline agent or playbook is refused",
+                format!("POST /v1/runs -> {} {}", r.status, r.body),
+            )
+        });
         if !r.ok() {
             if refusal_ok && (400..500).contains(&r.status) {
                 self.ctx.last_refusal = Some(r.body);
+                self.ctx.last_refusal_status = Some(r.status);
                 return Ok(());
             }
             return Err(Fail::new(
@@ -1148,6 +1172,7 @@ impl Engine {
             ));
         }
         self.ctx.last_refusal = None;
+        self.ctx.last_refusal_status = None;
         let v = r.json();
         let rec = RunRec {
             agent: alias.to_string(),
@@ -1180,18 +1205,23 @@ impl Engine {
         self.ctx.runs.push(rec);
         let i = self.ctx.runs.len() - 1;
         if !wait {
-            return Ok(());
+            return accepted_inline.map_or(Ok(()), Err);
         }
         let what = "the run is terminal or parked";
-        self.wait_for(budget, Some(i), |e| {
-            let st = e.ctx.runs[i].state.as_str();
-            Ok(if is_terminal(st) || st == "RUN_STATE_PAUSED" {
-                Probe::Met
-            } else {
-                Probe::Pending
+        let waited = self
+            .wait_for(budget, Some(i), |e| {
+                let st = e.ctx.runs[i].state.as_str();
+                Ok(if is_terminal(st) || st == "RUN_STATE_PAUSED" {
+                    Probe::Met
+                } else {
+                    Probe::Pending
+                })
             })
-        })
-        .map_err(|e| self.wait_fail(e, what, Some(i)))
+            .map_err(|e| self.wait_fail(e, what, Some(i)));
+        match (waited, accepted_inline) {
+            (_, Some(f)) => Err(f),
+            (w, None) => w,
+        }
     }
 
     /// The workspace name of an agent's runs: a created identity gets its own, and so do draft
@@ -1208,9 +1238,190 @@ impl Engine {
         slug
     }
 
+    /// The body of a `playbook` or `agent` piece for the identity `who`, under the run-unique
+    /// name `<piece>-<who>-<scenario>-<runTag>` (the `put-draft` rule); the URN is remembered
+    /// for `put-draft`, `chat` and `{{urn:<piece>:<as>}}`.
+    pub(super) fn draft_body(
+        &mut self,
+        alias: &str,
+        who: Option<&str>,
+        scenario_id: &str,
+    ) -> Result<(PieceKind, Value), Fail> {
+        self.draft_body_of(alias, who, None, scenario_id)
+    }
+
+    /// As `draft_body`. `{{ns}}` becomes the writer's `defaultNamespace` (`GET /v1/me`, cached per
+    /// identity). With `urn_of`, the body's URN is the one an earlier `put-draft` of the same piece
+    /// as `urn_of` wrote (class `scenario` when none), so a second identity aims at it.
+    pub(super) fn draft_body_of(
+        &mut self,
+        alias: &str,
+        who: Option<&str>,
+        urn_of: Option<&str>,
+        scenario_id: &str,
+    ) -> Result<(PieceKind, Value), Fail> {
+        let rec = self.ctx.pieces.get(alias).cloned().ok_or_else(|| {
+            Fail::new(
+                Class::Scenario,
+                format!("world piece `{alias}` in `given`"),
+                "not in `given`",
+            )
+        })?;
+        let wp = self.pieces.get(&rec.piece).cloned().ok_or_else(|| {
+            Fail::new(
+                Class::Harness,
+                format!("world piece `{}`", rec.piece),
+                "unknown piece",
+            )
+        })?;
+        let body = wp.body.as_ref().ok_or_else(|| {
+            Fail::new(
+                Class::Scenario,
+                format!("piece `{alias}` has a body"),
+                "no body",
+            )
+        })?;
+        let who = who.unwrap_or("bootstrap");
+        let name = format!("{alias}-{who}-{scenario_id}-{}", self.eff_tag().0);
+        let mut text = self.subst(body.to_string(), &name);
+        if text.contains("{{ns}}") {
+            let ns = self.namespace_of(if who == "bootstrap" { None } else { Some(who) })?;
+            text = text.replace("{{ns}}", &ns);
+        }
+        let mut body: Value = serde_json::from_str(&text).map_err(|e| {
+            Fail::new(
+                Class::Harness,
+                "a JSON body after substitution",
+                e.to_string(),
+            )
+        })?;
+        if let Some(other) = urn_of {
+            let urn = self.draft_urn(alias, Some(other)).ok_or_else(|| {
+                Fail::new(
+                    Class::Scenario,
+                    format!("a `put-draft` of `{alias}` as `{other}` before `urnOf: {other}`"),
+                    "none yet",
+                )
+            })?;
+            body["spec"]["resourceId"]["urn"] = Value::String(urn.to_string());
+        }
+        if let Some(urn) = body.pointer("/spec/resourceId/urn").and_then(Value::as_str) {
+            self.ctx
+                .drafts
+                .insert((alias.to_string(), who.to_string()), urn.to_string());
+        }
+        Ok((wp.kind, body))
+    }
+
+    /// The `defaultNamespace` of `GET /v1/me` for the identity (the bootstrap key when `who` is
+    /// `None`), asked once and kept for the scenario.
+    fn namespace_of(&mut self, who: Option<&str>) -> Result<String, Fail> {
+        let slot = who.unwrap_or("bootstrap").to_string();
+        if let Some(ns) = self.ctx.namespaces.get(&slot) {
+            return Ok(ns.clone());
+        }
+        let key = self.key_of(who)?;
+        let r = self.api.get_as(key.as_deref(), "/v1/me").map_err(conn)?;
+        let ns = r.json()["defaultNamespace"]
+            .as_str()
+            .filter(|n| !n.is_empty())
+            .map(String::from);
+        let Some(ns) = ns.filter(|_| r.ok()) else {
+            return Err(Fail::new(
+                Class::Harness,
+                format!("GET /v1/me as `{slot}` answers a defaultNamespace (for `{{{{ns}}}}`)"),
+                format!(
+                    "{} {}",
+                    r.status,
+                    r.body.chars().take(200).collect::<String>()
+                ),
+            ));
+        };
+        self.ctx.namespaces.insert(slot, ns.clone());
+        Ok(ns)
+    }
+
+    /// The URN a `put-draft` (or inline `chat`) step as `who` wrote or tried for the piece.
+    pub(super) fn draft_urn(&self, alias: &str, who: Option<&str>) -> Option<&str> {
+        let who = who.unwrap_or("bootstrap");
+        self.ctx
+            .drafts
+            .get(&(alias.to_string(), who.to_string()))
+            .map(String::as_str)
+    }
+
+    /// The agent a `chat` or `start-playbook` runs: `agent_of`, except that a deferred agent
+    /// that is not released has no URN until a `put-draft` step wrote it as `identity`; the run
+    /// then names that URN.
+    fn agent_for(
+        &self,
+        agent: Option<&str>,
+        identity: Option<&str>,
+    ) -> Result<(String, String), Fail> {
+        let (alias, urn) = self.agent_of(agent)?;
+        let deferred_draft = self
+            .ctx
+            .pieces
+            .get(&alias)
+            .and_then(|r| self.pieces.get(&r.piece))
+            .is_some_and(|w| w.kind == PieceKind::Agent && w.written_by_step());
+        if !deferred_draft {
+            return Ok((alias, urn));
+        }
+        let urn = self
+            .draft_urn(&alias, identity)
+            .ok_or_else(|| {
+                Fail::new(
+                    Class::Scenario,
+                    format!("a `put-draft` of `{alias}` as this identity before the run"),
+                    "none yet",
+                )
+            })?
+            .to_string();
+        Ok((alias, urn))
+    }
+
     fn chat(&mut self, c: &Chat, s: &Scenario) -> Result<(), Fail> {
-        let (alias, urn) = self.agent_of(c.agent())?;
         let identity = c.identity().map(String::from);
+        // An inline agent is sent as `inlineAgent`, with no `agentRef`; its URN is the draft's.
+        let inline_agent = match c.inline() {
+            Some(piece) => {
+                let (kind, body) = self.draft_body(piece, identity.as_deref(), &s.id)?;
+                if kind != PieceKind::Agent {
+                    return Err(Fail::new(
+                        Class::Scenario,
+                        format!("`inline: {piece}` names an agent piece"),
+                        format!("kind {kind:?}"),
+                    ));
+                }
+                Some((piece.to_string(), body))
+            }
+            None => None,
+        };
+        let (alias, urn) = match &inline_agent {
+            Some((piece, body)) => (
+                piece.clone(),
+                body.pointer("/spec/resourceId/urn")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+            None => self.agent_for(c.agent(), identity.as_deref())?,
+        };
+        let inline_playbook = match c.inline_playbook() {
+            Some(piece) => {
+                let (kind, body) = self.draft_body(piece, identity.as_deref(), &s.id)?;
+                if kind != PieceKind::Playbook {
+                    return Err(Fail::new(
+                        Class::Scenario,
+                        format!("`inlinePlaybook: {piece}` names a playbook piece"),
+                        format!("kind {kind:?}"),
+                    ));
+                }
+                Some(body)
+            }
+            None => None,
+        };
         self.key_of(identity.as_deref())?;
         let (mode, budget) = match c {
             Chat::Text(_) => (ThreadSel::Mode(ThreadMode::New), self.cfg.step_budget),
@@ -1260,6 +1471,16 @@ impl Engine {
         };
         let prompt = self.chat_prompt(c.text(), s);
         let mut body = self.run_body(&urn, &slug, &thread, &prompt, None, c.draft());
+        if let Some((_, a)) = &inline_agent {
+            body["spec"].as_object_mut().map(|o| o.remove("agentRef"));
+            body["inlineAgent"] = a["spec"].clone();
+        }
+        if let Some(p) = &inline_playbook {
+            body["inlinePlaybook"] = p["spec"].clone();
+            for (k, v) in c.inputs().into_iter().flatten() {
+                body["spec"]["inputs"][k] = serde_json::to_value(v).unwrap_or(Value::Null);
+            }
+        }
         if let Some((space, thread_id)) = place {
             body["spec"]["spaceId"] = json!(space);
             body["spec"]["threadId"] = json!(thread_id);
@@ -1295,7 +1516,7 @@ impl Engine {
         sp: &crate::scenario::StartPlaybook,
         s: &Scenario,
     ) -> Result<(), Fail> {
-        let (alias, urn) = self.agent_of(sp.agent.as_deref())?;
+        let (alias, urn) = self.agent_for(sp.agent.as_deref(), sp.as_.as_deref())?;
         let pb = self.playbook_of(&sp.playbook)?;
         self.key_of(sp.as_.as_deref())?;
         let slug = self.workspace_slug(&urn, sp.as_.as_deref(), sp.draft);
@@ -1838,6 +2059,28 @@ impl Engine {
         }
         let i = self.last_run();
         if let Some(true) = e.refused {
+            if let (Some(want), Some(_)) = (e.status, &self.ctx.last_refusal) {
+                match self.ctx.last_refusal_status {
+                    Some(got) if got == want => {}
+                    Some(got) => {
+                        return Err(Fail::new(
+                            Class::Product,
+                            format!("the start is refused with status {want}"),
+                            format!(
+                                "status {got}: {}",
+                                self.ctx.last_refusal.clone().unwrap_or_default()
+                            ),
+                        ))
+                    }
+                    None => {
+                        return Err(Fail::new(
+                            Class::Scenario,
+                            "`status` read after a `chat` step that was refused",
+                            "the refusal came from another step, which records no status",
+                        ))
+                    }
+                }
+            }
             return match &self.ctx.last_refusal {
                 Some(body) => match &e.contains {
                     Some(want) if !body.contains(want.as_str()) => Err(Fail::new(
@@ -2276,6 +2519,8 @@ impl Engine {
             Step::Login(x) => self.login(x),
             Step::ChangePassword(x) => self.change_password(x),
             Step::IdentityRequest(x) => self.identity_request(x),
+            Step::PutDraft(x) => self.put_draft(x, &s.id),
+            Step::SetRole(x) => self.set_role(x),
             Step::CreateUser(x) => self.create_user(x, &s.id),
         }
     }
@@ -2795,6 +3040,22 @@ impl Engine {
         text
     }
 
+    /// `{{urn:<piece>:<as>}}`: the URN a `put-draft` or an inline `chat` step as `<as>` wrote or
+    /// tried for `<piece>` (`encode`: percent-encoded for a path). One that no step produced is
+    /// class `scenario`.
+    pub(super) fn expand_draft_urns(&self, text: &str, encode: bool) -> Result<String, Fail> {
+        identity::expand_urns(text, encode, |piece, who| {
+            self.draft_urn(piece, Some(who)).map(String::from)
+        })
+        .map_err(|inner| {
+            Fail::new(
+                Class::Scenario,
+                format!("a `put-draft` or inline `chat` as the identity named by `{{{{urn:{inner}}}}}` before this step"),
+                "none yet",
+            )
+        })
+    }
+
     /// The value never leaves `Secret`; an error text from vamd is scrubbed of it.
     fn scrub(&self, text: &str) -> String {
         let mut out = text.to_string();
@@ -2937,7 +3198,7 @@ impl Engine {
                 format!("{} {}", r.status, r.body),
             ));
         }
-        self.release_skill_piece(piece, urn)
+        self.release_skill_piece(piece, urn, None)
     }
 
     /// `publish-skill: { piece, refused, contains }`: publishes and releases a `deferred` skill
@@ -2958,9 +3219,15 @@ impl Engine {
             )
         })?;
         let archive = self.skill_package(&wp, &rec.name, &rec.urn)?;
+        let key = self.key_of(p.as_.as_deref())?;
         let r = self
             .api
-            .post_file("/v1/skills/packages", "skill.tar.gz", archive)
+            .post_file_as(
+                key.as_deref(),
+                "/v1/skills/packages",
+                "skill.tar.gz",
+                archive,
+            )
             .map_err(conn)?;
         let shown = format!(
             "{} {}",
@@ -2993,7 +3260,10 @@ impl Engine {
                 shown,
             ));
         }
-        self.release_skill_piece(&p.piece, &rec.urn)?;
+        if !p.release {
+            return Ok(());
+        }
+        self.release_skill_piece(&p.piece, &rec.urn, key.as_deref())?;
         // An agent piece marked `deferred` that requires this skill is released now.
         let agents: Vec<(String, String)> = self
             .ctx
@@ -3009,7 +3279,8 @@ impl Engine {
         for (piece, urn) in agents {
             let r = self
                 .api
-                .post(
+                .post_as(
+                    key.as_deref(),
                     &format!("/v1/agents/{}/release", seg(&urn)),
                     &json!({ "version": { "major": 1, "minor": 0, "patch": 0 } }),
                 )
@@ -3025,10 +3296,16 @@ impl Engine {
         Ok(())
     }
 
-    fn release_skill_piece(&mut self, piece: &str, urn: &str) -> Result<(), Fail> {
+    fn release_skill_piece(
+        &mut self,
+        piece: &str,
+        urn: &str,
+        key: Option<&str>,
+    ) -> Result<(), Fail> {
         let r = self
             .api
-            .post(
+            .post_as(
+                key,
                 &format!("/v1/skills/packages/{}/release", seg(urn)),
                 &json!({ "urn": urn, "version": { "major": 1, "minor": 0, "patch": 0 } }),
             )

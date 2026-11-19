@@ -88,6 +88,11 @@ fn resolve_one_skill_ref(
     }
 
     let version = skill_ref.version.as_ref();
+    if mode == ResolveMode::ReleasedOnly && version.is_some_and(|v| v.prerelease == "draft") {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "skill '{urn}': drafts are not available to this agent"
+        )));
+    }
     let floating = version.is_none();
     if floating {
         let pinned = resolve_ref_for_owner(store, ArtifactKind::Skill, skill_ref, owner, mode)?;
@@ -809,6 +814,32 @@ mod tests {
         assert_eq!(staging, session.path().join("catalog-skills"));
         assert!(staging.join("assistant-tools/SKILLS.md").is_file());
         assert!(staging.join("assistant-tools/manifest.json").is_file());
+    }
+
+    #[test]
+    fn released_only_refuses_a_draft_pin_at_boot() {
+        let _drive9 = Drive9Fixture::new();
+        let store = store();
+        let digest = real_digest_for("v1");
+        store
+            .put_skill_package(&package_at(&digest, SkillChannel::Draft, 0, 1, 1, "draft"))
+            .expect("draft");
+        _drive9.write_blob(&digest, &fixture_archive("v1"));
+        let session = tempfile::tempdir().expect("session");
+        let agent = agent_with_refs(vec![skill_ref(&digest, "draft")]);
+        let err = resolve_agent_skill_refs(
+            &store,
+            &agent,
+            session.path(),
+            None,
+            LOCAL_USER_ID,
+            ResolveMode::ReleasedOnly,
+        )
+        .expect_err("a member's boot never stages a draft");
+        assert!(
+            err.to_string().contains("drafts are not available"),
+            "{err}"
+        );
     }
 
     #[test]
