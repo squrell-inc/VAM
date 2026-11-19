@@ -456,16 +456,31 @@ async fn an_email_member_saves_in_the_namespace_me_reports_and_not_the_user_id()
         );
     }
 
-    // Another login name with the same local part shares the namespace. It may save a new
-    // URN there, and the owner check refuses the first member's agent.
-    let (_, other) = key_for("ada.lovelace@Other.example");
+    // Another login name with the same local part gets a namespace of its own (user-identity
+    // decision 17), so the first member's URN and a free name in the first member's namespace
+    // answer the same 400: the second member cannot tell a taken name from a free one.
+    let (other_id, other) = key_for("ada.lovelace@Other.example");
     let (status, body) = send(&w.app, "GET", "/v1/me", &other, "", "application/json").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let me: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(me["defaultNamespace"].as_str(), Some(namespace), "{body}");
-    let (status, body) = put_agent(&w, &other, &own, serde_json::json!({})).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    let theirs = format!("urn:vam:agent:{registry}/{namespace}/second");
+    let other_namespace = me["defaultNamespace"]
+        .as_str()
+        .expect("namespace")
+        .to_string();
+    assert_eq!(
+        other_namespace,
+        vam_spec::namespace_suffixed(namespace, &other_id, 6),
+        "{body}"
+    );
+    let free = format!("urn:vam:agent:{registry}/{namespace}/second");
+    let mut refusals = Vec::new();
+    for target in [&own, &free] {
+        let (status, body) = put_agent(&w, &other, target, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{target}: {body}");
+        refusals.push(body.replace(target.as_str(), "<urn>"));
+    }
+    assert_eq!(refusals[0], refusals[1]);
+    let theirs = format!("urn:vam:agent:{registry}/{other_namespace}/second");
     let (status, body) = put_agent(&w, &other, &theirs, serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
