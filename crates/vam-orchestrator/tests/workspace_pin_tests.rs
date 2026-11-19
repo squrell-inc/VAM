@@ -289,6 +289,37 @@ async fn released_pin_create_run_is_accepted() {
 }
 
 #[tokio::test]
+async fn member_can_pin_own_draft() {
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let member = mint_user_key(&store, "member", UserRole::Member, MEMBER_SCOPES);
+    let (state, _dir) = app_state_http_only(store);
+    let app = test_app(state);
+    let urn = "urn:vam:agent:local.vam.dev/member/own-draft-pin";
+    assert_eq!(
+        put_agent_as(&app, &member, urn, "member-draft").await,
+        StatusCode::OK
+    );
+
+    let (status, body) = create_run_as(
+        &app,
+        &member,
+        catalog_run_body(
+            urn,
+            "member-own-draft-ws",
+            "member-own-draft-idem",
+            "urn:vam:run:local.vam.dev/member/own-draft",
+            "draft",
+        ),
+        "member-own-draft-idem",
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "a member's own draft pin must not 404: {status} {body}"
+    );
+}
+
+#[tokio::test]
 async fn member_cannot_pin_foreign_draft() {
     let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
     let publisher = mint_user_key(&store, "pub", UserRole::Publisher, PUBLISHER_SCOPES);

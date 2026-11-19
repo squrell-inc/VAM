@@ -1,0 +1,49 @@
+id: member-builds-and-runs-own-draft-agent-from-a-released-skill
+title: A member saves their own draft agent from a released skill, chats with it and runs a released playbook on it, and still cannot author a playbook or skill or release
+description: >
+  The member's agent names a released skill with no version. The save is accepted, the draft chat runs
+  the skill's tool, and a released playbook runs on the draft. The member's key lists agents:draft and
+  not catalog:write; saving a playbook, publishing a skill and releasing the agent are all refused for
+  the member.
+tags: [members, chat, playbook, permissions]
+needs: process
+given:
+  - org-admin
+  - { piece: org-member, as: member }
+  - skill-host-echo
+  - agent-member-draft-with-host-echo
+  - playbook-one-step
+  - playbook-draft-probe
+  - skill-draft-probe
+when:
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: member, status: 200 }
+  - chat: { agent: agent-member-draft-with-host-echo, draft: true, as: member, text: "e2e-step:me Echo" }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: host-echo-ok } }
+  - start-playbook: { playbook: playbook-one-step, agent: agent-member-draft-with-host-echo, draft: true, as: member, label: mp, inputs: { topic: e2e } }
+  - expect: { run: succeeded }
+then:
+  - identity-request: { as: member, credential: key, path: /v1/me, status: 200, contains: "agents:draft", lacks: "catalog:write" }
+  - put-draft: { piece: playbook-draft-probe, as: member, status: 403, contains: "catalog:write" }
+  - publish-skill: { piece: skill-draft-probe, as: member, refused: true, contains: "catalog:write" }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-member-draft-with-host-echo:member}}/release", status: 403 }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/permissions.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/keys.rs
+  - vam:crates/vam-orchestrator/src/catalog_resolve.rs
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/permissions_view.rs
+mock:
+  - when: { step: me, toolName: host_echo }
+    reply: { text: Echoed. }
+  - when: { step: me, toolName: load_skill }
+    reply: { toolCall: { name: host_echo, args: { marker: host-echo-ok } } }
+  - when: { step: me, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-host-echo-member-builds-and-runs-own-draft-agent-from-a-released-skill } } }
+  - when: { step: mp, afterTool: step_complete }
+    reply: { text: summarised }
+  - when: { step: mp }
+    reply: { toolCall: { name: step_complete, args: { step_id: summarise, outcome: done } } }
+status: active

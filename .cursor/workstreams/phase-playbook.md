@@ -255,7 +255,10 @@ owner hands it over. Nobody waits on it.
 
 ## 8. Release to `main`
 
-On the owner's word only. Open a PR from the epic base into `main` (both repos
+On the owner's word only, once per phase (or once per fix session), never per
+wave or per follow-up (working-agreement.md, "Integration branches"). Check
+that no other release PR into `main` is open; if one is, wait for it, then
+merge `main` into the base once. Open a PR from the epic base into `main` (both repos
 when both moved, vam first), titled `release: <epic> <phases>`. The body has a
 **deploy note**: order (vamd before the app when the app needs new vamd fields)
 and any env var to set once. Merge with a **merge commit**, never squash. If the code is unchanged since a green
@@ -276,7 +279,9 @@ workflow); check `git merge-tree` for conflicts before opening the PR.
   decisions, the current state and the progress log. GitHub has branches and
   PRs. Nothing lives only in chat.
 - **Base branches.** Each epic has its own base, cut from `main` (table in
-  `working-agreement.md`). Phases start on it, not on `main`.
+  `working-agreement.md`). Phases start on it, not on `main`. Every PR of the
+  phase, the tracker close-out included, targets it; `main` takes the phase in
+  one release PR (§8).
 - **One orchestrator per epic.** Start a new orchestrator session per epic (or per phase when the
   context gets long) from the repo root on the epic's base branch.
 - **Status messages** say what changed, what is next, and what

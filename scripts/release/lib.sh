@@ -76,3 +76,45 @@ sha256_of() { if command -v sha256sum >/dev/null; then sha256sum "$1" | awk '{pr
 
 # file_size <file>: bytes.
 file_size() { wc -c < "$1" | tr -d ' '; }
+
+# release_files <version>: every file a release holds: the assets, SHA256SUMS and RELEASE_NOTES.md.
+release_files() { release_assets "$1"; printf '%s\n' SHA256SUMS RELEASE_NOTES.md; }
+
+# --- GitHub release helpers (publish.sh, verify.sh); they use `gh` on PATH and $REPO ----------------
+
+# retry <tries> <seconds> <command...>: runs the command until it succeeds, at most <tries> times.
+# RETRY_SLEEP overrides the wait (tests set 0). The last failure's output stays visible.
+retry() {
+  local tries="$1" wait="${RETRY_SLEEP:-$2}" n=1; shift 2
+  until "$@"; do
+    [ "$n" -lt "$tries" ] || return 1
+    echo "retry: attempt $n of $tries failed; waiting ${wait}s" >&2
+    sleep "$wait"; n=$((n + 1))
+  done
+}
+
+# gh_releases: every release of $REPO, drafts included (the token needs contents: write), as one JSON array.
+gh_releases() {
+  local out
+  out="$(gh api -H 'Accept: application/vnd.github+json' --paginate "repos/$REPO/releases?per_page=100")" || return 1
+  printf '%s' "$out" | jq -cs 'add // []'
+}
+
+# gh_tag_refs <tag>: the refs named exactly refs/tags/<tag>, as a JSON array (matching-refs is a prefix match).
+gh_tag_refs() {
+  local out
+  out="$(gh api -H 'Accept: application/vnd.github+json' --paginate "repos/$REPO/git/matching-refs/tags/$1")" || return 1
+  printf '%s' "$out" | jq -cs --arg r "refs/tags/$1" 'add // [] | map(select(.ref == $r))'
+}
+
+# gh_release_by_id <id>: the release JSON; exit 3 when it does not exist (404), 1 on any other failure.
+gh_release_by_id() {
+  local out err rc
+  err="$(mktemp "${TMPDIR:-/tmp}/gh-err.XXXXXX")"
+  out="$(gh api -H 'Accept: application/vnd.github+json' "repos/$REPO/releases/$1" 2>"$err")"; rc=$?
+  if [ "$rc" != 0 ]; then
+    if grep -q 'HTTP 404' "$err"; then rm -f "$err"; return 3; fi
+    cat "$err" >&2; rm -f "$err"; return 1
+  fi
+  rm -f "$err"; printf '%s' "$out"
+}

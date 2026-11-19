@@ -1129,6 +1129,37 @@ paths:
         A connector whose client id is not configured on this node cannot be
         enabled (409). An unknown id is 404. A member gets 403 and nothing
         changes. The body is validated before anything is written.
+
+        **Admin-supplied client (`provider.client: org`).** The body may carry
+        `client: { clientId, clientSecret? }`. It is accepted only for such a
+        connector (400 otherwise); enabling one with no client stored or given
+        is 409 (the text names the client id); one that keeps a secret
+        (`clientSecret: org_vault`) needs a secret stored or given (400), also
+        when the body has no `client` and the saved client has none. On a
+        body with a client, the node reads the provider's OAuth metadata from
+        the connector's MCP URL (RFC 9728, whose `resource` must name that
+        server, then RFC 8414 / OpenID Connect) over
+        https to public addresses only, requires S256, and pins the
+        authorization and token endpoints on the node row, and for a connector
+        that keeps a secret how the secret authenticates (`client_secret_post`
+        when the provider lists it, else `client_secret_basic` when it lists it
+        or says nothing; neither is 409); a provider that
+        cannot be read is 502 and one whose metadata cannot be used is 409,
+        and nothing is written. A save planned from state another admin's save
+        has since changed (the saved client or the connector's definition) is
+        409 ("the client changed while saving; save again") and writes nothing. The secret becomes one org-scope `connection`
+        vault row pinned to the token endpoint's host; it is never returned,
+        never listed (`GET /v1/secrets` and `/v1/org/secrets` omit the row) and
+        the secrets API refuses to read, write or delete it. A new secret alone
+        keeps members connected (and brings back a member whose refresh the
+        provider had refused for this client, `invalid_client`; a revoked grant
+        still needs a sign-in). A save that also disables the connector brings no
+        one back: those members stay parked, with their notifications open, until
+        the save that enables the connector again with the same client; a new client id or a moved token endpoint marks
+        every member's connection `needs_reauth`. A token endpoint that moved to
+        another host needs the secret entered again (409). `client: null` (only
+        with `enabled: false`) removes the client and its secret. A disable
+        keeps the client; `{ "enabled": true }` alone restores it.
       parameters:
         - name: id
           in: path
@@ -1155,7 +1186,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ConnectorEntry"
         "400":
-          description: Unknown body field, a tenant that is not a GUID, or consent on a connector that takes none.
+          description: Unknown body field, a tenant that is not a GUID, consent on a connector that takes none, a client on a connector that uses the publisher's own, a missing client secret, or a malformed client (the answer never quotes the body).
           content:
             application/json:
               schema:
@@ -1173,7 +1204,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "409":
-          description: The connector is not configured on this node (its client id is the placeholder).
+          description: The connector is not configured on this node (its client id is the placeholder, or an admin-supplied client is not stored), or the provider's metadata cannot be used (no S256, an endpoint that is not public https, a moved token endpoint without a new secret).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: The provider's OAuth metadata could not be read; nothing was written.
           content:
             application/json:
               schema:
@@ -1277,6 +1314,117 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "404":
           description: No such connector, or the caller is not connected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/connectors/{id}/connection/oauth/code:
+    post:
+      summary: Exchange an authorization code on the node (admin-supplied client with a secret)
+      description: |
+        For an MCP connector with `provider.client: org` and `clientSecret: org_vault`
+        (`secrets:write`; Idempotency-Key required). The app runs the browser sign-in with
+        PKCE against `node.client.authorizeEndpoint` and the admin's client id, then posts
+        what it got. The body names no endpoint and no client; any other field is a 400.
+        `redirectUri` must be the app's own: `squrell://oauth` or
+        `http://127.0.0.1:<port>/<path>` with an explicit port other than 80 (a loopback URI
+        with no port, or with the default port 80, is a 400). `codeVerifier` is 43-128 RFC 7636 characters.
+        `vamd` posts `grant_type=authorization_code`, `code`, `code_verifier`,
+        `redirect_uri`, `client_id`, the RFC 8707 `resource` and the org's `client_secret`
+        to the token endpoint pinned at Enable (DNS-pinned public address, no redirects),
+        then writes the caller's connection (the node's client id and endpoints), stores
+        the refresh token and the access token in one transaction, and lists the vetted
+        tools. The connection is committed with its tools pending (`needsReconnect`, no
+        notification) and is `connected` only once they are adopted, so a request dropped
+        between the two (the app went away, the node stopped) leaves a connection that
+        `POST /v1/mcp/connections/{id}/refresh?scope=user` finishes (the connection is
+        user-scoped; without `scope` an org admin addresses the org scope and gets a 404). The secret goes in the body (`client_secret_post`) or as HTTP Basic
+        (`client_secret_basic`), whichever Enable pinned from the provider's metadata.
+        The local checks (body, redirect URI, code and verifier syntax, the connector, its
+        enable, the saved client and secret) run before the request and write nothing. Once
+        the provider has accepted the code it cannot be used again, so a client must never
+        retry with the same code: what can fail after that is a 409 or 502 below, each says
+        whether to sign in again or to refresh the connection. The node records the exchange
+        under the caller, the connector and the `Idempotency-Key` before it sends the code, so
+        a request repeated with the same key (its first answer was lost) never presents the
+        code again: it is a 409, not retryable, whatever became of the first request, and the
+        app reads the connection state (`GET /v1/connectors`). A request refused by the local
+        checks records nothing. A new sign-in uses a new key. The answer is the caller's
+        list entry: no code, verifier, secret or token is in it or in any error.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code, codeVerifier, redirectUri]
+              properties:
+                code:
+                  type: string
+                codeVerifier:
+                  type: string
+                redirectUri:
+                  type: string
+      responses:
+        "200":
+          description: Connected. The caller's list entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorEntry"
+        "400":
+          description: An unknown body field, a redirect URI that is not the app's, a malformed code or verifier, a connector with no node exchange (it does not keep a secret), or the provider refused the code (spent, expired, wrong verifier).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Caller lacks `secrets:write`, or the node has not enabled the connector.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No such connector.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: |
+            Before the sign-in is stored: the admin has saved no client or secret yet, the provider
+            refused the client id or secret the admin entered, or the admin changed the client (or
+            turned the connector off) while the provider was answering. Nothing was written, and the
+            member signs in again.
+            A request with an `Idempotency-Key` whose exchange was already sent (not retryable):
+            the code is not sent again and nothing is written; read the connection state
+            (`GET /v1/connectors`) and sign in again, with a new key, if it is not connected.
+            After the sign-in is stored: the connection changed while its tools were being read (a
+            later sign-in or a disconnect of the same connection). This sign-in was saved and then
+            replaced or removed; the code is spent. Read the connection's state again
+            (`GET /v1/connectors`) and do not repeat this request with the same code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: |
+            The provider could not be reached (nothing was written; retryable); or it answered with no
+            refresh token (nothing was written; not retryable: the provider must issue a refresh token,
+            offline access, for the admin's client before the member signs in again); or the provider accepted the code but the connection could not be saved (nothing was replaced;
+            the code cannot be used again, so sign in again); or the sign-in was stored but the
+            connector's tools could not be read (the connection is `needsReconnect` and stays so, with
+            its notification open and parked runs parked, until
+            `POST /v1/mcp/connections/{id}/refresh?scope=user` lists them).
           content:
             application/json:
               schema:
@@ -1444,7 +1592,18 @@ paths:
                 $ref: "#/components/schemas/ListAgentsResponse"
     put:
       summary: Register or update an Agent
-      description: Create or update an Agent specification catalog entry.
+      description: |
+        Create or update the caller's draft of an Agent specification.
+
+        Needs `catalog:write` or `agents:draft` in the caller's effective scopes. A caller with
+        `catalog:write` saves with no extra rules. A caller with `agents:draft` and not
+        `catalog:write` (a member) saves under the member rules: the spec may not carry
+        `capabilityPolicy`, `hitlPolicy`, `instructionArtifact`, `extends`, `overlay` or
+        `completionPolicy.evaluatorRefs`; every skill, playbook and policy ref must be a released
+        version; a new URN must be under `urn:vam:agent:<registryDomain>/<defaultNamespace>/` (both
+        from `GET /v1/me`); another user's URN is a 403; and a member keeps at most
+        `VAMD_MEMBER_DRAFT_AGENTS_MAX` (default 50) draft agents. The exact messages
+        are on the Member agents page of the docs site (orchestrator/member-agents).
       parameters:
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
       requestBody:
@@ -1456,7 +1615,7 @@ paths:
             example:
               spec:
                 resourceId:
-                  urn: "urn:vam:agent:hub.vam.dev/acme/sql-developer"
+                  urn: "urn:vam:agent:local.vam.dev/acme/sql-developer"
                 displayName: "SQL Developer"
                 description: "Specialized agent for database migrations and queries"
                 role: "Database Engineer"
@@ -1477,6 +1636,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PutAgentResponse"
+        "400":
+          description: The spec is invalid, or it breaks a member rule (a refused field, a ref that is not released, a URN outside the member's namespace).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller holds neither `catalog:write` nor `agents:draft`, or another user owns the URN.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: A member already keeps the most draft agents `VAMD_MEMBER_DRAFT_AGENTS_MAX` allows and this URN is new.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 
   /v1/agents/{urn}:
     get:
@@ -1492,7 +1669,7 @@ paths:
           required: true
           schema:
             type: string
-          example: "urn:vam:agent:hub.vam.dev/acme/sql-developer"
+          example: "urn:vam:agent:local.vam.dev/acme/sql-developer"
       responses:
         "200":
           description: Agent specification.
@@ -1500,6 +1677,165 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GetAgentResponse"
+
+  /v1/agents/{urn}/permissions:
+    get:
+      summary: Get an agent draft's permissions
+      description: |
+        The `permissions` block of the agent's draft. Callers with `runs:write`
+        or `catalog:write` may read, the same as `GET /v1/agents`. The owner sees
+        their own draft. `users:admin` also sees another user's draft. Any other
+        caller gets 404 for a foreign draft, the same as for a missing one. A
+        draft with no `permissions` block (including a legacy draft that still
+        uses `capabilityPolicy` or `hitlPolicy`) returns an empty object. Only
+        the draft is read. Use `permissions/effective?version=` for a release.
+      parameters:
+        - name: urn
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "urn:vam:agent:local.vam.dev/acme/jira"
+      responses:
+        "200":
+          description: The draft's permissions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentPermissions"
+        "400":
+          description: The agent URN is empty.
+        "403":
+          description: The caller has neither `runs:write` nor `catalog:write`.
+        "404":
+          description: No draft of this agent, or the draft belongs to another user.
+    put:
+      summary: Replace an agent draft's permissions
+      description: |
+        Replace the whole `permissions` block of the caller's own draft. The
+        request body is the new block, not a merge. Requires `catalog:write`
+        or `agents:draft`, and an `Idempotency-Key` header, the same as
+        `PUT /v1/agents`. Every role holds `agents:draft` by default. A caller
+        with `agents:draft` but not `catalog:write` (a member) writes under the
+        member rules: every `advanced` ref must be a released policy, and
+        `capabilityPolicy` or `hitlPolicy` is refused. Only the owner may write:
+        another user's draft is 404, including for `users:admin`, and the body
+        is not read. A changed body stores a new draft revision. Identical
+        bytes leave the revision as it is. The response is the stored block,
+        with tool and host targets in canonical spelling.
+      parameters:
+        - name: urn
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "urn:vam:agent:local.vam.dev/acme/jira"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentPermissions"
+            example:
+              tools:
+                default: bySideEffect
+                rules:
+                  - target: "skill:jira/create_issue"
+                    decision: ask
+              internet:
+                default: deny
+                rules:
+                  - target: "api.atlassian.com"
+                    decision: allow
+      responses:
+        "200":
+          description: Permissions saved on the draft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentPermissions"
+        "400":
+          description: |
+            No `Idempotency-Key` header, the agent URN is empty, the body is
+            not valid `AgentPermissions` JSON, or a rule does not validate
+            (for example an unparseable target), or, for a member, a ref
+            that has no released version or a field a member may not set.
+            Nothing is written.
+        "403":
+          description: The caller has neither `catalog:write` nor `agents:draft`.
+        "404":
+          description: No draft of this agent, or the draft belongs to another user.
+        "409":
+          description: |
+            The draft still uses `capabilityPolicy` or `hitlPolicy`. Run
+            `POST /v1/agents/{urn}/permissions/migrate` first. The draft is not
+            changed.
+        "503":
+          description: The node is not ready or is draining.
+
+  /v1/agents/{urn}/permissions/migrate:
+    post:
+      summary: Migrate a legacy agent draft to permissions
+      description: |
+        Convert the caller's own draft from `capabilityPolicy` and `hitlPolicy`
+        to a `permissions` block, store it as a new draft revision, and drop the
+        two legacy fields. Requires `catalog:write` and an `Idempotency-Key`
+        header, the same as `PUT /v1/agents/{urn}/permissions`. Members do not
+        have `catalog:write` by default and get 403. Only the owner may migrate:
+        another user's draft is 404, including for `users:admin`. The request
+        body is ignored.
+
+        The new block starts from tool default `deny` and internet default
+        `deny`. Each tool the capability Cedar decides becomes a tool rule on
+        its canonical target. A tool in `hitlPolicy.monitoredTools`
+        becomes `ask`, unless it was denied. Hosts the agent's skill secrets
+        already allowed become internet `allow` rules. A capability policy with
+        statements that are not tool-list rules stays attached on
+        `permissions.advanced`. A declared policy missing from the catalog falls
+        back to the builtin defaults and is reported in `behaviourChanges`.
+
+        A legacy tool name that maps to no target is a 409, and nothing is
+        written. With `force=true` (or `1`) those names are dropped and listed
+        in `unmapped`.
+      parameters:
+        - name: urn
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "urn:vam:agent:local.vam.dev/acme/jira"
+        - name: force
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["true", "1"]
+          description: Drop unmapped tool names instead of answering 409. Any other value is false.
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "200":
+          description: Draft migrated. The report says what was converted and what changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionsMigrationReport"
+        "400":
+          description: |
+            No `Idempotency-Key` header, the agent URN is empty, the draft has
+            no `resourceId`, or the capability policy's Cedar does not parse.
+            Nothing is written.
+        "403":
+          description: The caller lacks `catalog:write`.
+        "404":
+          description: No draft of this agent, or the draft belongs to another user.
+        "409":
+          description: |
+            The draft does not use `capabilityPolicy` or `hitlPolicy` (nothing to
+            migrate), or some legacy tool names map to no target and `force` was
+            not set. The message lists the unmapped names. The draft is not changed.
+        "503":
+          description: The node is not ready or is draining.
 
   /v1/agents/{urn}/permissions/effective:
     get:
@@ -1700,6 +2036,40 @@ paths:
                 $ref: "#/components/schemas/GetPlaybookResponse"
 
   /v1/skills:
+    get:
+      summary: List Skills
+      description: |
+        The skills an agent's `skillRefs` can name, newest first, one page at a time (50 by
+        default). While `pagination.nextPageToken` is not empty, pass it as `pageToken`.
+
+        Every caller with catalog read gets every **released** row: skill packages and skill
+        manifests. A manifest whose URN has a released package is left out, because a ref
+        resolves to the package. `includeDrafts=true` adds the caller's own drafts and needs
+        `catalog:write`; a member gets 403 `missing required scope 'catalog:write'`. Another
+        user's draft is never listed, for any caller.
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+        - name: includeDrafts
+          in: query
+          required: false
+          description: "`true` adds the caller's own drafts (needs `catalog:write`). Default `false`."
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: One page of skill records.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListSkillsResponse"
+        "400":
+          description: A bad `pageSize`, `pageToken` or `includeDrafts`.
+        "403":
+          description: "`includeDrafts=true` without `catalog:write`, or no catalog read."
+        "429":
+          $ref: "#/components/responses/RateLimited"
     put:
       summary: Register or update a Skill Manifest (metadata only)
       description: |
@@ -2884,7 +3254,7 @@ paths:
                 runId:
                   urn: "urn:vam:run:local.vam.dev/acme/run-20260826-001"
                 agentRef:
-                  urn: "urn:vam:agent:hub.vam.dev/acme/sql-developer"
+                  urn: "urn:vam:agent:local.vam.dev/acme/sql-developer"
                 workspaceRefUri: "volume://assistant"
                 threadRef: "session-thread-alpha"
                 inputs:
@@ -3410,7 +3780,21 @@ paths:
         `upgraded` without approval. An empty body defaults to
         `approveDrift: false`.
         This refreshes only the tool snapshot, not OAuth tokens; it does not
-        implement refresh-on-401. The `connection` object uses the same OAuth
+        implement refresh-on-401. One exception: a connector sign-in whose tools
+        are pending (`drift: adopted` on success) whose stored access token has
+        expired is renewed first, under the connection's refresh gate, with the
+        node's client and the org secret for an admin-supplied client; the
+        rotated tokens are stored and the row stays pending until its tools are
+        adopted. A stored token the MCP server refuses (HTTP 401) while the
+        tools are listed is renewed the same way, once, and the listing is
+        tried once more (a provider that sent no `expires_in` leaves no expiry
+        to go by). A refused renewal is a 409 (sign in again); an unreachable
+        provider is a 502 and the row stays pending. On a connector the node
+        has turned off this recovery is a 409 before the provider is contacted
+        and the sign-in stays pending. A listing that fails after another
+        request already adopted the tools, or after an admin save marked the
+        row, is a 409 and leaves the row as it is. The member's pending row is
+        user-scoped: pass `scope=user` (an org admin's default scope is org). The `connection` object uses the same OAuth
         status contract as list: `oauth.status`, `oauth.expiresAt` when known,
         sanitized `oauth.lastRefreshError` when set, and `oauth.hasRefreshBinding`.
         Static connections keep `oauth: null`.
@@ -3452,7 +3836,13 @@ paths:
         - `{id}/oauth/refresh-token` pinned to the token endpoint host
         - `{id}/oauth/client-secret` (optional) pinned to the token endpoint host
 
-        vamd never sees the authorization code and does not open a browser.
+        The app opens the browser and runs the sign-in in every flow; vamd never opens
+        one. vamd does not see the authorization code either, except for a connector with
+        an admin-supplied client and secret (`clientSecret: org_vault`): the app hands it
+        the code, verifier and redirect URI (`POST
+        /v1/connectors/{id}/connection/oauth/code`), vamd exchanges the code, and this
+        route answers 400 for that connector. A `clientSecret` is refused (400) for any
+        connector-backed row.
         Re-upsert replaces vault ciphertext for those bindings. The connection
         must already exist with `authMode=oauth`; static connections and other
         owners are rejected. Responses include binding ids and updated
@@ -3859,7 +4249,7 @@ components:
       properties:
         urn:
           type: string
-          example: "urn:vam:agent:hub.vam.dev/acme/sql-developer"
+          example: "urn:vam:agent:local.vam.dev/acme/sql-developer"
 
     Timestamp:
       type: object
@@ -3938,7 +4328,7 @@ components:
           type: array
           items:
             type: string
-          description: Scopes on this bearer (session role defaults, or the API key's minted set)
+          description: The effective scopes of this bearer. They follow the live role of the user (a key's stored list is capped by it).
         registryDomain:
           type: string
           description: This node's registry domain, the org's URN domain. `local.vam.dev` when unconfigured (`VAMD_REGISTRY_DOMAIN`).
@@ -4126,7 +4516,7 @@ components:
           type: array
           items:
             type: string
-          description: "Requested scopes. Empty = owner's role defaults. `catalog:write` does not imply `publish:grant`. Tenant owners never receive keys:admin or brokers:admin."
+          description: "Requested scopes. Empty follows the owner's live role; a list is capped by the live role. `catalog:write` does not imply `publish:grant`. Tenant owners never receive keys:admin or brokers:admin."
           example: ["runs:write", "sessions:write", "catalog:write", "approvals:write", "node:read"]
         idempotencyKey:
           type: string
@@ -4663,6 +5053,35 @@ components:
         permissions:
           $ref: "#/components/schemas/AgentPermissions"
 
+    PermissionsMigrationReport:
+      type: object
+      description: Result of `POST /v1/agents/{urn}/permissions/migrate`.
+      required: [converted, keptAdvanced, unmapped, behaviourChanges]
+      properties:
+        converted:
+          type: array
+          description: Canonical targets that received a tool rule.
+          items:
+            type: string
+        keptAdvanced:
+          type: array
+          description: Capability-policy URNs kept on `permissions.advanced`.
+          items:
+            type: string
+        unmapped:
+          type: array
+          description: Legacy tool names that mapped to no target. Non-empty only with `force`; they were dropped.
+          items:
+            type: string
+        behaviourChanges:
+          type: array
+          description: |
+            Plain-language notes on meaning the rules do not carry by themselves.
+            Always includes the note that internet is limited to the sites the
+            agent's secrets already allowed.
+          items:
+            type: string
+
     ListAgentsResponse:
       type: object
       properties:
@@ -4702,6 +5121,46 @@ components:
         version:
           $ref: "#/components/schemas/Version"
           description: "Released rows carry their semver. The owner's draft carries prerelease `draft`; its numbers are a storage slot, not a version."
+
+    ListSkillsResponse:
+      type: object
+      properties:
+        records:
+          type: array
+          description: One record per stored row, newest first.
+          items:
+            $ref: "#/components/schemas/SkillRecord"
+        pagination:
+          $ref: "#/components/schemas/PaginationResponse"
+
+    SkillRecord:
+      type: object
+      properties:
+        spec:
+          $ref: "#/components/schemas/SkillManifest"
+        ownerUserId:
+          type: string
+        channel:
+          type: string
+          enum: [DRAFT, RELEASED]
+        catalogTier:
+          type: string
+          enum: [user, platform, marketplace]
+        tier:
+          type: string
+          description: The same value as `catalogTier`.
+        readOnly:
+          type: boolean
+          description: True when a marketplace installed the row; nobody but the import changes it.
+        origin:
+          $ref: "#/components/schemas/CatalogOrigin"
+        version:
+          $ref: "#/components/schemas/Version"
+          description: "Released rows carry their semver. The owner's draft carries prerelease `draft`."
+        source:
+          type: string
+          enum: [package, manifest]
+          description: "`package` is a skill package (`POST /v1/skills/packages`); `manifest` is metadata saved with `PUT /v1/skills`."
 
     PolicyRecord:
       type: object
@@ -5517,9 +5976,18 @@ components:
         spec:
           $ref: "#/components/schemas/RunSpec"
         inlineAgent:
-          $ref: "#/components/schemas/AgentSpec"
+          description: >-
+            Refused: any inlineAgent, with or without a resourceId, is answered 400 before anything
+            is written. Save the agent with PUT /v1/agents and run it by spec.agentRef (your draft
+            is version 1.0.0-draft). The field number is kept.
+          allOf:
+            - $ref: "#/components/schemas/AgentSpec"
         inlinePlaybook:
-          $ref: "#/components/schemas/PlaybookSpec"
+          description: >-
+            Refused: any inlinePlaybook is answered 400 before anything is written. Save the
+            playbook with PUT /v1/playbooks and run it by spec.playbookRef. The field number is kept.
+          allOf:
+            - $ref: "#/components/schemas/PlaybookSpec"
         idempotencyKey:
           type: string
 
@@ -6350,7 +6818,10 @@ components:
           $ref: "#/components/schemas/McpConnectionView"
         drift:
           type: string
-          enum: [identical, shrunk, reapproved, upgraded]
+          description: >
+            `adopted`: the connection was a stored sign-in whose tools could not be read
+            yet; its vetted tools are now adopted and it is `connected` again.
+          enum: [identical, shrunk, reapproved, upgraded, adopted]
         removedTools:
           type: array
           items:
@@ -6468,6 +6939,9 @@ components:
         indexDigest:
           type: string
           description: SHA-256 of the `marketplace.json` last read.
+        indexRef:
+          type: string
+          description: Staging nodes only (`VAMD_SQURELL_MARKETPLACE_INDEX_REF`), preconfigured Squrell entry only. The branch its `marketplace.json` is read from; absent when the default branch is read. Artifacts are still installed only at the tags the index names.
         tagsSeen:
           type: array
           items:
@@ -6607,6 +7081,21 @@ components:
             tenantId:
               type: string
               description: Microsoft tenant GUID the admin consented for.
+        client:
+          type: [object, "null"]
+          description: |
+            The org's own OAuth client, for a connector with `provider.client: org`. Omitted keeps the
+            stored client; `null` removes it (only with `enabled: false`).
+          additionalProperties: false
+          required: [clientId]
+          properties:
+            clientId:
+              type: string
+              description: 1-128 characters of letters, digits, `.`, `_`, `-`.
+            clientSecret:
+              type: string
+              writeOnly: true
+              description: "Required the first time for `clientSecret: org_vault`; omitted keeps the stored secret. Never returned."
     PutConnectorConnectionRequest:
       type: object
       additionalProperties: false
@@ -6656,6 +7145,18 @@ components:
             updatedAt:
               type: integer
               description: Only for callers with `users:admin`.
+            client:
+              type: object
+              description: "A connector with `provider.client: org` whose client is stored (members see it once the connector is enabled). Never holds the secret."
+              properties:
+                clientId: { type: string }
+                secretSet: { type: boolean }
+                authorizeEndpoint: { type: string, description: Pinned at Enable from the provider's metadata. }
+                tokenEndpoint: { type: string, description: "Pinned at Enable. The secret is sent only here (code exchange and refresh) and to the revocation endpoint pinned from the same host (the revoke on disconnect), never to another host." }
+                updatedAt: { type: integer }
+                updatedBy:
+                  type: string
+                  description: Only for callers with `users:admin`.
         source:
           type: string
           enum: [builtin, marketplace]
@@ -6682,7 +7183,9 @@ components:
             provider: { type: string }
             profile: { type: string }
             clientId: { type: string }
-            clientSecret: { type: string }
+            client: { type: string, description: "`org` when the node's admin supplies the OAuth client (and, for `org_vault`, its secret) at Enable; absent for the file's own client." }
+            clientText: { type: string, description: "With `client: org`: \"admin-supplied client\" or \"admin-supplied client (with a secret)\"." }
+            clientSecret: { type: string, description: "`none`, `squrell_relay` or `org_vault`." }
             orgConsent: { type: string }
             scopes:
               type: array

@@ -6,6 +6,7 @@ use vam_spec::v1::{
     AgentRecord, AgentSpec, PlaybookSpec, PolicyRecord, ResourceId, ResourceMetadata, SkillChannel,
     SkillManifest,
 };
+#[cfg(any(test, feature = "test-support"))]
 use vam_spec::validation::Validate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,6 +338,32 @@ fn latest_draft_owned_where_sql() -> &'static str {
 }
 
 /// Tenant published rows plus the caller's own drafts.
+/// Where a row of `GET /v1/skills` sits in the list: newest `created_at` first, then packages
+/// before manifests, then the newest `rowid`. A draft edit is an `UPDATE` that keeps
+/// `created_at` and `rowid`, so the row keeps its place between pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillPageKey {
+    pub created_at: i64,
+    /// [`Self::MANIFEST`] or [`Self::PACKAGE`].
+    pub source: i64,
+    pub rowid: i64,
+}
+
+impl SkillPageKey {
+    /// A `skills` row (`PUT /v1/skills`, metadata only).
+    pub const MANIFEST: i64 = 0;
+    /// A `skill_packages` row (`POST /v1/skills/packages`).
+    pub const PACKAGE: i64 = 1;
+
+    pub fn source_name(&self) -> &'static str {
+        if self.source == Self::PACKAGE {
+            "package"
+        } else {
+            "manifest"
+        }
+    }
+}
+
 fn catalog_visible_where_sql() -> &'static str {
     "channel = 'released' OR owner_user_id = ?1"
 }
@@ -760,10 +787,12 @@ impl SqliteWorkflowStore {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_agent(&self, spec: &AgentSpec) -> Result<AgentSpec, OrchestratorError> {
         self.put_agent_with_owner(spec, crate::users::LOCAL_USER_ID)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_agent_with_owner(
         &self,
         spec: &AgentSpec,
@@ -815,6 +844,20 @@ impl SqliteWorkflowStore {
             owner_user_id,
             include_foreign_drafts,
         )
+    }
+
+    /// The owner of the agent's draft row, `None` when it has no draft. A run of a draft
+    /// agent resolves in that owner's mode, never a release row's owner.
+    pub(crate) fn agent_draft_owner(&self, urn: &str) -> Result<Option<String>, OrchestratorError> {
+        match self.query_latest_draft_listing(CatalogKind::Agent.table(), urn) {
+            // An unset owner reads as `local`, like the restricted save (a Member).
+            Ok(listing) if listing.owner_user_id.is_empty() => {
+                Ok(Some(crate::users::LOCAL_USER_ID.to_string()))
+            }
+            Ok(listing) => Ok(Some(listing.owner_user_id)),
+            Err(OrchestratorError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn get_agent_at_version(
@@ -944,10 +987,12 @@ impl SqliteWorkflowStore {
             .collect()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_playbook(&self, spec: &PlaybookSpec) -> Result<PlaybookSpec, OrchestratorError> {
         self.put_playbook_with_owner(spec, crate::users::LOCAL_USER_ID)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_playbook_with_owner(
         &self,
         spec: &PlaybookSpec,
@@ -1075,10 +1120,12 @@ impl SqliteWorkflowStore {
         self.get_catalog_message_visible(CatalogKind::Playbook, urn, owner_user_id)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_skill(&self, spec: &SkillManifest) -> Result<SkillManifest, OrchestratorError> {
         self.put_skill_with_owner(spec, crate::users::LOCAL_USER_ID)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_skill_with_owner(
         &self,
         spec: &SkillManifest,
@@ -1112,10 +1159,103 @@ impl SqliteWorkflowStore {
         self.get_catalog_message_visible(CatalogKind::Skill, urn, owner_user_id)
     }
 
+    /// One page of the skills an agent's `skillRefs` can name, newest first: every **released**
+    /// row of `skill_packages` and of `skills`, plus `owner_user_id`'s own drafts when
+    /// `include_own_drafts`. Another user's draft is never listed. A `skills` manifest whose URN
+    /// has a released package is left out, because a ref resolves to the package first
+    /// (`catalog_resolve::resolve_skill_pin`). Up to `limit` rows after `after` (the last row's
+    /// [`SkillPageKey`]); callers ask for `limit + 1` to learn whether another page exists.
+    pub fn list_skill_records_page(
+        &self,
+        owner_user_id: &str,
+        include_own_drafts: bool,
+        limit: usize,
+        after: Option<SkillPageKey>,
+    ) -> Result<Vec<(vam_spec::v1::SkillRecord, SkillPageKey)>, OrchestratorError> {
+        let owner = crate::owner::resolved_owner(owner_user_id);
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        // `?5` (the owner) is in the statement, and bound, only with `include_own_drafts`.
+        let visible = if include_own_drafts {
+            "(channel = 'released' OR (channel = 'draft' AND owner_user_id = ?5))"
+        } else {
+            "channel = 'released'"
+        };
+        let columns = "spec_bytes, COALESCE(NULLIF(owner_user_id, ''), 'local') AS owner,
+                       channel, COALESCE(NULLIF(catalog_tier, ''), 'user') AS tier,
+                       major, minor, patch, prerelease, created_at";
+        let sql = format!(
+            "SELECT * FROM (
+                 SELECT {columns}, {SOURCE_PACKAGE} AS src, rowid AS rid
+                 FROM skill_packages WHERE {visible}
+                 UNION ALL
+                 SELECT {columns}, {SOURCE_MANIFEST} AS src, rowid AS rid
+                 FROM skills WHERE {visible}
+                   AND urn NOT IN (SELECT urn FROM skill_packages WHERE channel = 'released')
+             )
+             WHERE (created_at, src, rid) < (?1, ?2, ?3)
+             ORDER BY created_at DESC, src DESC, rid DESC
+             LIMIT ?4",
+            SOURCE_PACKAGE = SkillPageKey::PACKAGE,
+            SOURCE_MANIFEST = SkillPageKey::MANIFEST,
+        );
+        let after = after.unwrap_or(SkillPageKey {
+            created_at: i64::MAX,
+            source: i64::MAX,
+            rowid: i64::MAX,
+        });
+        let mut stmt = connection.prepare(&sql)?;
+        use rusqlite::types::Value;
+        let mut values = vec![
+            Value::Integer(after.created_at),
+            Value::Integer(after.source),
+            Value::Integer(after.rowid),
+            Value::Integer(limit as i64),
+        ];
+        if include_own_drafts {
+            values.push(Value::Text(owner.to_string()));
+        }
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+            Ok((
+                catalog_listing_from_row(row)?,
+                SkillPageKey {
+                    created_at: row.get(8)?,
+                    source: row.get(9)?,
+                    rowid: row.get(10)?,
+                },
+            ))
+        })?;
+        rows.map(|row| {
+            let (listing, key) = row.map_err(OrchestratorError::Database)?;
+            let spec = SkillManifest::decode(&*listing.spec_bytes)
+                .map_err(|e| OrchestratorError::Core(e.to_string()))?;
+            Ok((
+                vam_spec::v1::SkillRecord {
+                    spec: Some(spec),
+                    owner_user_id: listing.owner_user_id,
+                    channel: catalog_channel_from_db(&listing.channel) as i32,
+                    read_only: listing.catalog_tier
+                        == crate::catalog_tier::CATALOG_TIER_MARKETPLACE,
+                    tier: listing.catalog_tier.clone(),
+                    catalog_tier: listing.catalog_tier,
+                    version: Some(listing.version),
+                    origin: None,
+                    source: key.source_name().to_string(),
+                },
+                key,
+            ))
+        })
+        .collect()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_policy(&self, urn: &str, cedar: &str) -> Result<PolicyRecord, OrchestratorError> {
         self.put_policy_with_owner(urn, cedar, crate::users::LOCAL_USER_ID)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_policy_with_owner(
         &self,
         urn: &str,
@@ -1137,6 +1277,7 @@ impl SqliteWorkflowStore {
         self.release_policy(urn, &crate::catalog_publish::catalog_release_version())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Insert an `examples.local` policy as a tenant-visible **platform** artifact.
     /// Not called on vamd boot; tests use it to stamp `catalog_tier = platform`.
     pub fn put_platform_policy(

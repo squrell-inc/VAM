@@ -292,11 +292,20 @@ agent_json='{
   "idempotencyKey": "bench-agent-setup"
 }'
 
-curl -sf ${CURL_CA[@]+"${CURL_CA[@]}"} -X PUT "${HOST}/v1/agents" \
+# The run route takes no inline agent: save the agent (a draft), then run the draft by ref.
+# A refused save stops the benchmark with vamd's answer; nothing is swallowed.
+agent_put_out="$(mktemp "${BENCH_TMP}/vam-bench-agent-put.XXXXXX")"
+agent_put_code="$(curl -s ${CURL_CA[@]+"${CURL_CA[@]}"} -o "${agent_put_out}" -w '%{http_code}' -X PUT "${HOST}/v1/agents" \
   -H "authorization: Bearer ${TOKEN}" \
   -H "Idempotency-Key: bench-agent-setup" \
   -H "content-type: application/json" \
-  -d "${agent_json}" >/dev/null || true
+  -d "${agent_json}")"
+if [[ "${agent_put_code}" != 2* ]]; then
+  echo "ERROR: PUT /v1/agents returned ${agent_put_code}: $(cat "${agent_put_out}")" >&2
+  rm -f "${agent_put_out}"
+  exit 1
+fi
+rm -f "${agent_put_out}"
 
 for i in $(seq 1 "${RUNS}"); do
   WS="${WORKSPACE_PREFIX}-${i}-$(date +%s)"
@@ -309,20 +318,11 @@ for i in $(seq 1 "${RUNS}"); do
     "runId": {"urn": "${RUN_URN}"},
     "agentRef": {
       "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/bench-agent"},
-      "version": {"major": 1, "minor": 0, "patch": 0},
-      "digest": {"algorithm": "ALGORITHM_SHA256", "hexHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+      "version": {"major": 1, "minor": 0, "patch": 0, "prerelease": "draft"}
     },
     "inputs": {"fields": {"prompt": {"stringValue": "bench"}}},
     "workspaceRefUri": "volume://${WS}",
     "idempotencyKey": "${IDEM}"
-  },
-  "inlineAgent": {
-    "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/bench-agent"},
-    "displayName": "Bench Agent",
-    "description": "bench",
-    "role": "Tester",
-    "systemInstructions": "Reply OK",
-    "allowAnyPlaybook": true
   }
 }
 EOF

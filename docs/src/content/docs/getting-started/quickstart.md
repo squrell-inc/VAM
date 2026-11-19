@@ -83,7 +83,9 @@ Start a run using the bundled `jira-assistant` example with the `--follow` flag:
 vam run --file examples/jira-assistant/run.json --follow
 ```
 
-The CLI prints the run's JSON, then follows it on stderr: a `[vam] following run <id>` line,
+The `agent.json` next to `run.json` is saved as your draft first (that needs a publisher or the
+bootstrap key), and the run uses that draft. A rerun starts a new draft Space. The CLI prints the
+run's JSON, then follows it on stderr: a `[vam] following run <id>` line,
 one line per step as it progresses, and a `[vam] run state: <STATE>` line each time the state
 changes.
 

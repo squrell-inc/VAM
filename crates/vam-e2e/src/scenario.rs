@@ -227,6 +227,8 @@ pub enum Step {
     ConnectorNode(crate::engine::connectors::ConnectorNode),
     /// `connector-connect: { id, url, piece, tenant, upn, as, refused }`: connects as the app would.
     ConnectorConnect(crate::engine::connectors::ConnectorConnect),
+    /// `api-call: { method, path, as, refused, contains, absent }`: one GET or DELETE as an identity.
+    ApiCall(crate::engine::connectors::ApiCallStep),
     /// `connector-check: { id, as }`: `POST /v1/connectors/{id}/connection/check`.
     ConnectorCheck(crate::engine::connectors::ConnectorCheck),
     /// `publish-skill: { piece, refused, contains }`: publishes and releases a `deferred` skill piece.
@@ -260,6 +262,12 @@ pub enum Step {
     /// `identity-request: { as, credential, method, path, status, fields }`: one request with one
     /// of the identity's credentials, judged by status and, when given, body fields.
     IdentityRequest(crate::engine::identity::IdentityRequest),
+    /// `put-draft: { piece, as, status, contains }`: PUTs a `playbook` or `agent` piece's body as an
+    /// identity, under a name unique to that identity, judged by status.
+    PutDraft(crate::engine::identity::PutDraft),
+    /// `set-role: { as, role }`: promotes (`publisher`) or demotes (`member`) an `org` identity as the
+    /// bootstrap key, through `/v1/users/{id}/publish-grant`.
+    SetRole(crate::engine::identity::SetRole),
     /// `create-user: { as, username, userId, status, contains }`: `POST /v1/users` with a fresh
     /// password, as an `org` identity or the bootstrap key.
     CreateUser(crate::engine::identity::CreateUser),
@@ -439,6 +447,13 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D:
 pub struct PublishSkill {
     /// The alias of a `skill` world piece.
     pub piece: String,
+    /// Alias of the `org` piece whose identity publishes and releases it; the bootstrap key when
+    /// omitted.
+    #[serde(rename = "as")]
+    pub as_: Option<String>,
+    /// `false`: publish the package as a draft only and do not release it.
+    #[serde(default = "yes")]
+    pub release: bool,
     /// The step passes only when publishing answers 4xx.
     #[serde(default)]
     pub refused: bool,
@@ -517,6 +532,7 @@ impl<'de> Deserialize<'de> for Step {
             "connector-node" => Step::ConnectorNode(val(v)?),
             "connector-connect" => Step::ConnectorConnect(val(v)?),
             "connector-check" => Step::ConnectorCheck(val(v)?),
+            "api-call" => Step::ApiCall(val(v)?),
             "mock-provider" => Step::MockProvider(val(v)?),
             "edit-agent-draft" => Step::EditAgentDraft(val(v)?),
             "release-agent" => Step::ReleaseAgent(val(v)?),
@@ -529,6 +545,8 @@ impl<'de> Deserialize<'de> for Step {
             "login" => Step::Login(val(v)?),
             "change-password" => Step::ChangePassword(val(v)?),
             "identity-request" => Step::IdentityRequest(val(v)?),
+            "put-draft" => Step::PutDraft(val(v)?),
+            "set-role" => Step::SetRole(val(v)?),
             "create-user" => Step::CreateUser(val(v)?),
             other => return Err(D::Error::custom(format!("unknown step `{other}`"))),
         })
@@ -625,7 +643,7 @@ pub struct ThreadById {
 #[serde(untagged)]
 pub enum Chat {
     Text(String),
-    Full(ChatFull),
+    Full(Box<ChatFull>),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -657,6 +675,16 @@ pub struct ChatFull {
     /// then checks it) instead of a failed step.
     #[serde(default)]
     pub refused: bool,
+    /// Alias of an `agent` piece sent as the run's `inlineAgent` (its `spec`, no `agentRef`).
+    /// vamd accepts no inline agent, so `check` needs `refused: true` with it.
+    pub inline: Option<String>,
+    /// Alias of a `playbook` piece sent as the run's `inlinePlaybook`, with `agent:` or
+    /// `inline:`. Needs `refused: true` as well.
+    #[serde(rename = "inlinePlaybook")]
+    pub inline_playbook: Option<String>,
+    /// With `inlinePlaybook`: extra run `inputs` (what the playbook's input schema requires).
+    #[serde(default)]
+    pub inputs: BTreeMap<String, serde_yaml::Value>,
 }
 
 fn yes() -> bool {
@@ -710,6 +738,27 @@ impl Chat {
     /// Whether a 4xx answer to the start is expected (checked by `expect: { refused }`).
     pub fn refused(&self) -> bool {
         matches!(self, Chat::Full(f) if f.refused)
+    }
+    /// The `agent` piece sent inline, when set.
+    pub fn inline(&self) -> Option<&str> {
+        match self {
+            Chat::Text(_) => None,
+            Chat::Full(f) => f.inline.as_deref(),
+        }
+    }
+    /// The `playbook` piece sent inline, when set.
+    pub fn inline_playbook(&self) -> Option<&str> {
+        match self {
+            Chat::Text(_) => None,
+            Chat::Full(f) => f.inline_playbook.as_deref(),
+        }
+    }
+    /// Extra run inputs sent with an inline playbook.
+    pub fn inputs(&self) -> Option<&BTreeMap<String, serde_yaml::Value>> {
+        match self {
+            Chat::Text(_) => None,
+            Chat::Full(f) => Some(&f.inputs),
+        }
     }
     /// The `e2e-step:<label>` label the message carries.
     pub fn label(&self) -> Option<String> {
@@ -784,6 +833,8 @@ pub struct Expect {
     pub refused: Option<bool>,
     /// With `refused`: the refusal's answer body contains this text.
     pub contains: Option<String>,
+    /// With `refused`: the refusal's exact HTTP status.
+    pub status: Option<u16>,
     /// `node: { fields }`: `GET /v1/node` fields (dotted paths from the response body).
     pub node: Option<NodeExpect>,
     /// `plain-http: refused`: a plain-HTTP request to vamd's address gets no API answer.
@@ -1030,6 +1081,40 @@ mod harness_tests {
     use super::*;
 
     #[test]
+    fn publish_skill_takes_an_identity_and_releases_unless_told_not_to() {
+        let publish = |yaml: &str| -> PublishSkill {
+            let Step::PublishSkill(p) = serde_yaml::from_str::<Step>(yaml).unwrap() else {
+                panic!("a publish-skill step");
+            };
+            p
+        };
+        let p = publish("publish-skill: { piece: skill-x }");
+        assert_eq!(
+            (p.as_.as_deref(), p.release, p.refused),
+            (None, true, false)
+        );
+        let p = publish("publish-skill: { piece: skill-x, as: pub, release: false }");
+        assert_eq!((p.as_.as_deref(), p.release), (Some("pub"), false));
+        assert!(
+            serde_yaml::from_str::<Step>("publish-skill: { piece: s, relase: false }").is_err()
+        );
+    }
+
+    #[test]
+    fn start_playbook_names_a_deferred_agent_and_an_identity() {
+        let Step::StartPlaybook(sp) = serde_yaml::from_str::<Step>(
+            "start-playbook: { playbook: pb, agent: a, draft: true, as: member, label: mp, inputs: { topic: e2e } }",
+        )
+        .unwrap() else {
+            panic!("a start-playbook step");
+        };
+        assert_eq!(
+            (sp.agent.as_deref(), sp.as_.as_deref(), sp.draft),
+            (Some("a"), Some("member"), Some(true))
+        );
+    }
+
+    #[test]
     fn thread_is_a_mode_word_or_an_id_of_the_latest() {
         let thread = |yaml: &str| -> ThreadSel {
             let Step::Chat(Chat::Full(f)) = serde_yaml::from_str::<Step>(yaml).unwrap() else {
@@ -1056,6 +1141,38 @@ mod harness_tests {
         for bad in ["thread: forever", "thread: { id: other }"] {
             assert!(serde_yaml::from_str::<Step>(&format!("chat: {{ text: hi, {bad} }}")).is_err());
         }
+    }
+
+    #[test]
+    fn chat_takes_inline_parts_and_expect_takes_a_status() {
+        let Step::Chat(c) = serde_yaml::from_str::<Step>(
+            "chat: { text: hi, inline: probe, inlinePlaybook: pb, as: m, refused: true }",
+        )
+        .unwrap() else {
+            panic!("a chat")
+        };
+        assert_eq!(
+            (c.inline(), c.inline_playbook(), c.refused()),
+            (Some("probe"), Some("pb"), true)
+        );
+        let Step::Chat(plain) = serde_yaml::from_str::<Step>("chat: hi").unwrap() else {
+            panic!("a chat")
+        };
+        assert_eq!((plain.inline(), plain.inline_playbook()), (None, None));
+        assert!(serde_yaml::from_str::<Step>("chat: { text: hi, inline_playbook: pb }").is_err());
+        let Step::Chat(c) =
+            serde_yaml::from_str::<Step>("chat: { text: hi, inputs: { topic: x } }").unwrap()
+        else {
+            panic!("a chat")
+        };
+        assert_eq!(c.inputs().map(|m| m.len()), Some(1));
+        let Step::Expect(e) =
+            serde_yaml::from_str::<Step>("expect: { refused: true, status: 400, contains: x }")
+                .unwrap()
+        else {
+            panic!("an expect")
+        };
+        assert_eq!((e.status, e.families()), (Some(400), 1));
     }
 
     #[test]

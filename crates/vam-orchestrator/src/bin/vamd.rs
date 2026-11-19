@@ -289,6 +289,13 @@ async fn main() {
     );
     vam_orchestrator::brokers::install_egress_max_bytes(config.egress_max_bytes);
     vam_orchestrator::registry::install_registry_domains(registry_domains);
+    let member_draft_agents_max = vam_orchestrator::member_draft::parse_member_draft_agents_max(
+        std::env::var(vam_orchestrator::member_draft::ENV_MEMBER_DRAFT_AGENTS_MAX)
+            .ok()
+            .as_deref(),
+    );
+    vam_orchestrator::member_draft::install_member_draft_agents_max(member_draft_agents_max);
+    tracing::info!(member_draft_agents_max, "vamd per-member draft agent cap");
     tracing::info!(
         registry_domain = registry_domains_log.registry_domain(),
         marketplace_domain = registry_domains_log.marketplace_domain(),
@@ -769,7 +776,16 @@ async fn main() {
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let mk = vam_orchestrator::marketplace::MarketplaceConfig::from_env(&state_dir);
+        let mut mk = vam_orchestrator::marketplace::MarketplaceConfig::from_env(&state_dir);
+        mk.squrell_index_ref =
+            vam_orchestrator::marketplace::MarketplaceConfig::index_ref_from_env()
+                .or_exit("invalid marketplace index ref");
+        if let Some(b) = &mk.squrell_index_ref {
+            tracing::warn!(
+                index_ref = %b,
+                "the Squrell marketplace index is read from this branch, not the default branch: a staging node"
+            );
+        }
         if mk.fetcher.git_bin.is_none() {
             tracing::warn!(
                 "git was not found: marketplaces cannot be read until it is installed (or {} names it)",

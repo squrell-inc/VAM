@@ -1661,6 +1661,198 @@ fn run_file_flag_posts_and_positional_path_is_usage() {
     assert_eq!(list.calls(), 0);
 }
 
+const FILE_AGENT_URN: &str = "urn:vam:agent:local.vam.dev/team/inline-check";
+const FILE_PLAYBOOK_URN: &str = "urn:vam:playbook:local.vam.dev/team/inline-flow";
+const FILE_AGENT_JSON: &str = r#"{"resourceId":{"urn":"urn:vam:agent:local.vam.dev/team/inline-check"},"displayName":"Inline check","role":"Tester","systemInstructions":"Answer briefly.","allowAnyPlaybook":true}"#;
+const FILE_PLAYBOOK_JSON: &str = r#"{"resourceId":{"urn":"urn:vam:playbook:local.vam.dev/team/inline-flow"},"displayName":"Inline flow","description":"d","steps":[]}"#;
+
+fn run_file_args<'a>(server: &'a MockServer, extra: &[&'a str]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--json",
+        "--host",
+        &server.base_url(),
+        "--token",
+        "vam_sk_test",
+        "run",
+        "--file",
+        ".",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.extend(extra.iter().map(|s| s.to_string()));
+    args
+}
+
+fn run_file_in(dir: &std::path::Path, server: &MockServer, extra: &[&str]) -> std::process::Output {
+    let args = run_file_args(server, extra);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_vam(dir, &refs)
+}
+
+/// The body of the run the CLI posted: no inline part, the saved draft pinned by reference.
+fn posted_run_pins_draft(req: &httpmock::prelude::HttpMockRequest, playbook: bool) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
+        return false;
+    };
+    let draft = |r: &serde_json::Value, urn: &str| {
+        r["resourceId"]["urn"] == urn
+            && r["version"]["prerelease"] == "draft"
+            && r.get("digest").is_none()
+    };
+    v.get("inlineAgent").is_none()
+        && v.get("inlinePlaybook").is_none()
+        && draft(&v["spec"]["agentRef"], FILE_AGENT_URN)
+        && (!playbook || draft(&v["spec"]["playbookRef"], FILE_PLAYBOOK_URN))
+}
+
+#[test]
+fn run_file_saves_the_agent_draft_then_runs_it_by_ref() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let server = MockServer::start();
+    let put_agent = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/agents")
+            .header_exists("idempotency-key")
+            .body_includes("inline-check");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body("{}");
+    });
+    let put_playbook = server.mock(|when, then| {
+        when.method(PUT).path("/v1/playbooks");
+        then.status(200).body("{}");
+    });
+    let created = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/runs")
+            .is_true(|req| posted_run_pins_draft(req, false));
+        then.status(202)
+            .header("content-type", "application/json")
+            .body(r#"{"status":{"state":"RUN_STATE_PENDING"}}"#);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("agent.json"), FILE_AGENT_JSON).unwrap();
+
+    let out = run_file_in(dir.path(), &server, &["--prompt", "hello"]);
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(put_agent.calls(), 1);
+    assert_eq!(put_playbook.calls(), 0);
+    assert_eq!(created.calls(), 1);
+}
+
+#[test]
+fn run_file_saves_the_playbook_too_and_pins_both_drafts() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let server = MockServer::start();
+    let put_agent = server.mock(|when, then| {
+        when.method(PUT).path("/v1/agents");
+        then.status(200).body("{}");
+    });
+    let put_playbook = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/playbooks")
+            .header_exists("idempotency-key")
+            .body_includes("inline-flow");
+        then.status(200).body("{}");
+    });
+    let created = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/runs")
+            .is_true(|req| posted_run_pins_draft(req, true));
+        then.status(202)
+            .header("content-type", "application/json")
+            .body(r#"{"status":{"state":"RUN_STATE_PENDING"}}"#);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("agent.json"), FILE_AGENT_JSON).unwrap();
+    std::fs::write(dir.path().join("playbook.json"), FILE_PLAYBOOK_JSON).unwrap();
+
+    let out = run_file_in(dir.path(), &server, &["--prompt", "hello"]);
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(put_playbook.calls(), 1);
+    assert_eq!(put_agent.calls(), 1);
+    assert_eq!(created.calls(), 1);
+}
+
+#[test]
+fn run_file_shows_a_refused_save_and_posts_no_run() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let server = MockServer::start();
+    let put_agent = server.mock(|when, then| {
+        when.method(PUT).path("/v1/agents");
+        then.status(403)
+            .header("content-type", "application/json")
+            .body(
+                r#"{"code":"FORBIDDEN","message":"scope catalog:write is required for PutAgent"}"#,
+            );
+    });
+    let created = server.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/v1/runs");
+        then.status(202).body("{}");
+    });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("agent.json"), FILE_AGENT_JSON).unwrap();
+
+    let out = run_file_in(dir.path(), &server, &["--prompt", "hello"]);
+    assert!(!out.status.success(), "{out:?}");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all.contains("catalog:write is required"), "{all}");
+    assert!(all.contains("vam run <agent>"), "{all}");
+    assert_eq!(put_agent.calls(), 1);
+    assert_eq!(created.calls(), 0);
+}
+
+#[test]
+fn run_file_exits_2_before_any_request_on_a_missing_or_mismatched_urn() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let server = MockServer::start();
+    let any = server.mock(|when, then| {
+        when.any_request();
+        then.status(500).body("no request expected");
+    });
+
+    // agent.json without resourceId.urn
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent.json"),
+        r#"{"displayName":"x","role":"t","systemInstructions":"s"}"#,
+    )
+    .unwrap();
+    let out = run_file_in(dir.path(), &server, &["--prompt", "hello"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+
+    // run.json agentRef names another agent than agent.json
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("agent.json"), FILE_AGENT_JSON).unwrap();
+    std::fs::write(
+        dir.path().join("run.json"),
+        r#"{"spec":{"agentRef":{"resourceId":{"urn":"urn:vam:agent:local.vam.dev/team/other"}},"workspaceRefUri":"volume://x","inputs":{"prompt":"hi"}}}"#,
+    )
+    .unwrap();
+    let out = run_file_in(dir.path(), &server, &[]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert_eq!(any.calls(), 0);
+}
+
 #[test]
 fn run_workspace_thread_prompt_posts_without_agent_or_continue_verb() {
     let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());

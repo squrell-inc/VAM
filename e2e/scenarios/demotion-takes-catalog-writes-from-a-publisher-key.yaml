@@ -1,0 +1,23 @@
+id: demotion-takes-catalog-writes-from-a-publisher-key
+title: Demoting a publisher takes catalog writes and the publish right from the key they already hold
+description: >
+  A publisher's default key writes a draft. After the user is demoted to member the same key is refused
+  the catalog write, naming the missing scope, and GET /v1/me no longer lists publish:grant.
+tags: [members, permissions]
+needs: process
+given:
+  - org-admin
+  - { piece: org-publisher, as: pub }
+  - playbook-draft-probe
+when:
+  - put-draft: { piece: playbook-draft-probe, as: pub, status: 200 }
+  - set-role: { as: pub, role: member }
+then:
+  - put-draft: { piece: playbook-draft-probe, as: pub, status: 403, contains: "missing required scope 'catalog:write'" }
+  - identity-request: { as: pub, credential: key, path: /v1/me, status: 200, lacks: "publish:grant" }
+guards:
+  - vam:crates/vam-orchestrator/src/keys.rs
+  - vam:crates/vam-orchestrator/src/api/auth.rs
+  - vam:crates/vam-orchestrator/src/api/catalog_auth.rs
+  - vam:crates/vam-orchestrator/src/api/users_keys_admin.rs
+status: active

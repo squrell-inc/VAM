@@ -226,6 +226,22 @@ fn ls_remote_output_is_parsed_strictly() {
 }
 
 #[test]
+fn ls_remote_output_names_the_branch_the_index_is_read_from() {
+    let out = format!(
+        "{C1}\trefs/heads/box-connector\n{C2}\trefs/heads/main\n{C2}\tHEAD\n{C1}\trefs/tags/v1\n"
+    );
+    assert_eq!(
+        parse_ls_remote_at(&out, 100, "refs/heads/box-connector")
+            .unwrap()
+            .head,
+        C1
+    );
+    assert_eq!(parse_ls_remote(&out, 100).unwrap().head, C2);
+    let e = parse_ls_remote_at(&out, 100, "refs/heads/gone").unwrap_err();
+    assert!(e.to_string().contains("no branch `gone`"), "{e}");
+}
+
+#[test]
 fn ls_tree_output_is_parsed() {
     let rec = format!("100644 blob {C1}      12\ta/b.json\0120000 blob {C2}       3\tlink\0160000 commit {C1}       -\tsub\0");
     let e = parse_ls_tree(rec.as_bytes()).unwrap();

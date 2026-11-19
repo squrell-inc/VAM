@@ -66,6 +66,8 @@ const MIN_REFRESH_SECS: u64 = 5 * 60;
 
 pub const ENV_GIT_BIN: &str = "VAMD_GIT_BIN";
 pub const ENV_REFRESH_SECS: &str = "VAMD_MARKETPLACE_REFRESH_SECS";
+/// Staging nodes only: the branch the preconfigured Squrell entry reads `marketplace.json` from.
+pub const ENV_SQURELL_INDEX_REF: &str = "VAMD_SQURELL_MARKETPLACE_INDEX_REF";
 
 // ---- configuration ----------------------------------------------------------------------------
 
@@ -76,9 +78,34 @@ pub struct MarketplaceConfig {
     /// How often an enabled marketplace is read on its own. `None`: only on demand.
     pub refresh_every: Option<Duration>,
     pub node_version: String,
+    /// The branch the preconfigured Squrell entry reads its index from (`None`: the default
+    /// branch head). Artifacts are still installed only at the tags the index names. No added
+    /// marketplace can use it.
+    pub squrell_index_ref: Option<String>,
 }
 
 impl MarketplaceConfig {
+    /// `VAMD_SQURELL_MARKETPLACE_INDEX_REF`: unset or empty is `None`; a value that is not a plain
+    /// branch name is an error (`vamd` refuses to start).
+    pub fn index_ref_from_env() -> Result<Option<String>, String> {
+        let raw = std::env::var(ENV_SQURELL_INDEX_REF).unwrap_or_default();
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        fetch::check_index_ref(raw).map_err(|e| format!("{ENV_SQURELL_INDEX_REF}: {e}"))?;
+        Ok(Some(raw.to_string()))
+    }
+
+    /// The branch to read `row`'s index from: only the preconfigured Squrell entry has one.
+    pub fn index_ref_for(&self, row: &MarketplaceRow) -> Option<&str> {
+        if row.preconfigured {
+            self.squrell_index_ref.as_deref()
+        } else {
+            None
+        }
+    }
+
     /// From the environment: `VAMD_GIT_BIN` (else `git` on `PATH`) and
     /// `VAMD_MARKETPLACE_REFRESH_SECS` (default 21600; `0` or `off` for never; at least 300).
     pub fn from_env(state_dir: &Path) -> Self {
@@ -104,6 +131,7 @@ impl MarketplaceConfig {
             ),
             refresh_every,
             node_version: vam_spec::build_info!().version,
+            squrell_index_ref: None,
         }
     }
 }
@@ -234,6 +262,9 @@ pub struct ReadInput<'a> {
     pub confirmed_domain: &'a str,
     pub pins: &'a BTreeMap<String, String>,
     pub node_version: &'a str,
+    /// Read the index from the head of this branch instead of the default branch (the preconfigured
+    /// Squrell entry on a staging node). Artifacts still come only from tags.
+    pub index_ref: Option<&'a str>,
 }
 
 pub struct ReadResult {
@@ -248,7 +279,7 @@ pub fn read_marketplace(f: &Fetcher, input: &ReadInput<'_>) -> Result<ReadResult
     let started = Instant::now();
     let id = input.id;
     f.precheck(&input.remote)?;
-    let refs = f.ls_remote(&input.remote)?;
+    let refs = f.ls_remote_at(&input.remote, input.index_ref)?;
     // A cache that grew past its cap is dropped and rebuilt; installed commits are fetched again
     // from their pinned tags when needed.
     if let Ok(dir) = f.cache_dir(id) {
@@ -256,10 +287,10 @@ pub fn read_marketplace(f: &Fetcher, input: &ReadInput<'_>) -> Result<ReadResult
             f.wipe(id)?;
         }
     }
-    f.fetch(id, &input.remote, &[])?;
+    f.fetch_at(id, &input.remote, input.index_ref, &[])?;
     let head = f
         .ref_commit(id, HEAD_REF)?
-        .ok_or_else(|| FetchError::Invalid("the default branch was not fetched".into()))?;
+        .ok_or_else(|| FetchError::Invalid("the index branch was not fetched".into()))?;
     let raw = f
         .read_file(id, &head, INDEX_FILE, MAX_INDEX_BYTES as u64)
         .map_err(|e| ReadError::Index(e.to_string()))?;
@@ -335,7 +366,9 @@ pub fn read_marketplace(f: &Fetcher, input: &ReadInput<'_>) -> Result<ReadResult
         listings.push(state);
     }
     if !to_fetch.is_empty() {
-        f.fetch(id, &input.remote, &to_fetch)?;
+        // The index was fetched above (from `HEAD` or the named branch); only the tags are needed
+        // here, so a remote whose `HEAD` does not resolve cannot fail this read.
+        f.fetch_tags(id, &input.remote, &to_fetch)?;
     }
 
     // Each tag is read from the cache at the commit it names, which must be the commit the remote
@@ -470,8 +503,10 @@ pub fn cached_tag_commit(
     let remote = Remote::for_url(&u);
     let f = &cfg.fetcher;
     f.precheck(&remote)?;
-    let refs = f.ls_remote(&remote)?;
-    match refs.tags.get(tag) {
+    // Only the tags are asked for: whether the index branch (or `HEAD`) still exists does not decide
+    // whether a pinned tag can be installed.
+    let tags = f.ls_remote_tags(&remote)?;
+    match tags.get(tag) {
         None => return Err(CachedTagError::Gone(tag.to_string())),
         Some(now) if *now != pinned => {
             return Err(CachedTagError::Moved(MovedTag {
@@ -483,7 +518,7 @@ pub fn cached_tag_commit(
         Some(_) => {}
     }
     if f.tag_commit(&row.id, tag)?.as_deref() != Some(pinned.as_str()) {
-        f.fetch(&row.id, &remote, &[tag.to_string()])?;
+        f.fetch_tags(&row.id, &remote, &[tag.to_string()])?;
         if f.tag_commit(&row.id, tag)?.as_deref() != Some(pinned.as_str()) {
             return Err(CachedTagError::Gone(tag.to_string()));
         }
@@ -579,6 +614,7 @@ pub fn refresh_blocking(
         confirmed_domain: &row.publisher_domain,
         pins: &pins,
         node_version: &cfg.node_version,
+        index_ref: cfg.index_ref_for(&row),
     };
     let mut refused = None;
     match read_marketplace(&cfg.fetcher, &input) {
@@ -690,6 +726,7 @@ pub fn add_blocking(
         confirmed_domain: domain,
         pins: &pins,
         node_version: &cfg.node_version,
+        index_ref: None,
     };
     let read = read_marketplace(&cfg.fetcher, &input).map_err(|e| {
         let _ = cfg.fetcher.wipe(&id);
@@ -836,6 +873,13 @@ pub fn marketplace_view(row: &MarketplaceRow) -> Value {
     }
     if let Some(d) = &row.index_digest {
         v["indexDigest"] = json!(d);
+    }
+    // A staging node reads the Squrell index from a named branch: say so.
+    if let Some(b) = config()
+        .ok()
+        .and_then(|c| c.index_ref_for(row).map(str::to_string))
+    {
+        v["indexRef"] = json!(b);
     }
     v
 }

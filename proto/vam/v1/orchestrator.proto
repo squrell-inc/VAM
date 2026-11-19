@@ -420,6 +420,41 @@ message GetSkillResponse {
   SkillManifest spec = 1;
 }
 
+// `GET /v1/skills`. Released rows by default; `include_drafts` adds the caller's own
+// drafts and needs `catalog:write`. Another user's draft is never listed.
+message ListSkillsRequest {
+  PaginationRequest pagination = 1;
+  bool include_drafts = 2;
+}
+
+message ListSkillsResponse {
+  // One record per stored row, newest first. A manifest whose URN has a released
+  // package is left out: a ref resolves to the package.
+  repeated SkillRecord records = 1;
+  PaginationResponse pagination = 2;
+}
+
+// Host listing row for a skill an agent's `skill_refs` can name: a package or a
+// manifest. The same stamps as `PlaybookRecord`, plus `source`.
+message SkillRecord {
+  SkillManifest spec = 1;
+  string owner_user_id = 2;
+  SkillChannel channel = 3;
+  // `user` (tenant-published), `platform` or `marketplace` (installed; read-only).
+  string catalog_tier = 4;
+  // Released rows carry their semver with an empty `prerelease`. The owner's draft
+  // carries its stored slot with `prerelease: "draft"`.
+  Version version = 5;
+  // The same value as `catalog_tier`.
+  string tier = 6;
+  // True when a marketplace installed the row.
+  bool read_only = 7;
+  CatalogOrigin origin = 8;
+  // `package` (a `skill_packages` row, `POST /v1/skills/packages`) or `manifest`
+  // (a `skills` row, `PUT /v1/skills`).
+  string source = 9;
+}
+
 enum SkillChannel {
   UNSPECIFIED = 0;
   DRAFT = 1;
@@ -872,7 +907,12 @@ message RestoreSessionResponse {
 
 message CreateRunRequest {
   RunSpec spec = 1;
-  AgentSpec inline_agent = 2;   // Optional inline agent for curl-friendly dev flows.
+  // REFUSED: POST /v1/runs answers 400 to any inline_agent (with or without a resource_id) before
+  // anything is written. Save the agent with PUT /v1/agents and run it by spec.agent_ref. The field
+  // number is kept; it is not reserved or renumbered.
+  AgentSpec inline_agent = 2;
+  // REFUSED: POST /v1/runs answers 400 to any inline_playbook. Save the playbook with
+  // PUT /v1/playbooks and run it by spec.playbook_ref. The field number is kept.
   PlaybookSpec inline_playbook = 3;
   string idempotency_key = 4;
 }

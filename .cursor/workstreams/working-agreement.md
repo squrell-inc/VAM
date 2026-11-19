@@ -30,11 +30,62 @@ spec (`design/scenarios.md`); they run on every PR.
 | E12 Run receipt (server, CLI) | `feat/run-receipt` |
 | E9 E2E scenarios | `feat/e2e-scenarios` |
 | Connectors (server, CLI) | `feat/connectors` |
-| Cross-cutting fixes (not epic-specific) | `main` |
+| A fix, follow-up or investigation session | its own `fix/<slug>` (or `feat/<slug>`), cut from `main` |
+| Small cross-cutting fixes with no session of their own (docs drift, deps, CI lint) | `chore/maintenance`, cut from `main` |
 
-- Feature branches take `main` by **merge** (never rebase).
+- Feature branches take `main` by **merge** (never rebase), and only at the
+  moments in "Integration branches" below.
 - Changes land through PRs. `main` takes an epic only through an owner-approved
   release (playbook §8).
+
+## Integration branches, and one release to `main` (owner, 2026-11-19)
+
+Several sessions merging small PRs into `main` made them fight: one session's
+merge put another's open PR into conflict, the other merged `main` back in,
+and the loop repeated (four `ra-sync-main-into-a*` merges in two days). Each
+of those merges, and each release, also re-ran the whole CI suite. So, for
+every session (phase orchestrators, wave sessions, fix and follow-up
+sessions, and sessions the owner starts by hand):
+
+1. **One integration branch per session.** At its start, the session cuts
+   its branch from `main` (the table above) and names it in its first
+   message and in its tracker. A session the harness gives a `claude/*`
+   branch uses that branch for its PRs' head, never as their base.
+2. **Every PR targets that branch, never `main`.** Waves, review and
+   CodeRabbit fixes, follow-ups, tracker and backlog updates, docs. Each one
+   merges into the branch on green with a merge commit (the orchestrator
+   merges wave PRs; a fix session may merge its own PRs into its own branch).
+3. **`main` takes the work once.** When the phase, or the session's whole
+   job, is done, one release PR goes from the integration branch into
+   `main`, opened on the owner's word (playbook §8). The tracker close-out,
+   backlog lines and docs ride in that PR, not in their own PRs afterwards.
+   Follow-ups found after a release go to the next phase's branch or a new
+   `fix/<slug>`, batched, not to `main` one at a time.
+4. **A PR straight into `main` only when the owner asks for it**: a
+   security hotfix, a broken `main`, or a change another release cannot wait
+   for. Its body says so in one line ("Owner asked for a direct release:
+   <reason>").
+5. **Merge `main` in once, not on every change to `main`.** Merge it into
+   the integration branch right before opening the release PR, or earlier
+   only when a conflict blocks the work or the work needs a fix that is on
+   `main`. Do it as one merge PR into the branch; never rebase a shared
+   branch.
+6. **One release PR into `main` at a time.** Before opening one, list the
+   open PRs into `main`. If another session's release PR is open, wait for
+   it to merge (tell the orchestrator), then merge `main` in once and open
+   yours. The orchestrator orders the releases.
+7. **Hands off other sessions' work.** Never push to, merge, retarget or
+   resolve conflicts in another session's branch or PR. A conflict with
+   another session's work goes to the orchestrator.
+8. **Spend CI on purpose.** Push when a PR is ready, not on every commit
+   (each push re-runs the suite); keep a PR a draft while still pushing; put
+   small fixes in one PR; let tracker and docs commits ride with a code PR.
+   No empty commits, no re-runs "to see", at most one re-run for an
+   infrastructure failure.
+
+`chore/maintenance` collects small cross-cutting fixes that have no session
+of their own. The orchestrator releases it into `main` in one PR when the
+owner asks, or ahead of a tag.
 
 ## Roles
 
@@ -226,9 +277,9 @@ Never delete build caches to free disk (`target/`, `src-tauri/target`); trim
   - The release PR into `main` runs the same suite plus the release gate and
     the lane, as before.
   - A red result on `main` after a release is fixed forward at once. After
-    every release, keep `main` and the epic base branches in sync
-    (fast-forward the base to `main` when it is an ancestor, else merge
-    `main` in).
+    a release, the next phase starts from a branch level with `main`
+    (fast-forward the released base to `main`); other open integration
+    branches merge `main` in only as "Integration branches" rule 5 says.
   - **Never** push an empty commit or close and reopen a PR to re-run CI; a
     failing job gets at most one re-run, and only when the failure is clearly
     infrastructure (runner lost, network), never to "see". Never merge on red.

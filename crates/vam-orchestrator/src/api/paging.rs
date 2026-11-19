@@ -1,4 +1,4 @@
-//! Page size and opaque cursors for the runs, sessions and approvals lists (IT-2.5).
+//! Page size and opaque cursors for the runs, sessions, approvals and skills lists (IT-2.5).
 //!
 //! `?pageSize=` is 1..=1000 (default 50; above the max is clamped). `?pageToken=` is the opaque
 //! `pagination.nextPageToken` of the previous page: a keyset over the store's row order, never an
@@ -47,7 +47,7 @@ impl PageQuery {
         }
     }
 
-    /// The cursor parts for `kind` (`"runs"`, `"sessions"`, `"approvals"`); `None` for the first page.
+    /// The cursor parts for `kind` (`"runs"`, `"sessions"`, `"approvals"`, `"skills"`); `None` for the first page.
     pub fn cursor(&self, kind: &str) -> Result<Option<Vec<String>>, OrchestratorError> {
         let Some(t) = self.page_token.as_deref().filter(|t| !t.is_empty()) else {
             return Ok(None);
@@ -95,6 +95,21 @@ pub fn pair_cursor(c: Option<Vec<String>>) -> Result<Option<(i64, String)>, Orch
             Ok(Some((n, p[1].clone())))
         }
         Some(_) => Err(bad("pageToken is not a token this list returned")),
+    }
+}
+
+/// A cursor of three integer parts.
+pub fn int_triple_cursor(
+    c: Option<Vec<String>>,
+) -> Result<Option<(i64, i64, i64)>, OrchestratorError> {
+    let invalid = || bad("pageToken is not a token this list returned");
+    match c {
+        None => Ok(None),
+        Some(p) if p.len() == 3 => {
+            let n = |s: &String| s.parse::<i64>().map_err(|_| invalid());
+            Ok(Some((n(&p[0])?, n(&p[1])?, n(&p[2])?)))
+        }
+        Some(_) => Err(invalid()),
     }
 }
 
@@ -148,5 +163,14 @@ mod tests {
         assert!(int_cursor(q(None, Some(&t)).cursor("runs").unwrap()).is_err());
         let t = token("runs", &["1".into(), "2".into()]);
         assert!(int_cursor(q(None, Some(&t)).cursor("runs").unwrap()).is_err());
+        let t = token("skills", &["1".into(), "0".into()]);
+        assert!(int_triple_cursor(q(None, Some(&t)).cursor("skills").unwrap()).is_err());
+        let t = token("skills", &["1".into(), "x".into(), "3".into()]);
+        assert!(int_triple_cursor(q(None, Some(&t)).cursor("skills").unwrap()).is_err());
+        let t = token("skills", &["1".into(), "0".into(), "3".into()]);
+        assert_eq!(
+            int_triple_cursor(q(None, Some(&t)).cursor("skills").unwrap()).unwrap(),
+            Some((1, 0, 3))
+        );
     }
 }
