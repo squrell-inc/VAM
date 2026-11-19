@@ -13,8 +13,8 @@
 
 use crate::connectors::{
     access_token_binding_id, connector_id, live_refresher, refresh_token_binding_id,
-    rest_connection_state, CallerState, ConnectionStatus, ConnectorConfig, EntraRefresher,
-    Freshness, SWAP_REFRESH_WINDOW_SECS,
+    rest_connection_state, CallerState, ConnectionStatus, ConnectorConfig, Freshness,
+    RestRefresher, SWAP_REFRESH_WINDOW_SECS,
 };
 use crate::error::OrchestratorError;
 use crate::secrets::{SecretKind, SecretScope, SecretsVault};
@@ -268,7 +268,7 @@ pub(crate) async fn ensure_fresh(
     store: &Arc<SqliteWorkflowStore>,
     vault: &Arc<SecretsVault>,
     cfg: &ConnectorConfig,
-    refresher: &EntraRefresher,
+    refresher: &RestRefresher,
     owner: &str,
     id: &str,
     horizon_secs: i64,
@@ -315,7 +315,7 @@ pub struct SessionConnectionSource {
     owner: String,
     /// Client ids of the node (read at session start; the node installs them at boot).
     cfg: ConnectorConfig,
-    refresher: EntraRefresher,
+    refresher: RestRefresher,
     /// `(token, placeholder)` pairs attached in this session, newest last, for the response scrub.
     attached: Mutex<Vec<(SecretString, String)>>,
 }
@@ -361,7 +361,7 @@ impl SessionConnectionSource {
 
     /// Replaces the node configuration and the refresh call (tests).
     #[cfg(test)]
-    fn with_refresh(mut self, cfg: ConnectorConfig, refresher: EntraRefresher) -> Self {
+    fn with_refresh(mut self, cfg: ConnectorConfig, refresher: RestRefresher) -> Self {
         self.cfg = cfg;
         self.refresher = refresher;
         self
@@ -443,7 +443,15 @@ impl SessionConnectionSource {
                 &refresh_token_binding_id(&id),
             )
             .unwrap_or(false);
-        if rest_connection_state(&conn, Some(&node), has_refresh) != CallerState::Connected {
+        let endpoint = self
+            .store
+            .node_client(&id)
+            .ok()
+            .flatten()
+            .map(|c| c.token_endpoint);
+        if rest_connection_state(&conn, Some(&node), has_refresh, endpoint.as_deref())
+            != CallerState::Connected
+        {
             return Err(not_connected(&name));
         }
         // Refresh before swap: only now that the envelope, the destination, the binding's host
@@ -598,7 +606,9 @@ fn builtin_by_urn(urn: &str) -> Option<vam_spec::connector::Connector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::RestRefreshTarget;
     use crate::connectors::{ConnectorConnection, NodeConnector};
+    use secrecy::SecretString;
     use vam_spec::v1::ResourceEnvelope;
 
     const URN: &str = "urn:vam:connector:hub.squrell.cloud/squrell/microsoft-365";
@@ -1146,9 +1156,17 @@ mod tests {
         calls: &Arc<AtomicUsize>,
         delay_ms: u64,
         reply: impl Fn() -> Outcome + Send + Sync + 'static,
-    ) -> EntraRefresher {
+    ) -> RestRefresher {
         let calls = calls.clone();
-        Arc::new(move |tenant, client, scope, rt| {
+        Arc::new(move |target: &RestRefreshTarget<'_>, rt: &SecretString| {
+            let RestRefreshTarget::Entra {
+                tenant,
+                client_id: client,
+                scope,
+            } = *target
+            else {
+                panic!("an Entra connection is refreshed with an Entra target");
+            };
             calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(tenant, TENANT, "the consent tenant");
             assert_eq!(client, "e2e-client");
@@ -1168,7 +1186,7 @@ mod tests {
     }
 
     /// A connected member whose access token expires at `expires_at`, with the refresher.
-    fn due_fx(expires_at: Option<i64>, refresher: EntraRefresher) -> Fx {
+    fn due_fx(expires_at: Option<i64>, refresher: RestRefresher) -> Fx {
         let mut f = fx();
         f.source = SessionConnectionSource::new(
             f.window.clone(),

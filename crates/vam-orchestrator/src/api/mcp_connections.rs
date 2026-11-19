@@ -291,33 +291,28 @@ fn parse_connect_oauth(req: ConnectMcpOauthRequest) -> Result<McpOauthMetadata, 
     })
 }
 
-/// The `oauth` block of a connect to a connector that uses the admin's client (CN-5.3, O3): the
-/// token endpoint and client id must be the node's (a block naming others is refused), and the
-/// authorization server, revocation endpoint, resource and registration method are the node's and
-/// the connector's whatever the request says.
-fn pin_org_oauth(
+/// A connect to a connector that uses the admin's client (CN-5.3, CN-6.3, O3, O5 widened). Every
+/// `client: org` connector connects by the node's code exchange, with a secret or without one, so an
+/// `oauth` block on this route is refused (400, nothing written): the app never names a token
+/// endpoint or a client id for such a connector, and never holds its tokens. A connect with no
+/// `oauth` block (a reconnect of the row's own settings, ask rules) goes on, and needs the admin's
+/// client to be saved.
+fn refuse_org_oauth_block(
     id: &str,
     org: &crate::connector_client::OrgConnector,
-    oauth: Option<McpOauthMetadata>,
-) -> Result<Option<McpOauthMetadata>, OrchestratorError> {
-    let Some(node) = org.client.as_ref() else {
+    oauth: &Option<McpOauthMetadata>,
+) -> Result<(), OrchestratorError> {
+    if org.client.is_none() {
         return Err(OrchestratorError::Conflict(format!(
             "`{id}` has no OAuth client saved by your admin yet"
         )));
-    };
-    let Some(mut oauth) = oauth else {
-        return Ok(None);
-    };
-    if oauth.token_endpoint != node.token_endpoint || oauth.client_id != node.client_id {
+    }
+    if oauth.is_some() {
         return Err(OrchestratorError::InvalidContract(format!(
-            "`{id}` uses the OAuth client and token endpoint your admin saved; a connection that names another is refused"
+            "`{id}` connects through the node's code exchange: use POST /v1/connectors/{id}/connection/oauth/code"
         )));
     }
-    oauth.authorization_server = node.issuer.clone();
-    oauth.revocation_endpoint = node.revocation_endpoint.clone();
-    oauth.resource = org.mcp_url.clone();
-    oauth.registration_method = McpOauthRegistrationMethod::Manual;
-    Ok(Some(oauth))
+    Ok(())
 }
 
 /// Org connections snapshot with the org credential only, so a shared
@@ -469,10 +464,9 @@ async fn connect(
         Some(_) => state.store.org_connector(&req.connection_id)?,
         None => None,
     };
-    let requested_oauth = match &org {
-        Some(org) => pin_org_oauth(&req.connection_id, org, requested_oauth)?,
-        None => requested_oauth,
-    };
+    if let Some(org) = &org {
+        refuse_org_oauth_block(&req.connection_id, org, &requested_oauth)?;
+    }
     let (auth_mode, oauth) =
         resolve_connection_auth(existing.as_ref(), requested_mode, requested_oauth)?;
     if org.is_some() && auth_mode != McpAuthMode::Oauth {
@@ -1087,19 +1081,16 @@ async fn upsert_oauth_tokens(
     let policy = connectors::gate_mcp_write(&state.store, &id, None, Some(&conn.url))?;
     if policy.is_some() {
         // A connector's client secret is the org's (or the publisher's) and never comes from the
-        // app (O1, O5), and a connector whose secret the node keeps connects by the node's code
-        // exchange: tokens the app got are refused. Nothing is written.
+        // app (O1, O5), and a connector that uses the admin's client (with a secret or without)
+        // connects by the node's code exchange: tokens the app got are refused. Nothing is
+        // written.
         if req.client_secret.is_some() {
             return Err(OrchestratorError::InvalidContract(
                 "a connector's client secret is not accepted from the app".into(),
             )
             .into());
         }
-        if state
-            .store
-            .org_connector(&id)?
-            .is_some_and(|org| org.keeps_secret)
-        {
+        if state.store.org_connector(&id)?.is_some() {
             return Err(OrchestratorError::InvalidContract(format!(
                 "`{id}` connects through the node's code exchange: use POST /v1/connectors/{id}/connection/oauth/code"
             ))

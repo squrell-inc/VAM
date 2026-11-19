@@ -101,7 +101,15 @@ fn caller_connection_state(
             .vault
             .has_binding_at(scope, &owner, &connectors::refresh_token_binding_id(id))
             .unwrap_or(false);
-        let st = connectors::rest_connection_state(&conn, node, has_refresh);
+        // An `oauth` connector's connection is judged against the token endpoint of the node's
+        // client as well (a connection made against another is not this company's).
+        let endpoint = state
+            .store
+            .node_client(id)
+            .ok()
+            .flatten()
+            .map(|c| c.token_endpoint);
+        let st = connectors::rest_connection_state(&conn, node, has_refresh, endpoint.as_deref());
         return (Some(st), conn.label);
     };
     let Ok(conn) = state.store.get_mcp_connection(scope, &owner, id) else {
@@ -337,6 +345,12 @@ async fn put_connection(
         .authorize(&auth, "PutConnectorConnection", CONNECTION_SCOPE)?;
     let idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let def = entry_or_404(&state, &id)?;
+    // A connector with fixed endpoints and the admin's client connects only through the node's code
+    // exchange (CN-6.3): tokens the app holds cannot be tied to the company address, so they are
+    // refused before the body is read. Nothing is written. The Entra route below is unchanged.
+    if connector_client::is_rest_oauth(&def.def) {
+        return Err(OrchestratorError::InvalidContract(connectors::exchange_only(&id)).into());
+    }
     // A fixed message: a serde error can quote the value it rejected.
     let req: connectors::PutConnectionRequest = serde_json::from_str(&body).map_err(|_| {
         OrchestratorError::InvalidContract(
@@ -392,7 +406,22 @@ async fn delete_connection(
     }
     let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
     let _gate = connectors::lock_connection(&owner, &id).await;
+    // An `oauth` connector's refresh token is revoked only when its file declares a revocation
+    // endpoint (RFC 7009, public client). Read before the rows go; sent once they are gone.
+    let revoke = connector_client::is_rest_oauth(&def.def)
+        .then(|| connectors::prepare_rest_revoke(&state.store, &state.vault, &owner, &id))
+        .flatten();
     connectors::disconnect(&state.store, &state.vault, &owner, &id)?;
+    if let Some(r) = revoke {
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::mcp_oauth_refresh::revoke_oauth_connector_refresh_token(
+                &r.revocation_endpoint,
+                &r.client_id,
+                &r.refresh_token,
+            )
+        })
+        .await;
+    }
     Ok(json_http_response(
         StatusCode::OK,
         entry_for(&state, &auth, &def)?.to_string(),
@@ -430,7 +459,7 @@ async fn check_connection(
             &owner2,
             &id2,
             connectors::now_secs(),
-            crate::mcp_oauth_refresh::refresh_access_token_entra,
+            connectors::refresh_rest_token,
         )
     })
     .await
@@ -449,15 +478,16 @@ async fn check_connection(
 }
 
 /// `POST /v1/connectors/{id}/connection/oauth/code`: the node exchanges the authorization code the
-/// app got from the browser sign-in (CN-5.3, D29).
+/// app got from the browser sign-in (CN-5.3, CN-6.3, D29, locked decision 13 as amended).
 ///
-/// For a connector with `client: org` and `clientSecret: org_vault`, the enabled connector's saved
-/// client and nothing else: the body is `{ code, codeVerifier, redirectUri }` and names no endpoint
-/// or client. The node posts the code with the org secret to the token endpoint it pinned at Enable
-/// and connects the caller. Every refusal is decided before anything is sent or written; a provider
-/// that refuses the client (`invalid_client`) is a 409 naming the admin's client, a refused code a
-/// 400, an unreachable provider a 502. The answer is the caller's list entry: no code, verifier,
-/// secret or token is in it, or in any error.
+/// For every connector with `client: org`, MCP or REST, with a secret or without: the enabled
+/// connector's saved client and nothing else. The body is `{ code, codeVerifier, redirectUri }` and
+/// names no endpoint or client. The node posts the code to the token endpoint it pinned at Enable
+/// (with the org secret when the org keeps one, with none otherwise) and connects the caller: an MCP
+/// row, or for a REST connector (`profile: oauth`) a `connector_connections` row. Every refusal is
+/// decided before anything is sent or written; a provider that refuses the client (`invalid_client`)
+/// is a 409 naming the admin's client, a refused code a 400, an unreachable provider a 502. The
+/// answer is the caller's list entry: no code, verifier, secret or token is in it, or in any error.
 async fn exchange_code(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -477,23 +507,30 @@ async fn exchange_code(
             "code exchange body must be { code, codeVerifier, redirectUri }".into(),
         )
     })?;
-    let org = state
-        .store
-        .org_connector(&id)?
-        .filter(|o| o.keeps_secret)
-        .ok_or_else(|| {
-            OrchestratorError::InvalidContract(format!(
-                "`{id}` has no code exchange on the node: it signs in with the app's own exchange"
+    let org = state.store.org_connector(&id)?.ok_or_else(|| {
+        OrchestratorError::InvalidContract(format!(
+            "`{id}` has no code exchange on the node: it signs in with the app's own exchange"
+        ))
+    })?;
+    // Enabled on this node, its own URL (an MCP connector), or enabled with its company address (a
+    // REST connector, which `gate_mcp_write` does not cover).
+    if org.is_rest() {
+        let enabled = state.store.node_connector(&id)?.is_some_and(|n| n.enabled);
+        if !enabled {
+            return Err(OrchestratorError::PermissionDenied(format!(
+                "the `{id}` connector is not enabled on this node; ask your admin (`vam connectors`)"
             ))
-        })?;
-    // Enabled on this node, its own URL.
-    connectors::gate_mcp_write(&state.store, &id, None, None)?;
+            .into());
+        }
+    } else {
+        connectors::gate_mcp_write(&state.store, &id, None, None)?;
+    }
     let client = org.client.clone().ok_or_else(|| {
         OrchestratorError::Conflict(format!(
             "`{id}` has no OAuth client saved by your admin yet"
         ))
     })?;
-    if !client.secret_set {
+    if org.keeps_secret && !client.secret_set {
         return Err(OrchestratorError::Conflict(format!(
             "`{id}` has no client secret saved by your admin yet"
         ))
@@ -501,6 +538,41 @@ async fn exchange_code(
     }
     connector_client::check_code_exchange(&req)?;
     let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
+    let (store, vault) = (state.store.clone(), state.vault.clone());
+    let (creator, id2) = (auth.owner_user_id().to_string(), id.clone());
+
+    if org.is_rest() {
+        // The connection's lock: a refresh of this member's connection does not interleave with the
+        // exchange. The exchange and every write after it run to the end on a worker that owns the
+        // lock, so a caller that goes away cannot leave a spent code or refresh token unstored.
+        let gate = connectors::lock_connection(&owner, &id).await;
+        let owner2 = owner.clone();
+        tokio::task::spawn_blocking(move || {
+            let c = connector_exchange::CodeConnect {
+                owner: &owner2,
+                creator: &creator,
+                connector_id: &id2,
+                org: &org,
+                client: &client,
+                request: &req,
+                idempotency_key: &idempotency,
+            };
+            connector_exchange::exchange_and_connect_rest(&store, &c, &vault, gate)
+        })
+        .await
+        .map_err(|_| {
+            ApiError::from(OrchestratorError::Core(
+                "connector code exchange task failed".into(),
+            ))
+        })??;
+        // Runs parked on this member's connection continue (the key carries the owner).
+        super::reauth::resume_key(&state, &crate::connector_park::park_key(&owner, &id));
+        return Ok(json_http_response(
+            StatusCode::OK,
+            entry_for(&state, &auth, &found)?.to_string(),
+        ));
+    }
+
     // The connection's credential gate: a refresh of this member's row does not interleave with the
     // exchange, and a call that began with the old tokens retries with the new ones.
     let mut gate =
@@ -509,8 +581,6 @@ async fn exchange_code(
             .map_err(|_| {
                 OrchestratorError::CorruptState("mcp credential lock unavailable".into())
             })?;
-    let (store, vault) = (state.store.clone(), state.vault.clone());
-    let (creator, id2) = (auth.owner_user_id().to_string(), id.clone());
     // The exchange and every write after it run to the end on a worker that owns the gate, so a
     // caller that goes away cannot leave a spent code or refresh token unstored.
     let connected = tokio::task::spawn_blocking(move || {
@@ -2170,8 +2240,9 @@ mod tests {
             .await;
             assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
         }
-        // The node's own client and endpoint pass, and the rest of the block is the node's whatever
-        // the request said.
+        // Not even the node's own client and endpoint pass: an `oauth` block on this route is refused
+        // for every connector that uses the admin's client (the node exchanges the code), so the row
+        // the exchange made keeps the node's authorization server, revocation endpoint and method.
         let (s, b) = call(
             &n.app,
             "PUT",
@@ -2184,7 +2255,8 @@ mod tests {
             )),
         )
         .await;
-        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(b.to_string().contains("exchange"), "{b}");
         let oauth = n
             .store
             .get_mcp_connection(crate::secrets::SecretScope::User, "ada", "filebox")
@@ -4614,5 +4686,238 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
         assert!(b.to_string().contains("takes no company address"), "{b}");
+    }
+
+    // ---- the node's code exchange for a company-address connector (CN-6.3) -----------------------
+
+    /// `zendesk` installed and enabled for `sub` with the client `zc1` (no secret), its token host
+    /// answered by a loopback provider.
+    async fn zendesk_node(sub: &str) -> (axum::Router, AppState, Provider) {
+        let (app, state) = app_world_with_state();
+        crate::connector_client::test_support::install_company_address_rows(&state.store);
+        let p = provider();
+        crate::mcp_oauth_refresh::test_seam::serve(&format!("{sub}.zendesk.com"), p.base.clone());
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({
+                "enabled": true, "tenant": { "subdomain": sub }, "client": { "clientId": "zc1" }
+            }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        (app, state, p)
+    }
+
+    async fn zendesk_exchange(
+        app: &axum::Router,
+        redirect: &str,
+        key: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        call_with_key(
+            app,
+            "POST",
+            "/v1/connectors/zendesk/connection/oauth/code",
+            "member-secret",
+            Some(exchange_body(redirect)),
+            key,
+        )
+        .await
+    }
+
+    fn nothing_stored(state: &AppState) {
+        assert!(state
+            .store
+            .connector_connection("ada", "zendesk")
+            .unwrap()
+            .is_none());
+        let ids: Vec<String> = state
+            .vault
+            .list_metadata()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.binding_id)
+            .filter(|id| id.starts_with("connector/zendesk/oauth/"))
+            .collect();
+        assert!(ids.is_empty(), "{ids:?}");
+    }
+
+    #[tokio::test]
+    async fn the_node_exchanges_the_code_with_no_secret_and_keeps_a_rest_connection() {
+        let (app, state, p) = zendesk_node("xrest-ok").await;
+        p.reply(200, tokens_reply());
+        let (s, b) = zendesk_exchange(&app, "squrell://oauth", "zk-1").await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_no_value("the exchange answer", &b.to_string());
+        assert_eq!(b["state"], "connected", "{b}");
+        // The one request the provider saw: the admin's client, the verifier, the redirect URI; no
+        // secret, no resource, no Authorization header.
+        let seen = p.requests();
+        assert_eq!(seen.len(), 1);
+        let r = &seen[0];
+        assert_eq!(r.path, "/oauth/tokens");
+        assert_eq!(r.authorization, None);
+        assert_eq!(r.form["grant_type"], "authorization_code");
+        assert_eq!(r.form["client_id"], "zc1");
+        assert_eq!(r.form["code"], CODE);
+        assert_eq!(r.form["code_verifier"], VERIFIER);
+        assert_eq!(r.form["redirect_uri"], "squrell://oauth");
+        for key in ["client_secret", "resource", "scope"] {
+            assert!(!r.form.contains_key(key), "{key} in {:?}", r.form);
+        }
+        // The REST connection: the address it was made under, the filled endpoint, tokens pinned.
+        let row = state
+            .store
+            .connector_connection("ada", "zendesk")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.tenant_id, "xrest-ok");
+        assert_eq!(
+            row.token_endpoint,
+            "https://xrest-ok.zendesk.com/oauth/tokens"
+        );
+        assert_eq!(row.label, None);
+        for binding in ["refresh-token", "access-token"] {
+            let meta = state
+                .vault
+                .get_metadata_at(
+                    crate::secrets::SecretScope::User,
+                    "ada",
+                    &format!("connector/zendesk/oauth/{binding}"),
+                )
+                .unwrap();
+            assert_eq!(meta.allowed_destinations, vec!["xrest-ok.zendesk.com"]);
+        }
+        let list = call(&app, "GET", "/v1/connectors", "member-secret", None)
+            .await
+            .1;
+        assert_no_value("the listing", &list.to_string());
+        // The app cannot hand the node tokens for this connector.
+        let (s, b) = call(
+            &app,
+            "PUT",
+            "/v1/connectors/zendesk/connection",
+            "member-secret",
+            Some(serde_json::json!({ "accessToken": "app-a", "refreshToken": "app-r" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(b.to_string().contains("exchange"), "{b}");
+        // The same Idempotency-Key sends nothing again.
+        let (s, b) = zendesk_exchange(&app, "squrell://oauth", "zk-1").await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(p.requests().len(), 1);
+        // The admin moves to another address and saves the client again: the member reconnects, and
+        // no request goes to the old or the new host.
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({
+                "enabled": true, "tenant": { "subdomain": "xrest-other" },
+                "client": { "clientId": "zc1" }
+            }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(
+            zendesk_entry(&app, "member-secret").await["state"],
+            "needsReconnect"
+        );
+        let (s, b) = call(
+            &app,
+            "POST",
+            "/v1/connectors/zendesk/connection/check",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "needsReconnect", "{b}");
+        assert_eq!(p.requests().len(), 1, "no refresh, nothing to the new host");
+    }
+
+    #[tokio::test]
+    async fn every_refusal_of_a_company_address_exchange_sends_and_writes_nothing() {
+        // Not enabled yet: 403.
+        let (app, state) = app_world_with_state();
+        crate::connector_client::test_support::install_company_address_rows(&state.store);
+        let (s, b) = zendesk_exchange(&app, "squrell://oauth", "zk-a").await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        nothing_stored(&state);
+
+        let (app, state, p) = zendesk_node("xrest-no").await;
+        // A body that is not the app's, a redirect URI that is not the app's.
+        let (s, _) = call(
+            &app,
+            "POST",
+            "/v1/connectors/zendesk/connection/oauth/code",
+            "member-secret",
+            Some(serde_json::json!({ "code": CODE, "tokenEndpoint": "https://evil.example/t" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _) = zendesk_exchange(&app, "https://evil.example/callback", "zk-b").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        // The client was pinned to another endpoint than the connector names now: 409 before a request.
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE node_connector_clients SET token_endpoint = 'https://other.zendesk.com/oauth/tokens'",
+                [],
+            )
+            .unwrap();
+        let (s, b) = zendesk_exchange(&app, "squrell://oauth", "zk-c").await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("save the client again"), "{b}");
+        assert!(p.requests().is_empty());
+        nothing_stored(&state);
+
+        // Turned off again: 403.
+        let (app, _state, p) = zendesk_node("xrest-off").await;
+        let (s, _) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": false }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = zendesk_exchange(&app, "squrell://oauth", "zk-d").await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        assert!(p.requests().is_empty());
+
+        // The provider refuses the code: 400, nothing stored.
+        let (app, state, p) = zendesk_node("xrest-bad").await;
+        p.reply(400, serde_json::json!({ "error": "invalid_grant" }));
+        let (s, b) = zendesk_exchange(&app, "squrell://oauth", "zk-e").await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert_eq!(p.requests().len(), 1);
+        nothing_stored(&state);
+
+        // The provider issues no refresh token: refused, nothing stored.
+        let (app, state, p) = zendesk_node("xrest-norefresh").await;
+        p.reply(
+            200,
+            serde_json::json!({ "access_token": NEW_ACCESS, "token_type": "Bearer" }),
+        );
+        let (s, b) = zendesk_exchange(&app, "squrell://oauth", "zk-f").await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{b}");
+        assert!(b.to_string().contains("refresh token"), "{b}");
+        assert_no_value("the answer", &b.to_string());
+        nothing_stored(&state);
+
+        // A connector with the publisher's own client keeps the app's exchange.
+        let (s, b) = call(
+            &app,
+            "POST",
+            "/v1/connectors/linear/connection/oauth/code",
+            "member-secret",
+            Some(exchange_body("squrell://oauth")),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(b.to_string().contains("app's own exchange"), "{b}");
     }
 }

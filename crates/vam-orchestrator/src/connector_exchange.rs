@@ -1,11 +1,13 @@
-//! The node's code exchange for a connector with an admin-supplied client and a secret (CN-5.3,
-//! locked decision 13, D29).
+//! The node's code exchange for a connector with an admin-supplied client (CN-5.3, CN-6.3, locked
+//! decision 13 as amended 2026-11-19, D29).
 //!
 //! The app runs the browser sign-in with PKCE and hands the code, the verifier and the redirect URI
 //! to `POST /v1/connectors/{id}/connection/oauth/code`. This module is what that route runs: it
-//! exchanges the code at the token endpoint the node pinned at Enable with the org's client secret
-//! (the secret is read by [`org_client_secret`], which checks the host), then writes the member's
-//! connection. The app never holds the secret and never sees a token.
+//! exchanges the code at the token endpoint the node pinned at Enable, with the org's client secret
+//! when the org keeps one (the secret is read by [`org_client_secret`], which checks the host) and
+//! with none otherwise, then writes the member's connection: an MCP row for an MCP connector, a
+//! `connector_connections` row for a REST connector (`profile: oauth`, [`exchange_and_connect_rest`]).
+//! The app never holds a secret and never sees a token.
 //!
 //! Nothing is written unless the provider accepted the code. From then on the writes run to the end
 //! on a blocking worker that owns the connection's credential gate, so a caller that goes away
@@ -28,8 +30,8 @@ use crate::connectors::now_secs;
 use crate::error::OrchestratorError;
 use crate::host_tools::{CredentialGeneration, McpCredentialWriteGuard};
 use crate::mcp_oauth_refresh::{
-    exchange_authorization_code, prepare_oauth_refresh_revoke, CodeGrant, RefreshFailure,
-    RefreshFailureKind,
+    exchange_authorization_code, prepare_oauth_refresh_revoke, CodeGrant, CodeProfile,
+    RefreshFailure, RefreshFailureKind,
 };
 use crate::mcp_registry::{
     ConnectorConnectionCommit, McpAuthMode, McpConnection, McpOauthMetadata,
@@ -140,6 +142,9 @@ pub(crate) fn exchange_and_connect(
     gate: &mut McpCredentialWriteGuard,
 ) -> Result<Connected, ApiError> {
     let id = c.connector_id;
+    let Some(mcp_url) = c.org.mcp_url.as_deref() else {
+        return Err(OrchestratorError::Core("an MCP exchange for a REST connector".into()).into());
+    };
     // The route checked the enable before it waited for the gate: an admin may have turned the
     // connector off meanwhile. Checked again now, before the secret is read or the code sent (the
     // commit checks it once more).
@@ -153,8 +158,8 @@ pub(crate) fn exchange_and_connect(
     // take it. The one exception is the row of a connector update that moved its server: it is
     // eligible for replacement, and goes only once the new credentials are valid, in the commit.
     let mut stale: Option<McpConnection> = None;
-    if let Some(row) = existing.as_ref().filter(|r| r.url != c.org.mcp_url) {
-        if crate::connectors::is_stale_installed_row(store, row, &c.org.mcp_url)? {
+    if let Some(row) = existing.as_ref().filter(|r| r.url != mcp_url) {
+        if crate::connectors::is_stale_installed_row(store, row, mcp_url)? {
             stale = Some(row.clone());
         } else {
             crate::connectors::gate_mcp_write(store, id, None, Some(&row.url))?;
@@ -164,21 +169,27 @@ pub(crate) fn exchange_and_connect(
             .into());
         }
     }
-    let existing = existing.filter(|r| r.url == c.org.mcp_url);
+    let existing = existing.filter(|r| r.url == mcp_url);
 
     // The secret is read and sent here, to the one host it is pinned to, and nowhere else.
     // A client the admin saved again after the route read it is not this sign-in's: nothing is
     // sent, and the member signs in again (the commit makes the same check if the save lands
     // while the provider answers).
-    let secret =
-        org_client_secret(vault, c.client, &c.client.token_endpoint).map_err(|e| match e {
-            OrchestratorError::Conflict(msg)
-                if msg.ends_with(crate::connector_client::SECRET_READ_SUPERSEDED) =>
-            {
-                superseded(id)
-            }
-            e => e,
-        })?;
+    // A client with no secret (`clientSecret: none`) sends none: there is nothing to read.
+    let secret = if c.org.keeps_secret {
+        Some(
+            org_client_secret(vault, c.client, &c.client.token_endpoint).map_err(|e| match e {
+                OrchestratorError::Conflict(msg)
+                    if msg.ends_with(crate::connector_client::SECRET_READ_SUPERSEDED) =>
+                {
+                    superseded(id)
+                }
+                e => e,
+            })?,
+        )
+    } else {
+        None
+    };
     // The exchange is recorded before the code leaves the node: a request repeated with the same
     // key (its first answer was lost) sends nothing. The credential gate already serializes the
     // two; this is what keeps the second from presenting the code again.
@@ -188,13 +199,13 @@ pub(crate) fn exchange_and_connect(
     let grant = CodeGrant {
         token_endpoint: &c.client.token_endpoint,
         client_id: &c.client.client_id,
-        resource: &c.org.mcp_url,
+        profile: CodeProfile::Mcp { resource: mcp_url },
         code: &c.request.code,
         code_verifier: &c.request.code_verifier,
         redirect_uri: &c.request.redirect_uri,
         auth_method: c.client.token_auth_method,
     };
-    let tokens = exchange_authorization_code(&grant, &secret)
+    let tokens = exchange_authorization_code(&grant, secret.as_ref())
         .map_err(|failure| exchange_failure(id, &failure))?;
     drop(secret);
     let Some(refresh_token) = tokens.refresh_token.as_deref() else {
@@ -203,7 +214,7 @@ pub(crate) fn exchange_and_connect(
 
     let now = now_secs();
     let oauth = McpOauthMetadata {
-        resource: c.org.mcp_url.clone(),
+        resource: mcp_url.to_string(),
         authorization_server: c.client.issuer.clone(),
         token_endpoint: c.client.token_endpoint.clone(),
         revocation_endpoint: c.client.revocation_endpoint.clone(),
@@ -239,7 +250,7 @@ pub(crate) fn exchange_and_connect(
         owner: c.owner,
         creator: c.creator,
         connection_id: id,
-        url: &c.org.mcp_url,
+        url: mcp_url,
         oauth: &oauth,
         header_bindings: &bindings,
         tools: &tools,
@@ -264,7 +275,7 @@ pub(crate) fn exchange_and_connect(
         });
         let enabled = crate::connectors::node_enabled_in(tx, id)?;
         let same_server =
-            crate::connectors::mcp_policy_in(tx, id)?.is_some_and(|p| p.url == c.org.mcp_url);
+            crate::connectors::mcp_policy_in(tx, id)?.is_some_and(|p| p.url == mcp_url);
         if same_client && enabled && same_server {
             Ok(())
         } else {
@@ -289,4 +300,153 @@ pub(crate) fn exchange_and_connect(
         conn,
         credentials: gate.generation_handle(),
     })
+}
+
+/// Exchanges the code and connects the member at an `oauth` connector (a REST connector with fixed
+/// endpoints, CN-6.3), all under the connection's lock (`_gate`, held until this returns). Blocking.
+///
+/// 1. every refusal that needs no network: the connector enabled on this node with its company
+///    address, no client secret kept (an `oauth` client is public), and the node client's pinned
+///    token endpoint equal to the endpoint the connector file names now, filled with that address
+///    (409, nothing sent, otherwise: a client pinned before a connector update or an address change
+///    never receives a code);
+/// 2. the exchange recorded under its Idempotency-Key (a repeat is a 409 and sends nothing), then the
+///    one POST of the code to the node client's token endpoint: no secret, no `resource`, no
+///    Authorization header ([`CodeProfile::Oauth`]);
+/// 3. a refresh token is required (the connection cannot be kept without one);
+/// 4. only then the write ([`SqliteWorkflowStore::commit_rest_connection`]): one transaction that
+///    re-checks the client (by its revision), the enable, the address and the filled hosts, then
+///    stores the refresh token pinned to the token host and the access token pinned to every filled
+///    binding host. A failure to save after the provider spent the code says to sign in again.
+pub(crate) fn exchange_and_connect_rest(
+    store: &SqliteWorkflowStore,
+    c: &CodeConnect<'_>,
+    vault: &SecretsVault,
+    _gate: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<crate::connectors::ConnectorConnection, ApiError> {
+    use crate::connectors::{binding_hosts, RestCommit};
+    let id = c.connector_id;
+    if c.org.keeps_secret {
+        // An `oauth` client is public by the connector file's own rule; never send a secret for it.
+        return Err(OrchestratorError::Conflict(format!(
+            "`{id}` is a REST connector whose client is public: it keeps no client secret"
+        ))
+        .into());
+    }
+    let not_enabled = || {
+        OrchestratorError::PermissionDenied(format!(
+            "the `{id}` connector is not enabled on this node; ask your admin (`vam connectors`)"
+        ))
+    };
+    let node = store
+        .node_connector(id)?
+        .filter(|n| n.enabled)
+        .ok_or_else(not_enabled)?;
+    let Some(address) = node.tenant_subdomain.clone() else {
+        return Err(OrchestratorError::PermissionDenied(format!(
+            "the `{id}` connector needs a company address; ask your admin (`vam connectors`)"
+        ))
+        .into());
+    };
+    // The endpoint a code is sent to is the node client's, and only while it is the endpoint the
+    // connector file names now for the node's address. Decided before anything is sent.
+    if c.org.filled_token_endpoint.as_deref() != Some(c.client.token_endpoint.as_str())
+        || c.org.tenant_subdomain.as_deref() != Some(address.as_str())
+    {
+        return Err(endpoint_moved(id).into());
+    }
+    let entry = store
+        .connector_entry(id)?
+        .ok_or_else(|| OrchestratorError::NotFound(format!("connector `{id}`")))?;
+    let access_hosts = binding_hosts(&entry.def);
+    let Some(token_host) = c.client.token_host() else {
+        return Err(endpoint_moved(id).into());
+    };
+    if access_hosts.is_empty() {
+        return Err(endpoint_moved(id).into());
+    }
+
+    if !store.claim_code_exchange(c.owner, id, c.idempotency_key, now_secs())? {
+        return Err(already_submitted(id));
+    }
+    let grant = CodeGrant {
+        token_endpoint: &c.client.token_endpoint,
+        client_id: &c.client.client_id,
+        profile: CodeProfile::Oauth,
+        code: &c.request.code,
+        code_verifier: &c.request.code_verifier,
+        redirect_uri: &c.request.redirect_uri,
+        auth_method: c.client.token_auth_method,
+    };
+    let tokens = exchange_authorization_code(&grant, None)
+        .map_err(|failure| exchange_failure(id, &failure))?;
+    let Some(refresh_token) = tokens.refresh_token.as_deref() else {
+        return Err(no_refresh_token());
+    };
+
+    let now = now_secs();
+    let commit = RestCommit {
+        owner: c.owner,
+        connector_id: id,
+        address: &address,
+        token_endpoint: &c.client.token_endpoint,
+        token_host: &token_host,
+        access_hosts: &access_hosts,
+        scopes: &c.org.scopes,
+        access_token: &tokens.access_token,
+        refresh_token,
+        expires_at: tokens
+            .expires_in
+            .and_then(|s| i64::try_from(s).ok())
+            .map(|s| now.saturating_add(s)),
+        now,
+    };
+    // Inside the transaction: the node's client (by its revision), the enable, the address and the
+    // filled endpoint and hosts are still what this code was exchanged for. A client replaced
+    // while the provider answered, even one replaced and put back, stores nothing.
+    let still_current = |tx: &rusqlite::Connection| -> Result<(), OrchestratorError> {
+        let same_client = client_in(tx, id)?.is_some_and(|n| {
+            n.revision == c.client.revision
+                && n.client_id == c.client.client_id
+                && n.token_endpoint == c.client.token_endpoint
+        });
+        let node_now = crate::connectors::node_connector_in(tx, id)?;
+        let enabled = node_now.as_ref().is_some_and(|n| n.enabled);
+        let same_address = node_now.and_then(|n| n.tenant_subdomain).as_deref() == Some(&*address);
+        let same_file = crate::connectors::entry_in(tx, id)?.is_some_and(|e| {
+            let endpoint = match &e.def.provider {
+                vam_spec::connector::Provider::Oauth2(o) => {
+                    o.endpoints.as_ref().map(|x| x.token.clone())
+                }
+                vam_spec::connector::Provider::ApiKey(_) => None,
+            };
+            endpoint.as_deref() == Some(c.client.token_endpoint.as_str())
+                && binding_hosts(&e.def) == access_hosts
+        });
+        if same_client && enabled && same_address && same_file {
+            Ok(())
+        } else {
+            Err(superseded(id))
+        }
+    };
+    let row = match store.commit_rest_connection(vault, &commit, &still_current) {
+        Ok(row) => row,
+        Err(e @ OrchestratorError::Conflict(_)) => return Err(e.into()),
+        Err(e) => {
+            tracing::warn!(connection_id = id, error = %e, "connector connection not saved after the code was spent");
+            return Err(spent_but_not_saved());
+        }
+    };
+    // The member's reconnect notification (if any) is resolved: they signed in again.
+    store.resolve_connection_needs_reauth(c.owner, id, "acted");
+    Ok(row)
+}
+
+/// The 409 when the client the admin saved was pinned to another endpoint than the connector file
+/// names now (a connector update, or an address changed without saving the client again). Nothing
+/// is sent.
+fn endpoint_moved(connector_id: &str) -> OrchestratorError {
+    OrchestratorError::Conflict(format!(
+        "the OAuth client for `{connector_id}` was saved for a different sign-in endpoint than the connector names now: ask your admin to save the client again"
+    ))
 }

@@ -3398,7 +3398,7 @@ fn exchange_and_store_mcp_tokens(
             org_metadata = crate::mcp_registry::McpOauthMetadata {
                 authorization_server: node.issuer.clone(),
                 revocation_endpoint: node.revocation_endpoint.clone(),
-                resource: org.mcp_url.clone(),
+                resource: org.mcp_url.clone().unwrap_or_default(),
                 ..metadata.clone()
             };
             (&org_metadata, client_secret)
