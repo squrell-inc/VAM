@@ -74,9 +74,21 @@ rel_fails "continue-on-error" "continue-on-error" "        id: guards
 "
 
 echo "release.yml: actions"
-rel_fails "an action pinned by tag" "not pinned by a full 40-hex" "actions/checkout@$SHA # v6.0.2" "actions/checkout@v6 # v6.0.2"
-rel_fails "an action pinned by a short SHA" "not pinned by a full 40-hex" "actions/checkout@$SHA # v6.0.2" "actions/checkout@${SHA:0:12} # v6.0.2"
-rel_fails "a pin without its version comment" "without a version comment" "actions/checkout@$SHA # v6.0.2" "actions/checkout@$SHA"
+rel_fails "an action pinned by tag" "not pinned by a full 40-hex" "actions/checkout@$SHA # v6.0.2
+        with:
+          fetch-depth: 0" "actions/checkout@v6 # v6.0.2
+        with:
+          fetch-depth: 0"
+rel_fails "an action pinned by a short SHA" "not pinned by a full 40-hex" "actions/checkout@$SHA # v6.0.2
+        with:
+          fetch-depth: 0" "actions/checkout@${SHA:0:12} # v6.0.2
+        with:
+          fetch-depth: 0"
+rel_fails "a pin without its version comment" "without a version comment" "actions/checkout@$SHA # v6.0.2
+        with:
+          fetch-depth: 0" "actions/checkout@$SHA
+        with:
+          fetch-depth: 0"
 rel_fails "a docker:// action" "docker:// references" "      - name: Install cargo-deny" "      - uses: docker://alpine:3.20
       - name: Install cargo-deny"
 rel_fails "actions/cache" "no caches" "      - name: Install cargo-deny" "      - uses: actions/cache@$SHA # v4.2.0
@@ -86,9 +98,13 @@ rel_fails "actions/cache" "no caches" "      - name: Install cargo-deny" "      
       - name: Install cargo-deny"
 rel_fails "rust-cache" "no caches" "      - name: Install cargo-deny" "      - uses: Swatinem/rust-cache@$SHA # v2.7.0
       - name: Install cargo-deny"
-rel_fails "checkout keeping credentials" "without persist-credentials: false" "          persist-credentials: false" "          persist-credentials: true"
-rel_fails "checkout without persist-credentials" "without persist-credentials: false" "          persist-credentials: false
-" ""
+rel_fails "checkout keeping credentials" "without persist-credentials: false" "          fetch-tags: true
+          persist-credentials: false" "          fetch-tags: true
+          persist-credentials: true"
+rel_fails "checkout without persist-credentials" "without persist-credentials: false" "          fetch-tags: true
+          persist-credentials: false
+" "          fetch-tags: true
+"
 rel_fails "a shallow checkout in validate" "fetch-depth: 0" "          fetch-depth: 0
 " "          fetch-depth: 1
 "
@@ -102,32 +118,86 @@ if mutate release.yml "$wf/release.yml" "        run: scripts/release/install-to
   expect_ok "an allowed expression (github.sha, runner.temp) inside run:" "$check" "$t_tmp/m/release.yml"
 fi
 
-echo "release.yml: the publish job (when a later wave adds it)"
-publish_good="
-  publish:
-    name: publish
-    runs-on: ubuntu-24.04
-    needs: [validate]
-    timeout-minutes: 30
-    environment: release
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
+echo "release.yml: the publish job"
+ATT=1e69f48acb82d1966a394da916b4c1698aa569d6
+rel_fails "publish without environment: release" "environment: release" "    environment: release
+" ""
+rel_fails "publish that does not need build" "publish must need exactly validate and build" "    needs: [validate, build]
+    if:" "    needs: [validate]
+    if:"
+rel_fails "publish that does not need validate" "publish must need validate" "    needs: [validate, build]
+    if:" "    needs: [build]
+    if:"
+rel_fails "publish with no dry_run condition" "only when dry_run is false" "    if: \${{ inputs.dry_run == false }}
+" ""
+rel_fails "publish gated on something else" "only when dry_run is false" "    if: \${{ inputs.dry_run == false }}" "    if: \${{ always() }}"
+rel_fails "publish with an extra permission" "publish permissions must be exactly" "      attestations: write
+    env:" "      attestations: write
+      packages: write
+    env:"
+rel_fails "publish without attestations: write" "publish permissions must be exactly" "      attestations: write
+    env:" "    env:"
+rel_fails "publish with contents: read" "publish permissions must be exactly" "      contents: write
+      id-token: write" "      contents: read
+      id-token: write"
+rel_fails "write permissions in a job that is not publish" "write permissions; only publish may" "  publish:
+    name: publish" "  ship:
+    name: publish"
+rel_fails "the validated commit taken from build" "VALIDATED_COMMIT and VALIDATED_VERSION must be" "      VALIDATED_COMMIT: \${{ needs.validate.outputs.commit }}" "      VALIDATED_COMMIT: \${{ needs.build.outputs.commit }}"
+rel_fails "the built commit taken from validate" "COMMIT and VERSION must be needs.build" "      COMMIT: \${{ needs.build.outputs.commit }}" "      COMMIT: \${{ needs.validate.outputs.commit }}"
+rel_fails "a secret in publish" "publish references secrets" "      GH_TOKEN: \${{ github.token }}
     steps:
-      - uses: actions/checkout@$SHA # v6.0.2
+      # the reviewed" "      GH_TOKEN: \${{ secrets.RELEASE_TOKEN }}
+    steps:
+      # the reviewed"
+rel_fails "publish downloading another artifact" "release-<version> artifact" "          name: release-\${{ needs.build.outputs.version }}" "          name: assets"
+rel_fails "gh release create in the workflow" "runs 'gh release create" "        run: scripts/release/publish.sh draft" "        run: gh release create v1 --draft"
+rel_fails "gh release edit in the workflow" "runs 'gh release edit" "        run: scripts/release/publish.sh draft" "        run: gh release edit v1 --draft=false"
+rel_fails "draft=false in the workflow" "draft=false" "        run: scripts/release/publish.sh publish" "        run: echo draft=false"
+rel_fails "a gh api call in the workflow" "runs 'gh api" "        run: scripts/release/publish.sh publish" "        run: gh api repos/x/y"
+rel_fails "publish.sh check missing" "steps must run in this order" "scripts/release/publish.sh check" "scripts/release/publish.sh chek"
+rel_fails "verify.sh draft missing" "steps must run in this order" "scripts/release/verify.sh draft" "scripts/release/verify.sh drat"
+rel_fails "no attestation step" "steps must run in this order" "      - name: Attest the assets
+        uses: actions/attest@$ATT # v4.2.2
+        with:
+          subject-checksums: release/SHA256SUMS
+      - name: Attest SHA256SUMS and the notes
+        uses: actions/attest@$ATT # v4.2.2
+        with:
+          subject-path: |
+            release/SHA256SUMS
+            release/RELEASE_NOTES.md
+" ""
+rel_fails "the draft verified before it is attested" "steps must run in this order" "      - name: Download and verify the draft
+        run: scripts/release/verify.sh draft
+" "      - name: Download and verify the draft
+        run: scripts/release/verify.sh drat
+"
+rel_fails "an unpinned attest action" "not pinned by a full 40-hex" "      - name: Attest the assets
+        uses: actions/attest@$ATT # v4.2.2" "      - name: Attest the assets
+        uses: actions/attest@v4 # v4.2.2"
+rel_fails "an attest action without its version comment" "without a version comment" "      - name: Attest the assets
+        uses: actions/attest@$ATT # v4.2.2" "      - name: Attest the assets
+        uses: actions/attest@$ATT"
+rel_fails "no cleanup step" "needs one cleanup step" "        if: \${{ failure() || cancelled() }}
+" ""
+rel_fails "a cleanup step that ignores cancellation" "needs one cleanup step" "        if: \${{ failure() || cancelled() }}" "        if: \${{ failure() }}"
+rel_fails "a step after the cleanup step" "must be the last step" "        run: scripts/release/publish.sh abort
+" "        run: scripts/release/publish.sh abort
+      - name: Late step
+        run: echo late
+"
+rel_fails "publish without a timeout" "no timeout-minutes" "    timeout-minutes: 45
+" ""
+rel_fails "publish checkout keeping credentials" "without persist-credentials: false" "      - uses: actions/checkout@$SHA # v6.0.2
         with:
           persist-credentials: false
-"
-cp "$wf/release.yml" "$t_tmp/m/release.yml"; printf '%s' "$publish_good" >> "$t_tmp/m/release.yml"
-expect_ok "a well-formed publish job (write permissions, environment: release) passes" "$check" "$t_tmp/m/release.yml"
-cp "$wf/release.yml" "$t_tmp/m/release.yml"; printf '%s' "${publish_good/    environment: release
-/}" >> "$t_tmp/m/release.yml"
-expect_fail "publish without environment: release" "environment: release" "$check" "$t_tmp/m/release.yml"
-cp "$wf/release.yml" "$t_tmp/m/release.yml"; printf '%s' "${publish_good/needs: \[validate\]/needs: []}" >> "$t_tmp/m/release.yml"
-expect_fail "publish that does not need validate" "publish must need validate" "$check" "$t_tmp/m/release.yml"
-cp "$wf/release.yml" "$t_tmp/m/release.yml"; printf '%s' "${publish_good/publish:/build:}" >> "$t_tmp/m/release.yml"
-expect_fail "write permissions in a job that is not publish" "write permissions; only publish may" "$check" "$t_tmp/m/release.yml"
+      - uses: actions/download-artifact" "      - uses: actions/checkout@$SHA # v6.0.2
+        with:
+          persist-credentials: true
+      - uses: actions/download-artifact"
+rel_fails "the version input inside run: in publish" "inputs.version.*inside run:" "        run: scripts/release/verify.sh release --dir \"\$DIST\"" "        run: scripts/release/verify.sh release \${{ inputs.version }}"
+rel_fails "a step output of build inside run: in publish" "needs.build.outputs.commit.*inside run:" "        run: scripts/release/publish.sh draft" "        run: echo \${{ needs.build.outputs.commit }}"
 
 echo "release-build.yml"
 cat > "$t_tmp/m/release-build.yml" <<YAML

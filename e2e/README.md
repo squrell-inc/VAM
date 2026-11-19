@@ -383,14 +383,16 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   substring the body must hold. A 200 with `current: right` and `new: fresh` moves the current password to
   `previous` and the new one becomes current. The identity's session is not replaced: it stays whatever
   `login` last stored, so after a change it is the token the change used.
-- `identity-request: { as, credential: session | previous-session | key, method, path, status, fields }`: one
-  request (`method` defaults to `get`) with that credential as bearer, judged by exact status. `fields`
-  (optional) matches dotted camelCase paths over the JSON body with the usual matchers (exact value,
-  `{ contains }`, `{ matches: <regex> }`, `{ present }`, `{ absent }`; an array element is picked with
-  `key=value`, e.g. `keys.name=e2e.userId`). In `path` and in the string values of `fields`,
-  `{<alias>.userId}`, `{<alias>.username}` and `{<alias>.USERNAME}` (the username upper-cased) are replaced
-  by that `org` identity's values; in `path` each value is percent-encoded. `<alias>` may be any `org`
-  piece of `given`, not only `as`.
+- `identity-request: { as, credential: session | previous-session | key, method, path, status, contains, lacks,
+  fields }`: one request (`method` defaults to `get`) with that credential as bearer, judged by exact status.
+  `contains` and `lacks` are body substrings (the body must hold the first and not the second), judged after the
+  status; a miss is class `product`. `fields` (optional) matches dotted camelCase paths over the JSON body with
+  the usual matchers (exact value, `{ contains }`, `{ matches: <regex> }`, `{ present }`, `{ absent }`; an array
+  element is picked with `key=value`, e.g. `keys.name=e2e.userId`). In `path`, `contains`, `lacks` and in the
+  string values of `fields`, `{<alias>.userId}`, `{<alias>.username}` and `{<alias>.USERNAME}` (the username
+  upper-cased) are replaced by that `org` identity's values; in `path` each value is percent-encoded. `<alias>`
+  may be any `org` piece of `given`, not only `as`. `as` naming an `org` piece of role Owner (it has no account)
+  works with `credential: key` only: the request goes out with the bootstrap key.
 - `create-user: { as, username, userId, status, contains }`: `POST /v1/users` (`role: member`, a fresh
   random password the runner keeps to itself, an `Idempotency-Key`) with the key of `as` (an `org` piece of
   `given`; omitted is the bootstrap key). `username` takes `{tag}` (unique to the scenario and run) and the
@@ -399,6 +401,58 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   session or key in later steps.
 - `{ matches: <regex> }` is a matcher of the shared `fields` matcher (events, `identity-request` and the rest): the string value must match the regular
   expression (anchor it with `^` and `$`).
+
+### Roles and drafts (`crates/vam-e2e/src/identity.rs`)
+
+- `org` pieces take `scopes: [..]`: the scope list sent to `POST /v1/users/{id}/keys` when the identity's key is
+  minted. Absent, the key gets the role's default scopes (as before). Pieces: `org-publisher` (role Publisher),
+  `org-member-with-a-narrow-key` (Member, the member set), `org-member-with-a-catalog-key` (Member, the member set
+  plus `catalog:write`).
+- A `playbook` piece with `deferred: true` is not written at `given` (its name and URN are still worked out);
+  `playbook-draft-probe` is one, with the body of `playbook-one-step`. A `put-draft` step writes it.
+- An `agent` piece with `deferred: true` and no `release` is not written at `given` either (an agent piece with
+  `deferred` and `release: true` is still written and only left unreleased). `agent-inline-probe` is one, with the
+  body of `agent-plain`. A `put-draft` step saves it, or a `chat` with `inline:` sends it inside the run.
+- `put-draft: { piece, as, status, contains }`: `PUT /v1/playbooks` (or `/v1/agents`, by the piece's kind) with the
+  piece's body and an `Idempotency-Key`, as the identity (the bootstrap key when `as` is omitted). The URN's
+  `{{name}}` becomes `<piece>-<as>-<scenario>-<runTag>`, so every identity writes a row of its own and the owner
+  check never decides the answer; nothing needs cleanup. `status` is exact and required; `contains` is a body
+  substring. The probe writes a playbook because that route stays on `catalog:write` for good. The step remembers
+  the URN it wrote (or tried) per piece and identity; `chat: { agent: <deferred agent piece>, as }` runs that URN
+  (class `scenario` when no `put-draft` wrote one as that identity), and `identity-request` can name it.
+- `{{ns}}` in the body of a piece that a `put-draft` (or a `chat` with `inline`) writes: the writer's
+  `defaultNamespace` from `GET /v1/me`, asked with the writer's key (the bootstrap key's own when `as` is omitted)
+  and kept per identity for the scenario. It is the value a member's agent URN must start with
+  (`urn:vam:agent:local.vam.dev/{{ns}}/{{name}}`). `check` refuses `{{ns}}` in a piece that `given` writes or
+  publishes (a released or `deferred`-and-`release` agent, a skill, a released playbook).
+- `put-draft: { urnOf: <org alias> }`: the body's URN is the one an earlier `put-draft` of the same piece as that
+  identity wrote or tried (class `scenario` when none), so a second identity aims at the first one's agent. The step
+  records the URN for its own identity too, so `{{urn:<piece>:<as>}}` names it. `check` needs `urnOf` to be an org
+  piece other than `as`, with such a `put-draft` earlier in the scenario.
+- `start-playbook: { agent: <deferred agent piece>, draft: true, as }` runs the URN a `put-draft` as `as` wrote
+  (class `scenario` when none), the rule `chat` has; the playbook may be a released piece with its inputs.
+- `publish-skill: { piece, as, release: false }`: `as` publishes (and releases) as that identity, the bootstrap key
+  when omitted; `release: false` publishes the package as a draft only and releases nothing (`check` refuses it
+  with `refused: true`). Pieces: `skill-host-echo` (released at `given`, one `host_echo` tool), `skill-draft-probe`
+  (`deferred`, the same body), and the agents `agent-member-draft-with-host-echo`,
+  `agent-member-draft-with-draft-probe` and `agent-member-draft-with-m365-probe` (each `deferred`, saved by a
+  `put-draft` under the writer's namespace; the first two name their skill with a floating ref, the third pins
+  `skill-m365-probe` at 1.0.0).
+- `{{urn:<piece>:<as>}}` in an `identity-request`'s `path` (percent-encoded), `contains` and `lacks`: the URN a
+  `put-draft`, or a `chat` with `inline` or `inlinePlaybook`, as `<as>` wrote or tried for `<piece>`. None yet:
+  class `scenario`. `check` needs `<piece>` in `given` and `<as>` an `org` piece.
+- `chat: { inline: <agent piece>, inlinePlaybook: <playbook piece>, refused: true }`: sends the agent piece's
+  `spec` as the run's `inlineAgent` (no `agentRef`) and/or the playbook piece's `spec` as `inlinePlaybook` (with
+  `agent:` or `inline:`), under the name `<piece>-<as>-<scenario>-<runTag>`. vamd accepts neither, so `check`
+  refuses either field without `refused: true`, and a start that is accepted fails the step at once (class
+  `product`) instead of waiting for the run. `inputs: { k: v }` (with `inlinePlaybook` only) adds run inputs, so a
+  playbook's input schema is met and the refusal under test is the inline rule.
+- `expect: { refused: true, status: <n>, contains }`: with `refused`, the refusal's exact HTTP status (without
+  `status`, any 4xx passes). Read after a `chat` step; a refusal from another step records no status (class
+  `scenario`).
+- `set-role: { as, role: publisher | member }`: as the bootstrap key, `POST` (publisher) or `DELETE` (member)
+  `/v1/users/{id}/publish-grant` for the identity. A non-2xx answer is class `harness`, because the role change is
+  arrangement, not the behaviour under test.
 
 ## Receipt expectations and offline verify
 
@@ -747,11 +801,11 @@ broker started). Tag `notifications`; a scenario that waits for the wall clock a
 
 ## Connectors (`crates/vam-e2e/src/connectors.rs`)
 
-Connector scenarios use two runner-hosted loopback providers (std-only HTTP, started once per run when a
-scenario `given`s a `mock-provider` piece). Tag `connectors`. Token values are made by the runner, kept in memory,
+Connector scenarios use four runner-hosted loopback listeners (Microsoft login, Microsoft Graph, Linear and the
+filebox service; std-only HTTP, started once per run when a scenario `given`s a `mock-provider` piece). Tag `connectors`. Token values are made by the runner, kept in memory,
 added to the scrub list and never printed or logged; a listing that holds one fails the `connectors` expect.
 
-- World piece `kind: mock-provider`, `provider: microsoft-login | microsoft-graph | linear-server`. `microsoft-login` serves
+- World piece `kind: mock-provider`, `provider: microsoft-login | microsoft-graph | linear-server | filebox`. `microsoft-login` serves
   `POST /{tenant}/oauth2/v2.0/token` for `refresh_token` grants it was told about, logs form field **names** (and the
   values of `client_id`, `grant_type`, `scope` only), and answers `invalid_grant` once revoked. `linear-server` is a
   streamable-HTTP MCP server at `/mcp` (`list_issues`, `get_issue`, `save_issue`, `save_comment` and the unvetted
@@ -766,7 +820,8 @@ added to the scrub list and never printed or logged; a listing that holds one fa
   (`PUT /v1/mcp/connections`, then `…/oauth/tokens`) with the id, the `url` (or the provider's address with `piece`)
   and, for the Linear mock, its bearer. Rows made (MCP rows, and the `microsoft-365` connection by `DELETE …/connection`) are removed at cleanup as the same identity.
 - `connector-check: { id, as }`: `POST /v1/connectors/{id}/connection/check`; must answer 2xx.
-- `mock-provider: { piece, revoke }`: with `revoke: true` the provider refuses everything from then on.
+- `mock-provider: { piece, revoke }`: with `revoke: true` the provider refuses everything from then on. A filebox
+  piece also takes `expire: true`, `holdToken: true | false` and `rotateSecret: true` (see "Admin-supplied clients").
 - `expect: { connectors: { id, as, fields, absent } }`: the entry of `GET /v1/connectors` for the caller; `fields`
   are dotted paths with exact values, `absent` are paths that must not exist. A 404 or a missing entry is `product`.
 - `expect: { mock-requests: { piece, path, has, lacks, count } }`: what the provider saw at `path`. `has`/`lacks`
@@ -782,6 +837,53 @@ added to the scrub list and never printed or logged; a listing that holds one fa
   authority host (`login.microsoftonline.com`) to the mocks, for the MCP client and the token refresh; every other URL
   keeps the SSRF rules.
 
+### Admin-supplied clients (filebox, `mock-filebox-server`)
+
+For connectors whose OAuth client the org's admin registered with the provider (`client: org`, `clientSecret:
+org_vault`). `mock-provider` with `provider: filebox` is a fictional Box-like service on one loopback listener, for
+three hosts: the MCP server `https://mcp.filebox.example/mcp` (`search_files`, `get_file_content`; bearer required), RFC 9728
+metadata (`/.well-known/oauth-protected-resource[/mcp]`, naming `https://auth.filebox.example`) and RFC 8414 metadata
+(`/.well-known/oauth-authorization-server`: authorize, token, revocation, S256, `client_secret_post`, **no**
+registration endpoint). `GET /authorize` mints a code for a client id starting `e2e-filebox-client`, the redirect URI
+and the S256 challenge and answers a 302 (the runner plays the browser). `POST /token` is a confidential client: it
+needs the current client secret (else 401 `invalid_client`), single-use codes checked with verifier and redirect URI,
+and **single-use rotating refresh tokens** (a spent one answers `invalid_grant`). `POST /revoke` answers 200.
+
+- It logs form field names, the values of `client_id`, `grant_type`, `redirect_uri` and `resource`,
+  `client-secret=current|old|wrong|none`, `refresh=fresh|reused|unknown`, and for the MCP server `authorization`,
+  `authorization-expired`, `authorization-wrong`, `method=<rpc>`, `tool=<name>` and `tool-ok=<name>` (a call the
+  provider answered). Never a secret value.
+- `mock-provider: { piece, expire: true }`: the current access token is refused from now on (until a refresh).
+  `holdToken: true` makes the token endpoint log a refresh request and then wait (at most 30 s); `false` releases it.
+  While held, an MCP call with an expired token is logged on arrival and answered 401 only on release: the node makes a
+  caller that starts during a refresh wait for it, so this is what keeps two tasks in flight on the same expired token.
+  Runs of one agent and member share a workspace and queue behind each other, so two overlapping tasks use two agents.
+  `rotateSecret: true`: the provider's client secret changes and the old one is refused (`client-secret=old`).
+- The client secret, a value the provider never held, the rotated secret and every token it issued are in the scrub
+  list; `expect: { secret-absent: { secret: <piece alias> } }` judges all of them.
+- Seam: `mcp:https://mcp.filebox.example/mcp` is mapped to the mock with the other `mcp:` keys. The key
+  `oauth:https://auth.filebox.example` (discovery, exchange and refresh at the pinned endpoints; every URL on that
+  origin keeps its path) is on (`PASS_OAUTH_SEAM`, `connectors.rs`). The `/.well-known/` metadata of an `mcp:` server
+  is answered by the same mock, so Enable's discovery runs the real code against it.
+- `connector-node` takes `client: { clientId, clientSecret: { piece, which: current | rotated | wrong } }`, sent as
+  `client: { clientId, clientSecret }` in the body (the secret value comes from the mock, never printed; leave
+  `clientSecret` out to send none), and `contains` (the refusal's body holds the text). A node with a client is sent
+  `client: null` at cleanup so the org secret does not outlive the scenario.
+- `connector-connect` with a filebox `piece` plays the app (D29): it reads `node.client.clientId`,
+  `node.client.authorizeEndpoint`, `node.client.tokenEndpoint` and `mcp.url` from the caller's `GET /v1/connectors`
+  entry (a missing field is `product`), makes a PKCE pair, asks the mock's authorize endpoint (the pinned endpoint's
+  path) for a code and posts `{ code, codeVerifier, redirectUri }` to `POST /v1/connectors/{id}/connection/oauth/code`.
+  `redirectUri` (default `squrell://oauth`) overrides the redirect URI. `via: tokens` plays an app that holds the
+  tokens itself: `PUT /v1/mcp/connections` (`tokenEndpoint` and `clientId` override the node's values) and then
+  `PUT …/oauth/tokens`; with `refused: true` either step may refuse, and `contains` must be in that body.
+- `api-call: { method, path, as, refused, contains, absent }`: one `GET` (default) or `DELETE` as an identity. Without
+  `refused` the answer is 2xx; with it 400, 403 or 409 (a 404 or 405 is a missing route) and the body holds `contains`.
+  `absent: <filebox piece alias>`: no form of that piece's secrets is in the answer body.
+- `expect: { connectors }` fields also take `{ present: true }` and `{ contains: text }`.
+- Fixture `marketplace-community-connectors` also lists `filebox-connector` (connector `filebox`: `discover`, `client:
+  org`, `clientSecret: org_vault`, `search_files` and `read_file`, MCP `https://mcp.filebox.example/mcp`) and
+  `org-secret-without-org-client` (`org_vault` without `client: org`, refused).
+
 ### Skills that call Microsoft Graph as the member
 
 - `mock-provider` with `provider: microsoft-graph` serves `GET /v1.0/me/messages` (two fixed messages) and
@@ -791,7 +893,9 @@ added to the scrub list and never printed or logged; a listing that holds one fa
   stale from the start.
 - `connector-connect` takes `expiresIn` (seconds, `microsoft-365`): sent as `expiresIn` in the connection body.
   `expect: { secret-absent: { secret: microsoft-365 } }` judges the connection's access and refresh tokens.
-- `mock-requests` takes `method` and `path: "*"` (any path), and `count: 0` passes when nothing was seen.
+- `mock-requests` takes `method` and `path: "*"` (any path), and `count: 0` passes when nothing was seen. `with: <field>`
+  keeps only the requests that carry that field before `count`, `atLeast`, `has` and `lacks` judge them
+  (`with: grant_type=refresh_token, count: 1`).
 - `skill` pieces take `files: { <path in the package>: <path under e2e/world/fixtures> }`, packed next to `SKILLS.md`
   and `manifest.json`. `skill-m365-probe` uses it for `probe.py` (python3 stdlib): it reads `{ method, path }` from
   stdin and calls Graph through the guest proxy with `X-Target-Url` and only the placeholder `vamsec_m365_graph`.
@@ -811,7 +915,7 @@ Scenarios for a skill whose tools name a card (`ui.show` for a result, `ui.ask` 
   failure while the world is built. An agent piece that `requires` a deferred skill is also `deferred: true` (it is saved at `given` time
   and released by the `publish-skill` step that releases the skill, since vamd refuses to release an agent whose skill is
   not released).
-- `publish-skill: { piece, refused, contains }`: packs the deferred skill piece (its `files:` included, as for any
+- `publish-skill: { piece, refused, contains, as, release }` (`as` and `release: false`: see "Roles and drafts"): packs the deferred skill piece (its `files:` included, as for any
   skill piece), publishes it and, when accepted, releases it as 1.0.0. With `refused: true` the answer must be 4xx and
   its body must contain `contains` (a tool name, a card file path or a JSON pointer).
 - `approve: { amend: { <field>: <value> }, refused, as, via }`: decides AMENDED with `amendedArgs`. With
@@ -849,11 +953,12 @@ same commit SHAs in every scenario: a node that remembers a tag's commit must no
   `with-a-connector`, `claims-the-squrell-name` (an artifact under `hub.squrell.cloud`) and `claims-the-org-name`
   (an artifact under `local.vam.dev`, the e2e registry domain). Overlay `marketplace-community-broken/` (an index
   that is not JSON).
-- `marketplace-community-connectors`: added by an admin, domain `connectors.community.example`. Four listings that ship a
+- `marketplace-community-connectors`: added by an admin, domain `connectors.community.example`. Six listings that ship a
   connector file (`connector.json`, the `spec/connectors/*.json` format): `bugwatch-connector` (installs: remote MCP at
   `https://mcp.bugwatch.example/mcp` with discovery) and three that must be refused with a reason
   (`reserved-connector-id` takes the id `linear`, `unknown-profile-connector` names the profile `generic`,
-  `connector-with-a-secret` asks for `squrell_relay`). Overlay `marketplace-community-connectors-update/` is the tag
+  `connector-with-a-secret` asks for `squrell_relay`), and two for admin-supplied clients (`filebox-connector` installs,
+  `org-secret-without-org-client` is refused; see "Admin-supplied clients"). Overlay `marketplace-community-connectors-update/` is the tag
   `bugwatch-connector-v1.1.0` whose connector asks for one more scope and one more tool. The runner maps the Bugwatch MCP
   URL to the `linear-server` mock through the `mcp:<https url>` key of the connector seam (`PASS_MCP_SERVER_SEAM`), so
   `connector-connect: { id: bugwatch, url: "https://mcp.bugwatch.example/mcp", piece: mock-linear-server }` connects the

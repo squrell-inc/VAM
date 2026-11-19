@@ -270,6 +270,27 @@ impl SqliteWorkflowStore {
         Ok(())
     }
 
+    /// Fills `origin` on the skill records that a marketplace installed.
+    pub fn attach_skill_origins(
+        &self,
+        records: &mut [vam_spec::v1::SkillRecord],
+    ) -> Result<(), OrchestratorError> {
+        let map = self.origins_for(
+            "skill",
+            records.iter().any(|r| is_installed(&r.catalog_tier)),
+        )?;
+        for r in records.iter_mut().filter(|r| is_installed(&r.catalog_tier)) {
+            if let Some(o) = lookup(
+                &map,
+                r.spec.as_ref().and_then(|s| s.resource_id.as_ref()),
+                r.version.as_ref(),
+            ) {
+                r.origin = Some(o.to_proto());
+            }
+        }
+        Ok(())
+    }
+
     /// Fills `origin` on the skill package records that a marketplace installed.
     pub fn attach_skill_package_origins(
         &self,
@@ -344,6 +365,8 @@ impl SqliteWorkflowStore {
             }
         }
         for id in stale {
+            // The admin's client and its secret go with the connector (CN-5.2).
+            crate::connector_client::clear_client_in(&tx, &id)?;
             tx.execute(
                 "DELETE FROM node_enabled_connectors WHERE connector_id = ?1",
                 [id],

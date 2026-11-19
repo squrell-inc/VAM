@@ -85,6 +85,8 @@ async fn mint_user_key(
     crate::owner::reject_reserved_bootstrap_name("principal", &req.principal)?;
     let key_id = format!("key-{}", uuid_like());
     let secret = mint_api_key_secret();
+    // Mode is decided by what was asked for, before sanitizing: no list follows the live role.
+    let scope_mode = crate::keys::ScopeMode::for_requested(&req.scopes);
     let scopes = crate::keys::sanitize_scopes_for_role(user.role, &req.scopes);
     if scopes.is_empty() {
         return Err(OrchestratorError::InvalidContract(
@@ -98,13 +100,14 @@ async fn mint_user_key(
     } else {
         req.principal
     };
-    let record = state.store.create_api_key_owned(
+    let record = state.store.create_api_key_owned_with_mode(
         &key_id,
         &req.name,
         &secret,
         &principal,
         &scopes,
         &user.user_id,
+        scope_mode,
     )?;
     let resp = CreateApiKeyResponse {
         key: Some(to_proto_key(&record)),

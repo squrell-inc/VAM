@@ -98,14 +98,34 @@ async fn response_body(response: axum::response::Response) -> String {
     .unwrap()
 }
 
+/// Saves the draft agent `create_run_body` runs by `agentRef` (the run route takes no inline
+/// agent): the same draft `PUT /v1/agents` writes, owned by `owner`.
+fn seed_draft_agent(store: &SqliteWorkflowStore, owner: &str) {
+    let agent = vam_spec::v1::AgentSpec {
+        resource_id: Some(vam_spec::v1::ResourceId {
+            urn: "urn:vam:agent:local.vam.dev/acme/test-agent".to_string(),
+        }),
+        display_name: "Test Agent".to_string(),
+        description: "fixture".to_string(),
+        role: "Tester".to_string(),
+        instruction_source: Some(
+            vam_spec::v1::agent_spec::InstructionSource::SystemInstructions("test".to_string()),
+        ),
+        allow_any_playbook: true,
+        ..Default::default()
+    };
+    store
+        .publish_agent_draft_with_owner(&agent, owner)
+        .expect("save draft agent");
+}
+
 fn create_run_body(run_id: &str, idem: &str) -> serde_json::Value {
     serde_json::json!({
         "spec": {
             "runId": {"urn": run_id},
             "agentRef": {
                 "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/test-agent"},
-                "version": {"major": 1, "minor": 0, "patch": 0},
-                "digest": {"algorithm": "ALGORITHM_SHA256", "hexHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+                "version": {"major": 1, "minor": 0, "patch": 0, "prerelease": "draft"}
             },
             "playbookRef": {
                 "resourceId": {"urn": "urn:vam:playbook:local.vam.dev/acme/test-pb"},
@@ -115,14 +135,6 @@ fn create_run_body(run_id: &str, idem: &str) -> serde_json::Value {
             "inputs": {"fields": {"prompt": {"stringValue": "hello from api test"}}},
             "workspaceRefUri": "volume://mock",
             "idempotencyKey": idem
-        },
-        "inlineAgent": {
-            "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/test-agent"},
-            "displayName": "Test Agent",
-            "description": "inline",
-            "role": "Tester",
-            "systemInstructions": "test",
-            "allowAnyPlaybook": true
         }
     })
 }
@@ -152,6 +164,7 @@ async fn post_run(model: &str, run: &str) -> (StatusCode, String) {
     let _state = isolate_state();
     let (store, secret) = bootstrap_store();
     seed_test_playbook(&store);
+    seed_draft_agent(&store, LOCAL_USER_ID);
     let app = api::router(app_state(store));
     let mut body = create_run_body(&format!("urn:vam:run:local.vam.dev/acme/{run}"), run);
     body["spec"]["inputs"]["fields"]["model"] = serde_json::json!({"stringValue": model});

@@ -212,6 +212,26 @@ impl StartOutcome {
     }
 }
 
+/// The run route never writes the catalog (locked decision 5): an inline agent or playbook,
+/// with any content, is refused before anything else happens, so nothing is written.
+fn refuse_inline_parts(req: &CreateRunRequest) -> Result<(), OrchestratorError> {
+    if req.inline_agent.is_some() {
+        return Err(OrchestratorError::InvalidContract(
+            "inlineAgent is not accepted: save the agent with PUT /v1/agents and run it by \
+             agentRef (your draft is version {major: 1, prerelease: \"draft\"})"
+                .into(),
+        ));
+    }
+    if req.inline_playbook.is_some() {
+        return Err(OrchestratorError::InvalidContract(
+            "inlinePlaybook is not accepted: save the playbook with PUT /v1/playbooks and run \
+             it by playbookRef (your draft is version {major: 1, prerelease: \"draft\"})"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Starts a run for `caller` from `req`, or hands the message to the live run / the queue.
 pub async fn start_run(
     state: &AppState,
@@ -219,6 +239,8 @@ pub async fn start_run(
     req: CreateRunRequest,
     opts: StartOpts,
 ) -> Result<StartOutcome, StartError> {
+    // First, before the idempotency lookup, a Space, an inbox admission or any write.
+    refuse_inline_parts(&req)?;
     let mut spec = req
         .spec
         .ok_or_else(|| OrchestratorError::InvalidContract("RunSpec required".into()))?;
@@ -235,13 +257,7 @@ pub async fn start_run(
         });
     }
 
-    let requested_urn = crate::run_context::requested_agent_urn(&spec).or_else(|| {
-        req.inline_agent
-            .as_ref()
-            .and_then(|agent| agent.resource_id.as_ref())
-            .map(|id| id.urn.clone())
-            .filter(|urn| !urn.is_empty())
-    });
+    let requested_urn = crate::run_context::requested_agent_urn(&spec);
     // Ids are the identity (locked decision 10): a Space id (owner checked) or the agent's
     // default Space, a thread id (inside that Space) or a new thread. Names are labels only.
     let kind = if spec
@@ -280,7 +296,6 @@ pub async fn start_run(
         state,
         caller,
         spec: &spec,
-        has_inline: req.inline_agent.is_some() || req.inline_playbook.is_some(),
         requested_urn: requested_urn.as_deref(),
         workspace_id: &workspace_id,
         thread_ref: &thread_ref,
@@ -335,21 +350,13 @@ pub async fn start_run(
         }
     }
 
-    // A run with no agentRef and an inline agent does not load the workspace's
-    // bound agent, so the bound pin must not be applied to it.
-    let pin_meta = workspace_meta
-        .as_ref()
-        .filter(|_| spec.agent_ref.is_some() || req.inline_agent.is_none());
-    crate::catalog_resolve::apply_workspace_version_pin(&mut spec, pin_meta, &workspace_id)?;
+    crate::catalog_resolve::apply_workspace_version_pin(
+        &mut spec,
+        workspace_meta.as_ref(),
+        &workspace_id,
+    )?;
 
-    let agent = if let Some(inline) = req.inline_agent {
-        if inline.resource_id.is_some() {
-            let _ = state
-                .store
-                .put_agent_with_owner(&inline, caller.owner_user_id.as_str())?;
-        }
-        inline
-    } else if let Some(urn) = requested_urn {
+    let agent = if let Some(urn) = requested_urn {
         crate::catalog_resolve::load_agent_for_run(
             &state.store,
             &spec,
@@ -374,18 +381,10 @@ pub async fn start_run(
         }
     } else {
         return Err(OrchestratorError::InvalidContract(
-            "agent_ref or inline_agent required for unbound workspace".into(),
+            "agent_ref required for unbound workspace".into(),
         )
         .into());
     };
-
-    if let Some(pb) = req.inline_playbook.as_ref() {
-        if pb.resource_id.is_some() {
-            let _ = state
-                .store
-                .put_playbook_with_owner(pb, caller.owner_user_id.as_str())?;
-        }
-    }
 
     // Admission: fail fast when the run's skills declare required
     // secrets the caller has not configured. Lists binding + scope.
@@ -434,7 +433,6 @@ pub async fn start_run(
         urn: run_id.clone(),
     });
 
-    crate::run_context::ensure_playbook_ref(&mut spec, req.inline_playbook.as_ref());
     crate::catalog_resolve::record_resolved_refs(
         &state.store,
         &mut spec,

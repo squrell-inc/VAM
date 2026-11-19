@@ -630,10 +630,101 @@ then:
 status: active
 ";
 
+const DRAFT_AGENT: &str = "piece: agent-draft\nkind: agent\ndeferred: true\nbody:\n  spec:\n    resourceId: { urn: \"urn:vam:agent:x/{{ns}}/{{name}}\" }\n";
+const SKILL_DRAFT: &str = "piece: skill-draft\nkind: skill\ndeferred: true\nbody:\n  spec:\n    resourceId: { urn: \"urn:vam:skill:x/e2e/{{name}}\" }\n";
+const MEMBER_DRAFTS: &str = "id: chat-replies
+title: Members save drafts
+tags: [members]
+needs: process
+given:
+  - org-admin
+  - { piece: org-member, as: m1 }
+  - { piece: org-member, as: m2 }
+  - agent-draft
+  - skill-draft
+when:
+  - put-draft: { piece: agent-draft, as: m1, status: 200 }
+  - put-draft: { piece: agent-draft, as: m2, urnOf: m1, status: 400, contains: namespace }
+  - publish-skill: { piece: skill-draft, as: m1, release: false }
+status: active
+";
+
+fn drafts_fx(scenario: &str) -> Fx {
+    let f = flood_fx(scenario);
+    f.write("world/agent-draft.yaml", DRAFT_AGENT);
+    f.write("world/skill-draft.yaml", SKILL_DRAFT);
+    f
+}
+
+#[test]
+fn member_draft_steps_catalog_is_clean() {
+    let f = drafts_fx(MEMBER_DRAFTS);
+    assert!(f.errors().is_empty(), "{:#?}", f.errors());
+}
+
 #[test]
 fn identity_forms_catalog_is_clean() {
     let f = flood_fx(IDENTITY_FORMS);
     assert!(f.errors().is_empty(), "{:#?}", f.errors());
+}
+
+#[test]
+fn ns_belongs_only_to_a_piece_a_step_writes() {
+    let f = drafts_fx(MEMBER_DRAFTS);
+    // A released agent is written at `given`, before any identity could name a namespace.
+    f.write(
+        "world/agent-draft.yaml",
+        &DRAFT_AGENT.replace("deferred: true", "release: true"),
+    );
+    f.expect_error(
+        "piece-body",
+        "`{{ns}}` belongs only to a piece a step writes",
+    );
+    // A deferred agent that is released at `given` is written there as well.
+    f.write(
+        "world/agent-draft.yaml",
+        &DRAFT_AGENT.replace("deferred: true", "deferred: true\nrelease: true"),
+    );
+    f.expect_error(
+        "piece-body",
+        "`{{ns}}` belongs only to a piece a step writes",
+    );
+    // A skill is published as a package, never through a namespace.
+    f.write("world/agent-draft.yaml", DRAFT_AGENT);
+    f.write(
+        "world/skill-draft.yaml",
+        &SKILL_DRAFT.replace("e2e/{{name}}", "{{ns}}/{{name}}"),
+    );
+    f.expect_error(
+        "piece-body",
+        "`{{ns}}` belongs only to a piece a step writes",
+    );
+}
+
+#[test]
+fn urn_of_needs_another_org_identity_that_wrote_the_piece_first() {
+    let f = drafts_fx(&MEMBER_DRAFTS.replace("urnOf: m1", "urnOf: nobody"));
+    f.expect_error("step-alias", "`as: nobody` is not an org piece");
+    let f = drafts_fx(&MEMBER_DRAFTS.replace("urnOf: m1", "urnOf: m2"));
+    f.expect_error("put-draft", "`urnOf` names another identity than `as`");
+    // No `put-draft` of the piece as `m1` before this step.
+    let f = drafts_fx(&MEMBER_DRAFTS.replace("as: m1, status: 200", "as: m2, status: 200"));
+    f.expect_error(
+        "put-draft",
+        "`urnOf: m1` needs an earlier `put-draft` of `agent-draft` as `m1`",
+    );
+}
+
+#[test]
+fn publish_skill_as_needs_an_org_alias_and_release_false_is_not_a_refusal() {
+    let f =
+        drafts_fx(&MEMBER_DRAFTS.replace("as: m1, release: false", "as: nobody, release: false"));
+    f.expect_error("step-alias", "`as: nobody` is not an org piece");
+    let f = drafts_fx(&MEMBER_DRAFTS.replace("release: false", "release: false, refused: true"));
+    f.expect_error(
+        "publish-skill",
+        "`release: false` and `refused: true` do not combine",
+    );
 }
 
 #[test]
@@ -677,4 +768,34 @@ fn org_piece_username_is_linted() {
         "piece: org-email\nkind: secret\nusername: \"fine\"\n",
     );
     f.expect_error("piece-body", "`username` belongs to an `org` piece");
+}
+
+#[test]
+fn a_second_filebox_piece_and_a_non_filebox_alias_for_a_filebox_secret_are_refused() {
+    let fx = Fx::new();
+    for (piece, provider) in [
+        ("mock-filebox-server", "filebox"),
+        ("mock-filebox-two", "filebox"),
+        ("mock-linear-server", "linear-server"),
+    ] {
+        fx.write(
+            &format!("world/{piece}.yaml"),
+            &format!("piece: {piece}\nkind: mock-provider\nprovider: {provider}\n"),
+        );
+    }
+    let scenario = SCENARIO
+        .replace(
+            "given: [org-admin, agent-plain]",
+            "given: [org-admin, agent-plain, mock-filebox-server, mock-filebox-two, mock-linear-server]",
+        )
+        .replace(
+            "when:\n  - chat: \"e2e-step:hello Hi\"\n",
+            "when:\n  - chat: \"e2e-step:hello Hi\"\n  - connector-node: { id: filebox, enabled: true, as: org-admin, client: { clientId: c, clientSecret: { piece: mock-linear-server, which: current } } }\n  - api-call: { path: /v1/connectors, as: org-admin, absent: mock-linear-server }\n",
+        );
+    fx.write("scenarios/chat-replies.yaml", &scenario);
+    // One listener holds one filebox state: a second piece would reset it.
+    fx.expect_error("given", "second filebox");
+    // The secret and the tokens are kept under a filebox alias only.
+    fx.expect_error("refs", "clientSecret.piece");
+    fx.expect_error("refs", "api-call.absent");
 }

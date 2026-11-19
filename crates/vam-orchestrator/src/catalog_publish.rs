@@ -14,12 +14,14 @@ use vam_spec::validation::Validate;
 use crate::catalog::{
     catalog_channel_from_db, catalog_record_version, CatalogKind, CATALOG_CHANNEL_DRAFT,
     CATALOG_CHANNEL_RELEASED, CATALOG_DRAFT_PRERELEASE, CATALOG_DRAFT_SLOT_MAJOR,
-    CATALOG_DRAFT_SLOT_MINOR, CATALOG_DRAFT_SLOT_PATCH, CATALOG_RELEASED_MAJOR,
-    CATALOG_RELEASED_MINOR, CATALOG_RELEASED_PATCH, CATALOG_RELEASED_PRERELEASE,
+    CATALOG_DRAFT_SLOT_MINOR, CATALOG_DRAFT_SLOT_PATCH, CATALOG_RELEASED_PRERELEASE,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::catalog::{CATALOG_RELEASED_MAJOR, CATALOG_RELEASED_MINOR, CATALOG_RELEASED_PATCH};
 use crate::error::OrchestratorError;
 use crate::workflow::SqliteWorkflowStore;
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn catalog_release_version() -> Version {
     Version {
         major: CATALOG_RELEASED_MAJOR,
@@ -246,6 +248,7 @@ fn upsert_spec_draft(
 }
 
 #[allow(clippy::too_many_arguments)] // flat parameter list is the established call shape; a params struct would change callers
+#[cfg(any(test, feature = "test-support"))]
 fn upsert_spec_released(
     connection: &rusqlite::Connection,
     kind: CatalogKind,
@@ -603,6 +606,7 @@ fn upsert_policy_draft(
 }
 
 #[allow(clippy::too_many_arguments)] // flat parameter list is the established call shape; a params struct would change callers
+#[cfg(any(test, feature = "test-support"))]
 fn upsert_policy_released(
     connection: &rusqlite::Connection,
     urn: &str,
@@ -887,7 +891,36 @@ pub fn update_draft_permissions(
     owner: &str,
     f: impl FnOnce(&mut AgentPermissions),
 ) -> Result<AgentSpec, OrchestratorError> {
-    write_draft_permissions(store, urn, owner, false, f)
+    write_draft_permissions(store, urn, owner, false, DraftWriter::Full, f)
+}
+
+/// [`update_draft_permissions`] for a caller in restricted mode: the edited spec goes
+/// through [`SqliteWorkflowStore::publish_agent_draft_restricted`], so refused fields and
+/// unreleased refs are 400 and the draft stays as it was. Only
+/// `PUT /v1/agents/{urn}/permissions` uses it; Always allow and deny keep
+/// [`update_draft_permissions`], which only adds or changes tool and host rules.
+pub fn update_draft_permissions_restricted(
+    store: &SqliteWorkflowStore,
+    urn: &str,
+    owner: &str,
+    max_drafts: usize,
+    f: impl FnOnce(&mut AgentPermissions),
+) -> Result<AgentSpec, OrchestratorError> {
+    write_draft_permissions(
+        store,
+        urn,
+        owner,
+        false,
+        DraftWriter::Restricted(max_drafts),
+        f,
+    )
+}
+
+/// Which writer stores an edited draft.
+#[derive(Clone, Copy)]
+enum DraftWriter {
+    Full,
+    Restricted(usize),
 }
 
 /// Replace the owner's draft permissions and drop `capability_policy` and
@@ -899,7 +932,7 @@ pub fn store_migrated_permissions(
     owner: &str,
     permissions: AgentPermissions,
 ) -> Result<AgentSpec, OrchestratorError> {
-    write_draft_permissions(store, urn, owner, true, move |slot| {
+    write_draft_permissions(store, urn, owner, true, DraftWriter::Full, move |slot| {
         *slot = permissions;
     })
 }
@@ -909,6 +942,7 @@ fn write_draft_permissions(
     urn: &str,
     owner: &str,
     clear_legacy: bool,
+    writer: DraftWriter,
     f: impl FnOnce(&mut AgentPermissions),
 ) -> Result<AgentSpec, OrchestratorError> {
     let mut spec = load_agent_draft(store, urn, owner, false)?;
@@ -921,7 +955,10 @@ fn write_draft_permissions(
     let mut permissions = spec.permissions.take().unwrap_or_default();
     f(&mut permissions);
     spec.permissions = Some(permissions);
-    store.publish_agent_draft_with_owner(&spec, owner)
+    match writer {
+        DraftWriter::Full => store.publish_agent_draft_with_owner(&spec, owner),
+        DraftWriter::Restricted(max) => store.publish_agent_draft_restricted(&spec, owner, max),
+    }
 }
 
 /// Insert `rule`, or replace the existing rule for the same target.
@@ -1053,6 +1090,67 @@ impl SqliteWorkflowStore {
         decode_agent(row)
     }
 
+    /// The save of a caller in restricted mode (`agents:draft` without `catalog:write`).
+    ///
+    /// Writes the caller's own draft row only and never releases. Order: refused fields
+    /// (400 naming the field), permission defaults, `validate`, platform-URN refusal,
+    /// refs (each must be an existing release; one 400 per kind), then under the store
+    /// lock: installed-URN refusal, namespace for a URN the caller owns no row of (400),
+    /// owner check with an empty owner read as `local` (403), and the cap when the write
+    /// inserts a new draft row (409). The namespace check comes first so a foreign URN
+    /// outside the namespace answers like a free one. Refs are checked outside the lock
+    /// (the resolver takes it); released rows are immutable and never deleted, so the
+    /// check cannot go stale before the write.
+    pub fn publish_agent_draft_restricted(
+        &self,
+        spec: &AgentSpec,
+        owner_user_id: &str,
+        max_drafts: usize,
+    ) -> Result<AgentSpec, OrchestratorError> {
+        crate::member_draft::require_no_refused_fields(spec)?;
+        let mut spec = spec.clone();
+        apply_publish_permission_defaults(&mut spec);
+        spec.validate()
+            .map_err(|e| OrchestratorError::InvalidContract(e.to_string()))?;
+        let urn = spec
+            .resource_id
+            .as_ref()
+            .map(|r| r.urn.as_str())
+            .filter(|u| !u.is_empty())
+            .ok_or_else(|| {
+                OrchestratorError::InvalidContract("AgentSpec.resource_id is required".to_string())
+            })?;
+        crate::catalog_tier::reject_caller_platform_urn(urn, "agent")?;
+        let owner = crate::owner::resolved_owner(owner_user_id);
+        crate::member_draft::require_released_refs(self, &spec, owner)?;
+        let (bytes, digest) = encode_spec(&spec)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let table = CatalogKind::Agent.table();
+        crate::catalog_tier::reject_caller_installed_urn(&connection, urn, "agent")?;
+        if !crate::owner::caller_owns_any_row(&connection, table, urn, owner)? {
+            crate::member_draft::require_own_namespace(&connection, owner, urn)?;
+        }
+        crate::owner::require_strict_urn_owner(&connection, table, urn, owner, "agent")?;
+        if fetch_spec_draft_row(&connection, table, urn)?.is_none() {
+            crate::member_draft::require_draft_capacity(&connection, owner, max_drafts)?;
+        }
+        let row = upsert_spec_draft(
+            &connection,
+            CatalogKind::Agent,
+            urn,
+            &bytes,
+            &digest,
+            owner,
+            CATALOG_DRAFT_SLOT_MAJOR,
+            CATALOG_DRAFT_SLOT_MINOR,
+            CATALOG_DRAFT_SLOT_PATCH,
+        )?;
+        decode_agent(row)
+    }
+
     pub fn release_agent(
         &self,
         urn: &str,
@@ -1096,6 +1194,7 @@ impl SqliteWorkflowStore {
         decode_agent(row)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_agent_released_with_owner(
         &self,
         spec: &AgentSpec,
@@ -1211,6 +1310,7 @@ impl SqliteWorkflowStore {
         decode_playbook(row)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_playbook_released_with_owner(
         &self,
         spec: &PlaybookSpec,
@@ -1312,6 +1412,7 @@ impl SqliteWorkflowStore {
         decode_skill(row)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_skill_released_with_owner(
         &self,
         spec: &SkillManifest,
@@ -1429,6 +1530,7 @@ impl SqliteWorkflowStore {
         Ok(policy_record_from_row(row))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_policy_released_with_owner(
         &self,
         urn: &str,

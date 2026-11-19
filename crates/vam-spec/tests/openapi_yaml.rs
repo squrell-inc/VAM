@@ -54,6 +54,32 @@ fn openapi_has_the_self_service_password_change() {
 }
 
 #[test]
+fn openapi_lists_skills_with_paging_and_include_drafts() {
+    let doc = load();
+    let get = &doc["paths"]["/v1/skills"]["get"];
+    assert!(get.is_mapping(), "missing GET /v1/skills");
+    let params = get["parameters"].as_sequence().expect("parameters");
+    let has = |needle: &str| {
+        params.iter().any(|p| {
+            p["$ref"].as_str().is_some_and(|r| r.ends_with(needle))
+                || p["name"].as_str() == Some(needle)
+        })
+    };
+    for p in ["PageSize", "PageToken", "includeDrafts"] {
+        assert!(has(p), "missing parameter {p}");
+    }
+    for code in ["200", "400", "403"] {
+        assert!(
+            get["responses"][code].is_mapping(),
+            "missing response {code}"
+        );
+    }
+    let schemas = &doc["components"]["schemas"];
+    assert!(schemas["ListSkillsResponse"]["properties"]["pagination"].is_mapping());
+    assert!(schemas["SkillRecord"]["properties"]["source"].is_mapping());
+}
+
+#[test]
 fn openapi_has_generated_ids_and_case_insensitive_login_names() {
     let doc = load();
     let create = &doc["paths"]["/v1/users"]["post"];
@@ -138,5 +164,77 @@ fn openapi_node_status_reports_the_build() {
             schemas["NodeBuild"]["properties"][f].is_mapping(),
             "NodeBuild.{f}"
         );
+    }
+}
+
+#[test]
+fn openapi_has_agent_draft_permissions() {
+    let doc = load();
+    let path = &doc["paths"]["/v1/agents/{urn}/permissions"];
+    let schema_ref = "#/components/schemas/AgentPermissions";
+    let get = &path["get"];
+    assert!(get.is_mapping(), "missing GET permissions");
+    for code in ["200", "400", "403", "404"] {
+        assert!(get["responses"][code].is_mapping(), "GET missing {code}");
+    }
+    assert_eq!(
+        get["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].as_str(),
+        Some(schema_ref)
+    );
+    let put = &path["put"];
+    assert!(put.is_mapping(), "missing PUT permissions");
+    for code in ["200", "400", "403", "404", "409"] {
+        assert!(put["responses"][code].is_mapping(), "PUT missing {code}");
+    }
+    assert_eq!(
+        put["requestBody"]["content"]["application/json"]["schema"]["$ref"].as_str(),
+        Some(schema_ref)
+    );
+    let params = put["parameters"].as_sequence().unwrap();
+    assert!(params
+        .iter()
+        .any(|p| p["$ref"].as_str() == Some("#/components/parameters/IdempotencyKeyHeader")));
+    for p in ["effective", "explain"] {
+        let route = format!("/v1/agents/{{urn}}/permissions/{p}");
+        assert!(
+            doc["paths"][route.as_str()]["get"].is_mapping(),
+            "missing {route}"
+        );
+    }
+    assert!(doc["components"]["schemas"]["AgentPermissions"].is_mapping());
+}
+
+#[test]
+fn openapi_has_permissions_migrate() {
+    let doc = load();
+    let post = &doc["paths"]["/v1/agents/{urn}/permissions/migrate"]["post"];
+    assert!(post.is_mapping(), "missing POST permissions/migrate");
+    for code in ["200", "400", "403", "404", "409"] {
+        assert!(post["responses"][code].is_mapping(), "missing {code}");
+    }
+    let params = post["parameters"].as_sequence().unwrap();
+    assert!(params
+        .iter()
+        .any(|p| p["$ref"].as_str() == Some("#/components/parameters/IdempotencyKeyHeader")));
+    assert!(params.iter().any(|p| p["name"].as_str() == Some("force")));
+    let report = &doc["components"]["schemas"]["PermissionsMigrationReport"];
+    for field in ["converted", "keptAdvanced", "unmapped", "behaviourChanges"] {
+        assert!(report["properties"][field].is_mapping(), "missing {field}");
+    }
+}
+
+#[test]
+fn openapi_refresh_drift_lists_every_value_the_route_answers() {
+    let doc = load();
+    let drift = &doc["components"]["schemas"]["RefreshMcpResponse"]["properties"]["drift"];
+    let values: Vec<&str> = drift["enum"]
+        .as_sequence()
+        .expect("drift enum")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    // `adopted` is the tools-pending recovery of a connector sign-in.
+    for v in ["identical", "shrunk", "reapproved", "upgraded", "adopted"] {
+        assert!(values.contains(&v), "drift enum lacks {v}: {values:?}");
     }
 }

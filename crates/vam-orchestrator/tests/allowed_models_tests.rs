@@ -76,6 +76,27 @@ async fn response_body(response: axum::response::Response) -> String {
     .unwrap()
 }
 
+/// Saves the draft agent `create_run_body` runs by `agentRef` (the run route takes no inline
+/// agent): the same draft `PUT /v1/agents` writes, owned by `owner`.
+fn seed_draft_agent(store: &SqliteWorkflowStore, owner: &str) {
+    let agent = vam_spec::v1::AgentSpec {
+        resource_id: Some(vam_spec::v1::ResourceId {
+            urn: "urn:vam:agent:local.vam.dev/acme/test-agent".to_string(),
+        }),
+        display_name: "Test Agent".to_string(),
+        description: "fixture".to_string(),
+        role: "Tester".to_string(),
+        instruction_source: Some(
+            vam_spec::v1::agent_spec::InstructionSource::SystemInstructions("test".to_string()),
+        ),
+        allow_any_playbook: true,
+        ..Default::default()
+    };
+    store
+        .publish_agent_draft_with_owner(&agent, owner)
+        .expect("save draft agent");
+}
+
 fn create_run_body(run_id: &str, idem: &str, model: Option<&str>) -> serde_json::Value {
     let mut inputs = serde_json::json!({
         "fields": {
@@ -90,20 +111,11 @@ fn create_run_body(run_id: &str, idem: &str, model: Option<&str>) -> serde_json:
             "runId": {"urn": run_id},
             "agentRef": {
                 "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/test-agent"},
-                "version": {"major": 1, "minor": 0, "patch": 0},
-                "digest": {"algorithm": "ALGORITHM_SHA256", "hexHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+                "version": {"major": 1, "minor": 0, "patch": 0, "prerelease": "draft"}
             },
             "inputs": inputs,
             "workspaceRefUri": "volume://mock",
             "idempotencyKey": idem
-        },
-        "inlineAgent": {
-            "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/test-agent"},
-            "displayName": "Test Agent",
-            "description": "inline",
-            "role": "Tester",
-            "systemInstructions": "test",
-            "allowAnyPlaybook": true
         }
     })
 }
@@ -230,6 +242,7 @@ async fn create_run_rejects_model_off_allowlist() {
         UserRole::Operator,
         &[BROKERS_ADMIN_SCOPE, "runs:write"],
     );
+    seed_draft_agent(&store, "operator");
     let (state, _dir) = app_state_http_only(store);
     let app = test_app(state);
 
@@ -264,6 +277,7 @@ async fn create_run_records_listed_model() {
         UserRole::Operator,
         &[BROKERS_ADMIN_SCOPE, "runs:write"],
     );
+    seed_draft_agent(&store, "operator");
     let (state, _dir) = app_state_http_only(store.clone());
     let app = test_app(state);
 

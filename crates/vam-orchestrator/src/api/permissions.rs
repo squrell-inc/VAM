@@ -152,21 +152,35 @@ pub(crate) async fn put_draft_permissions(
         return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
     }
     ensure_ready(&state, true)?;
-    state.pdp.authorize(&auth, "PutCatalog", "catalog:write")?;
+    let mode = crate::api::catalog_auth::require_agent_draft_write(&auth)?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let urn = agent_urn_from_permissions_path(&rest)?;
     // A non-owner gets the same 404 as a missing draft, before the body is read.
     crate::catalog_publish::load_agent_draft(&state.store, &urn, auth.owner_user_id(), false)?;
     let incoming: vam_spec::v1::AgentPermissions =
         parse_json_body("vam.v1.AgentPermissions", &body)?;
-    let saved = crate::catalog_publish::update_draft_permissions(
-        &state.store,
-        &urn,
-        auth.owner_user_id(),
-        move |permissions| {
-            *permissions = incoming;
-        },
-    )?;
+    let apply = move |permissions: &mut vam_spec::v1::AgentPermissions| {
+        *permissions = incoming;
+    };
+    let saved = match mode {
+        crate::api::catalog_auth::AgentWriteMode::Full => {
+            crate::catalog_publish::update_draft_permissions(
+                &state.store,
+                &urn,
+                auth.owner_user_id(),
+                apply,
+            )?
+        }
+        crate::api::catalog_auth::AgentWriteMode::Restricted => {
+            crate::catalog_publish::update_draft_permissions_restricted(
+                &state.store,
+                &urn,
+                auth.owner_user_id(),
+                crate::member_draft::member_draft_agents_max(),
+                apply,
+            )?
+        }
+    };
     let permissions = saved.permissions.unwrap_or_default();
     let (code, json) = json_response("vam.v1.AgentPermissions", &permissions)?;
     Ok(super::json_http_response(code, json))

@@ -1,0 +1,30 @@
+id: a-publisher-saves-a-draft-agent-and-runs-it-by-ref
+title: A publisher saves a draft agent with PUT and runs it by reference, and the draft stays private
+description: >
+  The path that vam run --file takes: the publisher saves the agent as a draft, then runs that draft by
+  agentRef. The run succeeds, the publisher sees only a draft version with no release, and a member neither
+  reads the agent nor finds it in the agent list.
+tags: [members, chat, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - agent-inline-probe
+when:
+  - put-draft: { piece: agent-inline-probe, as: pub, status: 200 }
+  - chat: { agent: agent-inline-probe, draft: true, as: pub, text: "e2e-step:sd Hello" }
+  - expect: { run: succeeded }
+then:
+  - identity-request: { as: pub, credential: key, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/versions", status: 200, lacks: "releasedAt" }
+  - identity-request: { as: member, credential: key, path: "/v1/agents/{{urn:agent-inline-probe:pub}}", status: 404 }
+  - identity-request: { as: member, credential: key, path: /v1/agents, status: 200, lacks: "{{urn:agent-inline-probe:pub}}" }
+guards:
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/catalog.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/inbox.rs
+mock:
+  - when: { step: sd }
+    reply: { text: hello }
+status: active

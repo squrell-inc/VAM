@@ -3178,19 +3178,21 @@ async fn create_run_stores_default_budgets_for_every_run_kind() {
         "resourceId": {"urn": "urn:vam:playbook:local.vam.dev/acme/budget-strict"}
     });
     let playbook_run = post_budget_run(&store, &app, &secret, &playbook).await;
+    // A saved draft agent run by reference (the run route takes no inline agent).
+    let draft_urn = "urn:vam:agent:local.vam.dev/acme/budget-inline";
+    store
+        .publish_agent_draft_with_owner(&budget_agent(draft_urn, None), LOCAL_USER_ID)
+        .expect("save draft agent");
     let inline = serde_json::json!({
         "spec": {
             "runId": {"urn": "urn:vam:run:local.vam.dev/acme/budget-inline"},
+            "agentRef": {
+                "resourceId": {"urn": draft_urn},
+                "version": {"major": 1, "minor": 0, "patch": 0, "prerelease": "draft"}
+            },
             "inputs": {"prompt": "hello"},
             "workspaceRefUri": "volume://budget-inline",
             "idempotencyKey": "budget-inline"
-        },
-        "inlineAgent": {
-            "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/budget-inline"},
-            "displayName": "Inline",
-            "role": "assistant",
-            "systemInstructions": "Do the task.",
-            "allowAnyPlaybook": true
         }
     });
     let inline_run = post_budget_run(&store, &app, &secret, &inline).await;

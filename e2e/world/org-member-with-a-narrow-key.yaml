@@ -1,0 +1,5 @@
+piece: org-member-with-a-narrow-key
+kind: org
+# A Member whose key was minted with an explicit scope list: the member set, nothing more.
+role: Member
+scopes: [sessions:write, runs:write, approvals:write, notifications:read, node:read]

@@ -28,7 +28,9 @@ deny_check() {
     echo "FAIL: cargo-deny is not installed. Install the pinned one: scripts/release/install-tool.sh cargo-deny (it lands in \$HOME/.local/bin; put that on PATH)"
     return 1
   fi
-  cargo deny check
+  # --exclude-dev: dev-dependencies are never shipped, and cargo-deny 0.21's graph builder panics on
+  # vam-orchestrator's renamed self dev-dependency (its test-support feature).
+  cargo deny --exclude-dev check
 }
 run deny deny_check
 # The microVM lane blocks releases (launch audit S4): rust.yml must force the lane on for release

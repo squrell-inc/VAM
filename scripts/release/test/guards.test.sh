@@ -89,7 +89,7 @@ SECONDS=0
 echo "good inputs"
 new_case; case_passes "a good input passes"
 expect_match "…and names the CI run" 'rust.yml succeeded on .*runs/push-success' "$T_OUT"
-grep -q "ran in $M2 with: check advisories" "$case_dir/deny.log" && ok "…cargo deny ran in a checkout of the commit" || bad "cargo deny did not run at the commit" "$(cat "$case_dir/deny.log")"
+grep -q "ran in $M2 with: --exclude-dev check advisories" "$case_dir/deny.log" && ok "…cargo deny --exclude-dev ran in a checkout of the commit" || bad "cargo deny did not run at the commit" "$(cat "$case_dir/deny.log")"
 new_case; runs_json "$M2" workflow_dispatch main completed success > "$fixtures/rust-runs.json"; case_passes "a workflow_dispatch run of rust.yml on main is accepted"
 new_case; case_passes "an empty commit means the head of main" COMMIT=
 new_case; case_passes "a dry run runs the same guards" DRY_RUN=true

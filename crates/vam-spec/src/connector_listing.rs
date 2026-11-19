@@ -8,7 +8,8 @@
 //! | Rule | Why |
 //! |---|---|
 //! | the id (last URN segment) is a short slug and not Squrell's (`microsoft-365`, `linear`, any `spec/connectors/` file) | a fixed id must mean the same connector on every node |
-//! | provider `oauth2`, profile `discover`, `clientSecret: none`, `orgConsent: none` | the only sign-in a node can run for a marketplace connector without a secret or a REST binding |
+//! | provider `oauth2`, profile `discover`, `clientSecret: none` or (with `client: org`) `org_vault`, `orgConsent: none` | the only sign-ins a node can run for a marketplace connector: the publisher's public client, or the org's own client whose id and secret the node's admin enters at Enable (the file carries neither) |
+//! | `squrell_relay` | refused: Squrell's relay is for Squrell's own connectors |
 //! | `api_key` provider | refused: a node has no connection flow that stores an API key for a connector |
 //! | `entra`, `google`, `slack` | refused: `entra` needs REST bindings (tokens attached to requests the guest makes), the others need a client secret |
 //! | `mcp` with an `https` URL on a full DNS name, 1 to 64 vetted tools, no `bindings` | a tool list the admin can read; no token reaches the guest |
@@ -35,6 +36,8 @@ pub const MAX_CONNECTOR_ID_LEN: usize = 64;
 
 /// Sign-in profiles a connector file may name, as the words in the file.
 const KNOWN_PROFILES: [&str; 4] = ["entra", "discover", "google", "slack"];
+
+const SECRET_REFUSED: &str = "the connector asks for a client secret: a marketplace connector must use `clientSecret: none` (or `org_vault` with `client: org`)";
 
 fn bad<T>(m: impl Into<String>) -> Result<T, ConnectorError> {
     Err(ConnectorError::Invalid(m.into()))
@@ -234,8 +237,8 @@ pub fn check_marketplace_connector(c: &Connector) -> Result<(), ConnectorError> 
                     "OAuth profile `{name}` is not available to a marketplace connector yet: use `discover` with a remote MCP server"
                 ));
             }
-            if p.client_secret != ClientSecret::None {
-                return bad("the connector asks for a client secret: a marketplace connector must use `clientSecret: none`");
+            if p.client_secret == ClientSecret::SqurellRelay {
+                return bad(SECRET_REFUSED);
             }
             if p.org_consent != OrgConsent::None {
                 return bad("orgConsent must be `none` for profile `discover`");
@@ -298,8 +301,15 @@ pub fn parse_marketplace_connector(raw: &str) -> Result<Connector, ConnectorErro
             Some(other) => return bad(format!("unknown provider kind `{other}`")),
         }
         if let Some(secret) = p.get("clientSecret") {
-            if secret.as_str() != Some("none") {
-                return bad("the connector asks for a client secret: a marketplace connector must use `clientSecret: none`");
+            if !matches!(secret.as_str(), Some("none" | "org_vault")) {
+                return bad(SECRET_REFUSED);
+            }
+            if secret.as_str() == Some("org_vault")
+                && p.get("client").and_then(Value::as_str) != Some("org")
+            {
+                return bad(
+                    "clientSecret `org_vault` needs `client: org`: the secret is the org's own client's",
+                );
             }
         }
         if let Some(profile) = p.get("profile") {
@@ -469,6 +479,74 @@ mod tests {
         let mut v = good();
         v["icon"] = json!("https://evil.example/x.png");
         assert!(err(v).contains("icon"));
+    }
+
+    fn org_good() -> Value {
+        let mut v = good();
+        v["provider"] = json!({ "kind": "oauth2", "profile": "discover", "client": "org",
+                                "clientSecret": "org_vault", "scopes": [], "orgConsent": "none" });
+        v
+    }
+
+    #[test]
+    fn an_admin_supplied_client_passes_with_or_without_a_secret() {
+        let c = parse_marketplace_connector(&org_good().to_string()).unwrap();
+        let s = crate::package::summarize_connector(&c);
+        let cs = s.connector.unwrap();
+        assert_eq!(cs.client.as_deref(), Some("org"));
+        assert_eq!(cs.client_secret, "org_vault");
+        assert_eq!(
+            cs.client_text.as_deref(),
+            Some("admin-supplied client (with a secret)")
+        );
+        let mut v = org_good();
+        v["provider"]["clientSecret"] = json!("none");
+        let c = parse_marketplace_connector(&v.to_string()).unwrap();
+        let cs = crate::package::summarize_connector(&c).connector.unwrap();
+        assert_eq!(cs.client_text.as_deref(), Some("admin-supplied client"));
+        // A publisher client has neither field (its summary digest is unchanged).
+        let c = parse_marketplace_connector(&good().to_string()).unwrap();
+        let cs = crate::package::summarize_connector(&c).connector.unwrap();
+        assert!(cs.client.is_none() && cs.client_text.is_none());
+    }
+
+    #[test]
+    fn a_vault_secret_without_an_org_client_names_the_client() {
+        let mut v = org_good();
+        v["provider"].as_object_mut().unwrap().remove("client");
+        assert!(err(v).contains("`client: org`"));
+        let mut v = org_good();
+        v["provider"]["client"] = json!("publisher");
+        assert!(err(v).contains("`client: org`"));
+    }
+
+    #[test]
+    fn an_org_client_still_refuses_the_relay_a_client_id_and_other_profiles() {
+        let mut v = org_good();
+        v["provider"]["clientSecret"] = json!("squrell_relay");
+        assert!(err(v).contains("client secret"));
+        let mut v = org_good();
+        v["provider"]["clientId"] = json!("abc");
+        assert!(err(v).contains("clientId"));
+        for profile in ["google", "slack"] {
+            let mut v = org_good();
+            v["provider"]["profile"] = json!(profile);
+            assert!(err(v).contains("not available"), "{profile}");
+        }
+        let mut v = org_good();
+        v["provider"]["clientSecret"] = json!("hunter2");
+        assert!(err(v).contains("client secret"));
+    }
+
+    #[test]
+    fn the_box_connector_file_passes() {
+        let raw = include_str!("../tests/fixtures/box-connector.json");
+        let c = parse_marketplace_connector(raw).unwrap();
+        assert_eq!(connector_id_of_urn(&c.urn), "box");
+        let cs = crate::package::summarize_connector(&c).connector.unwrap();
+        assert_eq!(cs.client.as_deref(), Some("org"));
+        assert_eq!(cs.mcp_host, "mcp.box.com");
+        assert_eq!(cs.tools.len(), 7);
     }
 
     #[test]

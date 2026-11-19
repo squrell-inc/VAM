@@ -25,7 +25,7 @@ pub enum PieceKind {
     /// scenario starts (`fixture` names the directory under `e2e/world/fixtures`).
     #[serde(rename = "workspace-seed")]
     WorkspaceSeed,
-    /// A runner-hosted loopback provider (`provider`: `microsoft-login`, `microsoft-graph` or `linear-server`).
+    /// A runner-hosted loopback provider (`provider`: `microsoft-login`, `microsoft-graph`, `linear-server` or `filebox`).
     /// The runner makes its tokens in memory and never prints them.
     #[serde(rename = "mock-provider")]
     MockProvider,
@@ -49,6 +49,9 @@ pub struct WorldPiece {
     pub requires: Vec<String>,
     /// `org` only: the role the signed-in profile has.
     pub role: Option<String>,
+    /// `org` only: the scope list sent to `POST /v1/users/{id}/keys` when the identity's key is
+    /// minted. Absent: the role's default scopes.
+    pub scopes: Option<Vec<String>>,
     /// `org` of a member role only: the login name to create the user under, instead of the
     /// run-unique default. `{tag}` is replaced by a short token unique to the piece, scenario and
     /// run (eight lowercase hex digits), so two scenarios on one node never clash.
@@ -91,14 +94,16 @@ pub struct WorldPiece {
     /// (vamd reports the path only once the broker is registered).
     #[serde(default)]
     pub restart_with_gateway: bool,
-    /// `mock-provider` only: `microsoft-login`, `microsoft-graph` or `linear-server`.
+    /// `mock-provider` only: `microsoft-login`, `microsoft-graph`, `linear-server` or `filebox`.
     pub provider: Option<String>,
     /// `skill` only: extra files packed into the package, `{ "path in the package": "path under
     /// e2e/world/fixtures" }` (a script a `localExec` tool runs).
     #[serde(default)]
     pub files: std::collections::BTreeMap<String, String>,
     /// `skill` only: arrange the piece's name and URN but do not publish it; a `publish-skill`
-    /// step does, so a refusal is a step result (product) and not a harness failure.
+    /// step does, so a refusal is a step result (product) and not a harness failure. A `playbook`
+    /// piece with `deferred` is not written at `given` either, nor is an `agent` piece with
+    /// `deferred` and no `release` (a `put-draft` step writes it).
     #[serde(default)]
     pub deferred: bool,
     /// `git-marketplace` only: the https URL the node is told about (the seam maps it to the repo).
@@ -135,11 +140,41 @@ pub struct EgressSpec {
 }
 
 impl WorldPiece {
+    /// True when `given` does not write the piece: a `put-draft` (or inline `chat`) step does.
+    /// A `playbook` with `deferred`, and an `agent` with `deferred` and no `release`. A deferred
+    /// agent with `release: true` is written at `given` and only left unreleased.
+    pub fn written_by_step(&self) -> bool {
+        self.deferred
+            && (self.kind == PieceKind::Playbook
+                || (self.kind == PieceKind::Agent && !self.release))
+    }
+
     /// The URN in `body.spec.resourceId.urn`, when present.
     pub fn urn(&self) -> Option<&str> {
         self.body
             .as_ref()?
             .pointer("/spec/resourceId/urn")?
             .as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn piece(yaml: &str) -> WorldPiece {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn a_deferred_agent_is_written_by_a_step_only_when_it_is_not_released() {
+        assert!(piece("{ piece: a, kind: agent, deferred: true }").written_by_step());
+        assert!(
+            !piece("{ piece: a, kind: agent, deferred: true, release: true }").written_by_step()
+        );
+        assert!(!piece("{ piece: a, kind: agent }").written_by_step());
+        assert!(piece("{ piece: p, kind: playbook, deferred: true }").written_by_step());
+        assert!(!piece("{ piece: p, kind: playbook }").written_by_step());
+        assert!(!piece("{ piece: s, kind: skill, deferred: true }").written_by_step());
     }
 }
