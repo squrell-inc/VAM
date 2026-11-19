@@ -18,6 +18,10 @@ proves:
   - members-whose-names-are-not-slugs-get-namespaces-of-their-own
   - member-namespaces-stay-apart-across-a-restart
   - crates/vam-orchestrator/tests/user_namespace_tests.rs
+  - member-lists-skills-and-sees-only-released-rows
+  - crates/vam-orchestrator/tests/catalog_read_authorize_tests.rs::skills_list_is_released_only_and_drafts_need_catalog_write
+  - crates/vam-orchestrator/tests/catalog_read_authorize_tests.rs::skills_list_pages_with_a_token_and_refuses_a_bad_page_size
+  - crates/vam-orchestrator/src/paging_store_tests.rs::skills_list_packages_and_manifests_and_a_released_package_hides_its_manifest
   - crates/vam-orchestrator/tests/member_draft_agents_tests.rs
   - crates/vam-orchestrator/tests/catalog_read_authorize_tests.rs::member_put_own_agent_draft_is_200_outside_namespace_is_400
   - crates/vam-orchestrator/tests/workspace_pin_tests.rs::member_can_pin_own_draft
@@ -209,6 +213,26 @@ A draft agent is read by its owner and by a caller with `users:admin`. Another m
 publisher get a 404, the same as for a missing row, and the other member's list does not show it
 (`member-draft-agent-is-private-and-in-the-members-namespace`).
 
+## Listing skills
+
+`GET /v1/skills` lists the skills an agent's `skillRefs` can name, for a skill picker
+(`api/mod.rs:849`, store `list_skill_records_page` in `catalog.rs`):
+
+- **Released rows by default**, for every caller: skill packages and skill manifests. A manifest
+  whose URN has a released package is left out, because a ref resolves to the package. Each record
+  has `channel`, `version`, `ownerUserId`, `catalogTier` and `source` (`package` or `manifest`).
+- **`includeDrafts=true`** adds the caller's own drafts. It needs `catalog:write` in the effective
+  scopes (`api/catalog_auth.rs:34`); a member gets 403 `missing required scope 'catalog:write'`. Any
+  value other than `true` or `false`, an empty one included, is a 400
+  `includeDrafts must be true or false`.
+- **Another user's draft is never listed**, an org admin's list included.
+- **Paging** as on [HTTP API](/orchestrator/api/#paging): `pageSize`, `pageToken`, newest first.
+
+Proved by `member-lists-skills-and-sees-only-released-rows`,
+`skills_list_is_released_only_and_drafts_need_catalog_write`,
+`skills_list_pages_with_a_token_and_refuses_a_bad_page_size` and
+`skills_list_packages_and_manifests_and_a_released_package_hides_its_manifest`.
+
 ## Namespaces
 
 Each user has one namespace, and no other user on the node has the same one. `GET /v1/me`
@@ -259,8 +283,12 @@ The points below are for the frontend. Each one names the call.
    carry a suffix.
 4. **Attach parts only by ref**, in `skillRefs`, `defaultPlaybookRef`, `allowedPlaybookRefs` and
    `permissions.advanced`, to released versions. Let the picker offer rows whose `channel` is
-   released (`GET /v1/playbooks`, `GET /v1/policies` and the skill package list). Write the URN alone (floating)
-   or `X.Y.Z`. Never write `-draft`.
+   released (`GET /v1/playbooks`, `GET /v1/policies`). For skills, call `GET /v1/skills`: it lists
+   released skills only (see [Listing skills](#listing-skills)), so offer every row it returns. Each
+   ref is an object with the URN in `resourceId.urn`: write it alone to float, as
+   `{"resourceId": {"urn": "<urn>"}}`, or pin a release with a `version` object, as
+   `{"resourceId": {"urn": "<urn>"}, "version": {"major": 1, "minor": 2, "patch": 0}}`. Never write a
+   `-draft` version.
 5. **Never `PUT` a skill, playbook or policy to attach it.** A member gets
    `missing required scope 'catalog:write'`. A publisher gets
    `only the artifact owner may version this skill`.

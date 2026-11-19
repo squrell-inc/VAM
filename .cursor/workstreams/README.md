@@ -20,6 +20,7 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | `machine-base` | Machine base (E7 Phase 1 + install slice, launch row 14): Debian slim default base with Python and git, `requiresRuntime` check, `vam node init` | active | 1 closed in base 2026-11-10 (W0-W5, 5/5 scenarios active); release PR into `main` open |
 | `user-identity` | User identity: self-service password change, opaque user IDs and email usernames, then one namespace per user | active | 3 (one namespace per user): W0–W2 done on `claude/wizardly-feynman-d5ch88`, phase close next; needs member-draft-agents released; 1 and 2 released to `main` |
 | `release-artifacts` | Release artifacts: one workspace version chosen at release time, manual owner-approved release workflow, immutable `v*` tags, an x86_64 node bundle and `vam` for Linux/macOS with SHA256SUMS and attestations, `vam dock` and `vam upgrade`. Phases A, B, Final; Lima and Windows in the next release (`v0.2.0`) | active | A (restructured 2026-11-18; breakdown waiting for the owner) |
+| `skill-list` | Skill list: paged `GET /v1/skills` for the member skill picker (`design/skill-list.md`) | active | 0 |
 
 ## Backlog (no tracker)
 

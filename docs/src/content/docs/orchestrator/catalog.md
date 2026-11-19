@@ -5,6 +5,7 @@ status: shipped
 proves:
   - released-agent-approvals-are-once-only
   - member-draft-agent-is-private-and-in-the-members-namespace
+  - member-lists-skills-and-sees-only-released-rows
   - crates/vam-orchestrator/tests/member_draft_agents_tests.rs
   - member-chats-with-a-released-agent
   - crates/vam-orchestrator/tests/agent_check_tests.rs
@@ -20,7 +21,7 @@ policies. Each entry is named by a URN. The host stores them in SQLite, stamped 
 | Entry | Write and list | Who writes | Release |
 |---|---|---|---|
 | Agent | `PUT`, `GET /v1/agents` | `catalog:write`, or `agents:draft` under the [member rules](/orchestrator/member-agents/) | `api/catalog_release.rs` |
-| Skill | `PUT /v1/skills`, reads by URN | `catalog:write` | `catalog_release::skill_release_route` (`api/mod.rs:197`) |
+| Skill | `PUT`, `GET /v1/skills` (paged, released only unless `includeDrafts=true`; see [Listing skills](/orchestrator/member-agents/#listing-skills)) | `catalog:write` | `catalog_release::skill_release_route` (`api/mod.rs:197`) |
 | Playbook | `PUT`, `GET /v1/playbooks` | `catalog:write` | `catalog_release::playbook_release_route` (`api/mod.rs:190`) |
 | Policy | `PUT`, `GET /v1/policies` | `catalog:write` | `catalog_release::policy_release_route` (`api/mod.rs:182`) |
 
