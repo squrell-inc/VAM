@@ -1,8 +1,9 @@
 name: Release build
 
 # Builds every v0.1.0 binary asset. Called by release.yml (`workflow_call`) and run build-only on
-# pull requests that touch the release path and weekly, so a broken release build shows up before a
-# release does. No publish job, no environment, no secrets, read-only permissions, no caches
+# pull requests into main that touch the release path and weekly, so a broken release build shows up
+# before a release does. A PR into another branch gets these builds only by asking (`CI:
+# release-build=yes`): rust.yml then calls this workflow. No publish job, no environment, no secrets, read-only permissions, no caches
 # (locked decisions 8 and 9; design §5.1 and §6). scripts/release/check-workflow.sh holds the rules.
 # `assemble` gathers the assets: scan (gitleaks, key and build-path strings, refused names),
 # SHA256SUMS, release notes (it reads pull request bodies, hence `pull-requests: read`, the one
@@ -48,6 +49,7 @@ on:
         description: "The commit that was built"
         value: ${{ jobs.meta.outputs.commit }}
   pull_request:
+    branches: [main]
     paths:
       - "scripts/release/**"
       - ".github/workflows/release*.yml"
