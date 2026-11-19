@@ -6,8 +6,9 @@
 #   scripts/release/assemble.sh --version V --commit SHA --channel release|dev \
 #                               --assets DIR --out DIR [--repo OWNER/NAME]
 #
-#   --assets  the downloaded asset-* artifacts, flat; exactly `release_assets V` (lib.sh) and
-#             nothing else: a missing or stray file fails here, not at publish
+#   --assets  the downloaded asset-* artifacts, flat; exactly `built_assets V` (lib.sh: the release
+#             assets without install.sh) and nothing else: a missing or stray file fails here, not
+#             at publish. scripts/release/install.sh is copied in from this checkout and scanned
 #   --out     must not exist or be empty; receives the assets, SHA256SUMS, RELEASE_NOTES.md and
 #             build-info.json (version, commit, channel, run id: publish checks it against the
 #             commit `validate` approved; it is not a release asset)
@@ -45,23 +46,32 @@ command -v jq >/dev/null || die "jq is required"
 if [ -e "$out" ] && [ -n "$(ls -A "$out" 2>/dev/null)" ]; then die "--out '$out' exists and is not empty"; fi
 
 # --- the asset set ------------------------------------------------------------------------------------
+installer="$here/install.sh"
+[ -f "$installer" ] && [ -s "$installer" ] || die "$installer is missing or empty"
 expected="$(release_assets "$version" | LC_ALL=C sort)"
+built="$(built_assets "$version" | LC_ALL=C sort)"
 have="$(ls -A "$assets" | LC_ALL=C sort)"
-missing="$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$have"))"
-stray="$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$have") | awk 'NF')"
+missing="$(comm -23 <(printf '%s\n' "$built") <(printf '%s\n' "$have"))"
+stray="$(comm -13 <(printf '%s\n' "$built") <(printf '%s\n' "$have") | awk 'NF')"
 [ -z "$missing" ] || die "missing asset(s) for $version: $(printf '%s' "$missing" | tr '\n' ' ')"
 [ -z "$stray" ] || die "unexpected file(s) in $assets: $(printf '%s' "$stray" | tr '\n' ' ') (the release holds exactly the listed assets)"
 while IFS= read -r a; do
   [ -f "$assets/$a" ] && [ -s "$assets/$a" ] || die "asset $a is not a non-empty regular file"
-done <<< "$expected"
+done <<< "$built"
 
 # --- the scan (nothing is written when it finds something) ----------------------------------------------
-"$here/scan.sh" "$assets"
+# the built assets plus the script that will ship beside them
+scan_dir="$(mktemp -d "${TMPDIR:-/tmp}/assemble-scan.XXXXXX")" || die "no temporary directory"
+trap 'rm -rf "$scan_dir"' EXIT
+while IFS= read -r a; do cp "$assets/$a" "$scan_dir/$a"; done <<< "$built"
+cp "$installer" "$scan_dir/install.sh"
+"$here/scan.sh" "$scan_dir"
 
 # --- the release directory --------------------------------------------------------------------------------
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
-while IFS= read -r a; do cp "$assets/$a" "$out/$a"; done <<< "$expected"
+while IFS= read -r a; do cp "$assets/$a" "$out/$a"; done <<< "$built"
+install -m 755 "$installer" "$out/install.sh"
 : > "$out/SHA256SUMS"
 while IFS= read -r a; do printf '%s  %s\n' "$(sha256_of "$out/$a")" "$a" >> "$out/SHA256SUMS"; done <<< "$expected"
 if command -v sha256sum >/dev/null; then (cd "$out" && sha256sum -c SHA256SUMS >/dev/null) || die "SHA256SUMS does not verify its own assets"; fi

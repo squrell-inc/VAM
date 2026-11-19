@@ -22,7 +22,7 @@ new_assets() {
       *.tar.gz) d="$t_tmp/pkg/${a%.tar.gz}"; rm -rf "$t_tmp/pkg"; mkdir -p "$d"; printf 'bin %s\n' "$a" > "$d/vam"; tar -czf "$A/$a" -C "$t_tmp/pkg" "${a%.tar.gz}" ;;
       *) printf 'runtime\n' > "$A/$a" ;;
     esac
-  done < <(release_assets "$v")
+  done < <(built_assets "$v")
 }
 run_assemble() { (cd "$fix" && "$assemble" --version "$v" --commit "$head" --channel "${CHANNEL:-dev}" --assets "$A" --out "$t_tmp/out" --repo "$repo_name" "$@"); }
 
@@ -35,11 +35,13 @@ out="$t_tmp/out"
 expect_eq "the release directory holds the assets, SHA256SUMS, the notes and build-info.json" \
   "$( { release_assets "$v"; printf '%s\n' SHA256SUMS RELEASE_NOTES.md build-info.json; } | LC_ALL=C sort | tr '\n' ' ')" \
   "$(ls "$out" | LC_ALL=C sort | tr '\n' ' ')"
+expect_ok "install.sh is copied from the checkout, byte for byte, executable" bash -c "cmp '$release_dir/install.sh' '$out/install.sh' && [ -x '$out/install.sh' ]"
+expect_match "SHA256SUMS lists install.sh" "^[0-9a-f]{64}  install\.sh\$" "$(cat "$out/SHA256SUMS")"
 expect_ok "sha256sum -c SHA256SUMS passes" bash -c "cd '$out' && sha256sum -c SHA256SUMS"
 expect_eq "SHA256SUMS lists every asset once" "$(release_assets "$v" | wc -l | tr -d ' ')" "$(wc -l < "$out/SHA256SUMS" | tr -d ' ')"
 expect_eq "SHA256SUMS is sorted by name" "$(awk '{print $2}' "$out/SHA256SUMS")" "$(awk '{print $2}' "$out/SHA256SUMS" | LC_ALL=C sort)"
 expect_nomatch "SHA256SUMS does not list itself, the notes or build-info" "SHA256SUMS$|RELEASE_NOTES|build-info" "$(awk '{print $2}' "$out/SHA256SUMS")"
-expect_match "SHA256SUMS uses the two-space sha256sum format" "^[0-9a-f]{64}  vam" "$(head -n 1 "$out/SHA256SUMS")"
+expect_match "SHA256SUMS uses the two-space sha256sum format" "^[0-9a-f]{64}  vam" "$(grep "  vam" "$out/SHA256SUMS" | head -n 1)"
 expect_eq "build-info version" "$v" "$(jq -r .version "$out/build-info.json")"
 expect_eq "build-info commit" "$head" "$(jq -r .commit "$out/build-info.json")"
 expect_eq "build-info channel" "dev" "$(jq -r .channel "$out/build-info.json")"
@@ -58,7 +60,9 @@ echo "the asset set must be exact"
 new_assets; rm "$A/vam-runtime-$v-x86_64-unknown-linux-musl"
 expect_fail "a missing asset" "missing asset.*vam-runtime-$v" run_assemble
 new_assets; echo x > "$A/install.sh"
-expect_fail "a stray file" "unexpected file.*install\.sh" run_assemble
+expect_fail "install.sh among the built assets is stray (it comes from the checkout)" "unexpected file.*install\.sh" run_assemble
+new_assets; echo x > "$A/extra.bin"
+expect_fail "another stray file" "unexpected file.*extra\.bin" run_assemble
 new_assets; : > "$A/vam-runtime-$v-x86_64-unknown-linux-musl"
 expect_fail "an empty asset" "not a non-empty regular file" run_assemble
 
