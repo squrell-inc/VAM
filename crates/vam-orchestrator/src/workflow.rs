@@ -417,6 +417,8 @@ pub struct SqliteWorkflowStore {
     /// Groups of usernames equal ignoring letter case, found when the case-insensitive unique
     /// index could not be created (never an `open` error; `vamd` reads this and refuses to serve).
     pub(crate) username_clashes: std::sync::RwLock<Vec<crate::users::UsernameClash>>,
+    /// Users the namespace backfill moved (user-identity decision 20); `vamd` logs them.
+    pub(crate) namespace_moves: std::sync::RwLock<Vec<crate::users::NamespaceMove>>,
     /// Trigger gateway sockets and request windows (E5).
     pub gateways: crate::gateway::Hub,
     /// In-memory per-session CA. The private key never enters SQLite.
@@ -634,6 +636,7 @@ impl SqliteWorkflowStore {
             resume_wake: tokio::sync::Notify::new(),
             queue_starting: Mutex::new(HashSet::new()),
             username_clashes: std::sync::RwLock::new(Vec::new()),
+            namespace_moves: std::sync::RwLock::new(Vec::new()),
             gateways: crate::gateway::Hub::default(),
             session_cas: std::sync::RwLock::new(std::collections::HashMap::new()),
         };
@@ -655,6 +658,7 @@ impl SqliteWorkflowStore {
         store.initialize_connection_secret_kinds()?;
         store.initialize_skill_package_blob_namespace()?;
         store.initialize_catalog_tier()?;
+        store.ensure_user_namespaces()?;
         store.initialize_web_sources_schema()?;
         {
             let connection = store

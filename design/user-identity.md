@@ -1,9 +1,11 @@
 # User identity: self-service password change, then opaque user IDs
 
 Status: **plan of record, 2026-11-12** (owner decisions in the phase 1 brief); phase 2
-breakdown 2026-11-14 (owner decisions 15–16); open questions on defaults until answered.
+breakdown 2026-11-14 (owner decisions 15–16); phase 3 proposed 2026-11-18 (§6, decisions 17–21
+proposed, waiting for the owner); open questions on defaults until answered.
 Tracker: `.cursor/workstreams/user-identity.md`. Base branch: `feat/user-identity` (phase 1),
-`feat/user-identity-phase2` (phase 2).
+`feat/user-identity-phase2` (phase 2), `claude/wizardly-feynman-d5ch88` (phase 3 design and
+wave 0, with `feat/member-draft-agents` merged in).
 
 Read only the section for the phase in hand.
 
@@ -24,6 +26,9 @@ name they typed once.
    generated `user_id`; `username` becomes a login name that may be an email
    address (allows `@` and `+`) and is matched case-insensitively. Existing users
    keep their IDs.
+3. **Phase 3 — one namespace per user.** Every user holds a URN namespace no other
+   user holds, assigned once and kept across renames and restarts. `GET /v1/me`
+   reports it, and the member draft rule enforces it (§6).
 
 Out of scope for the workstream: must-change-password-on-first-login (later),
 any email or SMTP reset (no mail transport exists or is planned here), OIDC.
@@ -348,3 +353,139 @@ Routes that take only an id today keep taking only an id.
 | Rename clashing usernames automatically | Owner decision 16 |
 | Fail `SqliteWorkflowStore::open` on a clash | `vamd` would fall back to an empty in-memory store (`bin/vamd.rs:329-343`) |
 | Derive the namespace from the generated id | Puts `usr_…` into user-visible URNs |
+
+## 6. Phase 3 — one namespace per user (proposed 2026-11-18)
+
+Phase 3 depends on `member-draft-agents`, which is closed but not yet released to `main`. This
+phase's branch merges `feat/member-draft-agents` into `main` (16 conflict hunks in the e2e harness
+and four docs pages, resolved by keeping both sides). So it lands after, or together with, that
+release.
+
+### 6.1 The problem, as the code has it today
+
+A member's new agent must sit under `urn:vam:agent:<registryDomain>/<namespace>/`, where the
+namespace is `vam_spec::default_namespace(username)`, worked out again on every save and every
+`GET /v1/me`:
+
+| Fact | Where |
+|---|---|
+| Namespace is derived on each call from the username, not stored | `crates/vam-spec/src/origin.rs:164-179`; `api/me.rs:33-47` |
+| The member rule reads the username and derives the same value | `member_draft.rs:149-180` (`require_own_namespace`, on `feat/member-draft-agents`) |
+| Save order: namespace check only when the caller owns no row of the URN, then the owner check | `catalog_publish.rs:1133-1136` (`publish_agent_draft_restricted`) |
+| Owner check: a URN another user owns is 403 `only the artifact owner may version this agent` | `owner.rs:681-713` (`require_strict_urn_owner`) |
+| The limitation is documented, and no test drives two users into one namespace | `docs/src/content/docs/orchestrator/member-agents.md`, "Known limitation" and "Not proved here" |
+
+What still collides after Phase 2:
+
+- **`Alice` and `alice`** no longer coexist: Phase 2's `idx_users_username_nocase` refuses the
+  second (409), and `vamd` refuses to start on a legacy clash (§4.3). This half of the brief is
+  closed already.
+- **Same local part, different domain**: `ann.lee@north.test` and `ann.lee@south.test` both
+  derive `ann.lee` (§4.2 row 1 accepted this: "two domains with the same local part share a
+  default").
+- **A plain name and an email with that local part**: `ann.lee` and `ann.lee@x.test`.
+- **Plus tags**: `ann+work@x.test` and `ann+home@x.test`, same person or not, both get `ann`.
+- **Not a slug**: a local part (or plain name) starting or ending with `.`, `-` or `_` (`_ann@x`,
+  `ann.@x`) gives `default`, which every such user shares.
+
+Users who share a namespace pass the namespace check for each other's URNs, so the answer is
+decided by the owner check: 200 for a free name, 403 for a taken one. That tells a member that
+another member holds the name. Also, because the value is derived from the username, renaming a
+user (`vamd --rename-user`) moves their namespace and their existing drafts are left outside it.
+
+### 6.2 Model (proposed decisions 17–21)
+
+- **Stored, not derived (17).** A new column `users.namespace`, set once when the user row is made
+  and never changed: not by a rename, not by a restart, not by a role change. A unique index
+  `idx_users_namespace` holds it. `GET /v1/me` `defaultNamespace` reports the stored value (the
+  field keeps its name: clients already build URNs from it, `member-agents.md` "Building a
+  client" point 3). `UserAccount` gains a read-only `namespace` for admins (open question 2).
+  `require_own_namespace` reads the column.
+- **Assignment (18).** At create, a candidate base is made from the username, then a suffix is
+  added only when the base is not free:
+  1. Base: for an email-shaped name, the local part with any `+tag` dropped; else the whole name.
+     Lowercased. Every character outside `[a-z0-9._-]` becomes `-`, runs of `.`, `-` and `_` at
+     the ends are trimmed, and the result is cut to 254 characters, the username limit (then trimmed again), so a slug name is never cut. Empty
+     gives `user`. So `_Ann-x@X.test` gives `ann-x`, never `default`. For every name that is a
+     slug today, the base equals today's `default_namespace`, so no existing value changes unless
+     it collides.
+  2. Free means: no user row holds it, it is not reserved (`default`, the seeded `local` and
+     `operator`, and `bootstrap`), and no catalog row of any kind whose URN's namespace segment
+     equals it is owned by another user (`agents`, `playbooks`, `skills`, `policies`, `skill_packages`;
+     any domain). The last rule stops a new member getting a namespace a publisher already
+     writes in.
+  3. Not free: `<base>-<6 of [a-z2-7]>`, the suffix taken from a SHA-256 of the `user_id` (so it
+     is fixed for the user and reveals nothing about the id or about other users). Taken too:
+     10 characters, then 16. Still taken (it cannot be, short of a hash collision): the create
+     fails with 500 and writes nothing. No counter (`ann-2`): a counter tells a member how many
+     others share the base.
+  4. Assignment runs in the same locked transaction as the insert, so two creates cannot take one
+     namespace (the unique index is the backstop).
+- **Seeded and synthetic rows (19).** `operator` gets `operator` and `local` gets `local` (their
+  values today). Marketplace owner rows (`marketplace:<id>`, §4.2 row 13) get `NULL`: they never
+  sign in and never save a member draft. A principal with no user row keeps today's fallback (the
+  user id read as the username) in `/v1/me` and in the rule.
+- **Migration of existing users (20).** In `initialize_users_schema`, idempotent, on every open:
+  1. Add `namespace TEXT` if missing. If every row that needs one has one and the index exists,
+     stop.
+  2. Backfill rows whose `namespace` is `NULL`, in this order: users who own catalog rows under
+     their old derived namespace first, ordered by their earliest such row's `created_at`; then the
+     rest by `users.created_at`, then `user_id`. Each takes its old derived value when it is free
+     (rule 18.2, counting the rows already backfilled; for a user who owns rows under it, other
+     users' old rows there do not count, since they stay where they are, decision 21), else the
+     suffixed value. So the first
+     user to have used a shared namespace keeps it, and everyone else's existing drafts stay owned
+     by them.
+  3. Create `idx_users_namespace` (unique, `WHERE namespace IS NOT NULL`).
+  4. `vamd` logs one line per user whose namespace differs from the old derived value:
+     `namespace for user <id> (<username>) is now <new>; was shared as <old>`. Nothing is
+     refused: a migration that can always finish never blocks a start (unlike the clash check of
+     §4.3, an admin has nothing to resolve).
+- **Existing drafts do not move (21).** A URN is an identifier: runs, workspace pins, receipts,
+  run grants and schedules hold it (`storage/turn-commits`, `security/run-receipt`). Rewriting
+  them is out of the question for a namespace fix. A member who lost a shared namespace keeps
+  every draft they own there and can still edit it: the edit path skips the namespace check when
+  the caller owns a row of the URN (`catalog_publish.rs:1133`). New drafts go under the new
+  namespace. The docs say so, with the start-up log line as the way to find who moved.
+
+### 6.3 What a member sees after Phase 3
+
+- `GET /v1/me` `defaultNamespace` is theirs alone. For almost every user it is the value it was.
+- A new URN in another member's namespace is the 400 `... must be under ... (your namespace)`,
+  whether that member holds the name or not. The 200 and 403 split is gone between members,
+  because the namespace check runs before the owner check and the namespaces no longer overlap.
+- The 403 remains for a URN the member could have written (inside their namespace) that someone
+  else owns: only a publisher (rule 18.2 keeps new namespaces clear of their rows) or a row that
+  existed before the migration can be there. Publishers writing into a member's namespace later
+  are not restricted by this phase (tracker "Explicitly later").
+- A rename keeps the namespace (`vamd --rename-user`, `update_username`).
+
+### 6.4 Proof
+
+Scenarios (process layer, one `vamd` per run, so values a second scenario could also take are
+matched by pattern, never exactly): two members with the same email local part on different
+domains; two members whose local parts are not slugs; the same pair across `restart-vamd`; and a
+changed `email-username-signs-in-in-any-letter-case` (its exact `ada.lovelace` becomes a pattern,
+because four scenarios create users with that local part on one node). Tracker Phase 3 has the
+delta.
+
+Rust, because the harness cannot seed a database (§4.3): `user_identity_migration_tests.rs` gains
+an old-schema database with `ann@north` and `ann@south` (the second owning no row, then owning
+one), `_x` and `-y` on `default`, a publisher row under `bob`: each user's namespace after open,
+the log line, existing drafts still editable, a new draft under the new namespace. `member_draft.rs`
+tests: a free and a taken name in another member's namespace give the same 400; rename keeps the
+namespace. `vam-spec` tests for the base rule (every row of §6.1 and every name in
+`default_namespace_rules`). A concurrent-create API test: two creates with colliding bases get
+two namespaces.
+
+### 6.5 Rejected options
+
+| Option | Why not |
+|---|---|
+| Namespace from the opaque id (`usr_…`) | Puts `usr_…` into every user-visible URN; already rejected in §5. The suffix uses a hash of the id only when the readable base is taken |
+| Keep deriving, add the user id to the derivation only on collision | A derived value moves whenever a user is created, renamed or removed; drafts would fall outside their owner's namespace |
+| A counter suffix (`ann-2`) | Tells a member how many others share the base; the hash suffix tells nothing |
+| Move existing drafts to the new namespace | URNs are pinned by runs, workspaces, receipts, grants and schedules |
+| Refuse to start until an admin resolves collisions (like §4.3) | Nothing for an admin to decide: the oldest user keeps it, others get a fixed suffix, and every draft keeps working |
+| A new `namespace` field on `/v1/me` beside `defaultNamespace` | Two fields with one value; clients already read `defaultNamespace` |
+| Answer 400 for a taken URN inside one's own namespace too | Only reachable for publisher rows or pre-migration rows; changes the publisher path, which is out of this phase |

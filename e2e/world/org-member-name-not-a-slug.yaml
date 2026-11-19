@@ -1,0 +1,5 @@
+piece: org-member-name-not-a-slug
+kind: org
+role: Member
+# A member whose local part starts with `_`, so it is not a URN segment as typed.
+username: "_Ann-{tag}@Example.Test"

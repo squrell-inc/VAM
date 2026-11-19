@@ -146,12 +146,164 @@ pub struct UserRecord {
     pub password_updated_at: Option<i64>,
     pub role: UserRole,
     pub deactivated_at: Option<i64>,
+    /// The user's own URN namespace (user-identity decision 17): unique on the node, set once at
+    /// create and never changed. `None` only for rows no create path made (marketplace owner
+    /// rows, decision 19) and for rows written before the backfill ran.
+    pub namespace: Option<String>,
 }
 
 impl UserRecord {
     pub fn is_deactivated(&self) -> bool {
         self.deactivated_at.is_some()
     }
+
+    /// The namespace `GET /v1/me` reports and the member draft rule enforces: the stored value,
+    /// else today's derivation from the username (a row without one).
+    pub fn effective_namespace(&self) -> String {
+        self.namespace
+            .clone()
+            .unwrap_or_else(|| vam_spec::default_namespace(&self.username))
+    }
+}
+
+/// A user whose stored namespace differs from the one their username used to give, found by the
+/// backfill (decision 20). `vamd` logs one line per move at start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceMove {
+    pub user_id: String,
+    pub username: String,
+    pub was: String,
+    pub now: String,
+}
+
+impl NamespaceMove {
+    /// The start-up log line (design §6.2).
+    pub fn log_line(&self) -> String {
+        format!(
+            "namespace for user {} ({}) is now {}; was shared as {}",
+            self.user_id, self.username, self.now, self.was
+        )
+    }
+}
+
+/// The unique index on `users.namespace` (rows without one are left out).
+pub const NAMESPACE_INDEX: &str = "idx_users_namespace";
+
+/// Catalog tables whose rows hold a namespace in their URN and an owner.
+const NAMESPACED_CATALOG_TABLES: [&str; 5] = [
+    "agents",
+    "playbooks",
+    "skills",
+    "policies",
+    "skill_packages",
+];
+
+/// The fixed namespace of a seeded row (decision 19), `None` for any other id.
+fn seeded_namespace(user_id: &str) -> Option<&'static str> {
+    match user_id {
+        OPERATOR_USER_ID => Some(OPERATOR_USER_ID),
+        LOCAL_USER_ID => Some(LOCAL_USER_ID),
+        _ => None,
+    }
+}
+
+fn table_has_columns(
+    connection: &rusqlite::Connection,
+    table: &str,
+    columns: &[&str],
+) -> Result<bool, OrchestratorError> {
+    let mut stmt = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().all(|c| names.iter().any(|n| n == c)))
+}
+
+/// Earliest `created_at` of a catalog row under `namespace` owned by someone other than
+/// `user_id` (`own_rows = false`), or by `user_id` itself (`own_rows = true`). An empty owner reads as
+/// `local`, as everywhere else.
+fn earliest_catalog_row(
+    connection: &rusqlite::Connection,
+    namespace: &str,
+    user_id: &str,
+    own_rows: bool,
+) -> Result<Option<i64>, OrchestratorError> {
+    let needle = format!("/{namespace}/");
+    let mut earliest: Option<i64> = None;
+    for table in NAMESPACED_CATALOG_TABLES {
+        if !table_has_columns(connection, table, &["urn", "owner_user_id", "created_at"])? {
+            continue;
+        }
+        let op = if own_rows { "=" } else { "!=" };
+        let mut stmt = connection.prepare(&format!(
+            "SELECT urn, created_at FROM {table}
+             WHERE COALESCE(NULLIF(owner_user_id, ''), '{LOCAL_USER_ID}') {op} ?1
+               AND instr(urn, ?2) > 0"
+        ))?;
+        let rows = stmt
+            .query_map(params![user_id, needle], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (urn, created_at) in rows {
+            if vam_spec::urn_namespace(&urn) == Some(namespace) {
+                earliest = Some(earliest.map_or(created_at, |e| e.min(created_at)));
+            }
+        }
+    }
+    Ok(earliest)
+}
+
+/// Decision 18: free when it is not reserved, no other user holds it, and (unless `claimed`) no
+/// catalog row under it is owned by another user. `claimed` is the backfill's first claimant of a
+/// namespace they already wrote in (decision 20): the others' old rows stay there and do not keep
+/// them out.
+fn namespace_is_free(
+    connection: &rusqlite::Connection,
+    namespace: &str,
+    user_id: &str,
+    claimed: bool,
+) -> Result<bool, OrchestratorError> {
+    if vam_spec::RESERVED_NAMESPACES.contains(&namespace) {
+        return Ok(false);
+    }
+    let holder: Option<String> = connection
+        .query_row(
+            "SELECT user_id FROM users WHERE namespace = ?1 AND user_id != ?2 LIMIT 1",
+            params![namespace, user_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if holder.is_some() {
+        return Ok(false);
+    }
+    if claimed {
+        return Ok(true);
+    }
+    Ok(earliest_catalog_row(connection, namespace, user_id, false)?.is_none())
+}
+
+/// Decision 18: `first` when free, else `first` with the user's fixed suffix (6, 10, then 16
+/// characters). All taken (a hash collision) is an error: the create writes nothing. `claimed`
+/// applies to `first` only (see [`namespace_is_free`]).
+fn choose_namespace(
+    connection: &rusqlite::Connection,
+    first: &str,
+    user_id: &str,
+    claimed: bool,
+) -> Result<String, OrchestratorError> {
+    if namespace_is_free(connection, first, user_id, claimed)? {
+        return Ok(first.to_string());
+    }
+    for len in vam_spec::NAMESPACE_SUFFIX_LENGTHS {
+        let candidate = vam_spec::namespace_suffixed(first, user_id, len);
+        if namespace_is_free(connection, &candidate, user_id, false)? {
+            return Ok(candidate);
+        }
+    }
+    Err(OrchestratorError::CorruptState(format!(
+        "could not choose a free namespace for user '{user_id}'"
+    )))
 }
 
 /// Login and token issue treat a deactivated user as unauthenticated.
@@ -327,6 +479,7 @@ impl SqliteWorkflowStore {
         add_users_password_columns(&connection)?;
         add_users_role_column(&connection)?;
         add_users_deactivated_column(&connection)?;
+        add_users_namespace_column(&connection)?;
         drop(connection);
         self.seed_builtin_users()?;
         self.ensure_username_nocase_index()?;
@@ -371,6 +524,101 @@ impl SqliteWorkflowStore {
             .write()
             .map_err(|_| OrchestratorError::StorageUnavailable)? = clashes;
         Ok(())
+    }
+
+    /// Give every user row a namespace and make namespaces unique (decisions 17–20).
+    ///
+    /// Idempotent, run on every open after the catalog tables exist. Rows without a namespace
+    /// (written before Phase 3, or by a path that sets none), except marketplace owner rows, are
+    /// filled in this order: users who own a catalog row under the namespace their username used
+    /// to give, by that row's age; then the rest by `created_at` and `user_id`. Each takes that old
+    /// value when free, else the old value with its fixed suffix; a username whose old value was
+    /// `default` starts from [`vam_spec::namespace_base`] instead. Seeded rows take their fixed
+    /// value. Then the unique index is made. Moves are kept for `vamd` to log
+    /// ([`Self::namespace_moves`]). Never refuses: nothing is left for an admin to decide.
+    pub fn ensure_user_namespaces(&self) -> Result<(), OrchestratorError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let mut stmt = connection.prepare(
+            "SELECT user_id, username, created_at FROM users
+             WHERE namespace IS NULL AND user_id NOT LIKE 'marketplace:%'",
+        )?;
+        let pending = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let mut moves = Vec::new();
+        if !pending.is_empty() {
+            let mut ordered = Vec::with_capacity(pending.len());
+            for (user_id, username, created_at) in pending {
+                let old = vam_spec::default_namespace(&username);
+                let claim = if old == "default" {
+                    None
+                } else {
+                    earliest_catalog_row(&connection, &old, &user_id, true)?
+                };
+                ordered.push((claim, created_at, user_id, username, old));
+            }
+            ordered.sort_by(|a, b| {
+                (a.0.is_none(), a.0, a.1, &a.2).cmp(&(b.0.is_none(), b.0, b.1, &b.2))
+            });
+            let transaction = connection.unchecked_transaction()?;
+            for (claim, _, user_id, username, old) in ordered {
+                let namespace = match seeded_namespace(&user_id) {
+                    Some(fixed) => fixed.to_string(),
+                    None => {
+                        let first = if old == "default" {
+                            vam_spec::namespace_base(&username)
+                        } else {
+                            old.clone()
+                        };
+                        choose_namespace(&transaction, &first, &user_id, claim.is_some())?
+                    }
+                };
+                transaction.execute(
+                    "UPDATE users SET namespace = ?1 WHERE user_id = ?2",
+                    params![namespace, user_id],
+                )?;
+                if namespace != old {
+                    moves.push(NamespaceMove {
+                        user_id,
+                        username,
+                        was: old,
+                        now: namespace,
+                    });
+                }
+            }
+            transaction.commit()?;
+        }
+        connection.execute_batch(&format!(
+            "CREATE UNIQUE INDEX IF NOT EXISTS {NAMESPACE_INDEX}
+             ON users(namespace) WHERE namespace IS NOT NULL;"
+        ))?;
+        drop(connection);
+        if !moves.is_empty() {
+            self.namespace_moves
+                .write()
+                .map_err(|_| OrchestratorError::StorageUnavailable)?
+                .extend(moves);
+        }
+        Ok(())
+    }
+
+    /// Users the namespace backfill moved off the namespace their username used to give, since
+    /// this store was opened.
+    pub fn namespace_moves(&self) -> Vec<NamespaceMove> {
+        self.namespace_moves
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// The groups of usernames that clash ignoring letter case, found when this store was
@@ -633,24 +881,40 @@ impl SqliteWorkflowStore {
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         ensure_username_available(&connection, username, user_id)?;
+        // Decision 18: chosen under the same lock as the insert, so two creates never take one
+        // namespace (the unique index is the backstop). A seeded id keeps its fixed value.
+        let namespace = match seeded_namespace(user_id) {
+            Some(fixed) => fixed.to_string(),
+            None => choose_namespace(
+                &connection,
+                &vam_spec::namespace_base(username),
+                user_id,
+                false,
+            )?,
+        };
         let now = unix_timestamp();
         let result = match password_hash {
             Some(hash) => connection.execute(
-                "INSERT INTO users (user_id, username, tenant_id, created_at, role, password_hash, password_updated_at)
-                 VALUES (?1, ?2, ?1, ?3, ?4, ?5, ?3)",
-                params![user_id, username, now, role.as_str(), hash],
+                "INSERT INTO users (user_id, username, tenant_id, created_at, role, password_hash, password_updated_at, namespace)
+                 VALUES (?1, ?2, ?1, ?3, ?4, ?5, ?3, ?6)",
+                params![user_id, username, now, role.as_str(), hash, namespace],
             ),
             None => connection.execute(
-                "INSERT INTO users (user_id, username, tenant_id, created_at, role)
-                 VALUES (?1, ?2, ?1, ?3, ?4)",
-                params![user_id, username, now, role.as_str()],
+                "INSERT INTO users (user_id, username, tenant_id, created_at, role, namespace)
+                 VALUES (?1, ?2, ?1, ?3, ?4, ?5)",
+                params![user_id, username, now, role.as_str(), namespace],
             ),
         };
         match result {
             Ok(_) => Ok(UserInsert::Inserted),
             Err(e) if is_unique_violation(&e) => {
-                if e.to_string().contains("users.user_id") {
+                let text = e.to_string();
+                if text.contains("users.user_id") {
                     Ok(UserInsert::IdTaken)
+                } else if text.contains("users.namespace") {
+                    Err(OrchestratorError::CorruptState(format!(
+                        "namespace '{namespace}' was taken while creating user '{user_id}'"
+                    )))
                 } else {
                     Ok(UserInsert::NameTaken)
                 }
@@ -759,9 +1023,9 @@ impl SqliteWorkflowStore {
         // user_id is immutable PK; tenant_id mirrors user_id for now.
         // INSERT OR IGNORE keeps existing usernames if an operator renamed them.
         connection.execute(
-            "INSERT OR IGNORE INTO users (user_id, username, tenant_id, created_at, role)
-             VALUES (?1, ?2, ?1, ?3, ?4)",
-            params![user_id, username, now, role.as_str()],
+            "INSERT OR IGNORE INTO users (user_id, username, tenant_id, created_at, role, namespace)
+             VALUES (?1, ?2, ?1, ?3, ?4, ?5)",
+            params![user_id, username, now, role.as_str(), seeded_namespace(user_id)],
         )?;
         Ok(())
     }
@@ -785,7 +1049,7 @@ impl SqliteWorkflowStore {
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         connection
             .query_row(
-                "SELECT user_id, username, tenant_id, created_at, password_hash, password_updated_at, role, deactivated_at
+                "SELECT user_id, username, tenant_id, created_at, password_hash, password_updated_at, role, deactivated_at, namespace
                  FROM users WHERE user_id = ?1",
                 [user_id],
                 parse_user_row,
@@ -811,7 +1075,7 @@ impl SqliteWorkflowStore {
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         let mut stmt = connection.prepare(
-            "SELECT user_id, username, tenant_id, created_at, password_hash, password_updated_at, role, deactivated_at
+            "SELECT user_id, username, tenant_id, created_at, password_hash, password_updated_at, role, deactivated_at, namespace
              FROM users WHERE username = ?1 COLLATE NOCASE
              ORDER BY (username = ?1) DESC, created_at ASC, user_id ASC LIMIT 2",
         )?;
@@ -838,7 +1102,7 @@ impl SqliteWorkflowStore {
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         let mut stmt = connection.prepare(
-            "SELECT user_id, username, tenant_id, created_at, password_hash, password_updated_at, role, deactivated_at
+            "SELECT user_id, username, tenant_id, created_at, password_hash, password_updated_at, role, deactivated_at, namespace
              FROM users WHERE user_id NOT LIKE 'marketplace:%' ORDER BY created_at ASC",
         )?;
         // `marketplace:<id>` rows are the owners of catalog installs (CN-4.5), not people.
@@ -1065,7 +1329,16 @@ fn parse_user_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
         password_updated_at: row.get(5)?,
         role: UserRole::from_db(role_raw.as_deref().unwrap_or(UserRole::Member.as_str())),
         deactivated_at: row.get(7)?,
+        namespace: row.get(8)?,
     })
+}
+
+fn add_users_namespace_column(connection: &rusqlite::Connection) -> Result<(), OrchestratorError> {
+    match connection.execute("ALTER TABLE users ADD COLUMN namespace TEXT", []) {
+        Ok(_) => Ok(()),
+        Err(e) if is_duplicate_column(&e) => Ok(()),
+        Err(e) => Err(OrchestratorError::Database(e)),
+    }
 }
 
 fn add_users_password_columns(connection: &rusqlite::Connection) -> Result<(), OrchestratorError> {

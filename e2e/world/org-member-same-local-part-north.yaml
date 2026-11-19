@@ -1,0 +1,6 @@
+piece: org-member-same-local-part-north
+kind: org
+role: Member
+# A member whose email shares its local part (`ann.lee`) with `org-member-same-local-part-south`; only the
+# domains differ. `{tag}` sits in the domain, so the local part is the same for both pieces on purpose.
+username: "Ann.Lee@North-{tag}.Test"
