@@ -64,7 +64,8 @@ sessions, and sessions the owner starts by hand):
 4. **A PR straight into `main` only when the owner asks for it**: a
    security hotfix, a broken `main`, or a change another release cannot wait
    for. Its body says so in one line ("Owner asked for a direct release:
-   <reason>").
+   <reason>"). A one-PR job (a `fix/` or `chore/` session whose whole job is
+   one PR) goes straight from its branch into `main` as its release.
 5. **Merge `main` in once, not on every change to `main`.** Merge it into
    the integration branch right before opening the release PR, or earlier
    only when a conflict blocks the work or the work needs a fix that is on
@@ -138,7 +139,8 @@ owner asks, or ahead of a tag.
 
 - Each wave ships tests for what it changes, at the cheapest layer (contract or
   unit test in vam before a UI test).
-- Scenarios run on every PR in CI and anywhere with `scripts/e2e/run.sh`
+- Scenarios run in CI (the smoke set on PRs into `main`, a wave's named scenarios
+  through its `CI:` line) and anywhere with `scripts/e2e/run.sh`
   (`--smoke`, `--scenarios a,b`, `--all`). A KVM host is only for scenarios marked
   `needs: firecracker`, run once at a phase close if the phase touched them.
 - Test-first guardrails: scenarios assert behaviour, not implementation; a new
@@ -168,6 +170,9 @@ Never delete build caches to free disk (`target/`, `src-tauri/target`); trim
   into `main` without the owner's word.
 - A PR whose code already passed CI in another PR (a release PR, or only docs
   commits since) merges without waiting for CI again (owner, 2026-10-16).
+- A wave PR's merge gate is the fast tier plus its named scenarios green on
+  Actions, and the session's local `--fast` (owner, 2026-11-19). The full suite
+  runs where code enters `main`.
 - Releases merge with a merge commit, never squash.
 - CI: check once; never wait past 10 minutes.
 - Cleanup after every merge (playbook §5).
@@ -257,15 +262,33 @@ Never delete build caches to free disk (`target/`, `src-tauri/target`); trim
   `rust.yml`, the microVM lane included) is free for public repositories.
   Running the full suite in a cloud session costs session time and disk for
   nothing. So:
-  - Before pushing, the wave session runs only the fast local checks:
-    `scripts/ci/local.sh --fast` (fmt, protos, manifests, `cargo check`,
-    smoke) or `--scenarios a,b` for the wave's own scenarios, plus the unit
-    tests of the crates it changed. This catches the obvious breaks without
-    a 15-minute round trip.
-  - The wave PR opens **ready for review** (not a draft) once those pass, so
-    the full suite runs on Actions: fmt, clippy on both feature sets, the
-    workspace tests, smoke, docs, DCO, and the microVM lane when a VM path
-    changed. A draft is only for work still in progress (drafts run no CI).
+  - **CI tiers (owner, 2026-11-19).** `rust.yml`'s `changes` job plans each
+    run (`scripts/ci/plan.sh`) and writes the plan into the job summary:
+    - **Full** for a PR into `main`, a push to `main`, `workflow_dispatch` on
+      any ref and fork PRs: checks, clippy, workspace tests, smoke and the
+      release gate, the microVM lane when VM paths change (always on a release
+      PR) plus `release-lane`, `release-build.yml` when the release path
+      changes, docs and DCO.
+    - **Fast** for a PR into any other branch: checks, clippy, and
+      `cargo test` for the affected crates only (changed crates plus their
+      workspace dependents, `scripts/ci/affected-crates.sh`). A change to
+      `Cargo.toml`, `Cargo.lock`, the toolchain files, `proto/`,
+      `third_party/`, `.github/workflows/` or a core crate (`vam-spec`,
+      `vam-security`) forces the workspace tests.
+    - A fast-tier PR asks for more with one line at the start of a line in
+      its body: `CI: scenarios=a,b tests=workspace lane=yes release-build=yes`
+      or `CI: full` (every key optional; ids must exist in `e2e/scenarios/`,
+      at most 20). Anything else is ignored and listed in the summary. The
+      line is read when a run starts: push a commit after changing it. A PR
+      into `main` ignores it.
+  - Before pushing, the wave session runs `scripts/ci/local.sh --fast --base
+    origin/<its base>` (fmt, protos, manifests, `cargo check`, the affected
+    crates' tests, smoke) or `--scenarios a,b` for the wave's own scenarios.
+  - The wave PR opens **ready for review** (not a draft) once those pass,
+    with its scenarios in its `CI:` line, so Actions runs the fast tier and
+    those scenarios. A draft is only for work still in progress (drafts run
+    no CI). The orchestrator starts one `workflow_dispatch` run on the
+    integration branch before a risky release.
   - The orchestrator subscribes to the PR and waits for the CI event instead
     of polling or re-running `--full` itself. It merges (merge commit into
     the base) only when every required check on the PR head is green and it
@@ -274,7 +297,7 @@ Never delete build caches to free disk (`target/`, `src-tauri/target`); trim
   - `scripts/ci/local.sh --full` is for reproducing a CI failure locally, not
     a routine step. No `[skip ci]` commits; the `skip-vm-lane` label is only
     a time saver when a VM-path change cannot affect the lane.
-  - The release PR into `main` runs the same suite plus the release gate and
+  - The release PR into `main` runs the full suite plus the release gate and
     the lane, as before.
   - A red result on `main` after a release is fixed forward at once. After
     a release, the next phase starts from a branch level with `main`
