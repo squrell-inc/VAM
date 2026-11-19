@@ -542,6 +542,8 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   form (raw, base64 and base64url padded or not at three alignments, hex, percent-encoded,
   JSON-escaped) and for any run of 12 or more of its bytes. A hit is `product` and names the form
   and the place only, never the bytes.
+  With no run in the scenario it searches the node's connector, MCP connection and secret listings instead
+  (`/v1/connectors`, `/v1/mcp/connections`, `/v1/secrets`); it fails as `scenario` when none of them answers.
 - `expect: { thread: { role, contains, maxBytes } }`: the matched message's text is also at most
   `maxBytes` bytes. The observation lists the sizes seen.
 - `flood: { as: <org alias>, path: /v1/node, count: 300 }` sends `count` GETs with that identity's

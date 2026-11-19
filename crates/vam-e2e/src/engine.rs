@@ -3514,6 +3514,55 @@ impl Engine {
         Ok(())
     }
 
+    /// [`Self::expect_secret_absent`] for a scenario with no run: the secret (and its companions)
+    /// must be in none of the node's connector, MCP connection and secret listings.
+    fn expect_secret_absent_without_run(
+        &mut self,
+        x: &crate::scenario::SecretAbsent,
+        what: &str,
+    ) -> Result<(), Fail> {
+        self.sync_filebox();
+        let Some(value) = self.ctx.secrets.get(&x.secret).map(|v| v.0.clone()) else {
+            return Err(Fail::new(
+                Class::Scenario,
+                what.to_string(),
+                format!("`{}` is not a secret piece in `given`", x.secret),
+            ));
+        };
+        let prefix = format!("{}#", x.secret);
+        let values: Vec<String> = std::iter::once(value)
+            .chain(
+                self.ctx
+                    .secrets
+                    .iter()
+                    .filter(|(k, _)| k.starts_with(&prefix))
+                    .map(|(_, v)| v.0.clone()),
+            )
+            .collect();
+        let mut answered = 0;
+        for path in ["/v1/connectors", "/v1/mcp/connections", "/v1/secrets"] {
+            let r = self.api.get_as(None, path).map_err(conn)?;
+            if !r.ok() {
+                continue;
+            }
+            answered += 1;
+            let mut strings = Vec::new();
+            crate::forms::strings_of(&r.json(), &mut strings);
+            let hit = strings
+                .iter()
+                .find_map(|t| values.iter().find_map(|v| crate::forms::find_form(v, t)));
+            if let Some(form) = hit {
+                return Err(Fail::new(
+                    Class::Product,
+                    what.to_string(),
+                    format!("the {form} form is in the answer of GET {path}"),
+                ));
+            }
+        }
+        // A search that read nothing proves nothing.
+        no_listing_answered(answered, what)
+    }
+
     /// `expect: { secret-absent: { secret } }`: no form of the secret's value is in the latest
     /// run's thread, run events, receipt (with its model appendix) or workspace files. A hit
     /// names the form and the place; the value is never put in the failure.
@@ -3522,6 +3571,11 @@ impl Engine {
             "no form of secret `{}` in what the run left behind",
             x.secret
         );
+        // A scenario that never started a run (a connector sign-in with no chat) has no thread,
+        // receipt or workspace to search: the node's own listings are what it can leak into.
+        if self.ctx.runs.is_empty() {
+            return self.expect_secret_absent_without_run(x, &what);
+        }
         // A run that is still refreshing a token when the values are collected would leave its fresh
         // token out of the search: wait until it is over (or parked), then collect.
         let i = self.last_run()?;
@@ -3652,6 +3706,18 @@ impl Engine {
     }
 }
 
+/// The failure of a no-run `secret-absent` that read none of the node's listings.
+fn no_listing_answered(answered: usize, what: &str) -> Result<(), Fail> {
+    if answered == 0 {
+        return Err(Fail::new(
+            Class::Scenario,
+            what.to_string(),
+            "none of /v1/connectors, /v1/mcp/connections, /v1/secrets answered".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Calls `get` until it answers something other than 409, or the budget or the
 /// scenario deadline is spent; then returns the last answer.
 fn poll_while_pending<E>(
@@ -3683,6 +3749,13 @@ fn first_str(values: &[&Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_search_that_read_no_listing_fails_as_a_scenario_problem() {
+        let e = no_listing_answered(0, "no form of secret `x`").unwrap_err();
+        assert_eq!(e.class, Class::Scenario);
+        assert!(no_listing_answered(1, "w").is_ok());
+    }
 
     struct NoVamd;
     impl crate::vamd::Vamd for NoVamd {

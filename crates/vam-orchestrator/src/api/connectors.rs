@@ -161,7 +161,8 @@ async fn put_node(
         .authorize(&auth, "PutConnectorNode", USERS_ADMIN_SCOPE)?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let found = entry_or_404(&state, &id)?;
-    let def = found.def.clone();
+    // The file as published: the plan fills it with the address of this body.
+    let template = found.template.clone();
     let req = parse_put_node(&body)?;
     let cfg = connectors::config();
     let existing = state.store.node_connector(&id)?;
@@ -169,17 +170,32 @@ async fn put_node(
     let now = connectors::now_secs();
     // Everything is decided before anything is written: a refused body leaves the state as it was.
     let row = connectors::plan_put(
-        &def,
+        &template,
         &cfg,
         existing.as_ref(),
         &req,
         now,
         auth.owner_user_id(),
     )?;
+    // The connector as this save leaves it: `{subdomain}` filled, so every URL below is exact.
+    let def = connectors::resolve(&template, row.tenant_subdomain.as_deref());
+    connector_client::check_address_change(
+        &template,
+        existing
+            .as_ref()
+            .and_then(|n| n.tenant_subdomain.as_deref()),
+        row.tenant_subdomain.as_deref(),
+        &req.client,
+        existing_client.as_ref(),
+    )?;
     let intent =
         connector_client::check_request(&def, existing_client.as_ref(), req.enabled, &req.client)?;
     let mcp_url = def.mcp.as_ref().map(|m| m.url.clone()).unwrap_or_default();
     let discovered = match &intent {
+        // A provider without metadata: the endpoints come from the file, no request is made.
+        connector_client::ClientIntent::Set(_) if connector_client::is_rest_oauth(&def) => {
+            Some(connector_client::fixed_endpoints(&def)?)
+        }
         connector_client::ClientIntent::Set(_) => {
             // The node's first fetch of URLs a connector file names: guarded, pinned, bounded.
             let (url, keeps) = (mcp_url.clone(), connector_client::keeps_secret(&def));
@@ -216,8 +232,11 @@ async fn put_node(
         &plan,
         &mcp_url,
         &connector_client::PlanBasis {
-            def: &def,
+            def: &template,
             client: existing_client.as_ref(),
+            tenant: existing
+                .as_ref()
+                .and_then(|n| n.tenant_subdomain.as_deref()),
         },
     )?;
     #[cfg(test)]
@@ -243,7 +262,9 @@ async fn put_node(
         connectors::caller_state(&def, Some(&saved.node), mine),
         account.as_deref(),
     );
-    connectors::annotate_source(&mut entry, &found, true);
+    let mut shown = found.clone();
+    shown.def = def.clone();
+    connectors::annotate_source(&mut entry, &shown, true);
     connector_client::annotate_client(&mut entry, &def, saved.client.as_ref(), true);
     Ok(json_http_response(StatusCode::OK, entry.to_string()))
 }
@@ -282,7 +303,7 @@ pub(crate) mod test_seam {
 fn parse_put_node(body: &str) -> Result<PutNodeRequest, OrchestratorError> {
     serde_json::from_str(body).map_err(|_| {
         OrchestratorError::InvalidContract(
-            "connector node body must be { enabled[, consent][, client: { clientId[, clientSecret] } | null] }"
+            "connector node body must be { enabled[, consent][, tenant: { subdomain } | null][, client: { clientId[, clientSecret] } | null] }"
                 .into(),
         )
     })
@@ -791,6 +812,7 @@ mod tests {
     fn node(store: &SqliteWorkflowStore, enabled: bool, tenant: Option<&str>) {
         store
             .put_node_connector(&crate::connectors::NodeConnector {
+                tenant_subdomain: None,
                 connector_id: "microsoft-365".into(),
                 enabled,
                 consent_tenant_id: tenant.map(str::to_string),
@@ -4402,5 +4424,195 @@ mod tests {
             assert!(!text.contains("SUPER-SECRET"), "{body}: {text}");
             assert!(text.contains("connector node body must be"), "{text}");
         }
+    }
+
+    // ---- the company address (CN-6.2) ----------------------------------------------------------
+
+    async fn put_zendesk(
+        app: &axum::Router,
+        secret: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        call(
+            app,
+            "PUT",
+            "/v1/connectors/zendesk/node",
+            secret,
+            Some(body),
+        )
+        .await
+    }
+
+    async fn zendesk_entry(app: &axum::Router, secret: &str) -> serde_json::Value {
+        let (_, l) = call(app, "GET", "/v1/connectors", secret, None).await;
+        l["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "zendesk")
+            .unwrap()
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn enable_needs_one_dns_label_and_no_secret_and_fills_every_host() {
+        let (app, store, _vault) = app_world();
+        crate::connector_client::test_support::install_company_address_rows(&store);
+        let client = serde_json::json!({ "clientId": "c1" });
+        // No address.
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": true, "client": client }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("company address"), "{b}");
+        // Not one DNS label; the value is never quoted.
+        for bad in ["acme.evil", "-acme", "a_b", "xn--acme", &"a".repeat(64)] {
+            let (s, b) = put_zendesk(&app, "orgadmin-secret", serde_json::json!({ "enabled": true, "tenant": { "subdomain": bad }, "client": client })).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}: {b}");
+            assert!(b.to_string().contains("one DNS label"), "{b}");
+            assert!(!b.to_string().contains(bad), "{b}");
+        }
+        // A secret for a client that keeps none.
+        let (s, b) = put_zendesk(&app, "orgadmin-secret", serde_json::json!({ "enabled": true, "tenant": { "subdomain": "acme" }, "client": { "clientId": "c1", "clientSecret": "s3cret" } })).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(
+            b.to_string().contains("secret") && !b.to_string().contains("s3cret"),
+            "{b}"
+        );
+        // A member.
+        let (s, _) = put_zendesk(&app, "member-secret", serde_json::json!({ "enabled": true, "tenant": { "subdomain": "acme" }, "client": client })).await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        // Nothing was written by any refusal.
+        assert!(store.node_connector("zendesk").unwrap().is_none());
+        assert!(store.node_client("zendesk").unwrap().is_none());
+        let before = zendesk_entry(&app, "member-secret").await;
+        assert_eq!(before["state"], "askAdmin");
+        assert!(before["node"].get("tenant").is_none());
+
+        // Enabled with " Acme ": trimmed and lowercased.
+        let (s, b) = put_zendesk(&app, "orgadmin-secret", serde_json::json!({ "enabled": true, "tenant": { "subdomain": " Acme " }, "client": client })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        for who in ["orgadmin-secret", "member-secret"] {
+            let e = zendesk_entry(&app, who).await;
+            assert_eq!(e["node"]["tenant"]["subdomain"], "acme");
+            assert_eq!(e["node"]["tenant"]["hosts"][0], "acme.zendesk.com");
+            assert_eq!(e["bindings"][0]["hosts"][0], "acme.zendesk.com");
+            assert_eq!(
+                e["provider"]["endpoints"]["token"],
+                "https://acme.zendesk.com/oauth/tokens"
+            );
+            assert_eq!(
+                e["node"]["client"]["tokenEndpoint"],
+                "https://acme.zendesk.com/oauth/tokens"
+            );
+            assert_eq!(
+                e["node"]["client"]["authorizeEndpoint"],
+                "https://acme.zendesk.com/oauth/authorizations/new"
+            );
+            assert!(!e.to_string().contains("{subdomain}"), "{e}");
+        }
+        // The answer of the save is filled too.
+        assert!(!b.to_string().contains("{subdomain}"), "{b}");
+
+        // Disabling keeps the address and the client; enabling alone needs neither.
+        let (s, _) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": false }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": true }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["node"]["tenant"]["subdomain"], "acme");
+    }
+
+    #[tokio::test]
+    async fn a_new_address_needs_the_client_again_and_null_only_when_disabling() {
+        let (app, store, _vault) = app_world();
+        crate::connector_client::test_support::install_company_address_rows(&store);
+        let client = serde_json::json!({ "clientId": "c1" });
+        let (s, b) = put_zendesk(&app, "orgadmin-secret", serde_json::json!({ "enabled": true, "tenant": { "subdomain": "acme" }, "client": client })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // Another company without the client: 409, nothing changes.
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": true, "tenant": { "subdomain": "globex" } }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(
+            store
+                .node_connector("zendesk")
+                .unwrap()
+                .unwrap()
+                .tenant_subdomain
+                .as_deref(),
+            Some("acme")
+        );
+        // The same address again asks for nothing.
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": true, "tenant": { "subdomain": "acme" } }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // With the client: both move together.
+        let (s, b) = put_zendesk(&app, "orgadmin-secret", serde_json::json!({ "enabled": true, "tenant": { "subdomain": "globex" }, "client": client })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(
+            b["node"]["client"]["tokenEndpoint"],
+            "https://globex.zendesk.com/oauth/tokens"
+        );
+        // Removing the address is only for a disable.
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": true, "tenant": null }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": false, "tenant": null, "client": null }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(b["node"].get("tenant").is_none(), "{b}");
+        // Enabling again asks for the address.
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": true, "client": client }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("company address"), "{b}");
+    }
+
+    #[tokio::test]
+    async fn a_connector_without_a_company_address_takes_none() {
+        let app = app();
+        let (s, b) = call(
+            &app,
+            "PUT",
+            "/v1/connectors/linear/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({ "enabled": true, "tenant": { "subdomain": "acme" } })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(b.to_string().contains("takes no company address"), "{b}");
     }
 }

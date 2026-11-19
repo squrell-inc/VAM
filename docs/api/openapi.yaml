@@ -1130,6 +1130,22 @@ paths:
         enabled (409). An unknown id is 404. A member gets 403 and nothing
         changes. The body is validated before anything is written.
 
+        **Company address (`tenant`).** A connector that declares `tenant`
+        (a service every company reaches at its own address) is enabled with
+        `tenant: { subdomain }`, entered once. The address is trimmed, lowercased
+        and must be one DNS label: 1 to 63 letters, digits or hyphens, no
+        leading or trailing hyphen, no `xn--` prefix (400, the value is never
+        quoted). Enabling without a stored or given address is 409 and names the
+        company address; `tenant` on a connector that declares none is 400.
+        Omitting `tenant` keeps the stored address, so a disable and a
+        re-enable need none; `tenant: null` clears it, only with
+        `enabled: false` (400 otherwise). A different address needs `client`
+        in the same body (409 otherwise): the client was registered in the old
+        instance. The node fills `{subdomain}` in every endpoint, MCP URL and
+        binding host, so no entry holds a template once an address is set; a
+        connector with fixed endpoints (`profile: oauth`) makes no request at
+        Enable.
+
         **Admin-supplied client (`provider.client: org`).** The body may carry
         `client: { clientId, clientSecret? }`. It is accepted only for such a
         connector (400 otherwise); enabling one with no client stored or given
@@ -7087,6 +7103,17 @@ components:
             tenantId:
               type: string
               description: Microsoft tenant GUID the admin consented for.
+        tenant:
+          type: [object, "null"]
+          description: |
+            The company address, for a connector that declares `tenant`. Omitted keeps the stored
+            address; `null` removes it (only with `enabled: false`).
+          additionalProperties: false
+          required: [subdomain]
+          properties:
+            subdomain:
+              type: string
+              description: One DNS label, 1-63 of letters, digits and hyphens (case is folded).
         client:
           type: [object, "null"]
           description: |
@@ -7151,6 +7178,16 @@ components:
             updatedAt:
               type: integer
               description: Only for callers with `users:admin`.
+            tenant:
+              type: object
+              description: "The company address of a connector that declares `tenant` (members see it once the connector is enabled)."
+              properties:
+                subdomain: { type: string }
+                label: { type: string }
+                hosts:
+                  type: array
+                  items: { type: string }
+                  description: Every host the connector reaches at this address.
             client:
               type: object
               description: "A connector with `provider.client: org` whose client is stored (members see it once the connector is enabled). Never holds the secret."

@@ -10932,6 +10932,7 @@ mod org_client_refresh_tests {
             reauth,
         };
         let node = crate::connectors::NodeConnector {
+            tenant_subdomain: None,
             connector_id: "filebox".into(),
             enabled: true,
             consent_tenant_id: None,
@@ -11097,6 +11098,7 @@ mod org_client_refresh_tests {
                     reauth: true,
                 };
                 let node = crate::connectors::NodeConnector {
+                    tenant_subdomain: None,
                     connector_id: "filebox".into(),
                     enabled: true,
                     consent_tenant_id: None,

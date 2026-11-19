@@ -876,6 +876,7 @@ fn connectors_world(edit: impl FnOnce(&mut TestRepo)) -> Option<(World, String)>
 
 fn node_row(id: &str, enabled: bool) -> crate::connectors::NodeConnector {
     crate::connectors::NodeConnector {
+        tenant_subdomain: None,
         connector_id: id.into(),
         enabled,
         consent_tenant_id: None,

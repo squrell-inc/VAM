@@ -64,4 +64,4 @@ mock:
   - when: { step: outside, stepStart: true }
     reply: { toolCall: { name: load_skill, args: { skill: ticketdesk-tickets } } }
 status: pending
-expectFail: { step: when.3, class: product }
+expectFail: { step: when.4, class: product }

@@ -352,6 +352,101 @@ pub(crate) fn url_host<'a>(what: &str, url: &'a str) -> Result<&'a str, String> 
     }
 }
 
+/// The text a company address is filled in place of.
+pub const SUBDOMAIN_PLACEHOLDER: &str = "{subdomain}";
+
+/// Checks a company address: one DNS label, trimmed and lowercased. 1 to 63 of `[a-z0-9-]`, no
+/// leading or trailing hyphen, no `xn--` prefix. The error never quotes the value.
+pub fn check_subdomain(raw: &str) -> Result<String, ConnectorError> {
+    let s = raw.trim().to_ascii_lowercase();
+    let ok = !s.is_empty()
+        && s.len() <= 63
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && !s.starts_with("xn--");
+    if ok {
+        Ok(s)
+    } else {
+        bad("the company address must be one DNS label: 1 to 63 letters, digits or hyphens, no dot, no leading or trailing hyphen, not starting with `xn--`")
+    }
+}
+
+/// The connector as the node uses it: `{subdomain}` filled with the company address in the
+/// endpoints, the MCP URL and the binding hosts. A connector without a `tenant` is returned as is.
+/// With no address, the endpoints and bindings are dropped (nothing usable) and the MCP server
+/// keeps its templated URL, so the connector's id stays reserved while no address is set.
+pub fn fill_subdomain(c: &Connector, subdomain: Option<&str>) -> Connector {
+    let mut out = c.clone();
+    if c.tenant.is_none() {
+        return out;
+    }
+    match subdomain {
+        Some(s) => {
+            let fill = |t: &str| t.replace(SUBDOMAIN_PLACEHOLDER, s);
+            if let Provider::Oauth2(p) = &mut out.provider {
+                if let Some(e) = &mut p.endpoints {
+                    e.authorize = fill(&e.authorize);
+                    e.token = fill(&e.token);
+                    e.revoke = e.revoke.as_deref().map(fill);
+                }
+            }
+            if let Some(m) = &mut out.mcp {
+                m.url = fill(&m.url);
+            }
+            for b in out.bindings.iter_mut().flatten() {
+                for h in &mut b.hosts {
+                    *h = fill(h);
+                }
+            }
+        }
+        None => {
+            if let Provider::Oauth2(p) = &mut out.provider {
+                p.endpoints = None;
+            }
+            out.bindings = None;
+        }
+    }
+    out
+}
+
+/// Every host a connector reaches once the address is filled, sorted and without repeats: the
+/// endpoints, the MCP server and the binding hosts.
+pub fn filled_hosts(c: &Connector, subdomain: &str) -> Vec<String> {
+    let t = fill_subdomain(c, Some(subdomain));
+    let mut hosts: Vec<String> = Vec::new();
+    let mut add = |h: &str| {
+        if !hosts.iter().any(|x| x == h) {
+            hosts.push(h.to_string());
+        }
+    };
+    if let Provider::Oauth2(p) = &t.provider {
+        if let Some(e) = &p.endpoints {
+            for u in [Some(&e.authorize), Some(&e.token), e.revoke.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Ok(h) = url_host("endpoint", u) {
+                    add(h);
+                }
+            }
+        }
+    }
+    if let Some(m) = &t.mcp {
+        if let Ok(h) = url_host("mcp.url", &m.url) {
+            add(h);
+        }
+    }
+    for b in t.bindings.iter().flatten() {
+        for h in &b.hosts {
+            add(h);
+        }
+    }
+    hosts.sort();
+    hosts
+}
+
 /// The company address rules: every `{subdomain}` host is exactly `{subdomain}.<tenant.suffix>`,
 /// and `tenant` is declared if and only if some host uses the template.
 fn check_tenant(c: &Connector) -> Result<(), ConnectorError> {
@@ -850,5 +945,62 @@ mod tests {
         let mut v = zendesk();
         v["provider"]["clientSecret"] = json!("org_vault");
         assert!(err(v).contains("no client secret"));
+    }
+
+    #[test]
+    fn a_company_address_is_one_dns_label() {
+        assert_eq!(check_subdomain(" Acme-1 ").unwrap(), "acme-1");
+        let long = "a".repeat(63);
+        assert_eq!(check_subdomain(&long).unwrap(), long);
+        for bad in [
+            "",
+            " ",
+            "acme.evil",
+            "-acme",
+            "acme-",
+            "a_b",
+            "xn--acme",
+            "a b",
+            "acm\u{e9}",
+            &"a".repeat(64),
+        ] {
+            let e = check_subdomain(bad).unwrap_err().to_string();
+            assert!(e.contains("one DNS label"), "{bad}");
+            assert!(bad.trim().is_empty() || !e.contains(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_address_fills_every_host_and_nothing_is_left() {
+        let c: Connector = serde_json::from_value(zendesk()).unwrap();
+        let f = fill_subdomain(&c, Some("acme"));
+        assert!(!serde_json::to_string(&f).unwrap().contains("{subdomain}"));
+        assert_eq!(fill_subdomain(&f, Some("acme")), f);
+        let hosts = filled_hosts(&c, "acme");
+        assert!(!hosts.is_empty());
+        assert!(hosts.iter().all(|h| h.starts_with("acme.")));
+        let Provider::Oauth2(p) = &f.provider else {
+            panic!()
+        };
+        assert!(p
+            .endpoints
+            .as_ref()
+            .unwrap()
+            .token
+            .starts_with("https://acme."));
+    }
+
+    #[test]
+    fn without_an_address_nothing_is_usable() {
+        let c: Connector = serde_json::from_value(zendesk()).unwrap();
+        let f = fill_subdomain(&c, None);
+        assert!(f.bindings.is_none());
+        let Provider::Oauth2(p) = &f.provider else {
+            panic!()
+        };
+        assert!(p.endpoints.is_none());
+        // A connector with no tenant is untouched.
+        let m: Connector = serde_json::from_value(m365()).unwrap();
+        assert_eq!(fill_subdomain(&m, None), m);
     }
 }
