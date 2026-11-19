@@ -596,6 +596,13 @@ pub fn plan_put(
 
 // ---- the caller's state ------------------------------------------------------------------------
 
+/// True when the connector's sign-in needs the admin's recorded consent before a member may
+/// connect (`orgConsent: admin_required`). A connector with `orgConsent: none` (a company-address
+/// `oauth` connector, a remote MCP server) has no consent row, and none is asked for.
+pub(crate) fn needs_admin_consent(def: &Connector) -> bool {
+    oauth(def).is_some_and(|o| o.org_consent == OrgConsent::AdminRequired)
+}
+
 /// What the caller sees on the tile (design 3.1). `connected` and `needsReconnect` need a
 /// connection store; the Phase 1 waves that add one pass it in here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -630,10 +637,7 @@ pub fn caller_state(
     let Some(n) = node.filter(|n| n.enabled) else {
         return CallerState::AskAdmin;
     };
-    let needs_consent = oauth(def)
-        .map(|o| o.org_consent == OrgConsent::AdminRequired)
-        .unwrap_or(false);
-    if needs_consent && n.consent_tenant_id.is_none() {
+    if needs_admin_consent(def) && n.consent_tenant_id.is_none() {
         return CallerState::WaitingForConsent;
     }
     connection.unwrap_or(CallerState::Connect)
@@ -1261,6 +1265,31 @@ pub(crate) fn token_due(conn: &ConnectorConnection, now: i64, horizon_secs: i64)
         .is_some_and(|e| e <= now.saturating_add(horizon_secs))
 }
 
+/// A token the intent check refreshed for this call is not refreshed again by the swap while it
+/// has at least this long left.
+const INTENT_REFRESH_MIN_LEFT_SECS: i64 = 20;
+
+/// Whether a check at `now` with `horizon_secs` must refresh: [`token_due`], except that the
+/// swap of a call whose intent check just refreshed (`intent_refreshed`) does not spend a second
+/// single-use refresh token while the token has at least 20 s left. One tool call is checked
+/// twice, at the intent (the tool's timeout as horizon) and at the swap (the 120 s window); a
+/// provider whose access tokens live a minute is inside both windows. `intent_refreshed` is
+/// per call (`connection_egress::IntentRefreshes`, keyed by the call id), never a time window, and
+/// is false for a call that waited on an approval (its intent check runs again). The one place
+/// both checks (`refresh_if_due` and `connection_egress::ensure_fresh`) decide.
+pub(crate) fn needs_refresh(
+    conn: &ConnectorConnection,
+    now: i64,
+    horizon_secs: i64,
+    intent_refreshed: bool,
+) -> bool {
+    if !token_due(conn, now, horizon_secs) {
+        return false;
+    }
+    let left = conn.expires_at.map_or(0, |e| e.saturating_sub(now));
+    !(intent_refreshed && left >= INTENT_REFRESH_MIN_LEFT_SECS)
+}
+
 /// Refreshes the member's access token if it expires within `horizon_secs`. The caller must hold
 /// [`lock_connection`] for `(owner, id)`; the expiry is read again here, under that lock, so a
 /// refresh a concurrent caller just finished is not sent twice.
@@ -1274,6 +1303,7 @@ pub(crate) fn refresh_if_due(
     id: &str,
     now: i64,
     horizon_secs: i64,
+    intent_refreshed: bool,
     refresh: &dyn for<'a> Fn(
         &RestRefreshTarget<'a>,
         &SecretString,
@@ -1286,7 +1316,7 @@ pub(crate) fn refresh_if_due(
     if conn.status != ConnectionStatus::Connected {
         return Freshness::NeedsReconnect;
     }
-    if !token_due(&conn, now, horizon_secs) {
+    if !needs_refresh(&conn, now, horizon_secs, intent_refreshed) {
         return Freshness::Fresh;
     }
     match refresh_connection(store, vault, cfg, owner, id, now, refresh) {
@@ -3723,5 +3753,55 @@ mod oauth_rest_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("code exchange"), "{err}");
+    }
+}
+
+/// The one rule both freshness checks share (CN-6.4): the swap of a call whose intent check just
+/// refreshed does not spend a second refresh while the token has time.
+#[cfg(test)]
+mod refresh_dedupe_tests {
+    use super::*;
+
+    fn conn(expires_at: Option<i64>) -> ConnectorConnection {
+        ConnectorConnection {
+            owner_user_id: "ada".into(),
+            connector_id: "zendesk".into(),
+            status: ConnectionStatus::Connected,
+            label: None,
+            tenant_id: "acme".into(),
+            token_endpoint: String::new(),
+            scopes: vec![],
+            expires_at,
+            connected_at: 1,
+            updated_at: 1,
+            last_check_at: Some(100),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_token_outside_the_window_is_never_refreshed_and_one_inside_is() {
+        for marked in [false, true] {
+            assert!(!needs_refresh(&conn(Some(1_000)), 100, 120, marked));
+            assert!(!needs_refresh(&conn(None), 100, 120, marked));
+            assert!(needs_refresh(&conn(Some(90)), 100, 120, marked), "expired");
+        }
+        assert!(needs_refresh(&conn(Some(200)), 100, 120, false));
+    }
+
+    #[test]
+    fn the_mark_skips_the_swap_only_while_the_token_has_twenty_seconds() {
+        // Minted for 60 s at 100: inside the intent's 60 s horizon and the swap's 120 s window.
+        let c = conn(Some(160));
+        assert!(!needs_refresh(&c, 100, 120, true));
+        assert!(!needs_refresh(&c, 140, 120, true), "20 s left is enough");
+        assert!(
+            needs_refresh(&c, 141, 120, true),
+            "under 20 s left refreshes"
+        );
+        assert!(
+            needs_refresh(&c, 100, 120, false),
+            "no mark, the window decides"
+        );
     }
 }

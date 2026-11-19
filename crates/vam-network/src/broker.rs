@@ -205,9 +205,9 @@ pub struct BrokerGate {
     /// Where connection placeholders are swapped for the member's token, inside the calling
     /// tool's declared shape. `None` leaves every placeholder to the static bindings.
     connection_tokens: Option<Arc<dyn ConnectionTokenSource>>,
-    /// TEST ONLY (process-guest builds): one host answered by a loopback http server.
+    /// TEST ONLY (process-guest builds): hosts answered by a loopback http server, one entry each.
     #[cfg(feature = "process-guest")]
-    upstream_redirect: Option<UpstreamRedirect>,
+    upstream_redirects: Vec<UpstreamRedirect>,
 }
 
 /// TEST ONLY: `host` is served by `base` (plain http on a loopback IP). It stands in for the
@@ -290,7 +290,7 @@ impl BrokerGate {
             fixture_origin: None,
             connection_tokens: None,
             #[cfg(feature = "process-guest")]
-            upstream_redirect: None,
+            upstream_redirects: Vec::new(),
         }
     }
 
@@ -308,7 +308,7 @@ impl BrokerGate {
     }
 
     /// TEST ONLY: serve `host` from `base`, a plain-http loopback URL (`http://127.0.0.1:P`).
-    /// Anything else is ignored. The host still goes through the authorizer and port check.
+    /// Call it once per host. Anything else is ignored. The host still goes through the authorizer and port check.
     #[cfg(feature = "process-guest")]
     pub fn with_upstream_redirect(mut self, host: &str, base: &str) -> Self {
         let Ok(base) = reqwest::Url::parse(base) else {
@@ -326,8 +326,11 @@ impl BrokerGate {
         if base.scheme() != "http" || !base.username().is_empty() {
             return self;
         }
-        self.upstream_redirect = Some(UpstreamRedirect {
-            host: normalize_host(host),
+        // One redirect per host: a second call for the same host replaces the first.
+        let host = normalize_host(host);
+        self.upstream_redirects.retain(|r| r.host != host);
+        self.upstream_redirects.push(UpstreamRedirect {
+            host,
             base,
             addr: SocketAddr::new(ip, port),
         });
@@ -347,9 +350,8 @@ impl BrokerGate {
 
     #[cfg(feature = "process-guest")]
     fn redirect_for(&self, host: &str) -> Option<&UpstreamRedirect> {
-        self.upstream_redirect
-            .as_ref()
-            .filter(|r| r.host == normalize_host(host))
+        let host = normalize_host(host);
+        self.upstream_redirects.iter().find(|r| r.host == host)
     }
 
     /// Route every host decision, on port 54 and port 55 alike, through
@@ -3301,6 +3303,27 @@ mod tests {
                 .with_upstream_redirect("Graph.Microsoft.com.", "http://127.0.0.1:9");
             assert!(gate.redirect_for("graph.microsoft.com").is_some());
             assert!(gate.redirect_for("evil.microsoft.com").is_none());
+        }
+
+        #[cfg(feature = "process-guest")]
+        #[test]
+        fn several_hosts_each_have_their_own_redirect() {
+            let r = rig(None, &[], false);
+            let gate = r
+                .gate
+                .with_upstream_redirect("graph.microsoft.com", "http://127.0.0.1:9")
+                .with_upstream_redirect("acme.ticketdesk.example", "http://127.0.0.1:10")
+                .with_upstream_redirect("globex.ticketdesk.example", "http://127.0.0.1:11")
+                .with_upstream_redirect("acme.ticketdesk.example", "http://127.0.0.1:12");
+            let port = |h: &str| gate.redirect_for(h).map(|r| r.addr.port());
+            assert_eq!(port("graph.microsoft.com"), Some(9));
+            assert_eq!(
+                port("acme.ticketdesk.example"),
+                Some(12),
+                "the last one wins"
+            );
+            assert_eq!(port("globex.ticketdesk.example"), Some(11));
+            assert_eq!(port("evil.ticketdesk.example"), None);
         }
     }
 }

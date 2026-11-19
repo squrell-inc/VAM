@@ -82,11 +82,14 @@ fn lookup(store: &SqliteWorkflowStore, session_id: &str, owner: &str, tool: &str
     }
     let id = connectors::connector_id(&def);
     let name = def.display_name.clone();
+    // The admin's consent is asked for only when the connector's sign-in needs it (Microsoft 365);
+    // an `oauth` connector with `orgConsent: none` has none to record (CN-6.4).
+    let needs_consent = connectors::needs_admin_consent(&def);
     let enabled = store
         .node_connector(&id)
         .ok()
         .flatten()
-        .is_some_and(|n| n.enabled && n.consent_tenant_id.is_some());
+        .is_some_and(|n| n.enabled && (!needs_consent || n.consent_tenant_id.is_some()));
     if !enabled {
         return Lookup::Refuse(format!(
             "{name} is not enabled for this organization; ask your admin to enable {name}."
@@ -140,16 +143,19 @@ fn gate_for(
 
 /// [`gate`], then for a connected member the intent-time refresh (`ensure_fresh` with the
 /// tool's timeout as horizon).
+///
+/// The flag says the intent refreshed the member's token; the broker records it for the call
+/// (`connection_egress::IntentRefreshes`) so the swap of the same call does not refresh again.
 pub async fn precheck(
     store: &Arc<SqliteWorkflowStore>,
     vault: &Arc<SecretsVault>,
     session_id: &str,
     tool: &str,
-) -> ConnectorGate {
+) -> (ConnectorGate, bool) {
     let Ok(owner) = store.session_owner_user_id(session_id) else {
-        return ConnectorGate::Clear;
+        return (ConnectorGate::Clear, false);
     };
-    precheck_with(
+    precheck_with_outcome(
         store,
         vault,
         &connectors::config(),
@@ -161,6 +167,7 @@ pub async fn precheck(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn precheck_with(
     store: &Arc<SqliteWorkflowStore>,
     vault: &Arc<SecretsVault>,
@@ -170,14 +177,29 @@ pub(crate) async fn precheck_with(
     owner: &str,
     tool: &str,
 ) -> ConnectorGate {
+    precheck_with_outcome(store, vault, cfg, refresher, session_id, owner, tool)
+        .await
+        .0
+}
+
+/// [`precheck_with`], and whether this intent refreshed the member's token.
+pub(crate) async fn precheck_with_outcome(
+    store: &Arc<SqliteWorkflowStore>,
+    vault: &Arc<SecretsVault>,
+    cfg: &connectors::ConnectorConfig,
+    refresher: &RestRefresher,
+    session_id: &str,
+    owner: &str,
+    tool: &str,
+) -> (ConnectorGate, bool) {
     let n = match lookup(store, session_id, owner, tool) {
-        Lookup::None => return ConnectorGate::Clear,
-        Lookup::Refuse(t) => return ConnectorGate::Refuse(t),
+        Lookup::None => return (ConnectorGate::Clear, false),
+        Lookup::Refuse(t) => return (ConnectorGate::Refuse(t), false),
         Lookup::Needed(n) => n,
     };
     let first = state_of(store, &n);
     if first != ConnectorGate::Clear {
-        return first;
+        return (first, false);
     }
     let horizon = i64::try_from(DEFAULT_TOOL_TIMEOUT.as_secs()).unwrap_or(60);
     match crate::connection_egress::ensure_fresh(
@@ -185,8 +207,9 @@ pub(crate) async fn precheck_with(
     )
     .await
     {
-        Freshness::NeedsReconnect => state_of(store, &n),
-        Freshness::Fresh | Freshness::Refreshed | Freshness::Unavailable => ConnectorGate::Clear,
+        Freshness::NeedsReconnect => (state_of(store, &n), false),
+        Freshness::Refreshed => (ConnectorGate::Clear, true),
+        Freshness::Fresh | Freshness::Unavailable => (ConnectorGate::Clear, false),
     }
 }
 
@@ -421,6 +444,88 @@ mod tests {
             gate_for(&store2, S, ME, T),
             ConnectorGate::Refuse(_)
         ));
+    }
+
+    #[test]
+    fn an_admin_required_connector_enabled_without_consent_is_still_refused() {
+        // Microsoft 365's sign-in needs the admin's recorded consent (`orgConsent:
+        // admin_required`): enabled with no consent is refused, with a connected member too.
+        let (store, vault) = fx();
+        node(&store, true, false);
+        connect(
+            &store,
+            &vault,
+            ME,
+            ConnectionStatus::Connected,
+            10_000_000_000,
+        );
+        let ConnectorGate::Refuse(t) = gate_for(&store, S, ME, T) else {
+            panic!("refused");
+        };
+        assert!(t.contains("not enabled"), "{t}");
+        node(&store, true, true);
+        assert_eq!(gate_for(&store, S, ME, T), ConnectorGate::Clear);
+    }
+
+    #[test]
+    fn a_company_address_connector_needs_no_consent_row_to_be_enabled() {
+        // `orgConsent: none` (an `oauth` connector from a marketplace): the admin's Enable stores
+        // the address and no consent, and the gate must still let a connected member through.
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        crate::connector_client::test_support::install_company_address_rows(&store);
+        let urn = "urn:vam:connector:connectors.community.example/community/zendesk";
+        store
+            .record_tool_egress(
+                S,
+                &[ToolEgressRow {
+                    tool: "ticket_search".into(),
+                    requires_connector: Some(urn.into()),
+                    shapes: vec![],
+                    effect_class: None,
+                }],
+            )
+            .unwrap();
+        let row = |enabled| NodeConnector {
+            connector_id: "zendesk".into(),
+            enabled,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            tenant_subdomain: Some("acme".into()),
+            updated_at: 1,
+            updated_by: "olga".into(),
+        };
+        store.put_node_connector(&row(false)).unwrap();
+        assert!(matches!(
+            gate_for(&store, S, ME, "ticket_search"),
+            ConnectorGate::Refuse(t) if t.contains("not enabled")
+        ));
+        store.put_node_connector(&row(true)).unwrap();
+        // Enabled, member not connected: parked on this connector, not refused.
+        assert!(matches!(
+            gate_for(&store, S, ME, "ticket_search"),
+            ConnectorGate::Park { ref connector_id, reconnect: false, .. } if connector_id == "zendesk"
+        ));
+        store
+            .put_connector_connection(&ConnectorConnection {
+                owner_user_id: ME.into(),
+                connector_id: "zendesk".into(),
+                status: ConnectionStatus::Connected,
+                label: None,
+                tenant_id: "acme".into(),
+                token_endpoint: "https://acme.zendesk.com/oauth/tokens".into(),
+                scopes: vec![],
+                expires_at: None,
+                connected_at: 1,
+                updated_at: 1,
+                last_check_at: None,
+                last_error: None,
+            })
+            .unwrap();
+        assert_eq!(
+            gate_for(&store, S, ME, "ticket_search"),
+            ConnectorGate::Clear
+        );
     }
 
     #[test]
