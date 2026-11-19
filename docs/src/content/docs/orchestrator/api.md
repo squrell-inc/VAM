@@ -59,8 +59,9 @@ every role, and any other `holder` is a 400 (`list_keys`, `api/mod.rs:460-490`).
 
 ## Health and node status
 
-`GET /v1/health` and `GET /v1/node` report the node's capacity, draining flag and the isolation it
-runs under (`api/mod.rs:382-393,523-570`). Proved by `node-reports-the-isolation-it-runs`.
+`GET /v1/node` reports the node's capacity, draining flag and the isolation it runs under
+(`api/mod.rs:523-570`). `GET /v1/health` returns only a serving status, `NOT_SERVING` while the
+node is not ready or is draining (`api/mod.rs:382-393`). Proved by `node-reports-the-isolation-it-runs`.
 
 ## Auth
 
