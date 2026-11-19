@@ -570,7 +570,8 @@ Scenarios the phases are expected to add (names final at the phase breakdown):
 
 1. Settings → Environments → new `release`: required reviewer = owner, "prevent self-review"
    off (the owner both dispatches and approves), deployment branches = `main` only,
-   "allow administrators to bypass" **off**.
+   "allow administrators to bypass" **off**. (Changed 2026-11-19 by the rc.1 run: the owner turned
+   it on while they are the only contributor; turn it off when a second maintainer joins.)
 2. Settings → General → Releases: **enable immutable releases**.
 3. Settings → Rules → new tag ruleset `release tags`, target `v*`: restrict updates, restrict
    deletions, block force pushes; bypass list empty. (Creation per open question 3.)
@@ -583,16 +584,20 @@ Scenarios the phases are expected to add (names final at the phase breakdown):
    minor (pre-1.0); `-rc.1` first when unsure.
 2. `scripts/release/prepare.sh <version>` → PR `release: prepare v<version>` → merge into `main`;
    `rust.yml` on that merge is green.
-3. Actions → `release` → Run workflow from `main` once: `version`, `commit` (or blank for the
-   head), `dry_run: false` (changed 2026-11-18: no dry run first; `dry_run: true` stays available
-   but is not a step).
+3. Actions → `release` → Run workflow from `main` once: `version`, `commit` = the prepare
+   PR's merge SHA (changed 2026-11-19: a blank `commit` takes `main`'s head, and for rc.1 that was
+   a later hotfix merge, so the tag is not on the prepare merge), `dry_run: false` (changed
+   2026-11-18: no dry run first; `dry_run: true` stays available but is not a step).
 4. The run stops at the `release` environment. Read the summary on the pending deployment:
    guards, asset table, `SHA256SUMS`, notes. Approve (or reject: nothing is public, no tag).
 5. On the published release: `gh release verify v<v>`, and download one archive and run
    `gh attestation verify` on it. `vam --version` from it prints `<v> (<sha> <date>)`.
 6. Nothing to do on `main` afterwards: there is no post-release PR.
 7. If the run failed before publish: there is no tag and the job deleted its draft; fix, then
-   dispatch the same number again. If it failed after publish: do not delete or reuse the tag;
+   dispatch the same number again. (Corrected 2026-11-19 by the rc.1 run: if it failed before the
+   draft's id was recorded, the cleanup cannot find the draft. Delete any draft for that tag by
+   hand first, since `publish.sh check` refuses a tag that any release, draft or not, already
+   uses.) If it failed after publish: do not delete or reuse the tag;
    prepare the next patch (or `-rc.N+1`).
 
 ## 10. Open questions (each with a default)
