@@ -765,13 +765,6 @@ pub async fn run_install(o: Options) -> Result<()> {
         }
     }
 
-    let mut rerun = String::new();
-    if root != Path::new("/") {
-        rerun.push_str(&format!(" --root {}", root.display()));
-    }
-    if o.no_systemd {
-        rerun.push_str(" --no-systemd");
-    }
     super::node_broker::run_brokers(super::node_broker::Plan {
         root: &root,
         brokers: &o.brokers,
@@ -781,7 +774,6 @@ pub async fn run_install(o: Options) -> Result<()> {
         minted_key: minted_key.as_deref(),
         api_host: o.api_host.as_deref(),
         api_token: o.api_token.as_deref(),
-        rerun_flags: rerun,
     })
     .await?;
 

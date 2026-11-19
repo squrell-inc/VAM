@@ -355,7 +355,9 @@ mod imp {
 
     impl Api {
         fn new(base: &str, token: Option<String>, user_agent: &str) -> Result<Self> {
-            let client = crate::transport::client_builder()?
+            // The bundled roots only: `VAM_CA_FILE` and `vam config set-ca` name the node's CA,
+            // which has nothing to do with GitHub, and a stale one must not block an upgrade.
+            let client = crate::transport::client_builder_with(None)?
                 .user_agent(user_agent)
                 .https_only(base.starts_with("https://"))
                 .connect_timeout(Duration::from_secs(10))
@@ -575,14 +577,31 @@ mod imp {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        Err(fail(
-            ExitCode::VerifyFailed,
+        Err(fail(ExitCode::VerifyFailed, attest_refusal(&text)))
+    }
+
+    /// The oldest gh whose `gh attestation verify` takes `--signer-workflow` (`gh attestation`
+    /// itself came in 2.49.0, the flag in 2.51.0).
+    const MIN_GH: &str = "2.51.0";
+
+    /// Why `gh attestation verify` failed, in words: a gh too old to run the check is named as
+    /// such, anything else is a refusal. Nothing is replaced either way.
+    fn attest_refusal(gh_output: &str) -> String {
+        let text = gh_output.trim();
+        let too_old = text.contains("unknown command \"attestation\"")
+            || text.contains("unknown flag: --signer-workflow");
+        if too_old {
+            format!(
+                "this gh is too old to check the attestation: `gh attestation verify \
+                 --signer-workflow` needs gh {MIN_GH} or newer. Nothing was replaced. Upgrade gh \
+                 (`gh --version` shows yours) and run `vam upgrade` again.\n{text}"
+            )
+        } else {
             format!(
                 "`gh attestation verify` refused the download; nothing was replaced. If gh is \
-                 not signed in, run `gh auth login`.\n{}",
-                text.trim()
-            ),
-        ))
+                 not signed in, run `gh auth login`.\n{text}"
+            )
+        }
     }
 
     // ---- extract, smoke-run, replace -------------------------------------------------------
@@ -1079,6 +1098,23 @@ mod imp {
             assert_eq!(find_in_path("gh", d.path().as_os_str()), Some(gh));
             assert!(find_in_path("gh", OsStr::new("")).is_none());
             assert!(find_in_path("gh", OsStr::new("/nonexistent-dir")).is_none());
+        }
+
+        #[test]
+        fn a_gh_too_old_for_the_check_is_named_and_still_refused() {
+            let old = attest_refusal(
+                "unknown command \"attestation\" for \"gh\"\n\nUsage:  gh <command>",
+            );
+            assert!(
+                old.contains("too old") && old.contains("gh 2.51.0 or newer"),
+                "{old}"
+            );
+            assert!(old.contains("Nothing was replaced"), "{old}");
+            let no_flag = attest_refusal("unknown flag: --signer-workflow\n");
+            assert!(no_flag.contains("gh 2.51.0 or newer"), "{no_flag}");
+            let refused = attest_refusal("X no matching attestations found\n");
+            assert!(refused.contains("refused the download"), "{refused}");
+            assert!(!refused.contains("too old"), "{refused}");
         }
 
         #[test]

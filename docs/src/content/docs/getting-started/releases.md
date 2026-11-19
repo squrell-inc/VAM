@@ -21,10 +21,10 @@ Release candidates (`v0.1.0-rc.1` and so on) are pre-releases, so GitHub shows n
 
 `install.sh` installs the `vam` CLI on Linux or macOS. It needs `curl` (or `wget`), `tar` and one of `sha256sum`, `shasum` or `openssl`. It never uses `sudo`.
 
-Until `v0.1.0` there is no "latest" release, so use the tag's own URL:
+Until `v0.1.0` there is no "latest" release, so use the tag's own URL and pass the same tag to `--version`:
 
 ```bash
-curl -fsSL https://github.com/squrell-inc/VAM/releases/download/<tag>/install.sh | sh
+curl -fsSL https://github.com/squrell-inc/VAM/releases/download/<tag>/install.sh | sh -s -- --version <tag>
 ```
 
 To read the script before you run it:
@@ -32,7 +32,7 @@ To read the script before you run it:
 ```bash
 curl -fsSLO https://github.com/squrell-inc/VAM/releases/download/<tag>/install.sh
 less install.sh
-sh install.sh
+sh install.sh --version <tag>
 ```
 
 | Flag | Meaning |
