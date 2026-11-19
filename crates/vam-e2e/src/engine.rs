@@ -218,6 +218,8 @@ struct Ctx {
     cli_root: Option<std::path::PathBuf>,
     /// The secret a `cli` step captured (`{{secret}}` in later `cli` steps). Never printed.
     cli_secret: Option<String>,
+    /// Words a `cli` step kept with `remember` (`{{<as>}}` in later `cli` checks).
+    cli_vars: HashMap<String, String>,
     /// Marketplace steps (`marketplace.rs`).
     mkt: marketplace::MktState,
 }
@@ -3709,6 +3711,32 @@ mod tests {
             Cfg::new(RunTag("abc123".into())),
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn a_member_alias_without_a_key_is_a_scenario_error_and_an_owner_gets_the_bootstrap_key() {
+        let mut e = engine();
+        for (name, role) in [("boss", None), ("mem", Some("Member"))] {
+            let wp: WorldPiece = serde_yaml::from_str(&format!(
+                "piece: {name}\nkind: org\n{}",
+                role.map(|r| format!("role: {r}\n")).unwrap_or_default()
+            ))
+            .unwrap();
+            e.pieces.insert(name.into(), wp);
+            e.ctx.pieces.insert(
+                name.into(),
+                PieceRec {
+                    kind: PieceKind::Org,
+                    piece: name.into(),
+                    urn: String::new(),
+                    name: String::new(),
+                },
+            );
+        }
+        assert_eq!(e.cli_key("boss").unwrap(), "k");
+        let err = e.cli_key("mem").unwrap_err();
+        assert_eq!(err.class, Class::Scenario);
+        assert!(err.expected.contains("a key for `mem`"));
     }
 
     /// The names a scenario run uses: piece name, thread names, idempotency key.

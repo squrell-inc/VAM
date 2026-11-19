@@ -1,8 +1,12 @@
-# Licence policy for dependencies: permissive licences only. Run `cargo deny check licenses`.
+# Dependency policy, checked by `cargo deny check` (scripts/e2e/check-release-gate.sh runs it on every
+# push to main and PR into main; scripts/release/install-tool.sh installs the pinned cargo-deny).
+# release.yml's guard 7 re-runs `cargo deny check advisories` at the commit being released, because
+# new advisories appear after the push run.
 [graph]
 all-features = true
 
 [licenses]
+# Permissive licences only.
 allow = [
     "MIT",
     "MIT-0",
@@ -25,3 +29,38 @@ confidence-threshold = 0.9
 [[licenses.exceptions]]
 allow = ["MPL-2.0"]
 crate = "webpki-roots"
+
+[advisories]
+# The RustSec database. A yanked crate fails; a known vulnerability fails unless it is ignored below.
+yanked = "deny"
+# Each ignore names the id, why it cannot be fixed now, and a date by which it is reviewed again.
+# 2026-11-18: the TLS, h2 and SQLite advisories this policy first ignored were fixed by the
+# reqwest / axum / tonic / tokio-tungstenite / rusqlite upgrade (#37); what remains are crates with
+# no fixed release.
+ignore = [
+    # Unmaintained crates: no fixed release exists. Each is a dependency we choose to keep for now.
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained (vam-firecracker, proc-macro only). Review by 2027-02-18" },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained (serde_yaml 0.9 in vam-spec, vam-e2e, vam-schedule). Review by 2027-02-18" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (vamd and the schedule broker; no fixed release). Review by 2027-02-18" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz is unmaintained (vamd and the schedule broker; pinned to =0.10.4). Review by 2027-02-18" },
+]
+
+[bans]
+# Multiple versions are common in a graph this size; warn, do not fail.
+multiple-versions = "warn"
+# Path dependencies between the workspace crates carry no version; they are not wildcards for us.
+# Registry dependencies with a `*` requirement are reported (a warning, not an error, for now).
+wildcards = "warn"
+allow-wildcard-paths = true
+# VAM uses rustls everywhere; an OpenSSL link would change what a release binary needs at run time.
+deny = [
+    { crate = "openssl" },
+    { crate = "openssl-sys" },
+]
+
+[sources]
+# crates.io only. A `[patch]` path crate (third_party/ext4-view) is a path, not a source.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

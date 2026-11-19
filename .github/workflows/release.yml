@@ -1,0 +1,158 @@
+name: Release
+
+# Starts a release. `workflow_dispatch` only, from `main` (guard 1): there is no tag-on-merge and no
+# schedule. Design: design/release-artifacts.md §4; locked decisions in
+# .cursor/workstreams/release-artifacts.md (2, 4, 5, 6, 7, 8, 9).
+#
+# `validate` checks the guards; `build` calls the reusable release-build.yml (channel `release`) beside
+# it, so the builds run while the guards do, and its `assemble` job leaves one release-<version>
+# artifact (assets, SHA256SUMS, RELEASE_NOTES.md, build-info.json). `publish` runs only when
+# `dry_run` is false, after the owner approves the protected `release` environment: it checks that
+# build and validate agree on the commit, creates a draft release at that commit, uploads every file,
+# attests them, downloads and verifies the draft, publishes (GitHub creates the tag now) and verifies
+# the published release. A failure before publish deletes the draft this run made; after publish it
+# says the number is burned. Every step is in scripts/release/publish.sh and verify.sh, tested
+# against a fake gh. A dry run, or a dispatch with a failed guard, stops before `publish` and the
+# built assets stay in the run's workflow artifacts. scripts/release/check-workflow.sh (run by
+# scripts/release/test/run.sh) holds the rules this file must keep: every action pinned by full
+# SHA, no caches, inputs reach shell only through `env:`, top-level `permissions: {}`, and write
+# permissions only in `publish`.
+run-name: "release ${{ inputs.version }} (dry run: ${{ inputs.dry_run }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release: 0.2.0 or 0.2.0-rc.1 (Cargo.toml at the commit must already say it)"
+        type: string
+        required: true
+      commit:
+        description: "Full 40-hex SHA to release; blank means the head of main"
+        type: string
+        required: false
+        default: ""
+      dry_run:
+        description: "Build and check only; never touch tags or releases"
+        type: boolean
+        required: true
+        default: true
+
+# Nothing is granted by default; each job asks for what it needs.
+permissions: {}
+
+# One release at a time; a second dispatch waits, it never cancels a run that may be publishing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # Read-only: the guards of design §4.2. Inputs reach the script only through `env:`.
+  validate:
+    name: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      commit: ${{ steps.guards.outputs.commit }}
+      version: ${{ steps.guards.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      # A pinned binary checked by sha256 (scripts/release/tools.pins): nothing is compiled.
+      - name: Install cargo-deny
+        run: scripts/release/install-tool.sh cargo-deny
+      - name: Guards
+        id: guards
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/guards.sh
+
+  # Every binary asset, built at the commit and version the dispatch names. Read-only, no secrets;
+  # release-build.yml is the same workflow pull requests run build-only. A build for a version
+  # the guards then refuse is wasted minutes and nothing else: only `publish` (a later wave)
+  # needs `validate`. The inputs are checked there (guard 1 and 2) and again by the build's `meta` job.
+  build:
+    name: build
+    # the called workflow cannot hold more than this: its `assemble` job reads pull request bodies
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/release-build.yml
+    with:
+      version: ${{ inputs.version }}
+      commit: ${{ inputs.commit }}
+      channel: release
+
+  # The only job with write permissions, behind the owner's approval of the `release` environment.
+  # Nothing here is public until `publish.sh publish`. The release is created as a draft at the
+  # built commit, so GitHub creates no tag until it is published; a failure before that deletes the
+  # draft this run made (and only that one), a failure after it leaves everything as it is.
+  publish:
+    name: publish
+    needs: [validate, build]
+    if: ${{ inputs.dry_run == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+      COMMIT: ${{ needs.build.outputs.commit }}
+      VALIDATED_COMMIT: ${{ needs.validate.outputs.commit }}
+      VALIDATED_VERSION: ${{ needs.validate.outputs.version }}
+      INPUT_VERSION: ${{ inputs.version }}
+      DIST: release
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # the reviewed scripts of the dispatched ref (main), not of the commit being released
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-${{ needs.build.outputs.version }}
+          path: release
+      # Everything must agree and the tag and release (drafts included) must be absent, before
+      # anything is created.
+      - name: Check
+        run: |
+          gh --version
+          scripts/release/publish.sh check
+      - name: Create the draft release and upload every file
+        run: scripts/release/publish.sh draft
+      # One provenance attestation for the six assets (subjects listed in SHA256SUMS), one for
+      # SHA256SUMS and the notes. Signed by this workflow, so `--signer-workflow` names release.yml.
+      - name: Attest the assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: release/SHA256SUMS
+      - name: Attest SHA256SUMS and the notes
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            release/SHA256SUMS
+            release/RELEASE_NOTES.md
+      - name: Download and verify the draft
+        run: scripts/release/verify.sh draft
+      - name: Publish
+        run: scripts/release/publish.sh publish
+      - name: Verify the published release
+        run: scripts/release/verify.sh release --dir "$DIST"
+      # A failure before publish: delete this run's draft. After publish: say the number is burned.
+      - name: Clean up after a failure
+        if: ${{ failure() || cancelled() }}
+        run: scripts/release/publish.sh abort

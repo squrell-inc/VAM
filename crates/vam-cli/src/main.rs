@@ -5,13 +5,10 @@ use clap::{ColorChoice, Parser, Subcommand};
 
 use vam_cli::{cmd, output};
 
-/// `vam --version`: the crate version and the git commit it was built from.
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("VAM_GIT_SHA"), ")");
-
 #[derive(Parser)]
 #[command(
     name = "vam",
-    version = VERSION,
+    version = vam_spec::build_info!().leaked_version_line(),
     about = "VAM control-plane CLI (HTTP client for vamd)"
 )]
 struct Cli {

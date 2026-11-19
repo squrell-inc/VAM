@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Release gate: process mode must never ship. Runs every check (no early abort):
 # manifests, the default/feature vamd markers, the default/feature guest markers,
-# the default dependency tree, and that a release needs a green microVM lane (rust.yml).
+# the default dependency tree, `cargo deny check` (licences, advisories, bans, sources; deny.toml)
+# and that a release needs a green microVM lane (rust.yml).
 # Exit 0 = PASS, 1 = any part failed.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -19,6 +20,17 @@ tree_check() {
   echo "ok:   the default workspace dependency tree enables neither feature"
 }
 run default-tree tree_check
+# Dependency policy (deny.toml). The pinned cargo-deny comes from scripts/release/install-tool.sh.
+deny_check() {
+  if ! cargo deny --version >/dev/null 2>&1; then
+    echo "FAIL: cargo-deny is not installed. Install the pinned one: scripts/release/install-tool.sh cargo-deny (it lands in \$HOME/.local/bin; put that on PATH)"
+    return 1
+  fi
+  # --exclude-dev: dev-dependencies are never shipped, and cargo-deny 0.21's graph builder panics on
+  # vam-orchestrator's renamed self dev-dependency (its test-support feature).
+  cargo deny --exclude-dev check
+}
+run deny deny_check
 # The microVM lane blocks releases (launch audit S4): rust.yml must force the lane on for release
 # PRs (into main from feat/*, or labelled `release`) and keep the `release lane (microVM)` job that fails such a PR unless the lane is green.
 lane_check() {

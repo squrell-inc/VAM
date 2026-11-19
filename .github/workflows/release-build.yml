@@ -1,0 +1,404 @@
+name: Release build
+
+# Builds every v0.1.0 binary asset. Called by release.yml (`workflow_call`) and run build-only on
+# pull requests that touch the release path and weekly, so a broken release build shows up before a
+# release does. No publish job, no environment, no secrets, read-only permissions, no caches
+# (locked decisions 8 and 9; design §5.1 and §6). scripts/release/check-workflow.sh holds the rules.
+# `assemble` gathers the assets: scan (gitleaks, key and build-path strings, refused names),
+# SHA256SUMS, release notes (it reads pull request bodies, hence `pull-requests: read`, the one
+# permission beyond `contents: read` in this file) and the release-<version> workflow artifact that
+# release.yml's publish job (a later wave) uploads as the release.
+#
+# The Linux gnu binaries are built inside an AlmaLinux 9 container (glibc 2.34, the decision 8
+# fallback: cargo-zigbuild cannot link cargo-auditable binaries) pinned by digest, on the same
+# runner, with the native gcc and a rustup installed from a sha256-pinned rustup-init. The image
+# digest is the multi-arch index digest of docker.io/library/almalinux:9, read 2026-11-18 with
+# `docker buildx imagetools inspect almalinux:9`; the dnf packages are named below but dnf's
+# repositories are not pinned (like the lane's apt). macOS builds natively.
+#
+# Assets (one workflow artifact each, named asset-<name>):
+#   vam-node-<v>-x86_64-unknown-linux-gnu.tar.gz   node bundle (vamd, vam, three brokers, vam-runtime, base kit)
+#   vam-runtime-<v>-x86_64-unknown-linux-musl      the guest init alone
+#   vam-<v>-<target>.tar.gz                        vam for x86_64/aarch64 Linux gnu and macOS arm64/x86_64
+# Pull request and weekly runs build the Cargo.toml version on channel `dev`; release.yml passes the
+# version being released and channel `release`.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version being built (X.Y.Z or X.Y.Z-rc.N); blank means Cargo.toml's"
+        type: string
+        required: false
+        default: ""
+      commit:
+        description: "Full 40-hex SHA to build; blank means the triggering commit"
+        type: string
+        required: false
+        default: ""
+      channel:
+        description: "release or dev (dev when blank)"
+        type: string
+        required: false
+        default: "dev"
+    outputs:
+      version:
+        description: "The version that was built"
+        value: ${{ jobs.meta.outputs.version }}
+      commit:
+        description: "The commit that was built"
+        value: ${{ jobs.meta.outputs.commit }}
+  pull_request:
+    paths:
+      - "scripts/release/**"
+      - ".github/workflows/release*.yml"
+      - "scripts/build-rootfs.sh"
+      - "scripts/base/**"
+      - "scripts/assets.pins"
+      - "scripts/refused-names.txt"
+      - ".gitleaks.toml"
+      - "Cargo.lock"
+  schedule:
+    - cron: "41 3 * * 1"
+
+# Nothing is granted by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  group: release-build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # What is built: the version, the commit and the channel, resolved once for every job.
+  meta:
+    name: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      commit: ${{ steps.meta.outputs.commit }}
+      channel: ${{ steps.meta.outputs.channel }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Resolve version, commit and channel
+        id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          . scripts/release/lib.sh
+          cargo_version="$(workspace_version < Cargo.toml)"
+          version="${INPUT_VERSION:-$cargo_version}"
+          channel="${INPUT_CHANNEL:-dev}"
+          commit="$(git rev-parse HEAD)"
+          semver_valid "$version" || { echo "version '$version' is not a release version" >&2; exit 1; }
+          case "$channel" in release|dev) ;; *) echo "channel must be release or dev, got '$channel'" >&2; exit 1 ;; esac
+          if [ -n "$INPUT_COMMIT" ] && [ "$INPUT_COMMIT" != "$commit" ]; then
+            echo "checked out $commit, asked for $INPUT_COMMIT" >&2; exit 1
+          fi
+          if [ "$channel" = release ] && [ "$version" != "$cargo_version" ]; then
+            echo "a release build is of Cargo.toml's version $cargo_version, not $version" >&2; exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "commit=$commit"
+            echo "channel=$channel"
+          } >> "$GITHUB_OUTPUT"
+          echo "building $version ($channel) at $commit" >> "$GITHUB_STEP_SUMMARY"
+
+  # The guest init (static musl), built exactly as build-rootfs.sh builds it. It stays outside the
+  # AlmaLinux container because musl-tools is an Ubuntu package (the lane installs the same one).
+  guest:
+    name: guest init (x86_64 musl)
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      VAM_BUILD_CHANNEL: ${{ needs.meta.outputs.channel }}
+      COMMIT: ${{ needs.meta.outputs.commit }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.meta.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Install musl-tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: Build the guest init
+        run: scripts/release/build.sh x86_64-unknown-linux-musl --set guest --out "$RUNNER_TEMP/guest"
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          scripts/release/package.sh --kind runtime --target x86_64-unknown-linux-musl --version "$VERSION" \
+            --runtime "$RUNNER_TEMP/guest/vam-runtime" --out dist
+          file "dist/vam-runtime-$VERSION-x86_64-unknown-linux-musl" | tee /dev/stderr | grep -Eq 'statically linked|static-pie linked'
+          ls -l dist
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: asset-runtime-x86_64-unknown-linux-musl
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # The x86_64 Linux node bundle: host binaries built in AlmaLinux 9, the guest init from `guest`.
+  node-x86_64:
+    name: node bundle (x86_64 linux gnu)
+    needs: [meta, guest]
+    runs-on: ubuntu-24.04
+    container:
+      image: almalinux@sha256:02df05719ef287ebd0df0a1eedb9172a00bd70703aed7b25660e426b8e0d6047
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+      VERSION: ${{ needs.meta.outputs.version }}
+      VAM_BUILD_CHANNEL: ${{ needs.meta.outputs.channel }}
+      COMMIT: ${{ needs.meta.outputs.commit }}
+      # fixed homes: in the container $HOME (/github/home) is not the euid's home (/root), which rustup warns about
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
+    steps:
+      # git first, so actions/checkout does a real clone with tags (it falls back to a tarball without git).
+      - name: Install the build packages
+        run: |
+          dnf -y install --nodocs --setopt=install_weak_deps=False git tar gzip xz which gcc gcc-c++ make cmake perl pkgconf-pkg-config openssl-devel findutils diffutils binutils file jq
+          dnf clean all
+          ldd --version | head -n 1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.meta.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Install rust and the pinned build tools
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          scripts/release/install-rust.sh
+          # GITHUB_PATH reaches later steps only: put cargo on this step's PATH for the cargo installs
+          export PATH="$CARGO_HOME/bin:$PATH"
+          scripts/release/install-tool.sh cargo-auditable cargo-audit
+      - name: Build the host binaries (native gcc, glibc 2.34)
+        run: scripts/release/build.sh "$TARGET" --set node --out "$RUNNER_TEMP/bin"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: asset-runtime-x86_64-unknown-linux-musl
+          path: guest
+      - name: Package
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$COMMIT")"
+          export SOURCE_DATE_EPOCH
+          mkdir -p dist
+          scripts/release/package.sh --kind node --target "$TARGET" --version "$VERSION" \
+            --bins "$RUNNER_TEMP/bin" --runtime "guest/vam-runtime-$VERSION-x86_64-unknown-linux-musl" --out dist
+          ls -l dist
+      # What a user gets: unpack the bundle and run it.
+      - name: Check the bundle
+        run: |
+          set -euo pipefail
+          mkdir smoke && tar -xzf "dist/vam-node-$VERSION-$TARGET.tar.gz" -C smoke
+          d="smoke/vam-node-$VERSION-$TARGET"
+          "$d/vam" --version
+          "$d/vamd" --version
+          for b in vam-web-broker vam-schedule-broker vam-notify-broker; do "$d/$b" --version; done
+          file "$d/vam-runtime" | tee /dev/stderr | grep -Eq 'statically linked|static-pie linked'
+          jq -e --arg v "$VERSION" '.name == "vam/base:2" and .version == $v and (.files | length) > 0' "$d/share/vam/base/manifest.json"
+          (cd "$d/share/vam/base" && jq -r '.files | to_entries[] | "\(.value)  \(.key)"' manifest.json | sha256sum -c -)
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: asset-node-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # `vam` alone for Linux x86_64 and aarch64, in the same AlmaLinux 9 image (the index digest holds
+  # both architectures; each runner pulls its own).
+  cli-linux:
+    name: vam (${{ matrix.target }})
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: almalinux@sha256:02df05719ef287ebd0df0a1eedb9172a00bd70703aed7b25660e426b8e0d6047
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      VAM_BUILD_CHANNEL: ${{ needs.meta.outputs.channel }}
+      COMMIT: ${{ needs.meta.outputs.commit }}
+      # fixed homes: in the container $HOME (/github/home) is not the euid's home (/root), which rustup warns about
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
+    steps:
+      - name: Install the build packages
+        run: |
+          dnf -y install --nodocs --setopt=install_weak_deps=False git tar gzip xz which gcc gcc-c++ make cmake perl pkgconf-pkg-config openssl-devel findutils diffutils binutils file jq
+          dnf clean all
+          ldd --version | head -n 1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.meta.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Install rust and the pinned build tools
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          scripts/release/install-rust.sh
+          # GITHUB_PATH reaches later steps only: put cargo on this step's PATH for the cargo installs
+          export PATH="$CARGO_HOME/bin:$PATH"
+          scripts/release/install-tool.sh cargo-auditable cargo-audit
+      - name: Build vam (native gcc, glibc 2.34)
+        run: scripts/release/build.sh "$TARGET" --set cli --out "$RUNNER_TEMP/bin"
+      - name: Package
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$COMMIT")"
+          export SOURCE_DATE_EPOCH
+          mkdir -p dist
+          scripts/release/package.sh --kind cli --target "$TARGET" --version "$VERSION" --bins "$RUNNER_TEMP/bin" --out dist
+          ls -l dist
+      - name: Check the archive
+        run: |
+          set -euo pipefail
+          mkdir smoke && tar -xzf "dist/vam-$VERSION-$TARGET.tar.gz" -C smoke
+          "smoke/vam-$VERSION-$TARGET/vam" --version | tee "$RUNNER_TEMP/version.txt"
+          grep -q '^vam ' "$RUNNER_TEMP/version.txt"
+          if [ "$VAM_BUILD_CHANNEL" = release ]; then grep -q "^vam $VERSION (" "$RUNNER_TEMP/version.txt"; else grep -q '+dev' "$RUNNER_TEMP/version.txt"; fi
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: asset-vam-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # `vam` alone for macOS, built natively on the runner (no glibc floor to hold).
+  cli-macos:
+    name: vam (${{ matrix.target }})
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      VAM_BUILD_CHANNEL: ${{ needs.meta.outputs.channel }}
+      COMMIT: ${{ needs.meta.outputs.commit }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.meta.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Install the pinned build tools
+        run: scripts/release/install-tool.sh cargo-auditable cargo-audit
+      - name: Build vam
+        run: scripts/release/build.sh "$TARGET" --set cli --out "$RUNNER_TEMP/bin"
+      - name: Package
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$COMMIT")"
+          export SOURCE_DATE_EPOCH
+          mkdir -p dist
+          scripts/release/package.sh --kind cli --target "$TARGET" --version "$VERSION" --bins "$RUNNER_TEMP/bin" --out dist
+          ls -l dist
+      - name: Check the archive
+        run: |
+          set -euo pipefail
+          mkdir smoke && tar -xzf "dist/vam-$VERSION-$TARGET.tar.gz" -C smoke
+          "smoke/vam-$VERSION-$TARGET/vam" --version | tee "$RUNNER_TEMP/version.txt"
+          grep -q '^vam ' "$RUNNER_TEMP/version.txt"
+          if [ "$VAM_BUILD_CHANNEL" = release ]; then grep -q "^vam $VERSION (" "$RUNNER_TEMP/version.txt"; else grep -q '+dev' "$RUNNER_TEMP/version.txt"; fi
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: asset-vam-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Everything that was built, checked and written down once: the release directory (assets,
+  # SHA256SUMS, RELEASE_NOTES.md, build-info.json) as one workflow artifact. Pull requests and the
+  # weekly run prove it; release.yml's publish job (a later wave) uploads it and holds the write
+  # permissions this job never has. The notes read pull requests through the read-only token.
+  assemble:
+    name: assemble
+    needs: [meta, guest, node-x86_64, cli-linux, cli-macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      CHANNEL: ${{ needs.meta.outputs.channel }}
+      COMMIT: ${{ needs.meta.outputs.commit }}
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # full history and tags: the notes read the merges since the previous tag
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.meta.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: asset-*
+          merge-multiple: true
+          path: assets
+      # A pinned binary checked by sha256 (scripts/release/tools.pins): nothing is compiled.
+      - name: Install gitleaks
+        run: scripts/release/install-tool.sh gitleaks
+      # The scan's own tests with the real gitleaks: a planted token, key and .env must fail it.
+      - name: Self-test the scan
+        env:
+          REQUIRE_GITLEAKS: "1"
+        run: scripts/release/test/run.sh scan
+      - name: Assemble
+        run: |
+          set -euo pipefail
+          ls -l assets
+          scripts/release/assemble.sh --version "$VERSION" --commit "$COMMIT" --channel "$CHANNEL" --assets assets --out release
+          ls -l release
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-${{ needs.meta.outputs.version }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7

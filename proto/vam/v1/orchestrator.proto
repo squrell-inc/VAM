@@ -100,6 +100,20 @@ message NodeStatus {
   repeated NodeSigningKey signing_keys = 14;
   // The base image this node boots and the runtimes it holds. Absent on an older node.
   NodeBase base = 15;
+  // The build this node runs: `vamd --version`, as data.
+  NodeBuild build = 16;
+}
+
+// The build a `vamd` was made from (build info is read in the binary crate's build script).
+message NodeBuild {
+  // `0.3.0` on a release build, `0.3.0+dev.14` or `0.3.0+dev` on any other.
+  string version = 1;
+  // Short commit, with `+dirty` when the tree had changes, or `unknown`.
+  string commit = 2;
+  // Commit date `YYYY-MM-DD`; empty when unknown.
+  string commit_date = 3;
+  // `release` (only the release workflow) or `dev`.
+  string channel = 4;
 }
 
 // The standard base image a node boots, from its `<image>.base.json`.

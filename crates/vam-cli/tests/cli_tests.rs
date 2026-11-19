@@ -2854,7 +2854,7 @@ fn agent_suggest_version_prints_a_readable_line() {
 }
 
 #[test]
-fn version_flag_prints_crate_version_and_git_sha() {
+fn version_flag_prints_build_version_and_git_sha() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = run_vam(dir.path(), &["--version"]);
     assert_eq!(
@@ -2866,7 +2866,7 @@ fn version_flag_prints_crate_version_and_git_sha() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.starts_with("vam "), "stdout: {stdout}");
     assert!(
-        stdout.contains(env!("CARGO_PKG_VERSION")),
+        stdout.contains(&vam_spec::build_info!().version),
         "stdout: {stdout}"
     );
     assert!(stdout.contains(" ("), "stdout: {stdout}");

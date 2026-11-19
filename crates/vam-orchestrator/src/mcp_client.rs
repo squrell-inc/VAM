@@ -375,7 +375,7 @@ impl McpClient {
             json!({
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": { "name": "vamd", "version": env!("CARGO_PKG_VERSION") },
+                "clientInfo": { "name": "vamd", "version": vam_spec::build_info!().version },
             }),
         )?;
         let init: McpInitializeResult = serde_json::from_value(result)

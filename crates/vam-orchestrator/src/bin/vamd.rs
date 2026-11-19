@@ -154,6 +154,14 @@ fn run_init(config: &DaemonConfig) -> ! {
 
 #[tokio::main]
 async fn main() {
+    // `--version` first: it reads no env file and no config, and opens nothing.
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        println!("{}", vam_spec::build_info!().line("vamd"));
+        return;
+    }
     dotenvy::dotenv().ok();
     let args: Vec<String> = std::env::args().collect();
     if let Some(msg) = vam_orchestrator::daemon::one_shot_flag_error(&args) {

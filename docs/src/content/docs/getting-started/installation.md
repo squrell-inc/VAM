@@ -11,6 +11,7 @@ proves:
   - plain-chat-gets-a-reply
   - vamd-refuses-plain-http-by-default
   - vm-restores-from-the-golden-snapshot
+  - node-init-from-a-release-bundle-needs-no-checkout
 ---
 
 A VAM node is `vamd` running on a Linux host with KVM, plus the `vam` CLI to talk to it. **`vam node init`** takes a bare host to a running, signed-in-ready node in one command.
@@ -26,13 +27,26 @@ A VAM node is `vamd` running on a Linux host with KVM, plus the `vam` CLI to tal
 | cgroup v2 | The jailer places each microVM in a cgroup |
 | root (`sudo`) | The jailer needs mounts and namespaces; `vamd` runs as root under systemd |
 | Docker | Builds the base image at install time. Nothing needs Docker at run time |
-| A Rust toolchain | Builds `vam` and `vamd` |
+| A Rust toolchain | Builds `vam` and `vamd`. Only for a source build |
 
 Developer laptops (macOS, Windows) need only the `vam` CLI. See [Remote developer workflow](#remote-developer-workflow-macos--windows) below.
 
 ---
 
-## Install a node
+## Install a node from a release
+
+Download the node bundle, check it against `SHA256SUMS`, and run `node init` from inside it. No checkout, no Rust toolchain. See [Releases](/getting-started/releases/) for which archive to take.
+
+```bash
+tar xzf vam-node-<V>-x86_64-unknown-linux-gnu.tar.gz
+cd vam-node-<V>-x86_64-unknown-linux-gnu
+sudo ./vam node init --check
+sudo ./vam node init
+```
+
+The steps below are the same for both ways. With a bundle, Docker builds the base from the bundle's own recipe.
+
+## Install a node from source
 
 ```bash
 git clone <repository-url> vam && cd vam

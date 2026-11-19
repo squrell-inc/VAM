@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "Firecracker fixture-not-a-real-pin"

@@ -155,6 +155,19 @@ fn every_local_ref_resolves() {
 }
 
 #[test]
+fn openapi_node_status_reports_the_build() {
+    let doc = load();
+    let schemas = &doc["components"]["schemas"];
+    assert!(schemas["NodeStatus"]["properties"]["build"].is_mapping());
+    for f in ["version", "commit", "commitDate", "channel"] {
+        assert!(
+            schemas["NodeBuild"]["properties"][f].is_mapping(),
+            "NodeBuild.{f}"
+        );
+    }
+}
+
+#[test]
 fn openapi_has_agent_draft_permissions() {
     let doc = load();
     let path = &doc["paths"]["/v1/agents/{urn}/permissions"];

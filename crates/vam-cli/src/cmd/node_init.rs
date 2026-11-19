@@ -57,6 +57,19 @@ pub struct Line {
     pub fix: String,
 }
 
+pub(crate) fn good(check: &str, detail: impl Into<String>) -> Line {
+    ok(check, detail)
+}
+
+pub(crate) fn problem(
+    check: &str,
+    status: Status,
+    detail: impl Into<String>,
+    fix: impl Into<String>,
+) -> Line {
+    bad(check, status, detail, fix)
+}
+
 fn ok(check: &str, detail: impl Into<String>) -> Line {
     Line {
         check: check.to_string(),
@@ -464,9 +477,11 @@ pub fn render(lines: &[Line]) -> String {
 }
 
 /// `vam node init --check`. Exit 1 when anything is missing or wrong.
-pub fn run_check(root: Option<PathBuf>, vamd: Option<PathBuf>) -> Result<()> {
+pub fn run_check(root: Option<PathBuf>, vamd: Option<PathBuf>, kit: Option<PathBuf>) -> Result<()> {
     let root = root.unwrap_or_else(|| PathBuf::from("/"));
-    let lines = run_checks(&root, vamd.as_deref());
+    let mut lines = run_checks(&root, vamd.as_deref());
+    // A kit line only when a kit is in play (`--kit` or a bundle's `share/vam/base/`).
+    lines.extend(super::node_install::kit_line(kit.as_deref()));
     let failing = lines.iter().filter(|l| l.status.needs_attention()).count();
     if output::is_json() {
         println!("{}", serde_json::to_string(&lines)?);

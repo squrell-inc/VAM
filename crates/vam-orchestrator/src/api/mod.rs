@@ -520,6 +520,16 @@ async fn revoke_key(
     Ok(json_http_response(code, json))
 }
 
+/// The `build` of `GET /v1/node` from a `BuildInfo` (a pure function so a test can pass a fixed one).
+pub fn node_build(info: &vam_spec::build_info::BuildInfo) -> vam_spec::v1::NodeBuild {
+    vam_spec::v1::NodeBuild {
+        version: info.version.clone(),
+        commit: info.commit.clone(),
+        commit_date: info.commit_date.clone(),
+        channel: info.channel.clone(),
+    }
+}
+
 /// Capacity / draining snapshot for the local node.
 ///
 /// Requires `node:read`. Role defaults include that scope for member,
@@ -561,6 +571,7 @@ async fn get_node(State(state): State<AppState>, auth: AuthContext) -> Result<Re
             .map(|k| k.node_signing_keys())
             .unwrap_or_default(),
         base: crate::node_base::report(),
+        build: Some(node_build(&vam_spec::build_info!())),
     };
     let resp = GetNodeStatusResponse {
         status: Some(status),

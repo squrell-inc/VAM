@@ -3,7 +3,7 @@
 # settings CI uses. GitHub Actions is the merge gate for every PR; use --fast
 # before pushing and --full to reproduce a CI failure locally.
 #
-#   scripts/ci/local.sh --fast            fmt, example protos, manifests, cargo check,
+#   scripts/ci/local.sh --fast            fmt, example protos, manifests, release script tests, cargo check,
 #                                         the smoke scenarios            (a wave's own check)
 #   scripts/ci/local.sh --full            --fast plus the clippy gate (default and process-guest
 #                                         features, -D warnings, pinned toolchain) and
@@ -132,6 +132,8 @@ fi
 step "rustfmt";               cargo fmt --all --check;                         record rustfmt ok
 step "example JSON protos";   cargo test -p vam-spec --test examples_json -q;  record protos ok
 step "manifests";             scripts/e2e/check-manifests.sh;                 record manifests ok
+# prepare.sh, the release guards, the workflow lint (and actionlint when installed: CI requires it).
+step "release scripts";       scripts/release/test/run.sh;                    record release-tests ok
 step "marketplace fixture";    scripts/marketplace/check-snapshot.sh;           record marketplace-snapshot ok
 step "bun tests (m365-mail)"; ensure_bun; (cd e2e/world/fixtures/marketplace-squrell && bun test tests); record bun-tests ok
 step "cargo check";           cargo check --workspace -q;                      record check ok

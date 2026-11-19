@@ -1,0 +1,55 @@
+id: cli-prints-its-version-and-commit
+title: Every binary names its version and commit, and a dev build never calls itself a release
+description: >
+  `vam --version` prints `vam <version> (<commit>)`, and `--version` of `vam-web-broker`,
+  `vam-schedule-broker` and `vam-notify-broker` print the same version and commit under their own
+  names. A build made from a checkout carries `+dev` in its version (`+dev.<N>` when a tag is
+  reachable) and no output says `release`. The commit is at least seven hex digits, with
+  `+dirty` when the tree has changes; the date is shown on release builds only.
+tags: [release]
+needs: process
+given: []
+when:
+  - cli:
+      args: [--version]
+      root: { from: version/empty }
+      exit: ok
+      contains: ["+dev"]
+      absent: ["release"]
+      matches:
+        - '^vam \d+\.\d+\.\d+(-rc\.\d+)?\+dev(\.\d+)? \([0-9a-f]{7,}(\+dirty)?\)$'
+      remember: { as: version, after: "vam " }
+  - cli:
+      bin: vam-web-broker
+      args: [--version]
+      root: { from: version/empty }
+      exit: ok
+      contains: ["{{version}}"]
+      absent: ["release"]
+      matches:
+        - '^vam-web-broker \d+\.\d+\.\d+(-rc\.\d+)?\+dev(\.\d+)? \([0-9a-f]{7,}(\+dirty)?\)$'
+  - cli:
+      bin: vam-schedule-broker
+      args: [--version]
+      root: { from: version/empty }
+      exit: ok
+      contains: ["{{version}}"]
+      absent: ["release"]
+      matches:
+        - '^vam-schedule-broker \d+\.\d+\.\d+(-rc\.\d+)?\+dev(\.\d+)? \([0-9a-f]{7,}(\+dirty)?\)$'
+  - cli:
+      bin: vam-notify-broker
+      args: [--version]
+      root: { from: version/empty }
+      exit: ok
+      contains: ["{{version}}"]
+      absent: ["release"]
+      matches:
+        - '^vam-notify-broker \d+\.\d+\.\d+(-rc\.\d+)?\+dev(\.\d+)? \([0-9a-f]{7,}(\+dirty)?\)$'
+guards:
+  - vam:crates/vam-cli/src/main.rs
+  - vam:crates/vam-spec/src/lib.rs
+  - vam:brokers/vam-web/src/bin/vam-web-broker.rs
+  - vam:brokers/vam-schedule/src/bin/vam-schedule-broker.rs
+  - vam:brokers/vam-notify/src/bin/vam-notify-broker.rs
+status: active

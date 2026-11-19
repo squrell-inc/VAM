@@ -35,9 +35,14 @@ on:
           - minimal
         default: standard
 
+# Only a newer run of the same pull request cancels an older one. Every other run (a push to main,
+# a workflow_dispatch) has its own group, so nothing cancels or replaces it: GitHub drops a *pending*
+# run in a shared group even with cancel-in-progress false, and release.yml's guard 3 needs a
+# complete push run (or dispatch run) on the exact SHA it releases. scripts/release/check-workflow.sh
+# checks this block.
 concurrency:
-  group: rust-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: rust-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Process-mode tools (the Microsoft 365 skill) run on the host under Bun. The same pin is in
@@ -82,7 +87,7 @@ jobs:
           esac
           git diff --name-only "origin/${{ github.base_ref }}...HEAD" > "$RUNNER_TEMP/changed.txt"
           cat "$RUNNER_TEMP/changed.txt"
-          if grep -qE '^(crates/(vam-core|vam-firecracker|vam-runtime|vam-orchestrator|vam-vsock|vam-storage|vam-e2e)/|scripts/e2e/|scripts/build-rootfs[^/]*\.sh$|scripts/base/|e2e/(scenarios|world)/|proto/|Cargo\.lock$|\.github/workflows/rust\.yml$)' "$RUNNER_TEMP/changed.txt"; then
+          if grep -qE '^(crates/(vam-core|vam-firecracker|vam-runtime|vam-orchestrator|vam-vsock|vam-storage|vam-e2e)/|scripts/e2e/|scripts/build-rootfs[^/]*\.sh$|scripts/release/build-guest\.sh$|scripts/base/|e2e/(scenarios|world)/|proto/|Cargo\.lock$|\.github/workflows/rust\.yml$)' "$RUNNER_TEMP/changed.txt"; then
             echo "vm=true" >> "$GITHUB_OUTPUT"
           else
             echo "vm=false" >> "$GITHUB_OUTPUT"
@@ -113,6 +118,16 @@ jobs:
         run: cargo fmt --all --check
       - name: example JSON protos
         run: cargo test -p vam-spec --test examples_json
+      # Pinned binaries checked by sha256 (scripts/release/tools.pins): cargo-deny for the release
+      # gate below, actionlint for the workflow lint in the release script tests.
+      - name: Install cargo-deny and actionlint
+        run: scripts/release/install-tool.sh cargo-deny actionlint
+      # Offline: prepare.sh, the release guards against a fixture repository, install-tool.sh, the
+      # release workflow lint and actionlint over the release workflows.
+      - name: Release script tests
+        env:
+          REQUIRE_ACTIONLINT: "1"
+        run: scripts/release/test/run.sh
       # Process mode must never ship. The manifest check runs on every PR; the
       # build gate (default vs process-guest vamd and vam-runtime) runs on PRs
       # into main and on pushes to main.
@@ -307,7 +322,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/vam-assets
-          key: fc-assets-${{ inputs.base || 'standard' }}-${{ hashFiles('scripts/e2e/firecracker-assets.sh', 'scripts/assets.pins', 'scripts/build-rootfs.sh', 'scripts/base/**', 'Cargo.lock', 'crates/vam-runtime/**') }}
+          key: fc-assets-${{ inputs.base || 'standard' }}-${{ hashFiles('scripts/e2e/firecracker-assets.sh', 'scripts/assets.pins', 'scripts/build-rootfs.sh', 'scripts/release/build-guest.sh', 'scripts/base/**', 'Cargo.lock', 'crates/vam-runtime/**') }}
           restore-keys: fc-assets-${{ inputs.base || 'standard' }}-
       - name: Check assets (cheap, first)
         env:

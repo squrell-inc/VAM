@@ -23,6 +23,7 @@ enum ProviderKind {
 #[derive(Debug, Parser)]
 #[command(
     name = "vam-web-broker",
+    version = vam_spec::build_info!().leaked_version_line(),
     about = "HSP web broker: web_search and web_fetch. The search key arrives per invoke from vamd, never from the environment."
 )]
 struct Args {
