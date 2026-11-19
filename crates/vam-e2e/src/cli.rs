@@ -17,7 +17,7 @@ impl Engine {
         let what = "the built program runs on the fixture tree";
         let var = x.bin.env_var();
         let mut cli = std::env::var(var).unwrap_or_default();
-        if cli.is_empty() {
+        if cli.is_empty() && x.exec.is_none() {
             return Err(Fail::new(
                 Class::Env,
                 what,
@@ -34,7 +34,19 @@ impl Engine {
             ));
         }
         let root = self.cli_tree(x, what)?;
+        // the built vam (before `exec` points at a file in the tree): the tree scan skips its copies
         let built_cli = cli.clone();
+        if let Some(rel) = &x.exec {
+            let path = root.join(rel);
+            if !path.is_file() {
+                return Err(Fail::new(
+                    Class::Product,
+                    format!("`{rel}` exists in the tree to run"),
+                    "the file does not exist",
+                ));
+            }
+            cli = path.to_string_lossy().into_owned();
+        }
         if let Some(rel) = &x.copy_cli {
             let dst = root.join(rel);
             if let Some(dir) = dst.parent() {
@@ -47,8 +59,40 @@ impl Engine {
                     format!("{rel}: {e}"),
                 )
             })?;
+            for b in &x.copy_bins {
+                let var = match b.as_str() {
+                    "vam-web-broker" => "VAM_E2E_WEB_BROKER",
+                    "vam-schedule-broker" => "VAM_E2E_SCHEDULE_BROKER",
+                    _ => "VAM_E2E_NOTIFY_BROKER",
+                };
+                let src = std::env::var(var).unwrap_or_default();
+                if src.is_empty() {
+                    return Err(Fail::new(
+                        Class::Env,
+                        "the built broker is copied beside vam",
+                        format!("{var} is not set (scripts/e2e/run.sh exports it)"),
+                    ));
+                }
+                let to = dst.with_file_name(b);
+                std::fs::copy(&src, &to).map_err(|e| {
+                    Fail::new(
+                        Class::Harness,
+                        "copy a built broker into the tree",
+                        format!("{b}: {e}"),
+                    )
+                })?;
+            }
             cli = dst.to_string_lossy().into_owned();
         }
+        self.ctx
+            .cli_brokers
+            .extend(x.cleanup_brokers.iter().cloned());
+        let urls: Vec<(String, String)> = self
+            .ctx
+            .release_servers
+            .iter()
+            .map(|(k, v)| (format!("{{{{url:{k}}}}}"), v.base.clone()))
+            .collect();
         let secret = self.ctx.cli_secret.clone().unwrap_or_default();
         let vars = self.ctx.cli_vars.clone();
         let sub = |t: &str| {
@@ -58,6 +102,9 @@ impl Engine {
                 .replace("{{secret}}", &secret);
             for (k, v) in &vars {
                 t = t.replace(&format!("{{{{{k}}}}}"), v);
+            }
+            for (k, v) in &urls {
+                t = t.replace(k.as_str(), v);
             }
             t
         };
@@ -76,8 +123,13 @@ impl Engine {
             args = pre;
             ca = self.api.ca_path().map(|p| p.to_path_buf());
         }
-        // HOME is beside the tree, not in it, so a step that must leave the tree unchanged can.
-        let home = root.with_extension("home");
+        // HOME is beside the tree, not in it, so a step that must leave the tree unchanged can;
+        // `home: tree` puts it in the tree (a command that edits the user's login files).
+        let home = if x.home.as_deref() == Some("tree") {
+            root.clone()
+        } else {
+            root.with_extension("home")
+        };
         let _ = std::fs::create_dir_all(&home);
         let before = x.unchanged.then(|| snapshot(&root));
         let file_before: Vec<(String, Option<Vec<u8>>)> = x
@@ -93,6 +145,9 @@ impl Engine {
             .env("HOME", &home)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        for (k, v) in &x.env {
+            cmd.env(k, sub(v));
+        }
         if let Some(ca) = ca {
             cmd.env("VAM_CA_FILE", ca);
         }
@@ -177,8 +232,27 @@ impl Engine {
             for (k, v) in &vars {
                 t = t.replace(&format!("{{{{{k}}}}}"), v);
             }
+            for (k, v) in &urls {
+                t = t.replace(k.as_str(), v);
+            }
             t
         };
+        if let Some(r) = &x.requests {
+            let got = self.ctx.release_servers.get(&r.piece).map(|s| s.count());
+            if got != Some(r.count) {
+                return Err(Fail::new(
+                    Class::Product,
+                    format!(
+                        "`{}` has answered {} request(s) after the step",
+                        r.piece, r.count
+                    ),
+                    format!(
+                        "it answered {}",
+                        got.map_or("none (no such server)".into(), |g| g.to_string())
+                    ),
+                ));
+            }
+        }
         if let Some(before) = before {
             if before != snapshot(&root) {
                 return Err(Fail::new(
@@ -225,6 +299,22 @@ impl Engine {
         for (path, f) in &x.files {
             let got = std::fs::read(root.join(path)).ok();
             let want_file = format!("`{path}` under the tree");
+            if let Some(want) = f.exists {
+                if want != got.is_some() {
+                    return Err(Fail::new(
+                        Class::Product,
+                        format!(
+                            "{want_file} {}",
+                            if want { "exists" } else { "does not exist" }
+                        ),
+                        if want {
+                            "the file does not exist"
+                        } else {
+                            "the file exists"
+                        },
+                    ));
+                }
+            }
             if (f.contains.is_some() || f.absent.is_some() || f.unchanged) && got.is_none() {
                 return Err(Fail::new(
                     Class::Product,
@@ -239,6 +329,16 @@ impl Engine {
                         Class::Product,
                         format!("{want_file} contains `{c}`"),
                         "it does not",
+                    ));
+                }
+            }
+            if let (Some(c), Some(n)) = (&f.contains, f.count) {
+                let seen = body.matches(&sub(c)).count();
+                if seen != n {
+                    return Err(Fail::new(
+                        Class::Product,
+                        format!("{want_file} contains `{c}` {n} time(s)"),
+                        format!("it contains it {seen} time(s)"),
                     ));
                 }
             }
@@ -279,9 +379,23 @@ impl Engine {
         }
         // The binary under test (copied into the tree by `copyCli`, in this step or an earlier
         // one) is not output of the step: the tree scan skips copies of it.
-        let placed = std::fs::read(&built_cli).ok();
+        // The built brokers `copyBins` places beside it are the same kind of copy.
+        let mut placed: Vec<Vec<u8>> = std::fs::read(&built_cli).ok().into_iter().collect();
+        for var in [
+            "VAM_E2E_WEB_BROKER",
+            "VAM_E2E_SCHEDULE_BROKER",
+            "VAM_E2E_NOTIFY_BROKER",
+        ] {
+            if let Some(b) = std::env::var(var)
+                .ok()
+                .filter(|p| !p.is_empty())
+                .and_then(|p| std::fs::read(p).ok())
+            {
+                placed.push(b);
+            }
+        }
         for a in x.absent.iter().chain(&x.absent_in_files) {
-            if let Some(f) = find_in_tree(&root, sub(a).as_bytes(), placed.as_deref()) {
+            if let Some(f) = find_in_tree(&root, sub(a).as_bytes(), &placed) {
                 return Err(Fail::new(
                     Class::Product,
                     format!("no file under the tree contains `{a}`"),
@@ -313,6 +427,74 @@ impl Engine {
                 format!("a key for `{alias}`"),
                 "none yet",
             ))
+        }
+    }
+
+    /// A `release-server` piece: builds the release's assets from the fixture and serves them.
+    pub(super) fn start_release_server_piece(
+        &mut self,
+        alias: &str,
+        wp: &crate::world::WorldPiece,
+    ) -> Result<(), Fail> {
+        let what = format!("release server of piece `{}`", wp.piece);
+        let Some(fixture) = wp.fixture_dir.clone().filter(|d| d.is_dir()) else {
+            return Err(Fail::new(
+                Class::Harness,
+                what,
+                "the fixture directory is missing",
+            ));
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "vam-e2e-release-{}-{}-{alias}",
+            self.cfg.tag.0,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tag = wp
+            .release_tag
+            .clone()
+            .unwrap_or_else(|| "v9.9.9".to_string());
+        let srv = crate::release_server::start(
+            &fixture,
+            &dir,
+            &tag,
+            wp.prerelease,
+            wp.tamper.as_deref() == Some("sum"),
+        )
+        .map_err(|e| Fail::new(Class::Harness, what, e))?;
+        self.ctx.release_servers.insert(alias.to_string(), srv);
+        Ok(())
+    }
+
+    /// Stops release servers and removes the broker registrations a `cli` step may have made.
+    pub(super) fn cleanup_cli(&mut self) {
+        for (_, s) in std::mem::take(&mut self.ctx.release_servers) {
+            s.stop();
+        }
+        for id in std::mem::take(&mut self.ctx.cli_brokers) {
+            let _ = self
+                .api
+                .delete(&format!("/v1/hosted/brokers/{}", super::seg(&id)));
+        }
+        // A broker `node init --no-systemd` started detached is not supervised: stop the ones
+        // recorded under the scratch tree.
+        if let Some(root) = &self.ctx.cli_root {
+            if let Ok(rd) = std::fs::read_dir(root.join("var/lib/vam/brokers")) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|x| x.to_str()) != Some("pid") {
+                        continue;
+                    }
+                    if let Some(pid) = std::fs::read_to_string(&p)
+                        .ok()
+                        .and_then(|t| t.trim().parse::<u32>().ok())
+                    {
+                        let _ = std::process::Command::new("kill")
+                            .arg(pid.to_string())
+                            .status();
+                    }
+                }
+            }
         }
     }
 
@@ -411,8 +593,8 @@ fn snapshot(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
 }
 
 /// The first file under `dir` that contains `needle`, skipping files whose bytes are exactly
-/// `skip` (the runner's own copies of the binary under test).
-fn find_in_tree(dir: &Path, needle: &[u8], skip: Option<&[u8]>) -> Option<PathBuf> {
+/// one of `skip` (the runner's own copies of the binaries under test).
+fn find_in_tree(dir: &Path, needle: &[u8], skip: &[Vec<u8>]) -> Option<PathBuf> {
     if needle.is_empty() {
         return None;
     }
@@ -425,7 +607,7 @@ fn find_in_tree(dir: &Path, needle: &[u8], skip: Option<&[u8]>) -> Option<PathBu
             }
         } else if t.is_file() {
             if let Ok(b) = std::fs::read(&p) {
-                if skip == Some(b.as_slice()) {
+                if skip.contains(&b) {
                     continue;
                 }
                 if b.windows(needle.len()).any(|w| w == needle) {
@@ -497,19 +679,33 @@ mod tests {
         std::fs::write(t.path().join("out.txt"), "done base: built from the kit").unwrap();
         let word = b"checkout";
         assert_eq!(
-            find_in_tree(t.path(), word, None),
+            find_in_tree(t.path(), word, &[]),
             Some(t.path().join("kit-1/vam"))
         );
-        assert_eq!(find_in_tree(t.path(), word, Some(&bin)), None);
+        assert_eq!(
+            find_in_tree(t.path(), word, std::slice::from_ref(&bin)),
+            None
+        );
         std::fs::write(t.path().join("out.txt"), "looking for a checkout").unwrap();
         assert_eq!(
-            find_in_tree(t.path(), word, Some(&bin)),
+            find_in_tree(t.path(), word, std::slice::from_ref(&bin)),
             Some(t.path().join("out.txt"))
         );
         // a modified copy is not the binary under test
         std::fs::write(t.path().join("kit-1/vam"), b"other checkout").unwrap();
         std::fs::write(t.path().join("out.txt"), "clean").unwrap();
-        assert!(find_in_tree(t.path(), word, Some(&bin)).is_some());
+        assert!(find_in_tree(t.path(), word, std::slice::from_ref(&bin)).is_some());
+        // a copied broker is skipped; a different file with the needle is still found
+        let broker = b"\x7fELF broker checkout".to_vec();
+        std::fs::write(t.path().join("kit-1/vam"), &bin).unwrap();
+        std::fs::write(t.path().join("vam-web-broker"), &broker).unwrap();
+        let skip = [bin.clone(), broker.clone()];
+        assert_eq!(find_in_tree(t.path(), word, &skip), None);
+        std::fs::write(t.path().join("other"), b"another checkout").unwrap();
+        assert_eq!(
+            find_in_tree(t.path(), word, &skip),
+            Some(t.path().join("other"))
+        );
     }
 
     #[test]
@@ -564,8 +760,18 @@ mod tests {
             "{ args: [x], root: { from: a }, exit: ok, bin: nonsense }",
         );
         assert!(bad.is_err());
+        let ok: CliStep = serde_yaml::from_str(
+            "{ args: [x], root: { from: a }, exit: ok, home: tree, env: { A: b }, exec: bin/vam, \
+             requests: { piece: s, count: 0 }, copyBins: [vam-web-broker], cleanupBrokers: [vam.web], \
+             files: { f: { contains: x, count: 1, exists: true } } }",
+        )
+        .unwrap();
+        assert_eq!(ok.home.as_deref(), Some("tree"));
+        assert_eq!(ok.env["A"], "b");
+        assert_eq!(ok.requests.unwrap().count, 0);
+        assert_eq!(ok.files["f"].count, Some(1));
         let bad = serde_yaml::from_str::<CliStep>(
-            "{ args: [x], root: { from: a }, exit: ok, home: tree }",
+            "{ args: [x], root: { from: a }, exit: ok, nonsense: 1 }",
         );
         assert!(bad.is_err());
     }

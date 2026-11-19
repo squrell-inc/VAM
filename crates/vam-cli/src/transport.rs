@@ -27,8 +27,13 @@ fn pick_ca_file(env: Option<String>, file: Option<String>) -> Option<PathBuf> {
 
 /// A client builder that trusts the configured CA file (if any) as well as the built-in roots.
 pub fn client_builder() -> Result<reqwest::ClientBuilder> {
+    client_builder_with(ca_file())
+}
+
+/// Like [`client_builder`] with an explicit CA file (`None`: only the built-in roots).
+pub fn client_builder_with(ca: Option<PathBuf>) -> Result<reqwest::ClientBuilder> {
     let mut b = reqwest::Client::builder().bundled_roots();
-    if let Some(path) = ca_file() {
+    if let Some(path) = ca {
         let pem = std::fs::read(&path).with_context(|| format!("read CA file {path:?}"))?;
         parse_pem_cert(&pem).with_context(|| format!("CA file {path:?}"))?;
         let cert = reqwest::Certificate::from_pem(&pem)

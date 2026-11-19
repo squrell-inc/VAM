@@ -5,4 +5,9 @@ mod build_info_logic;
 
 fn main() {
     build_info_logic::emit_build_info();
+    // The target this `vam` is built for: `vam upgrade` picks the release asset for it.
+    println!(
+        "cargo:rustc-env=VAM_TARGET={}",
+        std::env::var("TARGET").unwrap_or_default()
+    );
 }

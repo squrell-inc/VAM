@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Release gate: process mode must never ship. Runs every check (no early abort):
-# manifests, the default/feature vamd markers, the default/feature guest markers,
+# manifests, the default/feature vamd markers, the default/feature guest markers, the `vam upgrade`
+# test seam (absent from the default `vam`),
 # the default dependency tree, `cargo deny check` (licences, advisories, bans, sources; deny.toml)
 # and that a release needs a green microVM lane (rust.yml).
 # Exit 0 = PASS, 1 = any part failed.
@@ -13,11 +14,12 @@ run manifests scripts/e2e/check-manifests.sh
 run vamd-build scripts/e2e/check-vamd-build.sh
 run guest-build scripts/e2e/check-guest-build.sh
 run notify-build scripts/e2e/check-notify-build.sh
+run upgrade-build scripts/e2e/check-upgrade-build.sh
 tree_check() {
-  if cargo tree -q --workspace -e normal,build,features | grep -E 'process-guest|uds-transport' >/dev/null; then
-    echo "FAIL: the default workspace dependency tree enables process-guest or uds-transport"; return 1
+  if cargo tree -q --workspace -e normal,build,features | grep -E 'process-guest|uds-transport|upgrade-seam' >/dev/null; then
+    echo "FAIL: the default workspace dependency tree enables process-guest, uds-transport or upgrade-seam"; return 1
   fi
-  echo "ok:   the default workspace dependency tree enables neither feature"
+  echo "ok:   the default workspace dependency tree enables none of process-guest, uds-transport and upgrade-seam"
 }
 run default-tree tree_check
 # Dependency policy (deny.toml). The pinned cargo-deny comes from scripts/release/install-tool.sh.

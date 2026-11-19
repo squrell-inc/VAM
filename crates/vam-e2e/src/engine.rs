@@ -220,6 +220,10 @@ struct Ctx {
     cli_secret: Option<String>,
     /// Words a `cli` step kept with `remember` (`{{<as>}}` in later `cli` checks).
     cli_vars: HashMap<String, String>,
+    /// Running `release-server` pieces by alias (`cli.rs`).
+    release_servers: HashMap<String, crate::release_server::ReleaseServer>,
+    /// Broker ids a `cli` step may have registered; deleted at cleanup (`cli.rs`).
+    cli_brokers: Vec<String>,
     /// Marketplace steps (`marketplace.rs`).
     mkt: marketplace::MktState,
 }
@@ -593,7 +597,8 @@ impl Engine {
                 | PieceKind::Broker
                 | PieceKind::WorkspaceSeed
                 | PieceKind::MockProvider
-                | PieceKind::GitMarketplace => "",
+                | PieceKind::GitMarketplace
+                | PieceKind::ReleaseServer => "",
             };
             // A deferred playbook, or a deferred agent that is not released, is written by a
             // `put-draft` step, as an identity.
@@ -654,6 +659,9 @@ impl Engine {
         }
         if wp.kind == PieceKind::GitMarketplace {
             self.start_git_marketplace_piece(&wp)?;
+        }
+        if wp.kind == PieceKind::ReleaseServer {
+            self.start_release_server_piece(alias, &wp)?;
         }
         self.ctx.pieces.insert(
             alias.to_string(),
@@ -814,6 +822,7 @@ impl Engine {
     fn cleanup_inner(&mut self) {
         let runs = self.ctx.runs.clone();
         self.stop_brokers();
+        self.cleanup_cli();
         // Connectors first: an installed connector's node state (its client and vault secret) can only
         // be cleared while the connector is installed, and removing its marketplace uninstalls it.
         self.cleanup_connectors();

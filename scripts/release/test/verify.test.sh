@@ -13,8 +13,8 @@ run_cmd env GITHUB_STEP_SUMMARY="$W/summary.md" "$verify" release 0.1.0-rc.1 -R 
 expect_eq "a published release verifies" 0 "$T_RC"
 expect_match "it says so" "all checks passed for v0\.1\.0-rc\.1" "$T_OUT"
 expect_match "the assets were downloaded" "release download v0\.1\.0-rc\.1 -R acme/vam -D" "$(calls)"
-expect_eq "verify-asset ran for all eight files" "8" "$(calls | grep -c 'release verify-asset v[^ ]* /')"
-expect_eq "attestation verify ran for all eight files" "8" "$(calls | grep -c 'attestation verify /')"
+expect_eq "verify-asset ran for all nine files" "9" "$(calls | grep -c 'release verify-asset v[^ ]* /')"
+expect_eq "attestation verify ran for all nine files" "9" "$(calls | grep -c 'attestation verify /')"
 expect_match "with the repository's release workflow as signer" "--signer-workflow acme/vam/\.github/workflows/release\.yml --source-ref refs/heads/main" "$(calls)"
 expect_match "the summary has a row per file" "\| \`SHA256SUMS\` \| ok, attestation verified \|" "$(cat "$W/summary.md")"
 

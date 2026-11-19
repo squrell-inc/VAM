@@ -1,0 +1,61 @@
+id: upgrade-replaces-vam-with-the-newer-release
+title: vam upgrade replaces vam with the newer release, and the CLI never calls out unasked
+description: >
+  `vam --version` and `vam node status` make no request to the release server (the CLI never
+  calls the network unasked). `vam upgrade --check --pre` names `v9.9.9` and changes nothing.
+  `vam upgrade --pre` replaces the tree's copy of `vam` with the one in the fixture archive,
+  which prints `vam 9.9.9 (fixture)`; the output says the attestation was not checked because
+  `gh` is absent (the `PATH` holds no `gh`). Refusing a downgrade and "up to date" are unit tests.
+tags: [release]
+needs: process
+given:
+  - org-admin
+  - release-server
+when:
+  - cli:
+      args: [--version]
+      root: { from: dock/home }
+      copyCli: bin/vam
+      home: tree
+      env: { VAM_UPGRADE_API_URL: "{{url:release-server}}" }
+      exit: ok
+      matches: ['^vam \d+\.\d+\.\d+']
+      requests: { piece: release-server, count: 0 }
+  - cli:
+      args: [node, status]
+      root: { same: true }
+      exec: bin/vam
+      as: org-admin
+      home: tree
+      env: { VAM_UPGRADE_API_URL: "{{url:release-server}}" }
+      exit: ok
+      requests: { piece: release-server, count: 0 }
+  - cli:
+      args: [upgrade, --check, --pre]
+      root: { same: true }
+      exec: bin/vam
+      home: tree
+      env: { VAM_UPGRADE_API_URL: "{{url:release-server}}", PATH: "{{root}}/nobin" }
+      exit: ok
+      contains: ["v9.9.9"]
+      files:
+        bin/vam: { unchanged: true }
+  - cli:
+      args: [upgrade, --pre]
+      root: { same: true }
+      exec: bin/vam
+      home: tree
+      env: { VAM_UPGRADE_API_URL: "{{url:release-server}}", PATH: "{{root}}/nobin" }
+      exit: ok
+      contains: ["attestation", "gh"]
+  - cli:
+      args: [--version]
+      root: { same: true }
+      exec: bin/vam
+      home: tree
+      exit: ok
+      contains: ["vam 9.9.9 (fixture)"]
+guards:
+  - vam:crates/vam-cli/src/main.rs
+  - vam:crates/vam-cli/src/cmd/upgrade.rs
+status: active

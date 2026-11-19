@@ -1,0 +1,7 @@
+piece: release-server-bad-sum
+kind: release-server
+# The same release with one wrong `SHA256SUMS` line: the archive is intact, its listed hash is not.
+fixture: release/server
+releaseTag: v9.9.9
+prerelease: true
+tamper: sum

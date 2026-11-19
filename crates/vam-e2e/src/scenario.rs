@@ -319,6 +319,24 @@ pub struct CliStep {
     pub timeout: Option<u64>,
     /// A path in the tree: run a copy of `vam` placed there.
     pub copy_cli: Option<String>,
+    /// `tree`: `HOME` is the scratch tree itself (default: a directory beside it).
+    pub home: Option<String>,
+    /// Extra environment variables for the command (the environment is otherwise only `PATH` and
+    /// `HOME`). `{{root}}` and `{{url:<release-server alias>}}` are replaced in the values.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// A path in the tree: run the file already there (no copy of the built program), so a step
+    /// can run a binary that an earlier step replaced.
+    pub exec: Option<String>,
+    /// After the step, a `release-server` piece has answered exactly this many requests.
+    pub requests: Option<CliRequests>,
+    /// Built programs (`vam-web-broker`, `vam-schedule-broker`, `vam-notify-broker`) copied into
+    /// the directory of `copyCli`, beside the copied `vam`.
+    #[serde(default)]
+    pub copy_bins: Vec<String>,
+    /// Broker ids the command may register on the node; the runner deletes them at cleanup.
+    #[serde(default)]
+    pub cleanup_brokers: Vec<String>,
     /// Assertions on files in the tree, by path.
     #[serde(default)]
     pub files: std::collections::BTreeMap<String, CliFile>,
@@ -332,12 +350,24 @@ pub struct CliRemember {
     pub after: String,
 }
 
+/// How many requests a `release-server` piece has answered so far.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliRequests {
+    pub piece: String,
+    pub count: usize,
+}
+
 /// What a `cli` step asserts on one file under the tree.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliFile {
     pub contains: Option<String>,
     pub absent: Option<String>,
+    /// `contains` occurs exactly this many times.
+    pub count: Option<usize>,
+    /// The file exists (`true`) or does not (`false`).
+    pub exists: Option<bool>,
     /// The file's bytes are what they were before the step.
     #[serde(default)]
     pub unchanged: bool,

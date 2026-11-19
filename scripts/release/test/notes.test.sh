@@ -106,7 +106,7 @@ mk_assets 0.1.0-rc.2
 T_OUT="$(cd "$base" && "$notes" --version 0.1.0-rc.2 --commit "$head" --assets "$assets" --repo "$repo_name" 2>/dev/null)"
 a="vam-0.1.0-rc.2-aarch64-apple-darwin.tar.gz"
 expect_match "a row has name, size and sha256" "\| \`$a\` \| $(file_size "$assets/$a") \| \`$(sha256_of "$assets/$a")\` \|" "$T_OUT"
-expect_eq "one row per asset" "$(release_assets 0.1.0-rc.2 | wc -l | tr -d ' ')" "$(grep -c '^| `vam' <<< "$T_OUT")"
+expect_eq "one row per asset" "$(release_assets 0.1.0-rc.2 | wc -l | tr -d ' ')" "$(grep -cE "^\| \`(vam|install)" <<< "$T_OUT")"
 expect_match "gh release verify names the tag and repository" "gh release verify v0\.1\.0-rc\.2 -R acme/vam" "$T_OUT"
 expect_match "gh release verify-asset" "gh release verify-asset v0\.1\.0-rc\.2 <asset> -R acme/vam" "$T_OUT"
 expect_match "the attestation check names the signer workflow of the repository" "gh attestation verify <asset> -R acme/vam --signer-workflow acme/vam/.github/workflows/release\.yml" "$T_OUT"

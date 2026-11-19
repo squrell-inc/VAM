@@ -33,6 +33,10 @@ pub enum PieceKind {
     /// and serves the result as a bare repo (`file://`), standing in for `url`.
     #[serde(rename = "git-marketplace")]
     GitMarketplace,
+    /// A runner-hosted loopback release server: a GitHub-like `releases` API and the assets of
+    /// one release made from a fixture directory. It counts the requests it answers.
+    #[serde(rename = "release-server")]
+    ReleaseServer,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +116,13 @@ pub struct WorldPiece {
     pub preconfigured: bool,
     /// `git-marketplace` only: the `publisherDomain` the admin confirms when adding it.
     pub publisher_domain: Option<String>,
+    /// `release-server` only: the release's tag (default `v9.9.9`).
+    pub release_tag: Option<String>,
+    /// `release-server` only: the release is a pre-release (`releases/latest` then answers 404).
+    #[serde(default)]
+    pub prerelease: bool,
+    /// `release-server` only: `sum` writes one wrong hash line into `SHA256SUMS`.
+    pub tamper: Option<String>,
     /// Set by the loader: the absolute fixture directory of a `workspace-seed` or `git-marketplace` piece.
     #[serde(skip)]
     pub fixture_dir: Option<std::path::PathBuf>,

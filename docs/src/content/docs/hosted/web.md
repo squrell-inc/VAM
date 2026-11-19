@@ -36,7 +36,9 @@ scripts/run-web-broker.sh --dry-run   # print the registration request and exit
 scripts/run-web-broker.sh --stop      # stop the broker the script started
 ```
 
-Other options: `--fixtures DIR` (for `--mock`) and `--foreground`. The script needs `jq` and `curl`, registers the manifest (`scripts/web-broker/manifest.json`) with `PUT /v1/hosted/brokers`, and reads `VAMD_URL` (default `http://127.0.0.1:8080`), `VAMD_ADMIN_KEY` (an API key with `brokers:admin`, default `$VAM_API_KEY`), `VAM`, `VAM_WEB_SOCKET` (default `/tmp/vam-web.sock`), `VAM_WEB_BIN` and `VAM_WEB_STATE_DIR`.
+On a node installed from a release, `sudo vam node init --broker web` does this for you; see [Hosted Brokers](/hosted/overview/#install-the-brokers-with-the-node). The script is for a source checkout.
+
+Other options: `--fixtures DIR` (for `--mock`) and `--foreground`. The script needs `jq` and `curl`, registers the manifest (`brokers/vam-web/manifest.json`, printed by `vam-web-broker manifest`) with `PUT /v1/hosted/brokers`, and reads `VAMD_URL` (default `http://127.0.0.1:8080`), `VAMD_ADMIN_KEY` (an API key with `brokers:admin`, default `$VAM_API_KEY`), `VAM`, `VAM_WEB_SOCKET` (default `/tmp/vam-web.sock`), `VAM_WEB_BIN` and `VAM_WEB_STATE_DIR`.
 
 The fetcher sends `User-Agent: VAM-WebFetch/1 (+<docs-url>)`. By default `<docs-url>` is this page, `https://docs.squrell.dev/hosted/web/`, so site owners can find out who is fetching. Operators can override it with the broker's `--docs-url` flag.
 

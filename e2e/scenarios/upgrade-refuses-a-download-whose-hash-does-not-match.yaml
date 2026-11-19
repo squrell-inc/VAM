@@ -1,0 +1,26 @@
+id: upgrade-refuses-a-download-whose-hash-does-not-match
+title: vam upgrade refuses a download whose hash is not the one listed, and leaves vam as it was
+description: >
+  The tree's copy of `vam` runs `vam upgrade --version v9.9.9` against a fixture release server
+  (reached through `VAM_UPGRADE_API_URL`, a loopback seam) whose `SHA256SUMS` lists a wrong hash
+  for the archive. The command exits non-zero, the output names the hash mismatch, and the copy
+  is byte-for-byte what it was: the check comes before the replace.
+tags: [release]
+needs: process
+given:
+  - release-server-bad-sum
+when:
+  - cli:
+      args: [upgrade, --version, v9.9.9]
+      root: { from: dock/home }
+      copyCli: bin/vam
+      home: tree
+      env: { VAM_UPGRADE_API_URL: "{{url:release-server-bad-sum}}" }
+      exit: fail
+      contains: ["hash mismatch"]
+      files:
+        bin/vam: { unchanged: true }
+guards:
+  - vam:crates/vam-cli/src/main.rs
+  - vam:crates/vam-cli/src/cmd/upgrade.rs
+status: active
