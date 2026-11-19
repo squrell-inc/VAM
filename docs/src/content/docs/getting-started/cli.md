@@ -15,7 +15,11 @@ proves:
   - crates/vam-orchestrator/tests/workspace_files_tests.rs
   - crates/vam-orchestrator/tests/trajectory_replay_test.rs
   - a-publisher-saves-a-draft-agent-and-runs-it-by-ref
+  - email-username-signs-in-in-any-letter-case
+  - new-user-gets-a-generated-id-it-cannot-choose
+  - username-differing-only-in-letter-case-is-refused
   - user-path-resolves-by-id-then-by-login-name
+  - generated-id-and-email-login-survive-a-restart
 ---
 
 The **`vam`** binary (`crates/vam-cli`) is a control-plane client that communicates exclusively with the `vamd` daemon via HTTP REST APIs. It enforces a strict security boundary by never directly touching Firecracker, cgroups, or host SQLite databases.

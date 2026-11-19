@@ -136,3 +136,19 @@ fn every_local_ref_resolves() {
     walk(&doc, &doc, &mut bad);
     assert!(bad.is_empty(), "dangling $ref: {bad:?}");
 }
+
+#[test]
+fn openapi_refresh_drift_lists_every_value_the_route_answers() {
+    let doc = load();
+    let drift = &doc["components"]["schemas"]["RefreshMcpResponse"]["properties"]["drift"];
+    let values: Vec<&str> = drift["enum"]
+        .as_sequence()
+        .expect("drift enum")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    // `adopted` is the tools-pending recovery of a connector sign-in.
+    for v in ["identical", "shrunk", "reapproved", "upgraded", "adopted"] {
+        assert!(values.contains(&v), "drift enum lacks {v}: {values:?}");
+    }
+}

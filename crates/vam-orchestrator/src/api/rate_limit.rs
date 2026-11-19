@@ -436,7 +436,7 @@ pub(crate) fn refuse(r: &Refusal) -> Response {
 pub async fn key_layer(
     State(limiter): State<Arc<RateLimiter>>,
     mut req: Request<Body>,
-    next: Next<Body>,
+    next: Next,
 ) -> Response {
     let Some(auth) = req.extensions().get::<AuthContext>() else {
         return next.run(req).await;
@@ -457,7 +457,7 @@ pub async fn key_layer(
 pub async fn ip_layer(
     State(limiter): State<Arc<RateLimiter>>,
     req: Request<Body>,
-    next: Next<Body>,
+    next: Next,
 ) -> Response {
     let path = req.uri().path().to_string();
     if !limiter.cfg.enabled || exempt(&path) {

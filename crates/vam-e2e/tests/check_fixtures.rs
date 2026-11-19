@@ -630,12 +630,6 @@ then:
 status: active
 ";
 
-#[test]
-fn identity_forms_catalog_is_clean() {
-    let f = flood_fx(IDENTITY_FORMS);
-    assert!(f.errors().is_empty(), "{:#?}", f.errors());
-}
-
 const DRAFT_AGENT: &str = "piece: agent-draft\nkind: agent\ndeferred: true\nbody:\n  spec:\n    resourceId: { urn: \"urn:vam:agent:x/{{ns}}/{{name}}\" }\n";
 const SKILL_DRAFT: &str = "piece: skill-draft\nkind: skill\ndeferred: true\nbody:\n  spec:\n    resourceId: { urn: \"urn:vam:skill:x/e2e/{{name}}\" }\n";
 const MEMBER_DRAFTS: &str = "id: chat-replies
@@ -669,46 +663,9 @@ fn member_draft_steps_catalog_is_clean() {
 }
 
 #[test]
-fn identity_forms_are_linted() {
-    let f = flood_fx(&IDENTITY_FORMS.replace("case: upper", "case: title"));
-    assert!(
-        f.errors().iter().any(|e| e.contains("title")),
-        "{:#?}",
-        f.errors()
-    );
-    let f = flood_fx(&IDENTITY_FORMS.replace("as: person, username", "as: nobody, username"));
-    f.expect_error("step-alias", "`as: nobody` is not an org piece");
-    let f = flood_fx(&IDENTITY_FORMS.replace("{person.USERNAME}", "{nobody.USERNAME}"));
-    f.expect_error("step-alias", "`{nobody.USERNAME}` names `nobody`");
-    let f = flood_fx(&IDENTITY_FORMS.replace("{person.userId}", "{person.userid}"));
-    f.expect_error("step-placeholder", "`{person.userid}` is not a placeholder");
-    let f = flood_fx(&IDENTITY_FORMS.replace("username: \"fresh-{tag}\"", "username: \" \""));
-    f.expect_error("create-user", "needs a `username`");
-}
-
-#[test]
-fn org_piece_username_is_linted() {
+fn identity_forms_catalog_is_clean() {
     let f = flood_fx(IDENTITY_FORMS);
-    f.write(
-        "world/org-email.yaml",
-        "piece: org-email\nkind: org\nrole: Member\nusername: \"Ada+x-{tag}@Example.Test\"\n",
-    );
     assert!(f.errors().is_empty(), "{:#?}", f.errors());
-    f.write(
-        "world/org-email.yaml",
-        "piece: org-email\nkind: org\nrole: Member\nusername: \"a@b@c-{tag}\"\n",
-    );
-    f.expect_error("piece-body", "`username` belongs to an `org` piece");
-    f.write(
-        "world/org-email.yaml",
-        "piece: org-email\nkind: org\nrole: Member\nusername: \"sp ace\"\n",
-    );
-    f.expect_error("piece-body", "`username` belongs to an `org` piece");
-    f.write(
-        "world/org-email.yaml",
-        "piece: org-email\nkind: secret\nusername: \"fine\"\n",
-    );
-    f.expect_error("piece-body", "`username` belongs to an `org` piece");
 }
 
 #[test]
@@ -768,4 +725,77 @@ fn publish_skill_as_needs_an_org_alias_and_release_false_is_not_a_refusal() {
         "publish-skill",
         "`release: false` and `refused: true` do not combine",
     );
+}
+
+#[test]
+fn identity_forms_are_linted() {
+    let f = flood_fx(&IDENTITY_FORMS.replace("case: upper", "case: title"));
+    assert!(
+        f.errors().iter().any(|e| e.contains("title")),
+        "{:#?}",
+        f.errors()
+    );
+    let f = flood_fx(&IDENTITY_FORMS.replace("as: person, username", "as: nobody, username"));
+    f.expect_error("step-alias", "`as: nobody` is not an org piece");
+    let f = flood_fx(&IDENTITY_FORMS.replace("{person.USERNAME}", "{nobody.USERNAME}"));
+    f.expect_error("step-alias", "`{nobody.USERNAME}` names `nobody`");
+    let f = flood_fx(&IDENTITY_FORMS.replace("{person.userId}", "{person.userid}"));
+    f.expect_error("step-placeholder", "`{person.userid}` is not a placeholder");
+    let f = flood_fx(&IDENTITY_FORMS.replace("username: \"fresh-{tag}\"", "username: \" \""));
+    f.expect_error("create-user", "needs a `username`");
+}
+
+#[test]
+fn org_piece_username_is_linted() {
+    let f = flood_fx(IDENTITY_FORMS);
+    f.write(
+        "world/org-email.yaml",
+        "piece: org-email\nkind: org\nrole: Member\nusername: \"Ada+x-{tag}@Example.Test\"\n",
+    );
+    assert!(f.errors().is_empty(), "{:#?}", f.errors());
+    f.write(
+        "world/org-email.yaml",
+        "piece: org-email\nkind: org\nrole: Member\nusername: \"a@b@c-{tag}\"\n",
+    );
+    f.expect_error("piece-body", "`username` belongs to an `org` piece");
+    f.write(
+        "world/org-email.yaml",
+        "piece: org-email\nkind: org\nrole: Member\nusername: \"sp ace\"\n",
+    );
+    f.expect_error("piece-body", "`username` belongs to an `org` piece");
+    f.write(
+        "world/org-email.yaml",
+        "piece: org-email\nkind: secret\nusername: \"fine\"\n",
+    );
+    f.expect_error("piece-body", "`username` belongs to an `org` piece");
+}
+
+#[test]
+fn a_second_filebox_piece_and_a_non_filebox_alias_for_a_filebox_secret_are_refused() {
+    let fx = Fx::new();
+    for (piece, provider) in [
+        ("mock-filebox-server", "filebox"),
+        ("mock-filebox-two", "filebox"),
+        ("mock-linear-server", "linear-server"),
+    ] {
+        fx.write(
+            &format!("world/{piece}.yaml"),
+            &format!("piece: {piece}\nkind: mock-provider\nprovider: {provider}\n"),
+        );
+    }
+    let scenario = SCENARIO
+        .replace(
+            "given: [org-admin, agent-plain]",
+            "given: [org-admin, agent-plain, mock-filebox-server, mock-filebox-two, mock-linear-server]",
+        )
+        .replace(
+            "when:\n  - chat: \"e2e-step:hello Hi\"\n",
+            "when:\n  - chat: \"e2e-step:hello Hi\"\n  - connector-node: { id: filebox, enabled: true, as: org-admin, client: { clientId: c, clientSecret: { piece: mock-linear-server, which: current } } }\n  - api-call: { path: /v1/connectors, as: org-admin, absent: mock-linear-server }\n",
+        );
+    fx.write("scenarios/chat-replies.yaml", &scenario);
+    // One listener holds one filebox state: a second piece would reset it.
+    fx.expect_error("given", "second filebox");
+    // The secret and the tokens are kept under a filebox alias only.
+    fx.expect_error("refs", "clientSecret.piece");
+    fx.expect_error("refs", "api-call.absent");
 }

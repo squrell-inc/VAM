@@ -25,7 +25,7 @@ pub enum PieceKind {
     /// scenario starts (`fixture` names the directory under `e2e/world/fixtures`).
     #[serde(rename = "workspace-seed")]
     WorkspaceSeed,
-    /// A runner-hosted loopback provider (`provider`: `microsoft-login`, `microsoft-graph` or `linear-server`).
+    /// A runner-hosted loopback provider (`provider`: `microsoft-login`, `microsoft-graph`, `linear-server` or `filebox`).
     /// The runner makes its tokens in memory and never prints them.
     #[serde(rename = "mock-provider")]
     MockProvider,
@@ -45,13 +45,13 @@ pub struct WorldPiece {
     pub requires: Vec<String>,
     /// `org` only: the role the signed-in profile has.
     pub role: Option<String>,
+    /// `org` only: the scope list sent to `POST /v1/users/{id}/keys` when the identity's key is
+    /// minted. Absent: the role's default scopes.
+    pub scopes: Option<Vec<String>>,
     /// `org` of a member role only: the login name to create the user under, instead of the
     /// run-unique default. `{tag}` is replaced by a short token unique to the piece, scenario and
     /// run (eight lowercase hex digits), so two scenarios on one node never clash.
     pub username: Option<String>,
-    /// `org` only: the scope list sent to `POST /v1/users/{id}/keys` when the identity's key is
-    /// minted. Absent: the role's default scopes.
-    pub scopes: Option<Vec<String>>,
     /// `agent` and `playbook`: release it after the put.
     #[serde(default)]
     pub release: bool,
@@ -90,7 +90,7 @@ pub struct WorldPiece {
     /// (vamd reports the path only once the broker is registered).
     #[serde(default)]
     pub restart_with_gateway: bool,
-    /// `mock-provider` only: `microsoft-login`, `microsoft-graph` or `linear-server`.
+    /// `mock-provider` only: `microsoft-login`, `microsoft-graph`, `linear-server` or `filebox`.
     pub provider: Option<String>,
     /// `skill` only: extra files packed into the package, `{ "path in the package": "path under
     /// e2e/world/fixtures" }` (a script a `localExec` tool runs).

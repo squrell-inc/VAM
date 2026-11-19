@@ -26,6 +26,8 @@ proves:
   - crates/vam-orchestrator/tests/hsp_grants.rs::a_members_grant_naming_a_draft_playbook_is_refused_and_a_publishers_is_not
   - crates/vam-orchestrator/src/member_draft.rs::each_refused_field_is_a_400_naming_it
   - crates/vam-orchestrator/src/member_draft.rs::namespace_new_inside_ok_outside_400_non_slug_username_gets_its_own
+  - crates/vam-orchestrator/src/member_draft.rs::an_email_username_uses_the_namespace_me_reports_not_the_generated_id
+  - crates/vam-orchestrator/tests/member_draft_agents_tests.rs::an_email_member_saves_in_the_namespace_me_reports_and_not_the_user_id
   - crates/vam-orchestrator/src/member_draft.rs::a_urn_in_my_namespace_owned_by_a_publisher_is_403
   - crates/vam-orchestrator/src/member_draft.rs::the_cap_counts_drafts_only_and_refuses_a_new_row_not_an_edit
   - crates/vam-orchestrator/src/member_draft.rs::cap_parses_a_positive_number_else_the_default

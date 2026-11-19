@@ -53,6 +53,32 @@
       ],
       "ref": "connector-with-a-secret-v1.0.0",
       "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "filebox-connector",
+      "displayName": "Filebox",
+      "description": "Files in the member's own Filebox account, through a client the org's admin registered with Filebox.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/filebox-connector/connectors/filebox"
+        }
+      ],
+      "ref": "filebox-connector-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "org-secret-without-org-client",
+      "displayName": "Orgsecret",
+      "description": "A connector that asks for an org-held client secret but names no admin-supplied client.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/org-secret-without-org-client/connectors/orgsecret"
+        }
+      ],
+      "ref": "org-secret-without-org-client-v1.0.0",
+      "requiresNode": ">=0.1.0"
     }
   ]
 }

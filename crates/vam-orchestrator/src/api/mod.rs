@@ -125,26 +125,26 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/me", get(me::get_me))
         .route("/v1/me/password", post(me::change_my_password))
         .route("/v1/keys", post(create_key).get(list_keys))
-        .route("/v1/keys/:id", delete(revoke_key))
+        .route("/v1/keys/{id}", delete(revoke_key))
         .route("/v1/users", users_admin::users_collection_route())
         .route(
-            "/v1/users/:id/deactivate",
+            "/v1/users/{id}/deactivate",
             users_admin::deactivate_user_route(),
         )
         .route(
-            "/v1/users/:id/password",
+            "/v1/users/{id}/password",
             users_admin::reset_user_password_route(),
         )
         .route(
-            "/v1/users/:id/publish-grant",
+            "/v1/users/{id}/publish-grant",
             publish_grant::publish_grant_route(),
         )
         .route(
-            "/v1/users/:id/keys",
+            "/v1/users/{id}/keys",
             users_keys_admin::user_keys_collection_route(),
         )
         .route(
-            "/v1/users/:id/keys/:key_id",
+            "/v1/users/{id}/keys/{key_id}",
             users_keys_admin::revoke_user_key_route(),
         )
         .route(
@@ -156,7 +156,7 @@ pub fn router(state: AppState) -> Router {
             org_secrets_admin::org_secrets_collection_route(),
         )
         .route(
-            "/v1/org/secrets/*id",
+            "/v1/org/secrets/{*id}",
             org_secrets_admin::delete_org_secret_route(),
         )
         .route("/v1/node", get(get_node))
@@ -170,7 +170,7 @@ pub fn router(state: AppState) -> Router {
             get(permissions::list_permission_presets),
         )
         .route(
-            "/v1/agents/*rest",
+            "/v1/agents/{*rest}",
             get(get_agent_wildcard)
                 .put(permissions::put_draft_permissions)
                 .post(post_agent_wildcard)
@@ -178,14 +178,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/policies", put(put_policy).get(list_policies))
         .route(
-            "/v1/policies/*rest",
+            "/v1/policies/{*rest}",
             get(get_policy_wildcard).merge(catalog_release::policy_release_route()),
         )
         .route("/v1/playbooks", put(put_playbook).get(list_playbooks))
         .route("/v1/playbook-tests", post(playbook_test))
         .route("/v1/agent-checks", post(composition::agent_check))
         .route(
-            "/v1/playbooks/*rest",
+            "/v1/playbooks/{*rest}",
             get(get_playbook_wildcard)
                 .merge(catalog_release::playbook_release_route())
                 .delete(delete_playbook_wildcard),
@@ -193,11 +193,11 @@ pub fn router(state: AppState) -> Router {
         .merge(skill_packages::skill_package_routes())
         .route("/v1/skills", put(put_skill))
         .route(
-            "/v1/skills/*rest",
+            "/v1/skills/{*rest}",
             get(get_skill_wildcard).merge(catalog_release::skill_release_route()),
         )
         .route("/v1/sessions", post(create_session).get(list_sessions))
-        .route("/v1/workspaces/:id/files", workspace_files::list_route())
+        .route("/v1/workspaces/{id}/files", workspace_files::list_route())
         .merge(workspace_files::path_routes())
         .merge(spaces::routes())
         .merge(notifications::routes())
@@ -207,35 +207,35 @@ pub fn router(state: AppState) -> Router {
         .merge(marketplaces::routes())
         .merge(process_only_routes())
         .merge(threads::routes())
-        .route("/v1/sessions/:id", get(get_session))
-        .route("/v1/sessions/:id/egress-ca", get(get_session_egress_ca))
-        .route("/v1/sessions/:id/pause", post(pause_session))
-        .route("/v1/sessions/:id/resume", post(resume_session))
-        .route("/v1/sessions/:id/terminate", post(terminate_session))
-        .route("/v1/sessions/:id/snapshots", post(create_snapshot))
+        .route("/v1/sessions/{id}", get(get_session))
+        .route("/v1/sessions/{id}/egress-ca", get(get_session_egress_ca))
+        .route("/v1/sessions/{id}/pause", post(pause_session))
+        .route("/v1/sessions/{id}/resume", post(resume_session))
+        .route("/v1/sessions/{id}/terminate", post(terminate_session))
+        .route("/v1/sessions/{id}/snapshots", post(create_snapshot))
         .route("/v1/sessions/restore", post(restore_session))
         .route("/v1/runs", post(create_run).get(list_runs))
         // Catch-all so run URNs with slashes (`urn:vam:run:registry/ns/name`) match.
         // Axum 0.6 wildcards must be the last path segment, so /events and /cancel
         // are parsed from the captured rest.
         .route(
-            "/v1/runs/*rest",
+            "/v1/runs/{*rest}",
             get(run_wildcard_get).post(run_wildcard_post),
         )
         .route("/v1/approvals", get(list_approvals))
-        .route("/v1/approvals/:id", get(get_approval))
-        .route("/v1/approvals/:id/decide", post(decide_approval))
+        .route("/v1/approvals/{id}", get(get_approval))
+        .route("/v1/approvals/{id}/decide", post(decide_approval))
         .route("/v1/secrets", put(put_secret).get(list_secrets))
         .route("/v1/secrets/resolve", post(resolve_secret_requirements))
-        .route("/v1/secrets/*id", get(get_secret).delete(delete_secret))
+        .route("/v1/secrets/{*id}", get(get_secret).delete(delete_secret))
         .route("/v1/mcp/connections", mcp_connections::collection_route())
-        .route("/v1/mcp/connections/:id", mcp_connections::item_route())
+        .route("/v1/mcp/connections/{id}", mcp_connections::item_route())
         .route(
-            "/v1/mcp/connections/:id/refresh",
+            "/v1/mcp/connections/{id}/refresh",
             mcp_connections::refresh_route(),
         )
         .route(
-            "/v1/mcp/connections/:id/oauth/tokens",
+            "/v1/mcp/connections/{id}/oauth/tokens",
             mcp_connections::oauth_tokens_route(),
         )
         .route(
@@ -243,7 +243,7 @@ pub fn router(state: AppState) -> Router {
             put(put_hosted_broker).get(list_hosted_brokers),
         )
         .route(
-            "/v1/hosted/brokers/*id",
+            "/v1/hosted/brokers/{*id}",
             get(get_hosted_broker).delete(delete_hosted_broker),
         )
         .layer(middleware::from_fn_with_state(
@@ -264,12 +264,12 @@ pub async fn serve(
     listener: tokio::net::TcpListener,
 ) -> Result<(), OrchestratorError> {
     let app = router(state);
-    let std_listener = listener.into_std().map_err(OrchestratorError::Io)?;
-    axum::Server::from_tcp(std_listener)
-        .map_err(|e| OrchestratorError::Core(format!("HTTP server error: {}", e)))?
-        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .await
-        .map_err(|e| OrchestratorError::Core(format!("HTTP server error: {}", e)))
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|e| OrchestratorError::Core(format!("HTTP server error: {}", e)))
 }
 
 /// Serves the API as `transport` says: TLS by default, plain HTTP only for `--insecure-dev`.
@@ -2067,6 +2067,7 @@ async fn put_secret(
     let kind = SecretKind::from_proto(req.kind)?;
     let scope = resolve_secret_scope(SecretScope::from_proto(req.scope)?, auth.role());
     authorize_org_secret_write(scope, auth.role())?;
+    refuse_connector_row(scope, &req.binding_id)?;
     let idem = if req.idempotency_key.is_empty() {
         Some(idempotency.as_str())
     } else {
@@ -2086,6 +2087,21 @@ async fn put_secret(
     };
     let (code, json) = json_response("vam.v1.PutHostSecretResponse", &resp)?;
     Ok(json_http_response(code, json))
+}
+
+/// A connector's org row (`connector/<id>/oauth/client-secret`) is managed through
+/// `PUT /v1/connectors/{id}/node` only: the secrets API does not read, write or delete it.
+pub(crate) fn refuse_connector_row(
+    scope: SecretScope,
+    binding_id: &str,
+) -> Result<(), OrchestratorError> {
+    if crate::connector_client::is_connector_org_row(scope, binding_id) {
+        return Err(OrchestratorError::InvalidContract(
+            "this secret belongs to a connector and is managed through the connector (PUT /v1/connectors/{id}/node), not the secrets API"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -2118,6 +2134,11 @@ async fn list_secrets(
     if let Some(scope) = filter {
         secrets.retain(|meta| meta.scope == scope);
     }
+    // A connector's org rows (the admin's client secret) are not secrets of the caller: neither
+    // their ids nor their fingerprints are listed (CN-5.2, open question 11).
+    secrets.retain(|meta| {
+        !crate::connector_client::is_connector_org_row(meta.scope, &meta.binding_id)
+    });
     let resp = ListHostSecretsResponse {
         secrets: secrets.iter().map(to_proto_secret).collect(),
     };
@@ -2136,6 +2157,7 @@ async fn get_secret(
         .authorize(&auth, "GetHostSecret", "secrets:write")?;
     let binding_id = percent_decode_path(&id);
     let scope = resolve_secret_scope(requested_secret_scope(&query)?, auth.role());
+    refuse_connector_row(scope, &binding_id)?;
     let meta = state.vault.get_metadata_at(
         scope,
         vault_owner_user_id(scope, auth.owner_user_id()),
@@ -2163,6 +2185,7 @@ async fn delete_secret(
     let binding_id = percent_decode_path(&id);
     let scope = resolve_secret_scope(requested_secret_scope(&query)?, auth.role());
     authorize_org_secret_write(scope, auth.role())?;
+    refuse_connector_row(scope, &binding_id)?;
     let meta = state.vault.delete_secret_at(
         scope,
         vault_owner_user_id(scope, auth.owner_user_id()),

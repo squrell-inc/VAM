@@ -6,6 +6,7 @@
 //! the environment or the disk.
 
 use std::time::{Duration, Instant};
+use vam_security::tls_roots::BundledRoots;
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderValue, ACCEPT, RETRY_AFTER};
@@ -43,6 +44,7 @@ impl BraveProvider {
     /// Provider for another endpoint (tests point this at a local server).
     pub fn with_endpoint(endpoint: &str) -> Result<Self, ProviderError> {
         let client = reqwest::Client::builder()
+            .bundled_roots()
             .user_agent("VAM-WebBroker/1")
             .build()
             .map_err(|_| ProviderError::Upstream { status: 0 })?;
@@ -400,7 +402,7 @@ mod tests {
             .expect_err("limited");
         assert_eq!(err.code(), "rate_limited");
         // One try plus two retries.
-        assert_eq!(mock.hits(), 3);
+        assert_eq!(mock.calls(), 3);
     }
 
     #[tokio::test]

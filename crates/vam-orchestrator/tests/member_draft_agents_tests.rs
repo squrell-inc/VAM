@@ -184,7 +184,7 @@ async fn send(
         .unwrap();
     let status = resp.status();
     let body = String::from_utf8(
-        hyper::body::to_bytes(resp.into_body())
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap()
             .to_vec(),
@@ -401,6 +401,73 @@ async fn a_member_saves_an_own_draft_in_their_namespace_and_it_is_never_released
     .await;
     assert_eq!(versions.0, StatusCode::OK, "{}", versions.1);
     assert!(!versions.1.contains("releasedAt"), "{}", versions.1);
+}
+
+/// A member whose login name is an email address and whose id is a generated `usr_` id saves
+/// in the namespace `GET /v1/me` reports: the local part, lowercased, without a `+tag`. It is
+/// never made from the user id. Another email name with the same local part is the same
+/// namespace, so the owner check (403) is what stops an overwrite.
+#[tokio::test]
+async fn an_email_member_saves_in_the_namespace_me_reports_and_not_the_user_id() {
+    let w = world();
+    let key_for = |username: &str| -> (String, String) {
+        let user = w
+            .store
+            .create_managed_user_generated(username, "member-secret-1", UserRole::Member)
+            .expect("email member");
+        let secret = mint_api_key_secret();
+        let scopes: Vec<String> = MEMBER_SCOPES.iter().map(|s| (*s).to_string()).collect();
+        w.store
+            .create_api_key_owned_with_mode(
+                &format!("key-{}", user.user_id),
+                "email",
+                &secret,
+                &format!("User::\"{}\"", user.user_id),
+                &scopes,
+                &user.user_id,
+                ScopeMode::Role,
+            )
+            .expect("mint key");
+        (user.user_id, secret)
+    };
+    let (ada_id, ada) = key_for("Ada.Lovelace+work@Example.com");
+    assert!(ada_id.starts_with("usr_"), "{ada_id}");
+
+    let (status, body) = send(&w.app, "GET", "/v1/me", &ada, "", "application/json").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let me: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let namespace = me["defaultNamespace"].as_str().expect("namespace");
+    assert_eq!(namespace, "ada.lovelace", "{body}");
+    let registry = me["registryDomain"].as_str().expect("registry");
+
+    let own = format!("urn:vam:agent:{registry}/{namespace}/first");
+    let (status, body) = put_agent(&w, &ada, &own, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for outside in [
+        // The user id and the local part cut short are not the namespace.
+        format!("urn:vam:agent:{registry}/{ada_id}/second"),
+        format!("urn:vam:agent:{registry}/ada/second"),
+    ] {
+        let (status, body) = put_agent(&w, &ada, &outside, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{outside}: {body}");
+        assert!(
+            body.contains(&format!("urn:vam:agent:{registry}/{namespace}/")),
+            "{body}"
+        );
+    }
+
+    // Another login name with the same local part shares the namespace. It may save a new
+    // URN there, and the owner check refuses the first member's agent.
+    let (_, other) = key_for("ada.lovelace@Other.example");
+    let (status, body) = send(&w.app, "GET", "/v1/me", &other, "", "application/json").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let me: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(me["defaultNamespace"].as_str(), Some(namespace), "{body}");
+    let (status, body) = put_agent(&w, &other, &own, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let theirs = format!("urn:vam:agent:{registry}/{namespace}/second");
+    let (status, body) = put_agent(&w, &other, &theirs, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }
 
 #[tokio::test]

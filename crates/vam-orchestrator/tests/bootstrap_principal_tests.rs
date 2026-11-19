@@ -103,7 +103,9 @@ async fn call(
         .await
         .unwrap();
     let status = response.status();
-    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     (status, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
@@ -129,7 +131,9 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> String {
         .await
         .unwrap();
     let status = response.status();
-    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body = String::from_utf8(bytes.to_vec()).unwrap();
     assert_eq!(status, StatusCode::OK, "{body}");
     serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"]

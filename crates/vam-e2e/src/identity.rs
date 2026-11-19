@@ -1,6 +1,6 @@
 //! The steps that act as a user with a password: `login`, `change-password`,
-//! `identity-request` and `create-user`. An `org` piece keeps its username, user id and generated password in
-//! memory (`Account`); nothing here prints, logs or briefs a password or a token.
+//! `identity-request`, `create-user`, `put-draft` and `set-role`. An `org` piece keeps its
+//! username, user id and generated password in memory (`Account`); nothing here prints, logs or briefs a password or a token.
 //!
 //! This module is a child of `engine`, so it reads the engine's private state; the shared
 //! runner files only register the steps.
@@ -120,7 +120,7 @@ pub enum Credential {
     Key,
 }
 
-/// `identity-request: { as, credential, method, path, status, fields }`
+/// `identity-request: { as, credential, method, path, status, contains, lacks, fields }`
 ///
 /// `path` and the string values of `fields` may hold `{<alias>.userId}`, `{<alias>.username}`
 /// and `{<alias>.USERNAME}` (the login name upper-cased) of any `org` identity in `given`; in
@@ -136,13 +136,13 @@ pub struct IdentityRequest {
     pub path: String,
     /// The exact status vamd must answer.
     pub status: u16,
-    /// Dotted paths into the JSON body, matched as in other `fields` (exact, `contains`,
-    /// `matches`, `present`, `absent`).
-    pub fields: Option<std::collections::BTreeMap<String, serde_yaml::Value>>,
     /// A substring the response body must contain (judged after the status).
     pub contains: Option<String>,
     /// A substring the response body must not contain (judged after the status).
     pub lacks: Option<String>,
+    /// Dotted paths into the JSON body, matched as in other `fields` (exact, `contains`,
+    /// `matches`, `present`, `absent`).
+    pub fields: Option<std::collections::BTreeMap<String, serde_yaml::Value>>,
 }
 
 /// `put-draft: { piece, as, status, contains }`
@@ -594,16 +594,24 @@ impl Engine {
         };
         let write = method != reqwest::Method::GET;
         let body = (method == reqwest::Method::POST).then(|| json!({}));
-        let path = self.expand_draft_urns(&self.expand(&x.path, true)?, true)?;
+        // `{<alias>.userId}` placeholders first, then `{{urn:<piece>:<as>}}`.
+        let path = self.expand(&x.path, true)?;
+        let path = self.expand_draft_urns(&path, true)?;
         let contains = x
             .contains
             .as_deref()
-            .map(|t| self.expand_draft_urns(t, false))
+            .map(|t| {
+                self.expand(t, false)
+                    .and_then(|t| self.expand_draft_urns(&t, false))
+            })
             .transpose()?;
         let lacks = x
             .lacks
             .as_deref()
-            .map(|t| self.expand_draft_urns(t, false))
+            .map(|t| {
+                self.expand(t, false)
+                    .and_then(|t| self.expand_draft_urns(&t, false))
+            })
             .transpose()?;
         let want = format!(
             "{} {} as `{}` with {} answers {}",
@@ -625,15 +633,6 @@ impl Engine {
         if r.status != x.status {
             return Err(product(want, seen));
         }
-        if let Some(fields) = fields {
-            let bad = super::field_problems(&r.json(), &fields);
-            if !bad.is_empty() {
-                return Err(product(
-                    format!("{want} with the expected fields"),
-                    scrub(&bad.join("; "), &[&bearer]),
-                ));
-            }
-        }
         if let Some(sub) = &contains {
             if !r.body.contains(sub.as_str()) {
                 return Err(product(format!("{want} with `{sub}`"), seen));
@@ -642,6 +641,15 @@ impl Engine {
         if let Some(sub) = &lacks {
             if r.body.contains(sub.as_str()) {
                 return Err(product(format!("{want} without `{sub}`"), seen));
+            }
+        }
+        if let Some(fields) = fields {
+            let bad = super::field_problems(&r.json(), &fields);
+            if !bad.is_empty() {
+                return Err(product(
+                    format!("{want} with the expected fields"),
+                    scrub(&bad.join("; "), &[&bearer]),
+                ));
             }
         }
         Ok(())
@@ -812,47 +820,6 @@ mod tests {
         assert!(
             serde_yaml::from_str::<IdentityRequest>("{ as: m, path: /v1/me, status: 1 }").is_err()
         );
-        let x: IdentityRequest = serde_yaml::from_str(
-            "{ as: m, credential: key, path: /v1/me, status: 200, fields: { userId: { matches: '^usr_' } } }",
-        )
-        .unwrap();
-        assert_eq!(x.fields.map(|f| f.len()), Some(1));
-    }
-
-    #[test]
-    fn login_case_and_create_user_parse() {
-        let l: Login = serde_yaml::from_str("{ as: m, case: upper }").unwrap();
-        assert_eq!(l.case, LoginCase::Upper);
-        let l: Login = serde_yaml::from_str("{ as: m }").unwrap();
-        assert_eq!(l.case, LoginCase::AsCreated);
-        assert_eq!(LoginCase::Upper.apply("Ab+c@Ex.Test"), "AB+C@EX.TEST");
-        assert_eq!(LoginCase::Lower.apply("Ab+c@Ex.Test"), "ab+c@ex.test");
-        assert_eq!(LoginCase::AsCreated.apply("Ab+c@Ex.Test"), "Ab+c@Ex.Test");
-        assert!(serde_yaml::from_str::<Login>("{ as: m, case: title }").is_err());
-        let c: CreateUser =
-            serde_yaml::from_str("{ username: x, userId: usr_a, status: 400 }").unwrap();
-        assert_eq!((c.as_, c.user_id.as_deref()), (None, Some("usr_a")));
-        assert!(serde_yaml::from_str::<CreateUser>("{ username: x }").is_err());
-        assert!(serde_yaml::from_str::<CreateUser>("{ status: 200 }").is_err());
-    }
-
-    #[test]
-    fn placeholders_are_found_and_plain_braces_are_not() {
-        assert_eq!(
-            placeholders(
-                "/v1/users/{member.userId}/keys {a-b.USERNAME} {{name}} {contains} {x.y.z}"
-            ),
-            vec![("member", "userId"), ("a-b", "USERNAME")]
-        );
-        assert_eq!(unique_token(&["a", "b"]), unique_token(&["a", "b"]));
-        assert_ne!(unique_token(&["a", "b"]), unique_token(&["a", "c"]));
-        assert_eq!(unique_token(&["a"]).len(), 8);
-    }
-
-    #[test]
-    fn identity_request_contains_and_lacks_parse() {
-        let x: IdentityRequest =
-            serde_yaml::from_str("{ as: m, credential: key, path: /v1/me, status: 200 }").unwrap();
         assert_eq!((x.contains, x.lacks), (None, None));
         let x: IdentityRequest = serde_yaml::from_str(
             "{ as: m, credential: key, path: /v1/me, status: 200, contains: a, lacks: b }",
@@ -862,6 +829,11 @@ mod tests {
             (x.contains.as_deref(), x.lacks.as_deref()),
             (Some("a"), Some("b"))
         );
+        let x: IdentityRequest = serde_yaml::from_str(
+            "{ as: m, credential: key, path: /v1/me, status: 200, fields: { userId: { matches: '^usr_' } } }",
+        )
+        .unwrap();
+        assert_eq!(x.fields.map(|f| f.len()), Some(1));
     }
 
     #[test]
@@ -913,6 +885,36 @@ mod tests {
             expand_urns("x {{urn:probe}} {{name}} {{urn:", false, find).unwrap(),
             "x {{urn:probe}} {{name}} {{urn:"
         );
+    }
+
+    #[test]
+    fn login_case_and_create_user_parse() {
+        let l: Login = serde_yaml::from_str("{ as: m, case: upper }").unwrap();
+        assert_eq!(l.case, LoginCase::Upper);
+        let l: Login = serde_yaml::from_str("{ as: m }").unwrap();
+        assert_eq!(l.case, LoginCase::AsCreated);
+        assert_eq!(LoginCase::Upper.apply("Ab+c@Ex.Test"), "AB+C@EX.TEST");
+        assert_eq!(LoginCase::Lower.apply("Ab+c@Ex.Test"), "ab+c@ex.test");
+        assert_eq!(LoginCase::AsCreated.apply("Ab+c@Ex.Test"), "Ab+c@Ex.Test");
+        assert!(serde_yaml::from_str::<Login>("{ as: m, case: title }").is_err());
+        let c: CreateUser =
+            serde_yaml::from_str("{ username: x, userId: usr_a, status: 400 }").unwrap();
+        assert_eq!((c.as_, c.user_id.as_deref()), (None, Some("usr_a")));
+        assert!(serde_yaml::from_str::<CreateUser>("{ username: x }").is_err());
+        assert!(serde_yaml::from_str::<CreateUser>("{ status: 200 }").is_err());
+    }
+
+    #[test]
+    fn placeholders_are_found_and_plain_braces_are_not() {
+        assert_eq!(
+            placeholders(
+                "/v1/users/{member.userId}/keys {a-b.USERNAME} {{name}} {contains} {x.y.z}"
+            ),
+            vec![("member", "userId"), ("a-b", "USERNAME")]
+        );
+        assert_eq!(unique_token(&["a", "b"]), unique_token(&["a", "b"]));
+        assert_ne!(unique_token(&["a", "b"]), unique_token(&["a", "c"]));
+        assert_eq!(unique_token(&["a"]).len(), 8);
     }
 
     #[test]

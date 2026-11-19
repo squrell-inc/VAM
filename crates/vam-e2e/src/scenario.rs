@@ -227,6 +227,8 @@ pub enum Step {
     ConnectorNode(crate::engine::connectors::ConnectorNode),
     /// `connector-connect: { id, url, piece, tenant, upn, as, refused }`: connects as the app would.
     ConnectorConnect(crate::engine::connectors::ConnectorConnect),
+    /// `api-call: { method, path, as, refused, contains, absent }`: one GET or DELETE as an identity.
+    ApiCall(crate::engine::connectors::ApiCallStep),
     /// `connector-check: { id, as }`: `POST /v1/connectors/{id}/connection/check`.
     ConnectorCheck(crate::engine::connectors::ConnectorCheck),
     /// `publish-skill: { piece, refused, contains }`: publishes and releases a `deferred` skill piece.
@@ -260,15 +262,15 @@ pub enum Step {
     /// `identity-request: { as, credential, method, path, status, fields }`: one request with one
     /// of the identity's credentials, judged by status and, when given, body fields.
     IdentityRequest(crate::engine::identity::IdentityRequest),
-    /// `create-user: { as, username, userId, status, contains }`: `POST /v1/users` with a fresh
-    /// password, as an `org` identity or the bootstrap key.
-    CreateUser(crate::engine::identity::CreateUser),
     /// `put-draft: { piece, as, status, contains }`: PUTs a `playbook` or `agent` piece's body as an
     /// identity, under a name unique to that identity, judged by status.
     PutDraft(crate::engine::identity::PutDraft),
     /// `set-role: { as, role }`: promotes (`publisher`) or demotes (`member`) an `org` identity as the
     /// bootstrap key, through `/v1/users/{id}/publish-grant`.
     SetRole(crate::engine::identity::SetRole),
+    /// `create-user: { as, username, userId, status, contains }`: `POST /v1/users` with a fresh
+    /// password, as an `org` identity or the bootstrap key.
+    CreateUser(crate::engine::identity::CreateUser),
 }
 
 /// A `cli` step. `{{root}}` (the scratch tree) and `{{vamd}}` (the built `vamd`) are replaced in
@@ -420,6 +422,7 @@ impl<'de> Deserialize<'de> for Step {
             "connector-node" => Step::ConnectorNode(val(v)?),
             "connector-connect" => Step::ConnectorConnect(val(v)?),
             "connector-check" => Step::ConnectorCheck(val(v)?),
+            "api-call" => Step::ApiCall(val(v)?),
             "mock-provider" => Step::MockProvider(val(v)?),
             "edit-agent-draft" => Step::EditAgentDraft(val(v)?),
             "release-agent" => Step::ReleaseAgent(val(v)?),
@@ -432,9 +435,9 @@ impl<'de> Deserialize<'de> for Step {
             "login" => Step::Login(val(v)?),
             "change-password" => Step::ChangePassword(val(v)?),
             "identity-request" => Step::IdentityRequest(val(v)?),
-            "create-user" => Step::CreateUser(val(v)?),
             "put-draft" => Step::PutDraft(val(v)?),
             "set-role" => Step::SetRole(val(v)?),
+            "create-user" => Step::CreateUser(val(v)?),
             other => return Err(D::Error::custom(format!("unknown step `{other}`"))),
         })
     }

@@ -9,6 +9,7 @@
 //! a blocking thread.
 
 use std::time::Duration;
+use vam_security::tls_roots::BundledRoots;
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -311,6 +312,11 @@ impl McpClient {
         if let Some(mapped) = crate::process_mode::map_connector_url(url) {
             return Self::from_builder(base_builder(timeout_ms), mapped.to_string(), headers);
         }
+        // Unit-test seam: a host a test registered reaches that test's loopback server.
+        #[cfg(test)]
+        if let Some(mapped) = crate::mcp_oauth_refresh::test_seam::map(url) {
+            return Self::from_builder(base_builder(timeout_ms), mapped.to_string(), headers);
+        }
         if !url.starts_with("https://") {
             return Err(McpClientError::UrlRejected(
                 "remote MCP url must use https".into(),
@@ -512,6 +518,7 @@ fn parse_retry_after_ms(value: &str) -> Option<u64> {
 
 fn base_builder(timeout_ms: u64) -> reqwest::blocking::ClientBuilder {
     reqwest::blocking::Client::builder()
+        .bundled_roots()
         .timeout(Duration::from_millis(timeout_ms))
         .connect_timeout(Duration::from_millis(5000))
         // A 302 to another host would skip the allowlist. Do not follow it.

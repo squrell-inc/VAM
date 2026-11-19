@@ -23,14 +23,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::mcp_registry::{
     apply_oauth_token_metadata, assert_no_visible_name_collision,
     decide_pinned_snapshot_with_instructions, delete_replaced_auth_mode_bindings,
-    fetch_tools_snapshot, fetch_tools_snapshot_for_connection, flagged_vendor_text,
-    mcp_auth_binding_id, mcp_capabilities, mcp_oauth_refresh_token_binding_id,
-    merge_header_bindings, normalize_connect_headers, parse_side_effect_class,
-    resolve_connection_auth, sanitize_oauth_last_refresh_error, sanitized_oauth_metadata,
-    store_mcp_header_credential, store_mcp_oauth_tokens, suggested_read_only_tools,
-    validate_connection_id, validate_mcp_timeout_ms, HeaderBinding, McpAuthMode, McpConnection,
-    McpHeaderInput, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
-    McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision,
+    fetch_tools_snapshot, flagged_vendor_text, mcp_auth_binding_id, mcp_capabilities,
+    mcp_oauth_refresh_token_binding_id, merge_header_bindings, normalize_connect_headers,
+    parse_side_effect_class, resolve_connection_auth, sanitize_oauth_last_refresh_error,
+    sanitized_oauth_metadata, store_mcp_header_credential, store_mcp_oauth_tokens,
+    suggested_read_only_tools, validate_connection_id, validate_mcp_timeout_ms, HeaderBinding,
+    McpAuthMode, McpConnection, McpHeaderInput, McpOauthMetadata, McpOauthRegistrationMethod,
+    McpOauthStatus, McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision,
 };
 use crate::secrets::{
     authorize_org_secret_write, resolve_secret_scope, vault_owner_user_id, SecretScope,
@@ -292,6 +291,35 @@ fn parse_connect_oauth(req: ConnectMcpOauthRequest) -> Result<McpOauthMetadata, 
     })
 }
 
+/// The `oauth` block of a connect to a connector that uses the admin's client (CN-5.3, O3): the
+/// token endpoint and client id must be the node's (a block naming others is refused), and the
+/// authorization server, revocation endpoint, resource and registration method are the node's and
+/// the connector's whatever the request says.
+fn pin_org_oauth(
+    id: &str,
+    org: &crate::connector_client::OrgConnector,
+    oauth: Option<McpOauthMetadata>,
+) -> Result<Option<McpOauthMetadata>, OrchestratorError> {
+    let Some(node) = org.client.as_ref() else {
+        return Err(OrchestratorError::Conflict(format!(
+            "`{id}` has no OAuth client saved by your admin yet"
+        )));
+    };
+    let Some(mut oauth) = oauth else {
+        return Ok(None);
+    };
+    if oauth.token_endpoint != node.token_endpoint || oauth.client_id != node.client_id {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "`{id}` uses the OAuth client and token endpoint your admin saved; a connection that names another is refused"
+        )));
+    }
+    oauth.authorization_server = node.issuer.clone();
+    oauth.revocation_endpoint = node.revocation_endpoint.clone();
+    oauth.resource = org.mcp_url.clone();
+    oauth.registration_method = McpOauthRegistrationMethod::Manual;
+    Ok(Some(oauth))
+}
+
 /// Org connections snapshot with the org credential only, so a shared
 /// snapshot is never taken with one member's personal token.
 fn credential_caller(scope: SecretScope, owner: &str) -> &str {
@@ -435,8 +463,25 @@ async fn connect(
         None => None,
         Some(oauth) => Some(parse_connect_oauth(oauth)?),
     };
+    // A connector whose client is the admin's: the client id and endpoints are the node's, never the
+    // request's (O3). Refused here, before anything is written.
+    let org = match &policy {
+        Some(_) => state.store.org_connector(&req.connection_id)?,
+        None => None,
+    };
+    let requested_oauth = match &org {
+        Some(org) => pin_org_oauth(&req.connection_id, org, requested_oauth)?,
+        None => requested_oauth,
+    };
     let (auth_mode, oauth) =
         resolve_connection_auth(existing.as_ref(), requested_mode, requested_oauth)?;
+    if org.is_some() && auth_mode != McpAuthMode::Oauth {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "`{}` signs in with the OAuth client your admin saved: connect it with authMode oauth",
+            req.connection_id
+        ))
+        .into());
+    }
     // Hold the refresh gate for an existing OAuth connection so an in-flight
     // token refresh cannot write bindings back after a mode switch or before
     // this update finishes.
@@ -765,6 +810,53 @@ async fn refresh(
         serde_json::from_str(&body)
             .map_err(|_| OrchestratorError::InvalidContract("invalid request body".into()))?
     };
+    // A sign-in whose tools could not be read is finished here: the vetted tools are adopted (the
+    // same first pin the connect makes), and only then is the connection `connected` again.
+    let mut existing = existing;
+    if pending_tools_policy(&state, &existing)?.is_some() {
+        // Recovery renews the token, adopts the tools and resumes parked runs: none of that on a
+        // connector the node turned off. The adoption checks the enable again in its commit.
+        if !state.store.connector_enabled(&id)? {
+            return Err(crate::mcp_registry::connector_turned_off(&id).into());
+        }
+        // The row and the generation are read together under the credential gate (a sign-in that
+        // commits between two separate reads would pair an old row with its new generation; the
+        // write checks both), after the stored access token is refreshed if it has expired.
+        let (current, credentials) = pending_row_with_fresh_token(&state, &existing, None).await?;
+        existing = current;
+        if let Some(policy) = pending_tools_policy(&state, &existing)? {
+            // A stored access token the server refuses (a provider that sent no `expires_in`
+            // leaves no expiry to go by) is refreshed once, under the gate, and the adoption is
+            // tried once more with the generation taken after that refresh. No more than once.
+            let conn = match adopt_tools_and_reconnect_classified(
+                &state,
+                &existing,
+                &policy,
+                &credentials,
+                true,
+            )
+            .await
+            {
+                Ok(conn) => conn,
+                Err(AdoptFailure::Unauthorized) => {
+                    let (current, credentials) =
+                        pending_row_with_fresh_token(&state, &existing, Some(&credentials)).await?;
+                    existing = current;
+                    let Some(policy) = pending_tools_policy(&state, &existing)? else {
+                        return Err(crate::mcp_registry::tools_read_superseded(&id).into());
+                    };
+                    adopt_tools_and_reconnect(&state, &existing, &policy, &credentials).await?
+                }
+                Err(AdoptFailure::Other(e)) => return Err(e),
+            };
+            let has_refresh = refresh_binding_exists(&state.vault, &conn)?;
+            return Ok(respond(serde_json::json!({
+                "connection": connection_value(&conn, has_refresh)?,
+                "drift": "adopted",
+                "removedTools": Vec::<String>::new(),
+            })));
+        }
+    }
     let listed = snapshot_connection(&state, &existing).await?;
     let decided = decide_pinned_snapshot_with_instructions(
         &id,
@@ -906,6 +998,47 @@ async fn snapshot_connection(
     state: &AppState,
     conn: &McpConnection,
 ) -> Result<McpSnapshot, ApiError> {
+    snapshot_connection_classified(state, conn)
+        .await
+        .map_err(AdoptFailure::into_api)
+}
+
+/// Why a connector's tools could not be adopted: the MCP server refused the access token (HTTP
+/// 401, which a token refresh can fix), or anything else.
+enum AdoptFailure {
+    Unauthorized,
+    Other(ApiError),
+}
+
+impl AdoptFailure {
+    fn into_api(self) -> ApiError {
+        match self {
+            Self::Unauthorized => ApiError::from(OrchestratorError::from(
+                crate::mcp_client::McpClientError::HttpStatus(401),
+            )),
+            Self::Other(e) => e,
+        }
+    }
+}
+
+impl From<ApiError> for AdoptFailure {
+    fn from(e: ApiError) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl From<OrchestratorError> for AdoptFailure {
+    fn from(e: OrchestratorError) -> Self {
+        Self::Other(e.into())
+    }
+}
+
+/// [`snapshot_connection`] that reports the server's refusal of the access token apart.
+async fn snapshot_connection_classified(
+    state: &AppState,
+    conn: &McpConnection,
+) -> Result<McpSnapshot, AdoptFailure> {
+    use crate::mcp_registry::SnapshotFailure;
     let vault = state.vault.clone();
     let caller = credential_caller(conn.scope, &conn.owner_user_id).to_string();
     let policy = state
@@ -913,19 +1046,25 @@ async fn snapshot_connection(
         .mcp_policy(&conn.connection_id)?
         .filter(|p| p.url == conn.url);
     let conn = conn.clone();
-    tokio::task::spawn_blocking(move || {
-        fetch_tools_snapshot_for_connection(&vault, &caller, &conn, DEFAULT_MCP_TIMEOUT_MS)
+    let listed = tokio::task::spawn_blocking(move || {
+        crate::mcp_registry::fetch_tools_snapshot_classified(
+            &vault,
+            &caller,
+            &conn,
+            DEFAULT_MCP_TIMEOUT_MS,
+        )
     })
     .await
     .map_err(|e| OrchestratorError::Core(format!("mcp snapshot task failed: {e}")))?
-    .map_err(ApiError::from)
-    .map(sanitize_snapshot)
-    .map(|mut listed| {
-        if let Some(p) = &policy {
-            listed.tools.retain(|t| p.is_vetted(&t.name));
-        }
-        listed
-    })
+    .map_err(|e| match e {
+        SnapshotFailure::Unauthorized => AdoptFailure::Unauthorized,
+        SnapshotFailure::Other(e) => AdoptFailure::Other(e.into()),
+    })?;
+    let mut listed = sanitize_snapshot(listed);
+    if let Some(p) = &policy {
+        listed.tools.retain(|t| p.is_vetted(&t.name));
+    }
+    Ok(listed)
 }
 
 async fn upsert_oauth_tokens(
@@ -946,6 +1085,27 @@ async fn upsert_oauth_tokens(
     let owner = vault_owner_user_id(scope, auth.owner_user_id()).to_string();
     let conn = state.store.get_mcp_connection(scope, &owner, &id)?;
     let policy = connectors::gate_mcp_write(&state.store, &id, None, Some(&conn.url))?;
+    if policy.is_some() {
+        // A connector's client secret is the org's (or the publisher's) and never comes from the
+        // app (O1, O5), and a connector whose secret the node keeps connects by the node's code
+        // exchange: tokens the app got are refused. Nothing is written.
+        if req.client_secret.is_some() {
+            return Err(OrchestratorError::InvalidContract(
+                "a connector's client secret is not accepted from the app".into(),
+            )
+            .into());
+        }
+        if state
+            .store
+            .org_connector(&id)?
+            .is_some_and(|org| org.keeps_secret)
+        {
+            return Err(OrchestratorError::InvalidContract(format!(
+                "`{id}` connects through the node's code exchange: use POST /v1/connectors/{id}/connection/oauth/code"
+            ))
+            .into());
+        }
+    }
     // Serialize with tool-call refresh for this connection: a refresh that
     // started with the old credentials must not finish afterwards and mark
     // the freshly reconnected connection needs_reauth.
@@ -1008,33 +1168,16 @@ async fn upsert_oauth_tokens(
         Some(&oauth),
     )?;
     credentials.credentials_replaced();
+    let generation = credentials.generation_handle();
     drop(credentials);
-    // A connector's tools are listed once its tokens are in, and only the vetted ones stay.
+    // A connector's tools are listed once its tokens are in, and only the vetted ones stay; the
+    // reconnect (notification, parked runs) is done once they are.
     let conn = match &policy {
-        Some(p) => {
-            let listed = snapshot_connection(&state, &conn).await?;
-            state.store.upsert_mcp_connection(
-                scope,
-                &owner,
-                &id,
-                &conn.url,
-                "",
-                &conn.header_bindings,
-                &listed.tools,
-                McpAuthMode::Oauth,
-                conn.oauth.as_ref(),
-            )?;
-            if listed.instructions.is_some() {
-                state.store.set_mcp_instructions(
-                    scope,
-                    &owner,
-                    &id,
-                    listed.instructions.as_deref(),
-                )?;
-            }
-            state.store.apply_connector_policy(scope, &owner, p)?
+        Some(p) => adopt_tools_and_reconnect(&state, &conn, p, &generation).await?,
+        None => {
+            connector_row_reconnected(&state, &conn).await?;
+            conn
         }
-        None => conn,
     };
     let mut bindings_json = serde_json::json!({
         "accessToken": bindings.access_token_binding_id,
@@ -1044,7 +1187,193 @@ async fn upsert_oauth_tokens(
         bindings_json["clientSecret"] = serde_json::Value::String(client_secret_binding_id);
     }
     let has_refresh = refresh_binding_exists(&state.vault, &conn)?;
-    // A connector-backed row (Linear): its reconnect notification is done.
+    Ok(respond(serde_json::json!({
+        "connection": connection_value(&conn, has_refresh)?,
+        "bindings": bindings_json,
+    })))
+}
+
+/// Lists a connector's tools with the row's stored tokens and keeps the vetted ones, the
+/// definition's instructions and risk classes. Shared by the app's token upsert, the node's code
+/// exchange and the tools-refresh route.
+///
+/// The listing is a network call and runs without the credential gate. The write does not: it takes
+/// the gate, and goes ahead only if the credential generation is still `expected_generation` (the
+/// one the caller's own write left) and the row is still there. A member who disconnected while
+/// `tools/list` was in flight has removed the row and moved the generation: nothing is written, and
+/// the row is not brought back. (Routes call it through [`adopt_tools_and_reconnect`].)
+#[cfg(test)]
+pub(crate) async fn adopt_connector_tools(
+    state: &AppState,
+    conn: &McpConnection,
+    policy: &connectors::McpPolicy,
+    credentials: &crate::host_tools::CredentialGeneration,
+) -> Result<McpConnection, ApiError> {
+    adopt_connector_tools_classified(state, conn, policy, credentials)
+        .await
+        .map_err(AdoptFailure::into_api)
+}
+
+/// [`adopt_connector_tools`], with the server's refusal of the access token reported apart.
+async fn adopt_connector_tools_classified(
+    state: &AppState,
+    conn: &McpConnection,
+    policy: &connectors::McpPolicy,
+    credentials: &crate::host_tools::CredentialGeneration,
+) -> Result<McpConnection, AdoptFailure> {
+    let listed = snapshot_connection_classified(state, conn).await?;
+    let Some(gate) = credentials.lock_if_unchanged().await else {
+        return Err(crate::mcp_registry::tools_read_superseded(&conn.connection_id).into());
+    };
+    let adopted = state.store.adopt_connector_tools_if_present(
+        conn.scope,
+        &conn.owner_user_id,
+        policy,
+        conn.oauth.as_ref(),
+        &listed.tools,
+        listed.instructions.as_deref(),
+    )?;
+    drop(gate);
+    Ok(adopted)
+}
+
+/// A tools-pending row and its credential generation, read together under the credential gate, its
+/// access token refreshed first when the stored one has expired
+/// ([`crate::host_tools::prepare_pending_tools_row`]).
+async fn pending_row_with_fresh_token(
+    state: &AppState,
+    conn: &McpConnection,
+    rejected: Option<&crate::host_tools::CredentialGeneration>,
+) -> Result<(McpConnection, crate::host_tools::CredentialGeneration), OrchestratorError> {
+    use crate::host_tools::PendingRefreshError;
+    use crate::mcp_oauth_refresh::RefreshFailureKind;
+    crate::host_tools::prepare_pending_tools_row(
+        &state.store,
+        &state.vault,
+        conn,
+        crate::mcp_oauth_refresh::refresh_access_token,
+        rejected,
+    )
+    .await
+    .map_err(|e| match e {
+        PendingRefreshError::Store(e) => e,
+        PendingRefreshError::Refresh(f) if f.kind == RefreshFailureKind::NeedsReauth => {
+            OrchestratorError::Conflict(format!(
+                "the provider refused to renew the sign-in stored for `{}`: sign in again",
+                conn.connection_id
+            ))
+        }
+        PendingRefreshError::Refresh(f) => OrchestratorError::Mcp(format!(
+            "could not renew the stored sign-in before reading its tools: {}",
+            f.reason
+        )),
+    })
+}
+
+/// A sign-in is stored; now its tools are adopted and the member's reconnect is done: the
+/// `needs_reauth` notification resolved and the runs parked on the connection resumed, in that order
+/// and only after the tools are in.
+///
+/// If the tools cannot be read (the provider is down, `tools/list` is refused), the sign-in is not
+/// lost, and not announced either: no path re-adopts tools on its own and the code is spent, so the
+/// row is put in a state the member can retry. It is `needs_reauth` with [`TOOLS_PENDING_REASON`]
+/// (calls fail fast and parked runs stay parked, as for any connection that needs attention) until
+/// `POST /v1/mcp/connections/{id}/refresh` lists the tools and puts it back to `connected`.
+pub(crate) async fn adopt_tools_and_reconnect(
+    state: &AppState,
+    conn: &McpConnection,
+    policy: &connectors::McpPolicy,
+    credentials: &crate::host_tools::CredentialGeneration,
+) -> Result<McpConnection, ApiError> {
+    adopt_tools_and_reconnect_classified(state, conn, policy, credentials, false)
+        .await
+        .map_err(AdoptFailure::into_api)
+}
+
+/// [`adopt_tools_and_reconnect`]. With `report_unauthorized`, a listing the MCP server refused
+/// for the access token (HTTP 401) is returned as [`AdoptFailure::Unauthorized`] and records
+/// nothing, so the caller can refresh the token once and try again; without it, it is a listing
+/// failure like any other.
+async fn adopt_tools_and_reconnect_classified(
+    state: &AppState,
+    conn: &McpConnection,
+    policy: &connectors::McpPolicy,
+    credentials: &crate::host_tools::CredentialGeneration,
+    report_unauthorized: bool,
+) -> Result<McpConnection, AdoptFailure> {
+    match adopt_connector_tools_classified(state, conn, policy, credentials).await {
+        Ok(adopted) => {
+            connector_row_reconnected(state, &adopted).await?;
+            Ok(adopted)
+        }
+        Err(AdoptFailure::Unauthorized) if report_unauthorized => Err(AdoptFailure::Unauthorized),
+        // A conflict means the row is no longer the sign-in this adoption was for (removed, or
+        // rewritten by another sign-in, refresh or save): it is not marked.
+        Err(AdoptFailure::Other(failure)) if failure.status == StatusCode::CONFLICT => {
+            Err(AdoptFailure::Other(failure))
+        }
+        Err(_) => {
+            mark_tools_pending(state, conn, credentials).await?;
+            Err(OrchestratorError::Mcp(
+                "you are signed in, but the connector's tools could not be read yet: refresh the connection to finish connecting"
+                    .into(),
+            )
+            .into())
+        }
+    }
+}
+
+/// Leaves a stored sign-in whose tools were not adopted in the retryable state, if the connection is
+/// still the one the listing was for: the same credential generation, and the row still on `conn`'s
+/// URL with exactly `conn`'s OAuth metadata (checked in the transaction that writes the mark). A
+/// row that moved on (another adoption connected it, an admin save marked it, a sign-in, refresh or
+/// disconnect rewrote or removed it) is left unchanged and the answer is a 409. A store failure is
+/// logged and the caller reports the listing failure.
+async fn mark_tools_pending(
+    state: &AppState,
+    conn: &McpConnection,
+    credentials: &crate::host_tools::CredentialGeneration,
+) -> Result<(), ApiError> {
+    let superseded = || crate::mcp_registry::tools_read_superseded(&conn.connection_id).into();
+    let Some(_gate) = credentials.lock_if_unchanged().await else {
+        return Err(superseded());
+    };
+    match state.store.mark_tools_pending_if_unchanged(conn) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(superseded()),
+        Err(e) => {
+            tracing::warn!(connection_id = %conn.connection_id, error = %e, "tools-pending state not recorded");
+            Ok(())
+        }
+    }
+}
+
+/// The connector policy of a row whose sign-in is stored but whose tools are not adopted yet.
+fn pending_tools_policy(
+    state: &AppState,
+    conn: &McpConnection,
+) -> Result<Option<connectors::McpPolicy>, OrchestratorError> {
+    let pending = conn.scope == SecretScope::User
+        && conn.oauth.as_ref().is_some_and(|o| {
+            o.status == McpOauthStatus::NeedsReauth
+                && o.last_refresh_error.as_deref()
+                    == Some(crate::mcp_registry::TOOLS_PENDING_REASON)
+        });
+    if !pending {
+        return Ok(None);
+    }
+    Ok(state
+        .store
+        .mcp_policy(&conn.connection_id)?
+        .filter(|p| p.url == conn.url))
+}
+
+/// A connected row is back: a connector-backed row's reconnect notification is done, and runs
+/// parked on it continue.
+pub(crate) async fn connector_row_reconnected(
+    state: &AppState,
+    conn: &McpConnection,
+) -> Result<(), ApiError> {
     if conn.scope == SecretScope::User
         && state
             .store
@@ -1058,11 +1387,8 @@ async fn upsert_oauth_tokens(
         );
     }
     // Runs parked on this connection (reauth) continue now that it is connected again.
-    super::reauth::resume_parked(&state, &conn).await;
-    Ok(respond(serde_json::json!({
-        "connection": connection_value(&conn, has_refresh)?,
-        "bindings": bindings_json,
-    })))
+    super::reauth::resume_parked(state, conn).await;
+    Ok(())
 }
 
 fn resolve_token_expires_at(
@@ -1431,8 +1757,9 @@ mod tests {
         secret: &str,
         body: Option<serde_json::Value>,
     ) -> (axum::http::StatusCode, serde_json::Value) {
-        use axum::body::{Body, HttpBody as _};
+        use axum::body::Body;
         use axum::http::Request;
+        use http_body_util::BodyExt as _;
         use tower::ServiceExt;
 
         let builder = Request::builder()

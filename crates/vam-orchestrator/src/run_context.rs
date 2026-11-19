@@ -2485,7 +2485,7 @@ mod resolve_run_budgets_tests {
         let mut policy = policy(8, None);
         policy.termination = TerminationPolicy::ExplicitClaim as i32;
         let mut spec = RunSpec::default();
-        resolve_run_budgets(&mut spec, &agent(Some(policy.clone())));
+        resolve_run_budgets(&mut spec, &agent(Some(policy)));
         assert_eq!(termination_input(&spec).as_deref(), Some("explicit_claim"));
         // Resume reads the stored spec; it is not resolved again.
         let json = vam_spec::encoding::proto_to_json("vam.v1.RunSpec", &spec).expect("to json");
