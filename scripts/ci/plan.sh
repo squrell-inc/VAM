@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Plans one rust.yml run: which tier, which tests, which scenarios, whether the microVM lane and the
+# (ci-tiers probe: this line only exercises a CI: scenarios= line and is never merged.)
 # release builds run. Called by the `changes` job; every input is an environment variable, so
 # nothing from the event is interpolated into shell.
 #
