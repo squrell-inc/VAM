@@ -134,3 +134,191 @@ fn runs_page_newest_first_by_rowid_cursor() {
         .unwrap();
     assert_eq!(second.iter().map(name).collect::<Vec<_>>(), ["r1", "r0"]);
 }
+
+fn skill_manifest(urn: &str) -> vam_spec::v1::SkillManifest {
+    vam_spec::v1::SkillManifest {
+        resource_id: Some(ResourceId {
+            urn: urn.to_string(),
+        }),
+        version: Some(vam_spec::v1::Version {
+            major: 1,
+            ..Default::default()
+        }),
+        description: "Test".to_string(),
+        ..Default::default()
+    }
+}
+
+/// `urn:vam:skill:local.vam.dev/acme/<name>` released by `owner` at 1.0.0.
+fn released_skill(store: &SqliteWorkflowStore, name: &str, owner: &str) {
+    let urn = format!("urn:vam:skill:local.vam.dev/acme/{name}");
+    store
+        .publish_skill_draft_with_owner(&skill_manifest(&urn), owner)
+        .unwrap();
+    store
+        .release_skill(
+            &urn,
+            &vam_spec::v1::Version {
+                major: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+}
+
+fn draft_skill(store: &SqliteWorkflowStore, name: &str, owner: &str) {
+    let urn = format!("urn:vam:skill:local.vam.dev/acme/{name}");
+    store
+        .publish_skill_draft_with_owner(&skill_manifest(&urn), owner)
+        .unwrap();
+}
+
+fn skill_names(rows: &[(vam_spec::v1::SkillRecord, crate::catalog::SkillPageKey)]) -> Vec<String> {
+    rows.iter()
+        .map(|(r, _)| {
+            let urn = &r.spec.as_ref().unwrap().resource_id.as_ref().unwrap().urn;
+            let channel = if r.channel == vam_spec::v1::SkillChannel::Draft as i32 {
+                "draft"
+            } else {
+                "released"
+            };
+            format!("{}:{channel}", urn.rsplit('/').next().unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn skills_list_released_only_by_default_and_own_drafts_only_on_request() {
+    let store = store();
+    store.create_user("alice", "alice").unwrap();
+    store.create_user("bob", "bob").unwrap();
+    released_skill(&store, "shared", "alice");
+    draft_skill(&store, "alice-wip", "alice");
+    draft_skill(&store, "bob-wip", "bob");
+
+    for who in ["alice", "bob"] {
+        let rows = store.list_skill_records_page(who, false, 50, None).unwrap();
+        assert_eq!(skill_names(&rows), ["shared:released"], "{who} default");
+    }
+    let alice = store
+        .list_skill_records_page("alice", true, 50, None)
+        .unwrap();
+    // A release keeps the owner's draft row beside it, so alice also sees her draft of `shared`.
+    assert_eq!(
+        skill_names(&alice),
+        ["alice-wip:draft", "shared:released", "shared:draft"]
+    );
+    let bob = store
+        .list_skill_records_page("bob", true, 50, None)
+        .unwrap();
+    assert_eq!(skill_names(&bob), ["bob-wip:draft", "shared:released"]);
+    assert!(alice.iter().all(|(r, _)| r.owner_user_id == "alice"));
+}
+
+#[test]
+fn skills_page_newest_first_and_a_new_release_does_not_shift_the_next_page() {
+    let store = store();
+    for i in 0..5 {
+        released_skill(&store, &format!("s{i}"), "local");
+    }
+    let first = store
+        .list_skill_records_page("local", false, 3, None)
+        .unwrap();
+    assert_eq!(
+        skill_names(&first),
+        ["s4:released", "s3:released", "s2:released"]
+    );
+    released_skill(&store, "s5", "local");
+    let second = store
+        .list_skill_records_page("local", false, 3, Some(first.last().unwrap().1))
+        .unwrap();
+    assert_eq!(skill_names(&second), ["s1:released", "s0:released"]);
+}
+
+/// A package of `urn:vam:skill:local.vam.dev/acme/<name>` saved as `owner`'s draft at 1.0.0-draft,
+/// and released at 1.0.0 when `release`.
+fn skill_package(
+    store: &SqliteWorkflowStore,
+    name: &str,
+    owner: &str,
+    digest: char,
+    release: bool,
+) {
+    let urn = format!("urn:vam:skill:local.vam.dev/acme/{name}");
+    let draft = vam_spec::v1::Version {
+        major: 1,
+        prerelease: "draft".to_string(),
+        ..Default::default()
+    };
+    let digest: String = std::iter::repeat_n(digest, 64).collect();
+    let mut spec = skill_manifest(&urn);
+    spec.version = Some(draft.clone());
+    let package = vam_spec::v1::SkillPackageRecord {
+        resource_id: Some(ResourceId { urn: urn.clone() }),
+        version: Some(draft),
+        channel: vam_spec::v1::SkillChannel::Draft as i32,
+        blob_relpath: crate::skill_packages::skill_blob_relpath(owner, &digest),
+        digest,
+        size_bytes: 64,
+        spec: Some(spec),
+        ..Default::default()
+    };
+    store.put_skill_package_with_owner(&package, owner).unwrap();
+    if release {
+        store
+            .release_skill_package(
+                &urn,
+                &vam_spec::v1::Version {
+                    major: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn skills_list_packages_and_manifests_and_a_released_package_hides_its_manifest() {
+    let store = store();
+    store.create_user("alice", "alice").unwrap();
+    store.create_user("bob", "bob").unwrap();
+    skill_package(&store, "packaged", "alice", 'a', true);
+    released_skill(&store, "manifest-only", "alice");
+    // The same URN as a released package: a ref resolves to the package, so the manifest is hidden.
+    released_skill(&store, "packaged", "alice");
+    skill_package(&store, "bob-pkg-wip", "bob", 'b', false);
+
+    let rows = store
+        .list_skill_records_page("alice", false, 50, None)
+        .unwrap();
+    let mut seen: Vec<(String, String)> = rows
+        .iter()
+        .map(|(r, _)| {
+            let urn = &r.spec.as_ref().unwrap().resource_id.as_ref().unwrap().urn;
+            (
+                urn.rsplit('/').next().unwrap().to_string(),
+                r.source.clone(),
+            )
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        [
+            ("manifest-only".to_string(), "manifest".to_string()),
+            ("packaged".to_string(), "package".to_string()),
+        ]
+    );
+    let alice = store
+        .list_skill_records_page("alice", true, 50, None)
+        .unwrap();
+    assert!(
+        skill_names(&alice).iter().all(|n| !n.starts_with("bob-")),
+        "{:?}",
+        skill_names(&alice)
+    );
+    let bob = store
+        .list_skill_records_page("bob", true, 50, None)
+        .unwrap();
+    assert!(skill_names(&bob).contains(&"bob-pkg-wip:draft".to_string()));
+}

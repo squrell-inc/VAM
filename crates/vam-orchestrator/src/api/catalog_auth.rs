@@ -28,6 +28,19 @@ pub fn require_catalog_read(auth: &AuthContext) -> Result<(), OrchestratorError>
     }
 }
 
+/// `GET /v1/skills?includeDrafts=true` lists the caller's own drafts. Only a catalog writer has
+/// drafts to list, so it needs `catalog:write` (or `keys:admin`) in the **effective** scopes, the
+/// test [`require_agent_draft_write`] uses for its `Full` mode.
+pub fn require_own_drafts_listing(auth: &AuthContext) -> Result<(), OrchestratorError> {
+    if auth.has_keys_admin() || auth.key.record.scopes.iter().any(|s| s == "catalog:write") {
+        Ok(())
+    } else {
+        Err(OrchestratorError::PermissionDenied(
+            "missing required scope 'catalog:write'".into(),
+        ))
+    }
+}
+
 /// How a caller may write an agent draft.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentWriteMode {

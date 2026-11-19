@@ -21,6 +21,7 @@ proves:
   - crates/vam-orchestrator/tests/rate_limit_api_tests.rs
   - crates/vam-orchestrator/src/paging_store_tests.rs::sessions_page_newest_first_and_a_new_session_does_not_shift_the_next_page
   - crates/vam-orchestrator/src/paging_store_tests.rs::runs_page_newest_first_by_rowid_cursor
+  - crates/vam-orchestrator/src/paging_store_tests.rs::skills_page_newest_first_and_a_new_release_does_not_shift_the_next_page
   - crates/vam-orchestrator/tests/api_tests.rs
   - crates/vam-orchestrator/tests/mcp_credentials_stay_host_side.rs::the_secrets_api_cannot_write_the_connection_kind
   - crates/vam-orchestrator/tests/mcp_credentials_stay_host_side.rs::connection_credential_cannot_be_rewritten_as_egress
@@ -88,9 +89,12 @@ keeps the default (`daemon.rs:274-308`). Proved by `api-rate-limits-a-flood` and
 ## Paging
 
 List calls take `pageSize` (default 50, at most 1000) and `pageToken` (`api/paging.rs:13-50`).
-Sessions, runs and approvals page newest first by a cursor, so a new row does not shift the next
-page (tests `sessions_page_newest_first_and_a_new_session_does_not_shift_the_next_page` and
-`runs_page_newest_first_by_rowid_cursor`). A bad `pageSize` is a 400.
+Sessions, runs, approvals and skills (`GET /v1/skills`) page newest first by a cursor, so a new
+row does not shift the next page (tests
+`sessions_page_newest_first_and_a_new_session_does_not_shift_the_next_page`,
+`runs_page_newest_first_by_rowid_cursor` and
+`skills_page_newest_first_and_a_new_release_does_not_shift_the_next_page`). A bad `pageSize`, or
+a `pageToken` from another list, is a 400.
 
 ## Errors
 

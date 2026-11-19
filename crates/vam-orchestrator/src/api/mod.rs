@@ -191,7 +191,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(delete_playbook_wildcard),
         )
         .merge(skill_packages::skill_package_routes())
-        .route("/v1/skills", put(put_skill))
+        .route("/v1/skills", put(put_skill).get(list_skills))
         .route(
             "/v1/skills/{*rest}",
             get(get_skill_wildcard).merge(catalog_release::skill_release_route()),
@@ -821,6 +821,79 @@ async fn put_policy(
         record: Some(saved),
     };
     let (code, json) = json_response("vam.v1.PutPolicyResponse", &resp)?;
+    Ok(json_http_response(code, json))
+}
+
+/// `?includeDrafts=` on `GET /v1/skills`. Read beside [`paging::PageQuery`].
+#[derive(Debug, Default, serde::Deserialize)]
+struct ListSkillsQuery {
+    #[serde(rename = "includeDrafts")]
+    include_drafts: Option<String>,
+}
+
+impl ListSkillsQuery {
+    /// `true` or `false`; absent is `false`. Anything else, an empty value included, is refused.
+    fn include_drafts(&self) -> Result<bool, OrchestratorError> {
+        match self.include_drafts.as_deref().map(str::trim) {
+            None | Some("false") => Ok(false),
+            Some("true") => Ok(true),
+            Some(_) => Err(OrchestratorError::InvalidContract(
+                "includeDrafts must be true or false".into(),
+            )),
+        }
+    }
+}
+
+/// `GET /v1/skills`: released skill rows, newest first, one page at a time. `includeDrafts=true`
+/// adds the caller's own drafts and needs `catalog:write`. Another user's draft is never listed.
+async fn list_skills(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(page): Query<paging::PageQuery>,
+    Query(flags): Query<ListSkillsQuery>,
+) -> Result<Response, ApiError> {
+    require_catalog_read(&auth)?;
+    let include_drafts = flags.include_drafts()?;
+    if include_drafts {
+        crate::api::catalog_auth::require_own_drafts_listing(&auth)?;
+    }
+    let size = page.size()?;
+    let after =
+        paging::int_triple_cursor(page.cursor("skills")?)?.map(|(created_at, source, rowid)| {
+            crate::catalog::SkillPageKey {
+                created_at,
+                source,
+                rowid,
+            }
+        });
+    let mut rows = state.store.list_skill_records_page(
+        auth.owner_user_id(),
+        include_drafts,
+        size + 1,
+        after,
+    )?;
+    let more = rows.len() > size;
+    rows.truncate(size);
+    let next = match (more, rows.last()) {
+        (true, Some((_, key))) => paging::token(
+            "skills",
+            &[
+                key.created_at.to_string(),
+                key.source.to_string(),
+                key.rowid.to_string(),
+            ],
+        ),
+        _ => String::new(),
+    };
+    let mut records: Vec<_> = rows.into_iter().map(|(record, _)| record).collect();
+    state.store.attach_skill_origins(&mut records)?;
+    let resp = vam_spec::v1::ListSkillsResponse {
+        records,
+        pagination: Some(vam_spec::v1::PaginationResponse {
+            next_page_token: next,
+        }),
+    };
+    let (code, json) = json_response("vam.v1.ListSkillsResponse", &resp)?;
     Ok(json_http_response(code, json))
 }
 
