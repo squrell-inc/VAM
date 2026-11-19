@@ -365,6 +365,8 @@ impl SqliteWorkflowStore {
             }
         }
         for id in stale {
+            // The admin's client and its secret go with the connector (CN-5.2).
+            crate::connector_client::clear_client_in(&tx, &id)?;
             tx.execute(
                 "DELETE FROM node_enabled_connectors WHERE connector_id = ?1",
                 [id],

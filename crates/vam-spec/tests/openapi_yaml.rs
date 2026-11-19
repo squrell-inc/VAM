@@ -153,3 +153,75 @@ fn every_local_ref_resolves() {
     walk(&doc, &doc, &mut bad);
     assert!(bad.is_empty(), "dangling $ref: {bad:?}");
 }
+
+#[test]
+fn openapi_has_agent_draft_permissions() {
+    let doc = load();
+    let path = &doc["paths"]["/v1/agents/{urn}/permissions"];
+    let schema_ref = "#/components/schemas/AgentPermissions";
+    let get = &path["get"];
+    assert!(get.is_mapping(), "missing GET permissions");
+    for code in ["200", "400", "403", "404"] {
+        assert!(get["responses"][code].is_mapping(), "GET missing {code}");
+    }
+    assert_eq!(
+        get["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].as_str(),
+        Some(schema_ref)
+    );
+    let put = &path["put"];
+    assert!(put.is_mapping(), "missing PUT permissions");
+    for code in ["200", "400", "403", "404", "409"] {
+        assert!(put["responses"][code].is_mapping(), "PUT missing {code}");
+    }
+    assert_eq!(
+        put["requestBody"]["content"]["application/json"]["schema"]["$ref"].as_str(),
+        Some(schema_ref)
+    );
+    let params = put["parameters"].as_sequence().unwrap();
+    assert!(params
+        .iter()
+        .any(|p| p["$ref"].as_str() == Some("#/components/parameters/IdempotencyKeyHeader")));
+    for p in ["effective", "explain"] {
+        let route = format!("/v1/agents/{{urn}}/permissions/{p}");
+        assert!(
+            doc["paths"][route.as_str()]["get"].is_mapping(),
+            "missing {route}"
+        );
+    }
+    assert!(doc["components"]["schemas"]["AgentPermissions"].is_mapping());
+}
+
+#[test]
+fn openapi_has_permissions_migrate() {
+    let doc = load();
+    let post = &doc["paths"]["/v1/agents/{urn}/permissions/migrate"]["post"];
+    assert!(post.is_mapping(), "missing POST permissions/migrate");
+    for code in ["200", "400", "403", "404", "409"] {
+        assert!(post["responses"][code].is_mapping(), "missing {code}");
+    }
+    let params = post["parameters"].as_sequence().unwrap();
+    assert!(params
+        .iter()
+        .any(|p| p["$ref"].as_str() == Some("#/components/parameters/IdempotencyKeyHeader")));
+    assert!(params.iter().any(|p| p["name"].as_str() == Some("force")));
+    let report = &doc["components"]["schemas"]["PermissionsMigrationReport"];
+    for field in ["converted", "keptAdvanced", "unmapped", "behaviourChanges"] {
+        assert!(report["properties"][field].is_mapping(), "missing {field}");
+    }
+}
+
+#[test]
+fn openapi_refresh_drift_lists_every_value_the_route_answers() {
+    let doc = load();
+    let drift = &doc["components"]["schemas"]["RefreshMcpResponse"]["properties"]["drift"];
+    let values: Vec<&str> = drift["enum"]
+        .as_sequence()
+        .expect("drift enum")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    // `adopted` is the tools-pending recovery of a connector sign-in.
+    for v in ["identical", "shrunk", "reapproved", "upgraded", "adopted"] {
+        assert!(values.contains(&v), "drift enum lacks {v}: {values:?}");
+    }
+}

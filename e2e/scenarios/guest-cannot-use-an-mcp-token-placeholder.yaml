@@ -31,6 +31,7 @@ guards:
   - vam:crates/vam-orchestrator/src/connectors.rs
   - vam:crates/vam-orchestrator/src/api/connectors.rs
   - vam:crates/vam-orchestrator/src/connection_egress.rs
+  - vam:crates/vam-orchestrator/src/api/mcp_connections.rs
   - vam:crates/vam-network/src/broker.rs
 mock:
   - when: { step: probe, toolName: run }

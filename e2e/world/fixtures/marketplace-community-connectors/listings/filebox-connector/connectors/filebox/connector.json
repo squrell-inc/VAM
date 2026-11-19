@@ -1,0 +1,36 @@
+{
+  "urn": "urn:vam:connector:connectors.community.example/community/filebox",
+  "version": "1.0.0",
+  "displayName": "Filebox",
+  "publisher": "Community Tools Ltd",
+  "description": "Filebox files in the member's own account, through its remote MCP server.",
+  "icon": "filebox",
+  "provider": {
+    "kind": "oauth2",
+    "profile": "discover",
+    "client": "org",
+    "clientSecret": "org_vault",
+    "scopes": [
+      "read"
+    ],
+    "orgConsent": "none"
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "whoami.email"
+  },
+  "mcp": {
+    "url": "https://mcp.filebox.example/mcp",
+    "tools": [
+      {
+        "remote": "search_files",
+        "sideEffect": "READ_ONLY"
+      },
+      {
+        "remote": "get_file_content",
+        "sideEffect": "READ_ONLY"
+      }
+    ]
+  }
+}

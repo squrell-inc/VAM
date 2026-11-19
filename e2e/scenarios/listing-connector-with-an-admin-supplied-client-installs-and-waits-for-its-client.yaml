@@ -1,0 +1,43 @@
+id: listing-connector-with-an-admin-supplied-client-installs-and-waits-for-its-client
+title: A marketplace connector that needs the org's own OAuth client lists, installs and waits for the admin's client
+description: >
+  A marketplace listing ships a connector whose OAuth client the org's admin registers with the provider
+  (`client: org`) and whose secret the node keeps (`clientSecret: org_vault`). Before installing, the listing
+  shows the admin what it asks for: an admin-supplied client and an org-held secret. A member cannot install
+  it; the admin does. Installed, the connector reads "ask your admin" for a member, marked Unverified, not
+  enabled. A listing that asks for an org-held secret but names no admin-supplied client is refused with a
+  reason that names the client. Bugwatch (the publisher's own client) and the three refusals of the earlier
+  phase read as before.
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - marketplace-community-connectors
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: filebox-connector, as: org-admin, fields: { installed: null, summary.connectors.0.publisher: Community Tools Ltd, summary.connectors.0.mcpHost: mcp.filebox.example, summary.connectors.0.client: org, summary.connectors.0.clientSecret: org_vault } } }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-admin, fields: { installed: null, summary.connectors.0.mcpHost: mcp.bugwatch.example, summary.connectors.0.clientSecret: none } } }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: filebox-connector, as: org-member, refused: true }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: filebox-connector, as: org-admin }
+  - expect: { connectors: { id: filebox, as: org-member, fields: { state: askAdmin, source: marketplace, trust: unverified, publisher: Community Tools Ltd, origin.listing: filebox-connector, origin.ref: filebox-connector-v1.0.0, node.enabled: false } } }
+  - connector-node: { id: filebox, enabled: true, as: org-member, refused: true }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: org-secret-without-org-client, as: org-admin, refused: true, contains: client }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: reserved-connector-id, as: org-admin, refused: true, contains: linear }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: unknown-profile-connector, as: org-admin, refused: true, contains: profile }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: connector-with-a-secret, as: org-admin, refused: true, contains: secret }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: bugwatch-connector, as: org-admin }
+then:
+  - expect: { connectors: { id: filebox, as: org-member, fields: { state: askAdmin, trust: unverified, node.enabled: false } } }
+  - expect: { connectors: { id: filebox, as: org-admin, fields: { capabilities.client: org, capabilities.clientSecret: org_vault, capabilities.profile: discover } } }
+  - expect: { connectors: { id: bugwatch, as: org-member, fields: { state: askAdmin, trust: unverified } } }
+  - expect: { connectors: { id: bugwatch, as: org-admin, fields: { capabilities.profile: discover, capabilities.clientSecret: none } } }
+  - expect: { connectors: { id: linear, as: org-member, fields: { state: askAdmin, source: builtin, trust: squrell }, absent: [origin] } }
+guards:
+  - vam:crates/vam-orchestrator/src/marketplace/import.rs
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-spec/src/connector.rs
+  - vam:crates/vam-spec/src/connector_listing.rs
+  - vam:crates/vam-spec/src/package.rs
+status: active
