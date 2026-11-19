@@ -769,3 +769,33 @@ fn org_piece_username_is_linted() {
     );
     f.expect_error("piece-body", "`username` belongs to an `org` piece");
 }
+
+#[test]
+fn a_second_filebox_piece_and_a_non_filebox_alias_for_a_filebox_secret_are_refused() {
+    let fx = Fx::new();
+    for (piece, provider) in [
+        ("mock-filebox-server", "filebox"),
+        ("mock-filebox-two", "filebox"),
+        ("mock-linear-server", "linear-server"),
+    ] {
+        fx.write(
+            &format!("world/{piece}.yaml"),
+            &format!("piece: {piece}\nkind: mock-provider\nprovider: {provider}\n"),
+        );
+    }
+    let scenario = SCENARIO
+        .replace(
+            "given: [org-admin, agent-plain]",
+            "given: [org-admin, agent-plain, mock-filebox-server, mock-filebox-two, mock-linear-server]",
+        )
+        .replace(
+            "when:\n  - chat: \"e2e-step:hello Hi\"\n",
+            "when:\n  - chat: \"e2e-step:hello Hi\"\n  - connector-node: { id: filebox, enabled: true, as: org-admin, client: { clientId: c, clientSecret: { piece: mock-linear-server, which: current } } }\n  - api-call: { path: /v1/connectors, as: org-admin, absent: mock-linear-server }\n",
+        );
+    fx.write("scenarios/chat-replies.yaml", &scenario);
+    // One listener holds one filebox state: a second piece would reset it.
+    fx.expect_error("given", "second filebox");
+    // The secret and the tokens are kept under a filebox alias only.
+    fx.expect_error("refs", "clientSecret.piece");
+    fx.expect_error("refs", "api-call.absent");
+}

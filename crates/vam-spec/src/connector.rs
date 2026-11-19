@@ -66,6 +66,11 @@ pub struct OAuth2Provider {
     pub profile: OAuthProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Whose OAuth client the sign-in uses: the publisher's (default) or the org's, registered by
+    /// the node's admin and entered at Enable. Absent from the file (and from its JSON) when
+    /// `publisher`, so every existing file round-trips unchanged.
+    #[serde(default, skip_serializing_if = "ClientKind::is_publisher")]
+    pub client: ClientKind,
     pub client_secret: ClientSecret,
     pub scopes: Vec<String>,
     pub org_consent: OrgConsent,
@@ -80,11 +85,51 @@ pub enum OAuthProfile {
     Slack,
 }
 
+/// Whose OAuth client a connector signs in with (locked decision 12).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientKind {
+    /// The connector file's own client (Squrell's, or the publisher's `clientId`).
+    #[default]
+    Publisher,
+    /// The org's own client: the admin registers it with the provider and supplies the id (and
+    /// secret) at Enable. The file carries no `clientId`.
+    Org,
+}
+
+impl ClientKind {
+    pub fn is_publisher(&self) -> bool {
+        *self == ClientKind::Publisher
+    }
+
+    /// The word used in the file and in API output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ClientKind::Publisher => "publisher",
+            ClientKind::Org => "org",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientSecret {
     None,
     SqurellRelay,
+    /// The client secret is an org-scope vault row written by an org admin (only with
+    /// `client: org`); the node, not the app, exchanges codes and refreshes with it.
+    OrgVault,
+}
+
+impl ClientSecret {
+    /// The word used in the file and in API output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ClientSecret::None => "none",
+            ClientSecret::SqurellRelay => "squrell_relay",
+            ClientSecret::OrgVault => "org_vault",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +290,24 @@ pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
         Provider::Oauth2(p) => {
             if p.scopes.iter().any(|s| s.trim().is_empty()) {
                 return bad("scopes must not contain an empty scope");
+            }
+            if p.client_secret == ClientSecret::OrgVault && p.client != ClientKind::Org {
+                return bad("clientSecret `org_vault` needs `client: org`");
+            }
+            if p.client == ClientKind::Org {
+                if p.client_id.is_some() {
+                    return bad(
+                        "client `org` must not carry a clientId: the org's admin supplies it at Enable",
+                    );
+                }
+                if p.profile == OAuthProfile::Entra {
+                    return bad(
+                        "client `org` is not available with profile `entra`: Squrell's client is used",
+                    );
+                }
+                if p.client_secret == ClientSecret::SqurellRelay {
+                    return bad("client `org` cannot use clientSecret `squrell_relay`");
+                }
             }
             if p.profile == OAuthProfile::Entra {
                 if p.org_consent != OrgConsent::AdminRequired {
@@ -488,6 +551,75 @@ mod tests {
         let mut v = linear();
         v["mcp"]["tools"][0]["extra"] = json!(1);
         assert!(err(v).contains("connector json"));
+    }
+
+    fn org_client() -> Value {
+        let mut v = linear();
+        v["urn"] = json!("urn:vam:connector:hub.squrell.cloud/squrell/filebox");
+        v["provider"] = json!({ "kind": "oauth2", "profile": "discover", "client": "org",
+            "clientSecret": "org_vault", "scopes": [], "orgConsent": "none" });
+        v
+    }
+
+    #[test]
+    fn an_org_client_with_a_vault_secret_parses_and_round_trips() {
+        let c = parse_connector(&org_client().to_string()).unwrap();
+        let Provider::Oauth2(p) = &c.provider else {
+            panic!()
+        };
+        assert_eq!(p.client, ClientKind::Org);
+        assert_eq!(p.client_secret, ClientSecret::OrgVault);
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains(r#""client":"org""#) && s.contains(r#""clientSecret":"org_vault""#));
+        assert_eq!(parse_connector(&s).unwrap(), c);
+        // `client: org` with no secret is also valid.
+        let mut v = org_client();
+        v["provider"]["clientSecret"] = json!("none");
+        assert!(parse_connector(&v.to_string()).is_ok());
+    }
+
+    #[test]
+    fn a_file_without_client_is_publisher_and_serializes_without_it() {
+        for c in builtin_connectors() {
+            let Provider::Oauth2(p) = &c.provider else {
+                continue;
+            };
+            assert_eq!(p.client, ClientKind::Publisher);
+            assert!(!serde_json::to_string(&c).unwrap().contains("\"client\":"));
+        }
+        let mut v = org_client();
+        v["provider"]["client"] = json!("publisher");
+        v["provider"]["clientSecret"] = json!("none");
+        assert!(parse_connector(&v.to_string()).is_ok());
+    }
+
+    #[test]
+    fn org_vault_needs_an_org_client() {
+        let mut v = org_client();
+        v["provider"].as_object_mut().unwrap().remove("client");
+        assert!(err(v).contains("`client: org`"));
+        let mut v = org_client();
+        v["provider"]["client"] = json!("publisher");
+        let e = err(v);
+        assert!(e.contains("org_vault") && e.contains("client: org"), "{e}");
+        let mut v = org_client();
+        v["provider"]["client"] = json!("everyone");
+        assert!(err(v).contains("connector json"));
+    }
+
+    #[test]
+    fn an_org_client_carries_no_client_id_and_is_not_entra() {
+        let mut v = org_client();
+        v["provider"]["clientId"] = json!("abc");
+        let e = err(v);
+        assert!(e.contains("clientId") && e.contains("admin"), "{e}");
+        let mut m = m365();
+        m["provider"]["client"] = json!("org");
+        m["provider"].as_object_mut().unwrap().remove("clientId");
+        assert!(err(m).contains("entra"));
+        let mut v = org_client();
+        v["provider"]["clientSecret"] = json!("squrell_relay");
+        assert!(err(v).contains("squrell_relay"));
     }
 
     #[test]

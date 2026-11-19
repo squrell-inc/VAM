@@ -1,0 +1,54 @@
+id: rotating-refresh-token-is-spent-once-when-two-tasks-call-at-once
+title: A single-use refresh token is spent once when two tasks call a connector at the same time
+description: >
+  A member has connected Filebox, whose refresh tokens are single-use and rotate. The access token expires, the
+  provider's token endpoint is held, and two tasks of the member each call the read tool. Both calls are refused
+  by the provider as expired and both wait on one refresh. Once the token endpoint answers, both runs succeed and
+  the provider saw exactly one refresh, made with the org's client secret, and none with a token it had already
+  spent. The rotated refresh token was stored: when the access token expires again, one more call refreshes once
+  more and succeeds.
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - org-administrator
+  - marketplace-community-connectors
+  - mock-filebox-server
+  - { piece: agent-plain, as: tasks-a }
+  - { piece: agent-plain, as: tasks-b }
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: filebox-connector, as: org-admin }
+  - connector-node: { id: filebox, enabled: true, as: org-administrator, client: { clientId: e2e-filebox-client, clientSecret: { piece: mock-filebox-server, which: current } } }
+  - connector-connect: { id: filebox, piece: mock-filebox-server, as: org-member }
+  - expect: { connectors: { id: filebox, as: org-member, fields: { state: connected } } }
+  - mock-provider: { piece: mock-filebox-server, expire: true }
+  - mock-provider: { piece: mock-filebox-server, holdToken: true }
+  - chat: { agent: tasks-a, text: "e2e-step:read Search my files", as: org-member, wait: false }
+  - chat: { agent: tasks-b, text: "e2e-step:read Search my files too", as: org-member, wait: false }
+  - expect: { mock-requests: { piece: mock-filebox-server, path: /mcp, with: authorization-expired, atLeast: 2 } }
+  - mock-provider: { piece: mock-filebox-server, holdToken: false }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-filebox-server, path: /mcp, with: "tool-ok=search_files", count: 2 } }
+  - expect: { mock-requests: { piece: mock-filebox-server, path: /token, with: "grant_type=refresh_token", count: 1, has: ["client-secret=current", "client_id=e2e-filebox-client"], lacks: ["refresh=reused", "client-secret=none"] } }
+  - mock-provider: { piece: mock-filebox-server, expire: true }
+  - chat: { agent: tasks-a, text: "e2e-step:read Search my files once more", as: org-member }
+  - expect: { run: succeeded }
+then:
+  - expect: { mock-requests: { piece: mock-filebox-server, path: /token, with: "grant_type=refresh_token", count: 2 } }
+  - expect: { mock-requests: { piece: mock-filebox-server, path: /token, with: "refresh=fresh", count: 2 } }
+  - expect: { mock-requests: { piece: mock-filebox-server, path: /token, with: "refresh=reused", count: 0 } }
+  - expect: { connectors: { id: filebox, as: org-member, fields: { state: connected } } }
+guards:
+  - vam:crates/vam-orchestrator/src/host_tools.rs
+  - vam:crates/vam-orchestrator/src/mcp_oauth_refresh.rs
+  - vam:crates/vam-orchestrator/src/mcp_registry.rs
+  - vam:crates/vam-orchestrator/src/connectors.rs
+mock:
+  - when: { step: read, toolName: filebox__search_files }
+    reply: { text: Searched. }
+  - when: { step: read, stepStart: true }
+    reply: { toolCall: { name: filebox__search_files, args: {} } }
+status: active
