@@ -52,7 +52,8 @@ variable (test `vm_node_names_every_missing_variable`). A process-mode node does
 
 ## Readiness and draining
 
-`GET /v1/health` reports capacity and `draining` (`api/mod.rs:382-393,523-548`). On SIGTERM or Ctrl-C
+`GET /v1/health` reports `SERVING` or `NOT_SERVING` (`api/mod.rs:382-393`); `GET /v1/node` reports
+capacity and `draining` (`api/mod.rs:523-548`). On SIGTERM or Ctrl-C
 `vamd` sets `draining`, after which mutating requests are refused and readiness is false
 (`bin/vamd.rs:991-1015`, `api/mod.rs:340,383`).
 
