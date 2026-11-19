@@ -1314,11 +1314,14 @@ mod tests {
             prost_types::Value {
                 kind: Some(prost_types::value::Kind::ListValue(
                     prost_types::ListValue {
-                        values: vec![prost_types::Value {
-                            kind: Some(prost_types::value::Kind::StringValue(
-                                "sleep 2".to_string(),
-                            )),
-                        }],
+                        // `sh -c "sleep 2"`: a single "sleep 2" argument would make `sh` look for a
+                        // script of that name and exit 2 at once, racing the timeout.
+                        values: ["-c", "sleep 2"]
+                            .into_iter()
+                            .map(|a| prost_types::Value {
+                                kind: Some(prost_types::value::Kind::StringValue(a.to_string())),
+                            })
+                            .collect(),
                     },
                 )),
             },
