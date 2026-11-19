@@ -11,13 +11,12 @@ design_docs:
 
 ## Goal
 
-After isolation UI verify: members can read and run **released** agents; publishers can run **draft or released** by pinning the version on the **workspace**; chat can pick an **operator-allowlisted** model. Docs site teaches how to init users (admin env, operator, four profiles). No example catalog seeds. No merge to `main`.
+After isolation UI verify: members can read and run **released** agents; publishers can run **draft or released** by pinning the version on the **workspace**; chat can pick an **operator-allowlisted** model. Docs site teaches how to init users (admin env, operator, four profiles). No example catalog seeds.
 
 ## Out of scope
 
 - Per-message draft/released dropdown
 - Multiple operators / operator password login
-- Merge vam or the VAM app to `main`
 - Coding in Phase 0 (capture only)
 
 ## Locked decisions
@@ -36,6 +35,7 @@ Do not re-litigate without editing this list.
 7. Composer dropdown is **models** from the operator allowlist. Agent `preferredModels` is the default only.
 8. The VAM app must not hardcode CreateRun `agentRef` to `1.0.0`.
 9. Implement later, one phase per plan, on `feat/improving-the-vam` + `feature/user-admin-ui` (not `main`).
+   *Amended 2026-11-18 by the product owner:* both branches belong to the repository VAM moved from and do not exist here. vam work for this tracker branches from `main` and reaches `main` through a PR, as `working-agreement.md` sets out; the VAM app's items follow that repository's own convention. The earlier "no merge to `main`" rule (Goal, Out of scope, Explicitly later) falls with this decision and is removed.
 10. Docs site how-to lives under **Getting Started**, not inside `user-isolation.md`. New page `getting-started/users-and-roles.md`. Lima + quickstart + installation link it. `security.md` / `daemon.md` / `user-isolation.md` stay source of truth for scopes, env names, and invariants.
 
 ## Status legend
@@ -134,7 +134,6 @@ Do not re-litigate without editing this list.
 - Per-message agent version switch
 - Workspace migrates from one agent version to another in place
 - Multi-operator / OIDC
-- Merge to `main`
 
 ## Progress log
 

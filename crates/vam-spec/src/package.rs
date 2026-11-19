@@ -546,6 +546,16 @@ pub struct ConnectorSummary {
     /// The public client id the publisher declares, when it declares one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// `org` when the node's admin supplies the OAuth client (id, and secret for `org_vault`) at
+    /// Enable; absent for the file's own (publisher) client, so a publisher connector's summary,
+    /// and with it the digest of an installed release, is unchanged. A flip changes the digest:
+    /// the update needs Enable again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    /// What the admin reads for an org client: "admin-supplied client" or "admin-supplied client
+    /// (with a secret)".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_text: Option<String>,
     pub client_secret: String,
     pub org_consent: String,
     pub scopes: Vec<String>,
@@ -701,27 +711,39 @@ fn summarize_skill(m: &SkillManifest) -> CapabilitySummary {
 /// The capability summary of a connector definition.
 pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
     use crate::connector::{OAuthProfile, SideEffect, ToolDefault as McpDefault};
-    let (provider, profile, client_id, client_secret, org_consent, scopes) = match &c.provider {
-        crate::connector::Provider::Oauth2(p) => (
-            "oauth2",
-            match p.profile {
-                OAuthProfile::Entra => "entra",
-                OAuthProfile::Discover => "discover",
-                OAuthProfile::Google => "google",
-                OAuthProfile::Slack => "slack",
-            },
-            p.client_id.clone(),
-            match p.client_secret {
-                crate::connector::ClientSecret::None => "none",
-                crate::connector::ClientSecret::SqurellRelay => "squrell_relay",
-            },
-            match p.org_consent {
-                crate::connector::OrgConsent::None => "none",
-                crate::connector::OrgConsent::AdminRequired => "admin_required",
-            },
-            p.scopes.clone(),
-        ),
-        crate::connector::Provider::ApiKey(_) => ("api_key", "", None, "none", "none", Vec::new()),
+    let (provider, profile, client_id, client, client_secret, org_consent, scopes) =
+        match &c.provider {
+            crate::connector::Provider::Oauth2(p) => (
+                "oauth2",
+                match p.profile {
+                    OAuthProfile::Entra => "entra",
+                    OAuthProfile::Discover => "discover",
+                    OAuthProfile::Google => "google",
+                    OAuthProfile::Slack => "slack",
+                },
+                p.client_id.clone(),
+                p.client,
+                p.client_secret.as_str(),
+                match p.org_consent {
+                    crate::connector::OrgConsent::None => "none",
+                    crate::connector::OrgConsent::AdminRequired => "admin_required",
+                },
+                p.scopes.clone(),
+            ),
+            crate::connector::Provider::ApiKey(_) => (
+                "api_key",
+                "",
+                None,
+                crate::connector::ClientKind::Publisher,
+                "none",
+                "none",
+                Vec::new(),
+            ),
+        };
+    let client_text = match (client, client_secret) {
+        (crate::connector::ClientKind::Publisher, _) => None,
+        (_, "org_vault") => Some("admin-supplied client (with a secret)".to_string()),
+        _ => Some("admin-supplied client".to_string()),
     };
     let (mcp_url, mcp_host, tools) = match &c.mcp {
         Some(m) => (
@@ -765,6 +787,8 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
             provider: provider.into(),
             profile: profile.into(),
             client_id,
+            client: (!client.is_publisher()).then(|| client.as_str().to_string()),
+            client_text,
             client_secret: client_secret.into(),
             org_consent: org_consent.into(),
             scopes,

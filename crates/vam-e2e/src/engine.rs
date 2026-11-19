@@ -812,8 +812,10 @@ impl Engine {
     fn cleanup_inner(&mut self) {
         let runs = self.ctx.runs.clone();
         self.stop_brokers();
-        self.cleanup_marketplaces();
+        // Connectors first: an installed connector's node state (its client and vault secret) can only
+        // be cleared while the connector is installed, and removing its marketplace uninstalls it.
         self.cleanup_connectors();
+        self.cleanup_marketplaces();
         // The connection's credentials and host must not reach a later scenario's session.
         for id in std::mem::take(&mut self.ctx.mcp_connections) {
             let _ = self
@@ -2505,6 +2507,7 @@ impl Engine {
             Step::Cli(x) => self.cli_step(x),
             Step::ConnectorConnect(x) => self.connector_connect(x),
             Step::ConnectorCheck(x) => self.connector_check(x),
+            Step::ApiCall(x) => self.api_call(x),
             Step::MockProvider(x) => self.mock_provider(x),
             Step::EditAgentDraft(x) => self.edit_agent_draft(x),
             Step::ReleaseAgent(x) => self.release_agent(x),
@@ -3517,6 +3520,26 @@ impl Engine {
             "no form of secret `{}` in what the run left behind",
             x.secret
         );
+        // A run that is still refreshing a token when the values are collected would leave its fresh
+        // token out of the search: wait until it is over (or parked), then collect.
+        let i = self.last_run()?;
+        let budget = self.cfg.step_budget;
+        self.wait_for(budget, Some(i), |e| {
+            let st = e.ctx.runs[i].state.as_str();
+            Ok(if is_terminal(st) || st == "RUN_STATE_PAUSED" {
+                Probe::Met
+            } else {
+                Probe::Pending
+            })
+        })
+        .map_err(|e| {
+            self.wait_fail(
+                e,
+                "the run is over before its secrets are searched for",
+                Some(i),
+            )
+        })?;
+        self.sync_filebox();
         let value = match self.ctx.secrets.get(&x.secret) {
             Some(v) => v.0.clone(),
             None => {
@@ -3536,7 +3559,6 @@ impl Engine {
             .map(|(_, v)| v.0.clone())
             .collect();
         let values: Vec<String> = std::iter::once(value.clone()).chain(companions).collect();
-        let i = self.last_run()?;
         let _ = self.refresh(i);
         let key = self.run_key(i);
         let ws = self.ctx.runs[i].workspace_id.clone();

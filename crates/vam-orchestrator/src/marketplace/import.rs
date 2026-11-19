@@ -857,10 +857,15 @@ fn admit_connector_id(
 /// set back to not enabled: the admin approved the old summary. Members' connections to it are
 /// marked `needs_reauth`, so nothing is sent on the old shape (a member connects again after the
 /// admin enabled it again). A connector that was not installed before has no connections.
+///
+/// An admin-supplied client (CN-5.2) was pinned from the old MCP URL's metadata and approved with
+/// it: when the URL moved, or the connector no longer uses the org's client, the stored client and
+/// its secret are removed and the admin enters them again with the next Enable.
 fn reset_connector(
     tx: &Connection,
     urn: &str,
     new_url: &str,
+    new_org_client: bool,
     had_before: bool,
     by: &str,
     at: i64,
@@ -883,6 +888,9 @@ fn reset_connector(
             &[old_url.as_str(), new_url],
             "the connector changed: reconnect once the admin has enabled it again",
         )?;
+        if old_url != new_url || !new_org_client {
+            crate::connector_client::clear_client_in(tx, id)?;
+        }
     }
     Ok(())
 }
@@ -954,13 +962,24 @@ fn write(
         let same = old
             .is_some_and(|o| !o.summary_digest.is_empty() && o.summary_digest == pl.summary_digest);
         if !same {
-            let new_url = match &prepared_by_urn(&prepared, &pl.urn).map(|p| &p.checked.spec) {
-                Some(CheckedSpec::Connector(def)) => {
-                    def.mcp.as_ref().map(|m| m.url.clone()).unwrap_or_default()
-                }
-                _ => String::new(),
-            };
-            reset_connector(&tx, &pl.urn, &new_url, old.is_some(), by, at)?;
+            let (new_url, new_org_client) =
+                match &prepared_by_urn(&prepared, &pl.urn).map(|p| &p.checked.spec) {
+                    Some(CheckedSpec::Connector(def)) => (
+                        def.mcp.as_ref().map(|m| m.url.clone()).unwrap_or_default(),
+                        crate::connector_client::client_kind(def)
+                            == vam_spec::connector::ClientKind::Org,
+                    ),
+                    _ => (String::new(), false),
+                };
+            reset_connector(
+                &tx,
+                &pl.urn,
+                &new_url,
+                new_org_client,
+                old.is_some(),
+                by,
+                at,
+            )?;
         }
     }
 

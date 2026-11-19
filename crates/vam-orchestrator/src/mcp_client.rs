@@ -312,6 +312,11 @@ impl McpClient {
         if let Some(mapped) = crate::process_mode::map_connector_url(url) {
             return Self::from_builder(base_builder(timeout_ms), mapped.to_string(), headers);
         }
+        // Unit-test seam: a host a test registered reaches that test's loopback server.
+        #[cfg(test)]
+        if let Some(mapped) = crate::mcp_oauth_refresh::test_seam::map(url) {
+            return Self::from_builder(base_builder(timeout_ms), mapped.to_string(), headers);
+        }
         if !url.starts_with("https://") {
             return Err(McpClientError::UrlRejected(
                 "remote MCP url must use https".into(),
