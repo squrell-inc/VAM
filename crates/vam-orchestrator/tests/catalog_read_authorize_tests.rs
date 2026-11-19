@@ -334,3 +334,151 @@ async fn member_get_policies_and_skill_packages_is_200() {
         .unwrap();
     assert_eq!(packages.status(), StatusCode::OK);
 }
+
+/// Seeds `urn:vam:skill:local.vam.dev/acme/<name>` as `owner`'s draft, released at 1.0.0 when `release`.
+fn seed_skill(store: &SqliteWorkflowStore, name: &str, owner: &str, release: bool) -> String {
+    let urn = format!("urn:vam:skill:local.vam.dev/acme/{name}");
+    let version = vam_spec::v1::Version {
+        major: 1,
+        ..Default::default()
+    };
+    let manifest = vam_spec::v1::SkillManifest {
+        resource_id: Some(vam_spec::v1::ResourceId { urn: urn.clone() }),
+        version: Some(version.clone()),
+        description: "Test".to_string(),
+        ..Default::default()
+    };
+    store
+        .publish_skill_draft_with_owner(&manifest, owner)
+        .expect("skill draft");
+    if release {
+        store.release_skill(&urn, &version).expect("release skill");
+    }
+    urn
+}
+
+async fn get_as(app: &axum::Router, uri: &str, secret: &str) -> (StatusCode, serde_json::Value) {
+    let response = app.clone().oneshot(bearer_get(uri, secret)).await.unwrap();
+    let status = response.status();
+    let body = response_body(response).await;
+    (
+        status,
+        serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body)),
+    )
+}
+
+fn listed_urns(body: &serde_json::Value) -> Vec<(String, String)> {
+    body["records"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|r| {
+                    (
+                        r["spec"]["resourceId"]["urn"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        r["channel"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn skills_list_is_released_only_and_drafts_need_catalog_write() {
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let publisher = mint_user_key(&store, "pub", UserRole::Publisher, PUBLISHER_SCOPES);
+    let other = mint_user_key(&store, "pub2", UserRole::Publisher, PUBLISHER_SCOPES);
+    let member = mint_user_key(&store, "member", UserRole::Member, MEMBER_SCOPES);
+    let released = seed_skill(&store, "released", "pub", true);
+    let mine = seed_skill(&store, "pub-wip", "pub", false);
+    let theirs = seed_skill(&store, "pub2-wip", "pub2", false);
+    let app = test_app(app_state_http_only(store));
+
+    for secret in [&member, &publisher, &other] {
+        let (status, body) = get_as(&app, "/v1/skills", secret).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            listed_urns(&body),
+            [(released.clone(), "RELEASED".to_string())],
+            "default is released only: {body}"
+        );
+    }
+
+    let (status, body) = get_as(&app, "/v1/skills?includeDrafts=true", &member).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body.to_string()
+            .contains("missing required scope 'catalog:write'"),
+        "{body}"
+    );
+
+    let (status, body) = get_as(&app, "/v1/skills?includeDrafts=true", &publisher).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let urns = listed_urns(&body);
+    assert!(
+        urns.contains(&(mine.clone(), "DRAFT".to_string())),
+        "{body}"
+    );
+    assert!(urns.iter().all(|(u, _)| u != &theirs), "{body}");
+
+    for bad in ["yes", "", "%20%20"] {
+        let (status, body) =
+            get_as(&app, &format!("/v1/skills?includeDrafts={bad}"), &publisher).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "includeDrafts={bad:?}: {body}"
+        );
+        assert!(body.to_string().contains("includeDrafts"), "{body}");
+    }
+}
+
+#[tokio::test]
+async fn skills_list_pages_with_a_token_and_refuses_a_bad_page_size() {
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    let member = mint_user_key(&store, "member", UserRole::Member, MEMBER_SCOPES);
+    let _ = mint_user_key(&store, "pub", UserRole::Publisher, PUBLISHER_SCOPES);
+    let urns: Vec<String> = (0..3)
+        .map(|i| seed_skill(&store, &format!("s{i}"), "pub", true))
+        .collect();
+    let app = test_app(app_state_http_only(store));
+
+    let (status, first) = get_as(&app, "/v1/skills?pageSize=2", &member).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let token = first["pagination"]["nextPageToken"]
+        .as_str()
+        .expect("a next page")
+        .to_string();
+    assert!(!token.is_empty(), "{first}");
+    let (status, second) = get_as(
+        &app,
+        &format!("/v1/skills?pageSize=2&pageToken={token}"),
+        &member,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let seen: Vec<String> = listed_urns(&first)
+        .into_iter()
+        .chain(listed_urns(&second))
+        .map(|(u, _)| u)
+        .collect();
+    assert_eq!(
+        seen,
+        [urns[2].clone(), urns[1].clone(), urns[0].clone()],
+        "newest first, no repeat, no gap"
+    );
+    assert_eq!(
+        second["pagination"]["nextPageToken"].as_str().unwrap_or(""),
+        "",
+        "last page has no token: {second}"
+    );
+
+    let (status, body) = get_as(&app, "/v1/skills?pageSize=-1", &member).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let runs_token = "djEKcnVucwox"; // base64url of "v1\nruns\n1": another list's token
+    let (status, body) = get_as(&app, &format!("/v1/skills?pageToken={runs_token}"), &member).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}

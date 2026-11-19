@@ -2036,6 +2036,40 @@ paths:
                 $ref: "#/components/schemas/GetPlaybookResponse"
 
   /v1/skills:
+    get:
+      summary: List Skills
+      description: |
+        The skills an agent's `skillRefs` can name, newest first, one page at a time (50 by
+        default). While `pagination.nextPageToken` is not empty, pass it as `pageToken`.
+
+        Every caller with catalog read gets every **released** row: skill packages and skill
+        manifests. A manifest whose URN has a released package is left out, because a ref
+        resolves to the package. `includeDrafts=true` adds the caller's own drafts and needs
+        `catalog:write`; a member gets 403 `missing required scope 'catalog:write'`. Another
+        user's draft is never listed, for any caller.
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+        - name: includeDrafts
+          in: query
+          required: false
+          description: "`true` adds the caller's own drafts (needs `catalog:write`). Default `false`."
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: One page of skill records.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListSkillsResponse"
+        "400":
+          description: A bad `pageSize`, `pageToken` or `includeDrafts`.
+        "403":
+          description: "`includeDrafts=true` without `catalog:write`, or no catalog read."
+        "429":
+          $ref: "#/components/responses/RateLimited"
     put:
       summary: Register or update a Skill Manifest (metadata only)
       description: |
@@ -5087,6 +5121,46 @@ components:
         version:
           $ref: "#/components/schemas/Version"
           description: "Released rows carry their semver. The owner's draft carries prerelease `draft`; its numbers are a storage slot, not a version."
+
+    ListSkillsResponse:
+      type: object
+      properties:
+        records:
+          type: array
+          description: One record per stored row, newest first.
+          items:
+            $ref: "#/components/schemas/SkillRecord"
+        pagination:
+          $ref: "#/components/schemas/PaginationResponse"
+
+    SkillRecord:
+      type: object
+      properties:
+        spec:
+          $ref: "#/components/schemas/SkillManifest"
+        ownerUserId:
+          type: string
+        channel:
+          type: string
+          enum: [DRAFT, RELEASED]
+        catalogTier:
+          type: string
+          enum: [user, platform, marketplace]
+        tier:
+          type: string
+          description: The same value as `catalogTier`.
+        readOnly:
+          type: boolean
+          description: True when a marketplace installed the row; nobody but the import changes it.
+        origin:
+          $ref: "#/components/schemas/CatalogOrigin"
+        version:
+          $ref: "#/components/schemas/Version"
+          description: "Released rows carry their semver. The owner's draft carries prerelease `draft`."
+        source:
+          type: string
+          enum: [package, manifest]
+          description: "`package` is a skill package (`POST /v1/skills/packages`); `manifest` is metadata saved with `PUT /v1/skills`."
 
     PolicyRecord:
       type: object
