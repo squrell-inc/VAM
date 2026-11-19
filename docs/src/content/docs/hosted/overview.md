@@ -10,6 +10,8 @@ proves:
   - crates/vam-orchestrator/tests/hsp_trust.rs
   - vault-secret-is-not-in-the-guest
   - trigger-starts-a-run-as-the-grant-owner
+  - node-init-installs-and-registers-the-brokers-asked-for
+  - node-init-check-names-a-missing-broker
   - grant-token-is-refused-over-http
   - revoked-grant-starts-nothing
 ---
@@ -34,10 +36,33 @@ A broker that may ask `vamd` to start runs declares `run_request_permission` in 
 
 `vamd` serves `HostedTriggerGateway` (`hosted_services.proto:364`) to such a broker on a socket of its own, with `RequestRunTrigger` and `RevokeRunGrant`. The run starts as the user who approved the grant. `CallerContext` carries `space_id`, `thread_id` and `run_source` (`"broker:<id>"` for a triggered run). Proved by `trigger-starts-a-run-as-the-grant-owner`, `grant-token-is-refused-over-http` and `revoked-grant-starts-nothing`. See [Broker-Triggered Runs](/hosted/triggered-runs/) for grants, the gateway and what `vamd` checks on a fire.
 
+## Install the brokers with the node
+
+The release bundle holds the three first-party brokers beside `vam`. Install and register the ones you want in the same run as the node:
+
+```bash
+sudo ./vam node init --broker web,schedule,notify
+```
+
+Names are `web`, `schedule` and `notify`, comma separated or repeated. Without `--broker`, no broker is installed.
+
+* With systemd, `node init` writes one template unit, `/etc/systemd/system/vam-broker@.service`, and one argument file per broker, `/etc/vam/broker-<name>.env`. The unit starts after `vamd.service`, runs `vam-<name>-broker` and restarts it on failure. The argument file holds paths and flags only; a broker's credentials stay in the vault (`vam secrets set`).
+* With `--no-systemd`, `node init` starts each broker itself, detached, and writes `/var/lib/vam/brokers/<name>.log` and `<name>.pid`. Nothing restarts it. A re-run leaves a running broker alone, and restarts it only when its arguments changed.
+* Sockets are `/var/lib/vam/brokers/<name>.sock`, mode `0600`. Schedule and notify keep their state in `/var/lib/vam/brokers/<name>/`.
+* Registration is `PUT /v1/hosted/brokers` with the manifest the broker prints (`vam-<name>-broker manifest`). It uses the admin key the first run mints, else `--token`, `VAM_API_KEY` or your signed-in config.
+* With no key, the files are written, nothing is registered, and `node init` prints the command to run for each broker, then exits `0`:
+
+```bash
+VAM_API_KEY=<admin key> vam node init --broker web
+```
+
+Run it again whenever you like. Registration is idempotent, a re-run changes only what differs, and it never removes a broker you did not name. `sudo vam node init --check --broker web` names a broker binary missing beside `vam`, with the fix, and changes nothing.
+
 ## Brokers that exist
 
 * `vam.web` gives agents `web_search` and `web_fetch`. See [Web Broker](/hosted/web/).
 * `vam.schedule` starts runs at a set time or on a repeat. See [Schedule Broker](/hosted/schedule/).
+* `vam.notify` sends notification records to channels (Slack first) and relays decisions back. See [Notify Broker](/hosted/notify/).
 * Two TypeScript examples show how to write a broker: `examples/hsp-echo-ts` and `examples/hsp-files-ts`. They have a README and no test.
 
 ## Planned
