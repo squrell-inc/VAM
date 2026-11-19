@@ -14,7 +14,9 @@
 //! warning recorded on the run.
 
 use crate::catalog::policy_cedar_digest;
-use crate::catalog_resolve::{is_unpinned_digest, run_resolve_context};
+use crate::catalog_resolve::{
+    is_unpinned_digest, require_no_draft_pins, run_resolve_context, ResolveMode,
+};
 use crate::error::OrchestratorError;
 use crate::security::{
     capability_policy_urn, compose_policy, derive_hitl_overlay, derive_playbook_overlay,
@@ -35,6 +37,8 @@ pub(crate) struct SessionAgent {
     /// Whose drafts this session may load: the agent row's owner on a draft run,
     /// else the session owner. Released rows are visible to everyone.
     pub resolve_owner: String,
+    /// The mode the run recorded its pins in ([`run_resolve_context`]).
+    pub mode: ResolveMode,
     /// The run's spec, when it has one.
     pub run_spec: Option<RunSpec>,
 }
@@ -96,6 +100,7 @@ pub(crate) fn load_session_agent(
             agent: None,
             draft_run: false,
             resolve_owner: session_owner,
+            mode: ResolveMode::Release,
             run_spec,
         });
     };
@@ -105,16 +110,15 @@ pub(crate) fn load_session_agent(
         .and_then(|spec| pinned_agent_version(spec, urn).map(|version| (spec, version)));
     if let Some((spec, version)) = pinned {
         let draft_run = version.prerelease == "draft";
-        let resolve_owner = if draft_run {
-            run_resolve_context(store, spec, &session_owner).0
-        } else {
-            session_owner
-        };
+        let (resolve_owner, mode) = run_resolve_context(store, spec, &session_owner);
+        // A run recorded while its owner authored, booted after they stopped: refuse.
+        require_no_draft_pins(spec, mode)?;
         let agent = store.get_agent_at_version_visible(urn, version, &resolve_owner, false)?;
         return Ok(SessionAgent {
             agent: Some(agent),
             draft_run,
             resolve_owner,
+            mode,
             run_spec,
         });
     }
@@ -132,6 +136,7 @@ pub(crate) fn load_session_agent(
         agent,
         draft_run: false,
         resolve_owner: session_owner,
+        mode: ResolveMode::Release,
         run_spec,
     })
 }
@@ -266,6 +271,16 @@ fn load_pinned_policy(
         .as_ref()
         .and_then(|a| a.resource_id.as_ref())
         .map(|id| id.urn.as_str());
+    if session.mode == ResolveMode::ReleasedOnly && pin.version.prerelease == "draft" {
+        return Err(fail_closed(
+            store,
+            session_id,
+            agent_urn,
+            policy_urn,
+            pin,
+            &PinFailure::MissingVersion,
+        ));
+    }
     let record =
         match store.get_policy_at_version_visible(policy_urn, &pin.version, &session.resolve_owner)
         {
@@ -369,7 +384,13 @@ fn resolve_unpinned_policy(
     floats_by_design: bool,
 ) -> Result<(String, PolicyResolutionKind, Option<String>), OrchestratorError> {
     let owner = &session.resolve_owner;
-    let record = match store.get_policy_visible(urn, owner) {
+    // Only a Draft-mode run may fall to its owner's draft; any other mode takes releases.
+    let looked_up = if session.mode == ResolveMode::Draft {
+        store.get_policy_visible(urn, owner)
+    } else {
+        store.get_policy(urn)
+    };
+    let record = match looked_up {
         Ok(record) => Some(record),
         Err(OrchestratorError::NotFound(_)) => match store.get_policy(urn) {
             Ok(record) => Some(record),
@@ -613,6 +634,31 @@ mod tests {
             .get_policy_at_version_visible(POLICY, &draft_ver(), "bob")
             .expect_err("foreign draft");
         assert!(matches!(err, OrchestratorError::NotFound(_)));
+    }
+
+    #[test]
+    fn an_unpinned_legacy_policy_falls_to_the_owners_draft_only_in_draft_mode() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store
+            .publish_policy_draft_with_owner(POLICY, &marker("d"), LOCAL_USER_ID)
+            .expect("draft only");
+        let session = |mode| SessionAgent {
+            agent: None,
+            draft_run: true,
+            resolve_owner: LOCAL_USER_ID.to_string(),
+            mode,
+            run_spec: None,
+        };
+        let (cedar, _, _) =
+            resolve_unpinned_policy(&store, &session(ResolveMode::Draft), POLICY, true)
+                .expect("draft mode");
+        assert_eq!(cedar, marker("d"));
+        for mode in [ResolveMode::Release, ResolveMode::ReleasedOnly] {
+            let (cedar, kind, _) =
+                resolve_unpinned_policy(&store, &session(mode), POLICY, true).expect("fallback");
+            assert_ne!(cedar, marker("d"), "{mode:?} never takes the owner's draft");
+            assert!(matches!(kind, PolicyResolutionKind::DeclaredButMissing));
+        }
     }
 
     #[test]

@@ -11,6 +11,7 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
 use crate::config::ConfigFile;
+use vam_security::tls_roots::BundledRoots;
 
 /// The CA file clients trust besides the built-in roots: `VAM_CA_FILE`, else `ca_file` in the config.
 pub fn ca_file() -> Option<PathBuf> {
@@ -26,13 +27,13 @@ fn pick_ca_file(env: Option<String>, file: Option<String>) -> Option<PathBuf> {
 
 /// A client builder that trusts the configured CA file (if any) as well as the built-in roots.
 pub fn client_builder() -> Result<reqwest::ClientBuilder> {
-    let mut b = reqwest::Client::builder();
+    let mut b = reqwest::Client::builder().bundled_roots();
     if let Some(path) = ca_file() {
         let pem = std::fs::read(&path).with_context(|| format!("read CA file {path:?}"))?;
         parse_pem_cert(&pem).with_context(|| format!("CA file {path:?}"))?;
         let cert = reqwest::Certificate::from_pem(&pem)
             .with_context(|| format!("CA file {path:?} is not a PEM certificate"))?;
-        b = b.add_root_certificate(cert);
+        b = b.tls_certs_merge([cert]);
     }
     Ok(b)
 }

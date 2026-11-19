@@ -38,9 +38,10 @@ pub(crate) async fn release_agent_wildcard(
     body: String,
 ) -> Result<Response, ApiError> {
     let urn = parse_release_urn(&rest)?;
-    let (version, note) = parse_release_request(&body)?;
     ensure_ready(&state, true)?;
+    // Authorize before the body is read: a caller without `catalog:write` gets 403 whatever it sent.
     state.pdp.authorize(&auth, "PutCatalog", "catalog:write")?;
+    let (version, note) = parse_release_request(&body)?;
     require_release_authorization(&state.store, &auth, "agents", &urn, "agent")?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let meta = release_meta(&note, &auth);
@@ -58,9 +59,10 @@ async fn release_playbook_wildcard(
     body: String,
 ) -> Result<Response, ApiError> {
     let urn = parse_release_urn(&rest)?;
-    let (version, note) = parse_release_request(&body)?;
     ensure_ready(&state, true)?;
+    // Authorize before the body is read: a caller without `catalog:write` gets 403 whatever it sent.
     state.pdp.authorize(&auth, "PutCatalog", "catalog:write")?;
+    let (version, note) = parse_release_request(&body)?;
     require_release_authorization(&state.store, &auth, "playbooks", &urn, "playbook")?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let meta = release_meta(&note, &auth);
@@ -80,9 +82,10 @@ async fn release_skill_wildcard(
     body: String,
 ) -> Result<Response, ApiError> {
     let urn = parse_release_urn(&rest)?;
-    let (version, note) = parse_release_request(&body)?;
     ensure_ready(&state, true)?;
+    // Authorize before the body is read: a caller without `catalog:write` gets 403 whatever it sent.
     state.pdp.authorize(&auth, "PutCatalog", "catalog:write")?;
+    let (version, note) = parse_release_request(&body)?;
     require_release_authorization(&state.store, &auth, "skills", &urn, "skill")?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     crate::node_base::check_draft_skill(&state.store, &urn, auth.owner_user_id())?;
@@ -101,9 +104,10 @@ async fn release_policy_wildcard(
     body: String,
 ) -> Result<Response, ApiError> {
     let urn = parse_release_urn(&rest)?;
-    let (version, note) = parse_release_request(&body)?;
     ensure_ready(&state, true)?;
+    // Authorize before the body is read: a caller without `catalog:write` gets 403 whatever it sent.
     state.pdp.authorize(&auth, "PutCatalog", "catalog:write")?;
+    let (version, note) = parse_release_request(&body)?;
     require_release_authorization(&state.store, &auth, "policies", &urn, "policy")?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let meta = release_meta(&note, &auth);

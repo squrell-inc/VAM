@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use prost_types::value::Kind;
 use prost_types::{Struct, Value};
 use vam_spec::v1::{
-    AgentSpec, PlaybookSpec, PlaybookStep, ResourceId, ResourceRef, RunSpec, StepKind, StepMode,
+    AgentSpec, PlaybookSpec, PlaybookStep, ResourceRef, RunSpec, StepKind, StepMode,
 };
 
 use crate::error::OrchestratorError;
@@ -585,30 +585,6 @@ pub fn requested_agent_urn(spec: &RunSpec) -> Option<String> {
         .and_then(|r| r.resource_id.as_ref())
         .map(|r| r.urn.clone())
         .filter(|u| !u.is_empty())
-}
-
-/// When `CreateRun` carries an inline playbook and no playbook ref, pin the
-/// inline resource id so catalog resolution can load it.
-pub fn ensure_playbook_ref(spec: &mut RunSpec, inline: Option<&PlaybookSpec>) {
-    let has_urn = spec
-        .playbook_ref
-        .as_ref()
-        .and_then(|resource_ref| resource_ref.resource_id.as_ref())
-        .is_some_and(|id| !id.urn.is_empty());
-    if has_urn {
-        return;
-    }
-    let Some(urn) = inline
-        .and_then(|playbook| playbook.resource_id.as_ref())
-        .map(|id| id.urn.clone())
-        .filter(|urn| !urn.is_empty())
-    else {
-        return;
-    };
-    spec.playbook_ref = Some(ResourceRef {
-        resource_id: Some(ResourceId { urn }),
-        ..Default::default()
-    });
 }
 
 /// Pinned playbook loaded for a run, plus the procedure text for the guest.
@@ -2509,7 +2485,7 @@ mod resolve_run_budgets_tests {
         let mut policy = policy(8, None);
         policy.termination = TerminationPolicy::ExplicitClaim as i32;
         let mut spec = RunSpec::default();
-        resolve_run_budgets(&mut spec, &agent(Some(policy.clone())));
+        resolve_run_budgets(&mut spec, &agent(Some(policy)));
         assert_eq!(termination_input(&spec).as_deref(), Some("explicit_claim"));
         // Resume reads the stored spec; it is not resolved again.
         let json = vam_spec::encoding::proto_to_json("vam.v1.RunSpec", &spec).expect("to json");

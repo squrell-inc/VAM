@@ -952,3 +952,46 @@ async fn playbook_inputs_that_fail_the_schema_are_refused_and_leave_nothing() {
     assert_eq!((fx.calls(), fx.grants().len(), fx.spaces()), (0, 0, spaces));
     assert_eq!(fx.threads(&fx.calling_space), threads);
 }
+
+#[tokio::test]
+async fn a_members_grant_naming_a_draft_playbook_is_refused_and_a_publishers_is_not() {
+    let fx = fixture(0).await;
+    use vam_spec::v1::{PlaybookSpec, PlaybookStep, StepMode};
+    let playbook = PlaybookSpec {
+        activation: Some(vam_spec::v1::PlaybookActivation::asking("Use for drafts.")),
+        resource_id: Some(ResourceId {
+            urn: PLAYBOOK.to_string(),
+        }),
+        display_name: "Draft only".to_string(),
+        description: "Never released".to_string(),
+        steps: vec![PlaybookStep {
+            id: "s1".to_string(),
+            description: "step".to_string(),
+            instruction: "Do the step.".to_string(),
+            mode: StepMode::Agentic as i32,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    fx.store
+        .publish_playbook_draft_with_owner(&playbook, OWNER)
+        .unwrap();
+    let run = serde_json::json!({
+        "playbookRef": {
+            "resourceId": { "urn": PLAYBOOK },
+            "version": { "major": 1, "prerelease": "draft" }
+        },
+        "thread": { "mode": "NEW", "name": "drafts" }
+    });
+    // `local` is a Member: a draft is never granted, even their own.
+    let e = error_of(&fx.arm(run.clone()).await);
+    assert!(e.starts_with("playbook_invalid:"), "{e}");
+    assert!(e.contains("drafts are not available"), "{e}");
+    assert_eq!((fx.calls(), fx.grants().len()), (0, 0));
+
+    fx.store
+        .set_user_role(OWNER, vam_orchestrator::users::UserRole::Publisher)
+        .unwrap();
+    let r = fx.arm(run).await;
+    assert!(!failed(&r), "{r:?}");
+}

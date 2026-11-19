@@ -76,7 +76,7 @@ fn bearer_get(uri: &str, secret: &str) -> Request<Body> {
 
 async fn response_body(response: axum::response::Response) -> String {
     String::from_utf8(
-        hyper::body::to_bytes(response.into_body())
+        axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap()
             .to_vec(),
@@ -201,14 +201,23 @@ async fn publisher_put_agent_is_200() {
     );
 }
 
+/// Spec change (member-draft-agents Phase 3, decisions 6 and 9): a member holds `agents:draft`,
+/// so `PUT /v1/agents` of their own draft in their own namespace is 200; outside it is 400.
 #[tokio::test]
-async fn member_put_agent_is_403() {
+async fn member_put_own_agent_draft_is_200_outside_namespace_is_400() {
     let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
     let member = mint_user_key(&store, "member", UserRole::Member, MEMBER_SCOPES);
     let app = test_app(app_state_http_only(store));
-    let urn = "urn:vam:agent:local.vam.dev/acme/member-write";
-    let status = put_agent_as(&app, &member, urn, "member-draft").await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    let own = "urn:vam:agent:local.vam.dev/member/member-write";
+    assert_eq!(
+        put_agent_as(&app, &member, own, "member-draft").await,
+        StatusCode::OK
+    );
+    let outside = "urn:vam:agent:local.vam.dev/acme/member-write";
+    assert_eq!(
+        put_agent_as(&app, &member, outside, "member-draft").await,
+        StatusCode::BAD_REQUEST
+    );
 }
 
 #[tokio::test]

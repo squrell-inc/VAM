@@ -1,0 +1,5 @@
+piece: org-member-with-a-catalog-key
+kind: org
+# A Member whose key was minted with an explicit list: the member set plus `catalog:write`.
+role: Member
+scopes: [sessions:write, runs:write, approvals:write, notifications:read, node:read, catalog:write]

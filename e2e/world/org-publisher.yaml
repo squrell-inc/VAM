@@ -1,0 +1,4 @@
+piece: org-publisher
+kind: org
+# A second identity with the Publisher role, holding the publisher default key (it can write the catalog).
+role: Publisher

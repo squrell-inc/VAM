@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
+use vam_security::tls_roots::BundledRoots;
 
 use crate::host_tools::{HostToolAdapter, HostToolContext, HostToolOutput};
 use crate::ssrf_guard::PinnedUrl;
@@ -64,6 +65,7 @@ fn execute_http_request(
 
     // 2. Build reqwest blocking client
     let mut builder = reqwest::blocking::Client::builder()
+        .bundled_roots()
         .timeout(Duration::from_millis(timeout_ms))
         .connect_timeout(Duration::from_millis(5000))
         .redirect(reqwest::redirect::Policy::none()); // Do not follow redirects by default to prevent SSRF bypass

@@ -383,14 +383,16 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   substring the body must hold. A 200 with `current: right` and `new: fresh` moves the current password to
   `previous` and the new one becomes current. The identity's session is not replaced: it stays whatever
   `login` last stored, so after a change it is the token the change used.
-- `identity-request: { as, credential: session | previous-session | key, method, path, status, fields }`: one
-  request (`method` defaults to `get`) with that credential as bearer, judged by exact status. `fields`
-  (optional) matches dotted camelCase paths over the JSON body with the usual matchers (exact value,
-  `{ contains }`, `{ matches: <regex> }`, `{ present }`, `{ absent }`; an array element is picked with
-  `key=value`, e.g. `keys.name=e2e.userId`). In `path` and in the string values of `fields`,
-  `{<alias>.userId}`, `{<alias>.username}` and `{<alias>.USERNAME}` (the username upper-cased) are replaced
-  by that `org` identity's values; in `path` each value is percent-encoded. `<alias>` may be any `org`
-  piece of `given`, not only `as`.
+- `identity-request: { as, credential: session | previous-session | key, method, path, status, contains, lacks,
+  fields }`: one request (`method` defaults to `get`) with that credential as bearer, judged by exact status.
+  `contains` and `lacks` are body substrings (the body must hold the first and not the second), judged after the
+  status; a miss is class `product`. `fields` (optional) matches dotted camelCase paths over the JSON body with
+  the usual matchers (exact value, `{ contains }`, `{ matches: <regex> }`, `{ present }`, `{ absent }`; an array
+  element is picked with `key=value`, e.g. `keys.name=e2e.userId`). In `path`, `contains`, `lacks` and in the
+  string values of `fields`, `{<alias>.userId}`, `{<alias>.username}` and `{<alias>.USERNAME}` (the username
+  upper-cased) are replaced by that `org` identity's values; in `path` each value is percent-encoded. `<alias>`
+  may be any `org` piece of `given`, not only `as`. `as` naming an `org` piece of role Owner (it has no account)
+  works with `credential: key` only: the request goes out with the bootstrap key.
 - `create-user: { as, username, userId, status, contains }`: `POST /v1/users` (`role: member`, a fresh
   random password the runner keeps to itself, an `Idempotency-Key`) with the key of `as` (an `org` piece of
   `given`; omitted is the bootstrap key). `username` takes `{tag}` (unique to the scenario and run) and the
@@ -399,6 +401,58 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   session or key in later steps.
 - `{ matches: <regex> }` is a matcher of the shared `fields` matcher (events, `identity-request` and the rest): the string value must match the regular
   expression (anchor it with `^` and `$`).
+
+### Roles and drafts (`crates/vam-e2e/src/identity.rs`)
+
+- `org` pieces take `scopes: [..]`: the scope list sent to `POST /v1/users/{id}/keys` when the identity's key is
+  minted. Absent, the key gets the role's default scopes (as before). Pieces: `org-publisher` (role Publisher),
+  `org-member-with-a-narrow-key` (Member, the member set), `org-member-with-a-catalog-key` (Member, the member set
+  plus `catalog:write`).
+- A `playbook` piece with `deferred: true` is not written at `given` (its name and URN are still worked out);
+  `playbook-draft-probe` is one, with the body of `playbook-one-step`. A `put-draft` step writes it.
+- An `agent` piece with `deferred: true` and no `release` is not written at `given` either (an agent piece with
+  `deferred` and `release: true` is still written and only left unreleased). `agent-inline-probe` is one, with the
+  body of `agent-plain`. A `put-draft` step saves it, or a `chat` with `inline:` sends it inside the run.
+- `put-draft: { piece, as, status, contains }`: `PUT /v1/playbooks` (or `/v1/agents`, by the piece's kind) with the
+  piece's body and an `Idempotency-Key`, as the identity (the bootstrap key when `as` is omitted). The URN's
+  `{{name}}` becomes `<piece>-<as>-<scenario>-<runTag>`, so every identity writes a row of its own and the owner
+  check never decides the answer; nothing needs cleanup. `status` is exact and required; `contains` is a body
+  substring. The probe writes a playbook because that route stays on `catalog:write` for good. The step remembers
+  the URN it wrote (or tried) per piece and identity; `chat: { agent: <deferred agent piece>, as }` runs that URN
+  (class `scenario` when no `put-draft` wrote one as that identity), and `identity-request` can name it.
+- `{{ns}}` in the body of a piece that a `put-draft` (or a `chat` with `inline`) writes: the writer's
+  `defaultNamespace` from `GET /v1/me`, asked with the writer's key (the bootstrap key's own when `as` is omitted)
+  and kept per identity for the scenario. It is the value a member's agent URN must start with
+  (`urn:vam:agent:local.vam.dev/{{ns}}/{{name}}`). `check` refuses `{{ns}}` in a piece that `given` writes or
+  publishes (a released or `deferred`-and-`release` agent, a skill, a released playbook).
+- `put-draft: { urnOf: <org alias> }`: the body's URN is the one an earlier `put-draft` of the same piece as that
+  identity wrote or tried (class `scenario` when none), so a second identity aims at the first one's agent. The step
+  records the URN for its own identity too, so `{{urn:<piece>:<as>}}` names it. `check` needs `urnOf` to be an org
+  piece other than `as`, with such a `put-draft` earlier in the scenario.
+- `start-playbook: { agent: <deferred agent piece>, draft: true, as }` runs the URN a `put-draft` as `as` wrote
+  (class `scenario` when none), the rule `chat` has; the playbook may be a released piece with its inputs.
+- `publish-skill: { piece, as, release: false }`: `as` publishes (and releases) as that identity, the bootstrap key
+  when omitted; `release: false` publishes the package as a draft only and releases nothing (`check` refuses it
+  with `refused: true`). Pieces: `skill-host-echo` (released at `given`, one `host_echo` tool), `skill-draft-probe`
+  (`deferred`, the same body), and the agents `agent-member-draft-with-host-echo`,
+  `agent-member-draft-with-draft-probe` and `agent-member-draft-with-m365-probe` (each `deferred`, saved by a
+  `put-draft` under the writer's namespace; the first two name their skill with a floating ref, the third pins
+  `skill-m365-probe` at 1.0.0).
+- `{{urn:<piece>:<as>}}` in an `identity-request`'s `path` (percent-encoded), `contains` and `lacks`: the URN a
+  `put-draft`, or a `chat` with `inline` or `inlinePlaybook`, as `<as>` wrote or tried for `<piece>`. None yet:
+  class `scenario`. `check` needs `<piece>` in `given` and `<as>` an `org` piece.
+- `chat: { inline: <agent piece>, inlinePlaybook: <playbook piece>, refused: true }`: sends the agent piece's
+  `spec` as the run's `inlineAgent` (no `agentRef`) and/or the playbook piece's `spec` as `inlinePlaybook` (with
+  `agent:` or `inline:`), under the name `<piece>-<as>-<scenario>-<runTag>`. vamd accepts neither, so `check`
+  refuses either field without `refused: true`, and a start that is accepted fails the step at once (class
+  `product`) instead of waiting for the run. `inputs: { k: v }` (with `inlinePlaybook` only) adds run inputs, so a
+  playbook's input schema is met and the refusal under test is the inline rule.
+- `expect: { refused: true, status: <n>, contains }`: with `refused`, the refusal's exact HTTP status (without
+  `status`, any 4xx passes). Read after a `chat` step; a refusal from another step records no status (class
+  `scenario`).
+- `set-role: { as, role: publisher | member }`: as the bootstrap key, `POST` (publisher) or `DELETE` (member)
+  `/v1/users/{id}/publish-grant` for the identity. A non-2xx answer is class `harness`, because the role change is
+  arrangement, not the behaviour under test.
 
 ## Receipt expectations and offline verify
 
@@ -784,7 +838,7 @@ Scenarios for a skill whose tools name a card (`ui.show` for a result, `ui.ask` 
   failure while the world is built. An agent piece that `requires` a deferred skill is also `deferred: true` (it is saved at `given` time
   and released by the `publish-skill` step that releases the skill, since vamd refuses to release an agent whose skill is
   not released).
-- `publish-skill: { piece, refused, contains }`: packs the deferred skill piece (its `files:` included, as for any
+- `publish-skill: { piece, refused, contains, as, release }` (`as` and `release: false`: see "Roles and drafts"): packs the deferred skill piece (its `files:` included, as for any
   skill piece), publishes it and, when accepted, releases it as 1.0.0. With `refused: true` the answer must be 4xx and
   its body must contain `contains` (a tool name, a card file path or a JSON pointer).
 - `approve: { amend: { <field>: <value> }, refused, as, via }`: decides AMENDED with `amendedArgs`. With

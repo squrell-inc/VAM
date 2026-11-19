@@ -335,3 +335,148 @@ fn resolve_skill(
     let capabilities = manifest.map(|m| m.capabilities).unwrap_or_default();
     Ok((version, capabilities))
 }
+
+#[cfg(test)]
+mod released_only_agreement_tests {
+    //! Check, explain and run take the same skill version for a draft agent, whoever owns it
+    //! by live role.
+    use super::check_agent;
+    use crate::catalog_resolve::record_resolved_refs;
+    use crate::permissions_view::effective_permissions;
+    use crate::users::UserRole;
+    use crate::workflow::SqliteWorkflowStore;
+    use vam_spec::v1::{
+        tool_spec::ExecutionProvider, AgentSpec, LocalExecSpec, ResourceId, ResourceRef, RunSpec,
+        SkillChannel, SkillManifest, SkillPackageRecord, ToolSpec, Version,
+    };
+
+    const SKILL: &str = "urn:vam:skill:local.vam.dev/alice/probe";
+    const AGENT: &str = "urn:vam:agent:local.vam.dev/alice/probe-agent";
+
+    fn version(minor: i32, prerelease: &str) -> Version {
+        Version {
+            major: 1,
+            minor,
+            patch: 0,
+            prerelease: prerelease.to_string(),
+            build: String::new(),
+        }
+    }
+
+    fn package(minor: i32, prerelease: &str, channel: SkillChannel) -> SkillPackageRecord {
+        let digest = format!("{:064x}", minor + 1);
+        SkillPackageRecord {
+            resource_id: Some(ResourceId {
+                urn: SKILL.to_string(),
+            }),
+            version: Some(version(minor, prerelease)),
+            channel: channel as i32,
+            digest: digest.clone(),
+            blob_relpath: format!("local/sha256-{digest}.tar.gz"),
+            size_bytes: 8,
+            spec: Some(SkillManifest {
+                resource_id: Some(ResourceId {
+                    urn: SKILL.to_string(),
+                }),
+                version: Some(version(minor, prerelease)),
+                description: "Probe".to_string(),
+                tools: vec![ToolSpec {
+                    name: "probe_tool".to_string(),
+                    description: "probe".to_string(),
+                    input_schema_json: "{\"type\":\"object\"}".to_string(),
+                    execution_provider: Some(ExecutionProvider::LocalExec(LocalExecSpec {
+                        command: "bun".to_string(),
+                        entrypoint: "./execute.js".to_string(),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn unversioned() -> ResourceRef {
+        ResourceRef {
+            resource_id: Some(ResourceId {
+                urn: SKILL.to_string(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn draft_agent_ref() -> ResourceRef {
+        ResourceRef {
+            resource_id: Some(ResourceId {
+                urn: AGENT.to_string(),
+            }),
+            version: Some(version(0, "draft")),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn explain_check_and_run_agree_before_and_after_a_demotion() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store
+            .create_user_with_role("alice", "alice", UserRole::Publisher)
+            .expect("alice");
+        store
+            .put_skill_package_with_owner(&package(0, "", SkillChannel::Released), "alice")
+            .expect("release");
+        store
+            .put_skill_package_with_owner(&package(1, "draft", SkillChannel::Draft), "alice")
+            .expect("draft");
+        let agent = AgentSpec {
+            resource_id: Some(ResourceId {
+                urn: AGENT.to_string(),
+            }),
+            display_name: "Probe".to_string(),
+            description: "test".to_string(),
+            role: "tester".to_string(),
+            instruction_source: Some(
+                vam_spec::v1::agent_spec::InstructionSource::SystemInstructions("go".to_string()),
+            ),
+            skill_refs: vec![unversioned()],
+            ..Default::default()
+        };
+        store
+            .publish_agent_draft_with_owner(&agent, "alice")
+            .expect("agent draft");
+
+        for (role, expected) in [(UserRole::Publisher, "draft"), (UserRole::Member, "")] {
+            store.set_user_role("alice", role).expect("role");
+
+            let mut spec = RunSpec {
+                agent_ref: Some(draft_agent_ref()),
+                ..Default::default()
+            };
+            record_resolved_refs(&store, &mut spec, &agent, "alice", false).expect("record");
+            let run = spec.resolved_refs[0].version.clone().expect("run version");
+
+            let check = check_agent(&store, &draft_agent_ref(), "alice", false).expect("check");
+            let checked = check.skills[0].version.clone().expect("check version");
+
+            let view = effective_permissions(&store, "alice", false, AGENT, None).expect("view");
+            let source = view
+                .tools
+                .iter()
+                .find(|t| t.tool_name == "probe_tool")
+                .map(|t| t.source.clone())
+                .expect("the skill's tool is listed");
+
+            assert_eq!(run.prerelease, expected, "run, {role:?}");
+            assert_eq!(checked, run, "check, {role:?}");
+            let label = if expected.is_empty() {
+                format!("v{}.{}.{}", run.major, run.minor, run.patch)
+            } else {
+                format!("v{}.{}.{}-draft", run.major, run.minor, run.patch)
+            };
+            assert!(
+                source.ends_with(&label),
+                "explain {source} vs {label}, {role:?}"
+            );
+        }
+    }
+}

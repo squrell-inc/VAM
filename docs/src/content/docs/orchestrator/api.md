@@ -36,31 +36,31 @@ request and response shapes, is the OpenAPI file the node serves.
 `GET /openapi.yaml` returns the file built into the binary (`api/mod.rs:87,119`; source
 `docs/api/openapi.yaml`). `GET /docs` serves a page that renders it with a pinned Scalar script,
 `@scalar/api-reference@1.74.0` from jsDelivr (`api/mod.rs:120,328`). `/openapi.yaml` needs no key
-(`api/auth.rs:133`).
+(`api/auth.rs:131`).
 
 ## Route groups
 
 | Group | Routes |
 |---|---|
 | Identity | `/v1/login`, `/v1/login/refresh`, `/v1/logout`, `/v1/me`, `/v1/keys`, `/v1/users` |
-| Catalog | `/v1/agents`, `/v1/skills`, `/v1/playbooks`, `/v1/policies`, `/v1/agent-checks` |
+| Catalog | `/v1/agents`, `/v1/skills`, `/v1/playbooks`, `/v1/policies`, `/v1/agent-checks`. `PUT /v1/agents` takes `catalog:write` or `agents:draft`; the rest of the writes take `catalog:write` (see [Member agents](/orchestrator/member-agents/)) |
 | Sessions | `/v1/sessions`, and `pause`, `resume`, `terminate`, `snapshots` under `/v1/sessions/{id}` |
-| Runs | `/v1/runs`, and `messages`, `stop`, `cancel`, `events` under `/v1/runs/{id}` |
+| Runs | `/v1/runs` (an agent or playbook by reference only: `inlineAgent` and `inlinePlaybook` are refused with 400, so save with `PUT /v1/agents` or `PUT /v1/playbooks` first), and `messages`, `stop`, `cancel`, `events` under `/v1/runs/{id}` |
 | Approvals | `/v1/approvals`, `/v1/approvals/{id}/decide` |
 | Secrets | `/v1/secrets`, `/v1/org/secrets` |
 | Node | `/v1/health`, `/v1/node` |
 
 The run routes sit behind one wildcard, `/v1/runs/*rest` (`api/mod.rs:221-224`), and are told apart
-by their last segment (`api/mod.rs:1384-1404`).
+by their last segment (`api/mod.rs:1396-1416`).
 
 `GET /v1/keys` lists the caller's `http` keys (`keys:admin` lists every `http` key). `?holder=broker`
 lists the grants issued to brokers and `?holder=all` both; a grant is listed to its owner only, for
-every role, and any other `holder` is a 400 (`list_keys`, `api/mod.rs:457-487`).
+every role, and any other `holder` is a 400 (`list_keys`, `api/mod.rs:460-490`).
 
 ## Health and node status
 
 `GET /v1/health` and `GET /v1/node` report the node's capacity, draining flag and the isolation it
-runs under (`api/mod.rs:382-393,520-567`). Proved by `node-reports-the-isolation-it-runs`.
+runs under (`api/mod.rs:382-393,523-570`). Proved by `node-reports-the-isolation-it-runs`.
 
 ## Auth
 
@@ -79,7 +79,7 @@ Limits are on by default (`api/rate_limit.rs:60-72`):
 | Creating runs, per key | 2 | 20 |
 | Auth attempts, per address | 5 | 20 |
 
-A refused call is a 429 with a reason header (`rate_limit.rs:31,425`). `VAMD_RATE_LIMIT=off`
+A refused call is a 429 with a reason header (`rate_limit.rs:32,425`). `VAMD_RATE_LIMIT=off`
 turns the limits off; the `VAMD_RATE_LIMIT_*` variables change a value, and zero or a non-number
 keeps the default (`daemon.rs:274-308`). Proved by `api-rate-limits-a-flood` and
 `rate_limit_api_tests.rs`.
@@ -94,7 +94,7 @@ page (tests `sessions_page_newest_first_and_a_new_session_does_not_shift_the_nex
 ## Errors
 
 Each error type maps to one status in `api/error.rs:37-250`: 400 bad request, 401 and 403 auth,
-404 missing or foreign row, 409 conflict, 412 failed precondition, 502 upstream failure, 503
+404 missing or foreign row, 409 conflict (it also answers a member past the draft agent cap, see [Member agents](/orchestrator/member-agents/#error-messages)), 412 failed precondition, 502 upstream failure, 503
 node cannot take the call, 504 a stop still settling.
 
 ## Users, ids and login names
@@ -159,7 +159,7 @@ rewritten as egress (`SecretKind::from_proto`, `secrets.rs`). Proved by
 
 A response from a host that holds a session secret is read through a scrub buffer (8 MiB by
 default, `vam-network/src/proxy/mitm.rs:52`). A response over the buffer is refused with a 502
-before any of its bytes reach the guest (`mitm.rs:38`). Proved by
+before any of its bytes reach the guest (`mitm.rs:13-17,380`). Proved by
 `oversize-response-with-a-secret-never-reaches-the-guest`, which uses a 64 KiB buffer so the
 bodies stay small. It proves the host proxy, not the guest's lack of a route.
 

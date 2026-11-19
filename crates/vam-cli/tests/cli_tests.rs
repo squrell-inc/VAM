@@ -159,7 +159,7 @@ fn dry_run_prints_decisions_and_does_not_post_a_run() {
         vam_cli::cmd::run::run(Some(server.base_url()), Some("vam_sk_test".into()), args).await
     });
     assert!(result.is_ok(), "{result:?}");
-    assert_eq!(post.hits(), 0);
+    assert_eq!(post.calls(), 0);
 }
 
 #[test]
@@ -176,9 +176,9 @@ fn playbook_inputs_are_posted_and_invalid_inputs_start_nothing() {
     let post = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/runs")
-            .body_contains(playbook)
-            .body_contains("cutoff_days")
-            .body_contains("PROJ");
+            .body_includes(playbook)
+            .body_includes("cutoff_days")
+            .body_includes("PROJ");
         then.status(200)
             .header("content-type", "application/json")
             .body(r#"{"runId":{"urn":"urn:vam:run:local/demo"},"status":{"runId":{"urn":"urn:vam:run:local/demo"}}}"#);
@@ -222,7 +222,7 @@ fn playbook_inputs_are_posted_and_invalid_inputs_start_nothing() {
     });
     let err = bad.expect_err("bad integer").to_string();
     assert!(err.contains("cutoff_days"), "{err}");
-    assert_eq!(rejected.hits(), 0);
+    assert_eq!(rejected.calls(), 0);
 }
 
 fn install_catalog(
@@ -482,11 +482,7 @@ fn list_paged_follows_the_token_only_with_all() {
     let first = server.mock(|when, then| {
         when.method(httpmock::Method::GET)
             .path("/v1/approvals")
-            .matches(|req| {
-                !req.query_params
-                    .as_ref()
-                    .is_some_and(|q| q.iter().any(|(k, _)| k == "pageToken"))
-            });
+            .is_true(|req| !req.query_params().iter().any(|(k, _)| k == "pageToken"));
         then.status(200)
             .header("content-type", "application/json")
             .body(r#"{"approvals":[{"n":1},{"n":2}],"pagination":{"nextPageToken":"tok-2"}}"#);
@@ -511,7 +507,7 @@ fn list_paged_follows_the_token_only_with_all() {
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&one).unwrap();
         assert_eq!(v["approvals"].as_array().unwrap().len(), 2);
-        assert_eq!(second.hits(), 0);
+        assert_eq!(second.calls(), 0);
         // `--all` follows it and merges.
         let every = vam_cli::client::list_paged(&c, "/v1/approvals", "approvals", true)
             .await
@@ -520,8 +516,8 @@ fn list_paged_follows_the_token_only_with_all() {
         assert_eq!(v["approvals"].as_array().unwrap().len(), 3);
         assert!(v.get("pagination").is_none());
     });
-    assert_eq!(first.hits(), 2);
-    assert_eq!(second.hits(), 1);
+    assert_eq!(first.calls(), 2);
+    assert_eq!(second.calls(), 1);
     vam_cli::output::set_json(false);
 }
 
@@ -538,8 +534,8 @@ fn approve_decide_parked_tool_hitl() {
             .path(format!("/v1/approvals/{encoded}/decide"))
             .header("authorization", "Bearer vam_sk_test")
             .header_exists("Idempotency-Key")
-            .body_contains(approval_urn)
-            .body_contains("HITL_DECISION_APPROVED");
+            .body_includes(approval_urn)
+            .body_includes("HITL_DECISION_APPROVED");
         then.status(200)
             .header("content-type", "application/json")
             .body(r#"{"status":{"state":"APPROVAL_STATE_APPROVED"}}"#);
@@ -622,8 +618,8 @@ fn approve_decide_posts_a_submitted_gate_response() {
             .path(format!("/v1/approvals/{encoded}/decide"))
             .header("authorization", "Bearer vam_sk_test")
             .header_exists("Idempotency-Key")
-            .body_contains("HITL_DECISION_SUBMITTED")
-            .body_contains("looks good");
+            .body_includes("HITL_DECISION_SUBMITTED")
+            .body_includes("looks good");
         then.status(200)
             .header("content-type", "application/json")
             .body(r#"{"status":{"state":"APPROVAL_STATE_SUBMITTED"}}"#);
@@ -978,7 +974,7 @@ fn receipt_show_and_the_evidence_alias_read_the_run_receipt_endpoint() {
         .await
         .unwrap();
     });
-    mock.assert_hits(2);
+    mock.assert_calls(2);
 }
 
 #[test]
@@ -1495,9 +1491,9 @@ fn run_short_name_starts_without_run_json() {
     let created = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/runs")
-            .body_contains(JIRA_URN)
-            .body_contains("summarize the sprint")
-            .body_contains("volume://jira-assistant");
+            .body_includes(JIRA_URN)
+            .body_includes("summarize the sprint")
+            .body_includes("volume://jira-assistant");
         then.status(202)
             .header("content-type", "application/json")
             .body(r#"{"status":{"state":"RUN_STATE_PENDING"}}"#);
@@ -1529,7 +1525,7 @@ fn run_short_name_starts_without_run_json() {
     );
     list.assert();
     created.assert();
-    assert_eq!(put.hits(), 0);
+    assert_eq!(put.calls(), 0);
     assert_no_run_json(dir.path());
 }
 
@@ -1545,8 +1541,8 @@ fn run_urn_starts_without_listing_or_run_json() {
     let created = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/runs")
-            .body_contains(JIRA_URN)
-            .body_contains("summarize the sprint");
+            .body_includes(JIRA_URN)
+            .body_includes("summarize the sprint");
         then.status(202)
             .header("content-type", "application/json")
             .body(r#"{"status":{"state":"RUN_STATE_PENDING"}}"#);
@@ -1576,7 +1572,7 @@ fn run_urn_starts_without_listing_or_run_json() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert!(parsed.get("error").is_none(), "{parsed}");
-    assert_eq!(list.hits(), 0);
+    assert_eq!(list.calls(), 0);
     created.assert();
     assert_no_run_json(dir.path());
 }
@@ -1593,7 +1589,7 @@ fn run_file_flag_posts_and_positional_path_is_usage() {
     let created = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/runs")
-            .body_contains("volume://from-file");
+            .body_includes("volume://from-file");
         then.status(202)
             .header("content-type", "application/json")
             .body(r#"{"status":{"state":"RUN_STATE_PENDING"}}"#);
@@ -1661,8 +1657,200 @@ fn run_file_flag_posts_and_positional_path_is_usage() {
     assert!(pos_out.contains("vam run --file"), "{pos_out}");
     assert!(positional.stderr.is_empty());
 
-    assert_eq!(created.hits(), 1);
-    assert_eq!(list.hits(), 0);
+    assert_eq!(created.calls(), 1);
+    assert_eq!(list.calls(), 0);
+}
+
+const FILE_AGENT_URN: &str = "urn:vam:agent:local.vam.dev/team/inline-check";
+const FILE_PLAYBOOK_URN: &str = "urn:vam:playbook:local.vam.dev/team/inline-flow";
+const FILE_AGENT_JSON: &str = r#"{"resourceId":{"urn":"urn:vam:agent:local.vam.dev/team/inline-check"},"displayName":"Inline check","role":"Tester","systemInstructions":"Answer briefly.","allowAnyPlaybook":true}"#;
+const FILE_PLAYBOOK_JSON: &str = r#"{"resourceId":{"urn":"urn:vam:playbook:local.vam.dev/team/inline-flow"},"displayName":"Inline flow","description":"d","steps":[]}"#;
+
+fn run_file_args<'a>(server: &'a MockServer, extra: &[&'a str]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--json",
+        "--host",
+        &server.base_url(),
+        "--token",
+        "vam_sk_test",
+        "run",
+        "--file",
+        ".",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.extend(extra.iter().map(|s| s.to_string()));
+    args
+}
+
+fn run_file_in(dir: &std::path::Path, server: &MockServer, extra: &[&str]) -> std::process::Output {
+    let args = run_file_args(server, extra);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_vam(dir, &refs)
+}
+
+/// The body of the run the CLI posted: no inline part, the saved draft pinned by reference.
+fn posted_run_pins_draft(req: &httpmock::prelude::HttpMockRequest, playbook: bool) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(req.body_ref()) else {
+        return false;
+    };
+    let draft = |r: &serde_json::Value, urn: &str| {
+        r["resourceId"]["urn"] == urn
+            && r["version"]["prerelease"] == "draft"
+            && r.get("digest").is_none()
+    };
+    v.get("inlineAgent").is_none()
+        && v.get("inlinePlaybook").is_none()
+        && draft(&v["spec"]["agentRef"], FILE_AGENT_URN)
+        && (!playbook || draft(&v["spec"]["playbookRef"], FILE_PLAYBOOK_URN))
+}
+
+#[test]
+fn run_file_saves_the_agent_draft_then_runs_it_by_ref() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let server = MockServer::start();
+    let put_agent = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/agents")
+            .header_exists("idempotency-key")
+            .body_includes("inline-check");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body("{}");
+    });
+    let put_playbook = server.mock(|when, then| {
+        when.method(PUT).path("/v1/playbooks");
+        then.status(200).body("{}");
+    });
+    let created = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/runs")
+            .is_true(|req| posted_run_pins_draft(req, false));
+        then.status(202)
+            .header("content-type", "application/json")
+            .body(r#"{"status":{"state":"RUN_STATE_PENDING"}}"#);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("agent.json"), FILE_AGENT_JSON).unwrap();
+
+    let out = run_file_in(dir.path(), &server, &["--prompt", "hello"]);
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(put_agent.calls(), 1);
+    assert_eq!(put_playbook.calls(), 0);
+    assert_eq!(created.calls(), 1);
+}
+
+#[test]
+fn run_file_saves_the_playbook_too_and_pins_both_drafts() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let server = MockServer::start();
+    let put_agent = server.mock(|when, then| {
+        when.method(PUT).path("/v1/agents");
+        then.status(200).body("{}");
+    });
+    let put_playbook = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/playbooks")
+            .header_exists("idempotency-key")
+            .body_includes("inline-flow");
+        then.status(200).body("{}");
+    });
+    let created = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/runs")
+            .is_true(|req| posted_run_pins_draft(req, true));
+        then.status(202)
+            .header("content-type", "application/json")
+            .body(r#"{"status":{"state":"RUN_STATE_PENDING"}}"#);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("agent.json"), FILE_AGENT_JSON).unwrap();
+    std::fs::write(dir.path().join("playbook.json"), FILE_PLAYBOOK_JSON).unwrap();
+
+    let out = run_file_in(dir.path(), &server, &["--prompt", "hello"]);
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(put_playbook.calls(), 1);
+    assert_eq!(put_agent.calls(), 1);
+    assert_eq!(created.calls(), 1);
+}
+
+#[test]
+fn run_file_shows_a_refused_save_and_posts_no_run() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let server = MockServer::start();
+    let put_agent = server.mock(|when, then| {
+        when.method(PUT).path("/v1/agents");
+        then.status(403)
+            .header("content-type", "application/json")
+            .body(
+                r#"{"code":"FORBIDDEN","message":"scope catalog:write is required for PutAgent"}"#,
+            );
+    });
+    let created = server.mock(|when, then| {
+        when.method(httpmock::Method::POST).path("/v1/runs");
+        then.status(202).body("{}");
+    });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("agent.json"), FILE_AGENT_JSON).unwrap();
+
+    let out = run_file_in(dir.path(), &server, &["--prompt", "hello"]);
+    assert!(!out.status.success(), "{out:?}");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all.contains("catalog:write is required"), "{all}");
+    assert!(all.contains("vam run <agent>"), "{all}");
+    assert_eq!(put_agent.calls(), 1);
+    assert_eq!(created.calls(), 0);
+}
+
+#[test]
+fn run_file_exits_2_before_any_request_on_a_missing_or_mismatched_urn() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let server = MockServer::start();
+    let any = server.mock(|when, then| {
+        when.any_request();
+        then.status(500).body("no request expected");
+    });
+
+    // agent.json without resourceId.urn
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent.json"),
+        r#"{"displayName":"x","role":"t","systemInstructions":"s"}"#,
+    )
+    .unwrap();
+    let out = run_file_in(dir.path(), &server, &["--prompt", "hello"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+
+    // run.json agentRef names another agent than agent.json
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("agent.json"), FILE_AGENT_JSON).unwrap();
+    std::fs::write(
+        dir.path().join("run.json"),
+        r#"{"spec":{"agentRef":{"resourceId":{"urn":"urn:vam:agent:local.vam.dev/team/other"}},"workspaceRefUri":"volume://x","inputs":{"prompt":"hi"}}}"#,
+    )
+    .unwrap();
+    let out = run_file_in(dir.path(), &server, &[]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert_eq!(any.calls(), 0);
 }
 
 #[test]
@@ -1677,12 +1865,11 @@ fn run_workspace_thread_prompt_posts_without_agent_or_continue_verb() {
     let created = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/runs")
-            .body_contains("sp_k3q7xw2m5b4n6a7c3d2e3f4g5h")
-            .body_contains("feature-login")
-            .body_contains("add a badge")
-            .matches(|req| {
-                let body = req.body.as_deref().unwrap_or_default();
-                let text = String::from_utf8_lossy(body);
+            .body_includes("sp_k3q7xw2m5b4n6a7c3d2e3f4g5h")
+            .body_includes("feature-login")
+            .body_includes("add a badge")
+            .is_true(|req| {
+                let text = req.body_string();
                 !text.contains("agentRef") && !text.contains("agent_ref")
             });
         then.status(202)
@@ -1718,7 +1905,7 @@ fn run_workspace_thread_prompt_posts_without_agent_or_continue_verb() {
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert!(parsed.get("error").is_none(), "{parsed}");
     created.assert();
-    assert_eq!(list.hits(), 0);
+    assert_eq!(list.calls(), 0);
     assert_no_run_json(dir.path());
 
     let gone = run_vam(
@@ -1761,7 +1948,7 @@ fn run_workspace_thread_prompt_posts_without_agent_or_continue_verb() {
     let no_prompt_out = String::from_utf8(no_prompt.stdout).unwrap();
     assert!(no_prompt_out.contains("-p"), "{no_prompt_out}");
     assert!(no_prompt.stderr.is_empty());
-    assert_eq!(created.hits(), 1);
+    assert_eq!(created.calls(), 1);
 }
 
 #[test]
@@ -1774,10 +1961,10 @@ fn run_by_ids_prints_the_place_line_and_a_label_is_never_a_lookup() {
     let created = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/runs")
-            .body_contains(format!("\"spaceId\":\"{sp}\""))
-            .body_contains(format!("\"threadId\":\"{th}\""))
-            .matches(|req| {
-                !String::from_utf8_lossy(req.body.as_deref().unwrap_or_default())
+            .body_includes(format!("\"spaceId\":\"{sp}\""))
+            .body_includes(format!("\"threadId\":\"{th}\""))
+            .is_true(|req| {
+                !req.body_string()
                     .contains("threadRef")
             });
         then.status(202)
@@ -1827,7 +2014,7 @@ fn run_by_ids_prints_the_place_line_and_a_label_is_never_a_lookup() {
         &["--json", "run", "--workspace", "my notes", "-p", "next"],
     );
     assert_eq!(refused.status.code(), Some(2), "{refused:?}");
-    assert_eq!(created.hits(), 1);
+    assert_eq!(created.calls(), 1);
 }
 
 #[test]
@@ -1883,7 +2070,7 @@ fn run_unknown_short_name_exits_not_found() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("vam agent ls"), "{stderr}");
     list.assert();
-    assert_eq!(created.hits(), 0);
+    assert_eq!(created.calls(), 0);
     assert_no_run_json(dir.path());
 }
 
@@ -2040,7 +2227,7 @@ fn workspace_cat_json_requires_out_and_prints_metadata() {
         vam_cli::output::classify(&err).0,
         vam_cli::output::ExitCode::Usage
     );
-    assert_eq!(mock.hits(), 0);
+    assert_eq!(mock.calls(), 0);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -2413,7 +2600,7 @@ fn agent_release_sends_the_note_in_the_request_body() {
                 "/v1/agents/{}/release",
                 vam_cli::client::encode_path_segment(urn)
             ))
-            .body_contains("adds jira");
+            .body_includes("adds jira");
         then.status(200)
             .header("content-type", "application/json")
             .body(format!(r#"{{"resourceId":{{"urn":"{urn}"}}}}"#));
@@ -2502,7 +2689,7 @@ fn agent_versions_prints_a_table_and_json_flag_prints_the_response() {
     let parsed: serde_json::Value =
         serde_json::from_slice(&json.stdout).expect("raw JSON on stdout");
     assert_eq!(parsed["versions"].as_array().map(Vec::len), Some(2));
-    versions.assert_hits(2);
+    versions.assert_calls(2);
 }
 
 #[test]
@@ -2618,13 +2805,13 @@ fn agent_release_without_version_and_without_a_tty_fails_naming_the_suggestion()
     let suggestion = suggestion_mock(&server, urn);
     let release = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
-            .path_matches(httpmock::Regex::new("/release$").unwrap());
+            .path_matches("/release$");
         then.status(200).body("{}");
     });
     let out = run_vam_against(&server, &["agent", "release", urn]);
     assert!(!out.status.success(), "must not release without --version");
     suggestion.assert();
-    release.assert_hits(0);
+    release.assert_calls(0);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("--version is required; suggested: 1.1.0 (minor: added skill jira)"),
@@ -2693,7 +2880,7 @@ fn users_create_posts_role_and_env_password_with_idempotency_key() {
             .path("/v1/users")
             .header("authorization", "Bearer vam_sk_test")
             .header_exists("Idempotency-Key")
-            .json_body_partial(
+            .json_body_includes(
                 r#"{"username":"ops-bot","role":"publisher","password":"pw-from-env-only"}"#,
             );
         then.status(200)
@@ -2757,7 +2944,7 @@ fn users_create_refuses_a_password_on_argv_before_any_request() {
         ],
     );
     assert!(!out.status.success());
-    none.assert_hits(0);
+    none.assert_calls(0);
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -2787,7 +2974,7 @@ fn users_create_names_the_missing_password_env_var_without_a_request() {
         ],
     );
     assert!(!out.status.success());
-    none.assert_hits(0);
+    none.assert_calls(0);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("VAM_TEST_UNSET_PASSWORD_VAR"),
@@ -2816,7 +3003,7 @@ fn users_create_rejects_roles_outside_the_offered_set() {
         ],
     );
     assert!(!out.status.success());
-    none.assert_hits(0);
+    none.assert_calls(0);
 }
 
 #[test]
@@ -2831,8 +3018,8 @@ fn space_create_rename_and_thread_rename_call_the_id_routes() {
         when.method(httpmock::Method::POST)
             .path("/v1/spaces")
             .header_exists("idempotency-key")
-            .body_contains(agent)
-            .body_contains("my notes");
+            .body_includes(agent)
+            .body_includes("my notes");
         then.status(200)
             .header("content-type", "application/json")
             .body(format!(r#"{{"spaceId":"{sp}","name":"my notes"}}"#));
@@ -2840,7 +3027,7 @@ fn space_create_rename_and_thread_rename_call_the_id_routes() {
     let rename = server.mock(|when, then| {
         when.method(httpmock::Method::PATCH)
             .path(format!("/v1/spaces/{sp}"))
-            .body_contains("new name");
+            .body_includes("new name");
         then.status(200)
             .header("content-type", "application/json")
             .body(format!(r#"{{"spaceId":"{sp}","name":"new name"}}"#));
@@ -2848,7 +3035,7 @@ fn space_create_rename_and_thread_rename_call_the_id_routes() {
     let thread = server.mock(|when, then| {
         when.method(httpmock::Method::PATCH)
             .path(format!("/v1/spaces/{sp}/threads/{th}"))
-            .body_contains("plan b");
+            .body_includes("plan b");
         then.status(200)
             .header("content-type", "application/json")
             .body(format!(r#"{{"threadId":"{th}","name":"plan b"}}"#));

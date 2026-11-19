@@ -950,7 +950,7 @@ impl InferenceBrokerServer {
                         saw_error = true;
                     }
                     if let Some(ref usage) = chunk.usage {
-                        last_usage = Some(usage.clone());
+                        last_usage = Some(*usage);
                         println!(
                             "[broker:trace] 📊 [Token Usage] prompt: {}, completion: {}, total: {}",
                             usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
@@ -1029,7 +1029,7 @@ impl InferenceBrokerServer {
                         exchange_id,
                         text: accumulated_assistant.clone(),
                         tool_calls: accumulated_tool_calls.clone(),
-                        usage: last_usage.clone(),
+                        usage: last_usage,
                         reasoning: kept,
                         reasoning_bytes,
                     })
