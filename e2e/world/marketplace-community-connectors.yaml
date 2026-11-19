@@ -1,10 +1,11 @@
 piece: marketplace-community-connectors
 kind: git-marketplace
-# A marketplace an admin adds, whose listings ship connector files: one that installs (a remote MCP
-# server with discovery) and three that must be refused (a Squrell-reserved id, an unknown profile,
-# a client secret). Overlay `marketplace-community-connectors-update/` is a newer tag of the good
-# listing whose connector asks for one more scope and offers one more tool.
+# A marketplace an admin adds, whose listings ship connector files: two that install (a remote MCP
+# server with discovery; `filebox-connector`, whose OAuth client the org's admin supplies, with a secret
+# the node holds) and four that must be refused (a Squrell-reserved id, an unknown profile, a client secret
+# of the Squrell relay, and `org-secret-without-org-client`, an org-held secret with no admin-supplied client).
+# Overlay `marketplace-community-connectors-update/` is a newer tag of the good listing whose connector asks for one more scope and offers one more tool.
 fixture: marketplace-community-connectors
 url: https://connectors.community.example/vam-marketplace
 publisherDomain: connectors.community.example
-tags: [bugwatch-connector-v1.0.0, reserved-connector-id-v1.0.0, unknown-profile-connector-v1.0.0, connector-with-a-secret-v1.0.0]
+tags: [bugwatch-connector-v1.0.0, reserved-connector-id-v1.0.0, unknown-profile-connector-v1.0.0, connector-with-a-secret-v1.0.0, filebox-connector-v1.0.0, org-secret-without-org-client-v1.0.0]

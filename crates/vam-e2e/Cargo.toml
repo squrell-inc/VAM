@@ -25,6 +25,7 @@ reqwest = { workspace = true, features = ["blocking", "json", "multipart"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+sha2.workspace = true
 tar = "0.4"
 # Mock rule types, to validate inline `mock:` blocks. Never depend on vam-orchestrator,
 # vam-core or vam-runtime here (S5: the process-guest feature must not unify into workspace builds).

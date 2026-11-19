@@ -27,6 +27,9 @@ pub const ENV_GUEST_BIN: &str = "VAMD_PROCESS_GUEST_BIN";
 /// to runner-hosted loopback mocks. A JSON object `{"microsoft-login": "http://127.0.0.1:P",
 /// "linear-server": "http://127.0.0.1:Q/mcp", "microsoft-graph": "http://127.0.0.1:R"}`. It is read only under this feature, needs
 /// `VAMD_PROCESS_GUEST_BIN`, and a default `vamd` refuses it like every `VAMD_PROCESS_*`.
+/// CN-5.2 adds `"oauth:<https origin>": "http://127.0.0.1:P"` (an authorization server's origin: the
+/// discovery fetch, the code exchange and the refresh keep their path) and answers the
+/// `/.well-known/` metadata of an `mcp:` server from that server's mock.
 pub const ENV_CONNECTOR_ENDPOINTS: &str = "VAMD_PROCESS_CONNECTOR_ENDPOINTS";
 /// Test-only seam for marketplaces (CN-4.4): maps the https URL of a marketplace to a local bare
 /// repository, so the runner's `file://` repos stand in for GitHub. A JSON object
@@ -105,6 +108,26 @@ pub struct ConnectorEndpoints {
     /// Stands in for the exact https URL of an MCP server a connector from a marketplace names
     /// (`"mcp:<https url>": "<loopback http url>"`).
     pub mcp_servers: std::collections::BTreeMap<String, url::Url>,
+    /// Stands in for every URL on one https origin of an authorization server a connector's
+    /// metadata names (`"oauth:<https origin>": "<loopback http origin>"`): the discovery fetch,
+    /// the code exchange and the refresh. The path and query are kept.
+    pub oauth_origins: std::collections::BTreeMap<String, url::Url>,
+}
+
+/// `https://<host>` with no port, path, query or user info (the form of an `oauth:` key).
+fn is_https_origin(raw: &str) -> bool {
+    url::Url::parse(raw).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.host_str().is_some()
+            && u.port().is_none()
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.query().is_none()
+            && u.fragment().is_none()
+            && matches!(u.path(), "" | "/")
+            && raw.len() <= 512
+            && raw.trim_end_matches('/') == u.as_str().trim_end_matches('/')
+    })
 }
 
 fn loopback_http(raw: &str) -> Result<url::Url, Refusal> {
@@ -141,16 +164,30 @@ impl ConnectorEndpoints {
                     }
                     out.microsoft_graph = Some(base);
                 }
-                other => match other.strip_prefix("mcp:") {
-                    Some(real) if real.starts_with("https://") && real.len() <= 512 => {
-                        out.mcp_servers.insert(real.to_string(), loopback_http(v)?);
+                other => {
+                    if let Some(real) = other.strip_prefix("mcp:") {
+                        if real.starts_with("https://") && real.len() <= 512 {
+                            out.mcp_servers.insert(real.to_string(), loopback_http(v)?);
+                            continue;
+                        }
                     }
-                    _ => {
-                        return Err(Refusal::ConnectorEndpoints(format!(
-                            "unknown key `{other}`"
-                        )))
+                    if let Some(origin) = other.strip_prefix("oauth:") {
+                        if is_https_origin(origin) {
+                            let base = loopback_http(v)?;
+                            if base.port().is_none() || !matches!(base.path(), "" | "/") {
+                                return Err(Refusal::ConnectorEndpoints(format!(
+                                    "{v:?}: an oauth key must map to http://127.0.0.1:<port> with no path"
+                                )));
+                            }
+                            out.oauth_origins
+                                .insert(origin.trim_end_matches('/').to_string(), base);
+                            continue;
+                        }
                     }
-                },
+                    return Err(Refusal::ConnectorEndpoints(format!(
+                        "unknown key `{other}`"
+                    )));
+                }
             }
         }
         Ok(out)
@@ -169,6 +206,23 @@ impl ConnectorEndpoints {
         if let Some(mock) = self.mcp_servers.get(url) {
             return Some(mock.clone());
         }
+        if let Ok(u) = url::Url::parse(url) {
+            if u.scheme() == "https" && u.port().is_none() {
+                let host = u.host_str().unwrap_or_default();
+                // A connector's authorization server (discovery, code exchange, refresh).
+                if let Some(base) = self.oauth_origins.get(&format!("https://{host}")) {
+                    return Some(rebase(base, &u));
+                }
+                // The MCP server's own metadata: `/.well-known/...` on its origin (RFC 9728).
+                if u.path().starts_with("/.well-known/") {
+                    for (real, mock) in &self.mcp_servers {
+                        if url::Url::parse(real).is_ok_and(|r| r.host_str() == Some(host)) {
+                            return Some(rebase(mock, &u));
+                        }
+                    }
+                }
+            }
+        }
         if let Some(login) = &self.microsoft_login {
             let u = url::Url::parse(url).ok()?;
             if u.scheme() == "https" && u.host_str() == Some("login.microsoftonline.com") {
@@ -180,6 +234,14 @@ impl ConnectorEndpoints {
         }
         None
     }
+}
+
+/// `base`'s scheme, host and port with `u`'s path and query.
+fn rebase(base: &url::Url, u: &url::Url) -> url::Url {
+    let mut mapped = base.clone();
+    mapped.set_path(u.path());
+    mapped.set_query(u.query());
+    mapped
 }
 
 /// Why vamd refuses to start in process mode.
@@ -707,6 +769,68 @@ mod tests {
             r#"{"mcp:https://mcp.bugwatch.example/mcp":"https://127.0.0.1:1/mcp"}"#,
             r#"{"mcp:https://mcp.bugwatch.example/mcp":"http://10.0.0.5:1/mcp"}"#,
             r#"{"mcp:":"http://127.0.0.1:1/mcp"}"#,
+        ] {
+            assert!(
+                matches!(
+                    Env::ok()
+                        .set(ENV_CONNECTOR_ENDPOINTS, bad)
+                        .go()
+                        .unwrap_err(),
+                    Refusal::ConnectorEndpoints(_)
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_authorization_server_origin_maps_with_its_path_and_the_mcp_metadata_follows_its_server() {
+        let seam = r#"{
+            "mcp:https://mcp.filebox.example/mcp":"http://127.0.0.1:41003/mcp",
+            "oauth:https://auth.filebox.example":"http://127.0.0.1:41003"
+        }"#;
+        let m = Env::ok()
+            .set(ENV_CONNECTOR_ENDPOINTS, seam)
+            .go()
+            .unwrap()
+            .unwrap();
+        let e = &m.connector_endpoints;
+        // Every URL of the authorization server keeps its path and query.
+        assert_eq!(
+            e.map("https://auth.filebox.example/.well-known/oauth-authorization-server")
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:41003/.well-known/oauth-authorization-server"
+        );
+        assert_eq!(
+            e.map("https://auth.filebox.example/token")
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:41003/token"
+        );
+        // The MCP server's metadata (RFC 9728) is on its own origin, the server itself is exact.
+        assert_eq!(
+            e.map("https://mcp.filebox.example/.well-known/oauth-protected-resource/mcp")
+                .unwrap()
+                .as_str(),
+            "http://127.0.0.1:41003/.well-known/oauth-protected-resource/mcp"
+        );
+        for other in [
+            "https://mcp.filebox.example/other",
+            "https://other.filebox.example/token",
+            "https://auth.filebox.example:8443/token",
+            "http://auth.filebox.example/token",
+            "https://evil.example/.well-known/oauth-protected-resource",
+        ] {
+            assert!(e.map(other).is_none(), "{other}");
+        }
+        for bad in [
+            r#"{"oauth:http://auth.filebox.example":"http://127.0.0.1:1"}"#,
+            r#"{"oauth:https://auth.filebox.example/path":"http://127.0.0.1:1"}"#,
+            r#"{"oauth:https://auth.filebox.example:8443":"http://127.0.0.1:1"}"#,
+            r#"{"oauth:https://auth.filebox.example":"http://10.0.0.5:1"}"#,
+            r#"{"oauth:https://auth.filebox.example":"http://127.0.0.1:1/x"}"#,
+            r#"{"oauth:":"http://127.0.0.1:1"}"#,
         ] {
             assert!(
                 matches!(

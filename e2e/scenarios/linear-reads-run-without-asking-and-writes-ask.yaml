@@ -41,6 +41,7 @@ guards:
   - vam:crates/vam-orchestrator/src/mcp_registry.rs
   - vam:crates/vam-orchestrator/src/api/mcp_connections.rs
   - vam:crates/vam-orchestrator/src/secrets.rs
+  - vam:crates/vam-orchestrator/src/host_tools.rs
 mock:
   - when: { step: read, toolName: linear__list_issues }
     reply: { text: Read. }
