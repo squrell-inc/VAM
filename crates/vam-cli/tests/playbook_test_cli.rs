@@ -33,9 +33,9 @@ fn playbook_test_posts_the_scenario_and_passes_when_every_trial_passes() {
     let post = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/playbook-tests")
-            .body_contains("\"repeat\":2")
-            .body_contains("cli-test")
-            .body_contains("\"expect\"");
+            .body_includes("\"repeat\":2")
+            .body_includes("cli-test")
+            .body_includes("\"expect\"");
         then.status(200)
             .header("content-type", "application/json")
             .body(r#"{"passed":2,"repeat":2,"passK":1.0,"failures":[]}"#);
@@ -64,7 +64,7 @@ fn playbook_test_exits_nonzero_when_a_trial_fails() {
     let post = server.mock(|when, then| {
         when.method(httpmock::Method::POST)
             .path("/v1/playbook-tests")
-            .body_contains("\"repeat\":3");
+            .body_includes("\"repeat\":3");
         then.status(200)
             .header("content-type", "application/json")
             .body(r#"{"passed":1,"repeat":3,"passK":0.037,"failures":["trial 2: boom"]}"#);

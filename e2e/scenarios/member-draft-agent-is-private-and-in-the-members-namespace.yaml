@@ -1,0 +1,40 @@
+id: member-draft-agent-is-private-and-in-the-members-namespace
+title: A member's draft agent runs for them and stays private, and a member saves agents only under their own namespace and never over another member's
+description: >
+  The member saves a draft agent under their own namespace and chats with it pinned to the draft. An
+  agent whose URN is outside that namespace is refused with 400 naming the namespace, and so is a second
+  member's save onto the first member's URN. The second member and a publisher get 404 on the agent and
+  the second member's list lacks it; the admin reads it. Its versions show a draft and no
+  release.
+tags: [members, chat, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: m1 }
+  - { piece: org-member, as: m2 }
+  - { piece: org-publisher, as: pub }
+  - skill-host-echo
+  - agent-member-draft-with-host-echo
+  - agent-inline-probe
+when:
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: m1, status: 200 }
+  - chat: { agent: agent-member-draft-with-host-echo, draft: true, as: m1, text: "e2e-step:pin Hello" }
+  - expect: { run: succeeded }
+  - put-draft: { piece: agent-inline-probe, as: m1, status: 400, contains: "namespace" }
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: m2, urnOf: m1, status: 400, contains: "namespace" }
+then:
+  - identity-request: { as: m2, credential: key, path: "/v1/agents/{{urn:agent-member-draft-with-host-echo:m1}}", status: 404 }
+  - identity-request: { as: m2, credential: key, path: /v1/agents, status: 200, lacks: "{{urn:agent-member-draft-with-host-echo:m1}}" }
+  - identity-request: { as: pub, credential: key, path: "/v1/agents/{{urn:agent-member-draft-with-host-echo:m1}}", status: 404 }
+  - identity-request: { as: admin, credential: key, path: "/v1/agents/{{urn:agent-member-draft-with-host-echo:m1}}", status: 200 }
+  - identity-request: { as: m1, credential: key, path: "/v1/agents/{{urn:agent-member-draft-with-host-echo:m1}}/versions", status: 200, contains: "\"channel\":\"DRAFT\"", lacks: "releasedAt" }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/permissions.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/keys.rs
+  - vam:crates/vam-orchestrator/src/owner.rs
+mock:
+  - when: { step: pin }
+    reply: { text: Hello. }
+status: active

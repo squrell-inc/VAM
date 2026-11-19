@@ -7,6 +7,7 @@
 
 use std::io::Read;
 use std::time::Duration;
+use vam_security::tls_roots::BundledRoots;
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -316,6 +317,7 @@ fn classify_pin_error(err: PinError) -> RefreshFailure {
 
 fn client_builder() -> reqwest::blocking::ClientBuilder {
     reqwest::blocking::Client::builder()
+        .bundled_roots()
         .timeout(Duration::from_secs(10))
         .connect_timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())

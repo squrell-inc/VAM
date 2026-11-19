@@ -1,8 +1,9 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use axum::body::{Body, HttpBody as _};
+use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt as _;
 use tower::ServiceExt;
 
 use crate::api::auth::ControlPlanePdp;
@@ -56,7 +57,7 @@ fn app_with_store() -> (axum::Router, Arc<SqliteWorkflowStore>) {
         ("ada", "member-secret", UserRole::Member),
         ("olga", "orgadmin-secret", UserRole::OrgAdmin),
     ] {
-        store.create_user(user, user).unwrap();
+        store.create_user_with_role(user, user, role).unwrap();
         store
             .create_api_key_owned(
                 &format!("{user}-key"),

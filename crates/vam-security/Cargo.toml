@@ -11,7 +11,9 @@ description = "Host-side approval signing and replay protection for VAM"
 default = []
 # Shared SSRF guard (DNS pinning). Off by default: the static guest build
 # (vam-runtime) must not pull reqwest.
-ssrf-guard = ["dep:reqwest", "dep:url"]
+ssrf-guard = ["tls-roots", "dep:url"]
+# Bundled Mozilla roots for host reqwest clients (tls_roots). Off by default for the same reason.
+tls-roots = ["dep:reqwest", "dep:webpki-root-certs"]
 # Shared redactor for encoded, split and partial secret forms (secret_forms). Off by
 # default so the static guest build does not compile it.
 secret-forms = ["dep:aho-corasick"]
@@ -25,7 +27,8 @@ serde_json = "1.0"
 sha2.workspace = true
 thiserror.workspace = true
 vam-spec.workspace = true
-reqwest = { version = "0.11", features = ["blocking", "rustls-tls"], default-features = false, optional = true }
+reqwest = { workspace = true, features = ["blocking"], optional = true }
+webpki-root-certs = { version = "1", optional = true }
 url = { version = "2.5", optional = true }
 aho-corasick = { version = "1.1", optional = true }
 

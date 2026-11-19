@@ -1,6 +1,12 @@
 ---
 title: Agent Specifications (agent.json)
 description: Complete guide to authoring declarative agent configurations with AgentSpec in VAM.
+status: shipped
+proves:
+  - crates/vam-orchestrator/tests/api_tests.rs
+  - always-allow-and-always-deny-are-remembered
+  - crates/vam-security/src/permissions.rs::default_deny_internet_allows_only_listed_hosts
+  - member-draft-agent-refuses-a-skill-that-is-not-released
 ---
 
 Read [Authoring model](/authoring/model/) first. It is the map of drafts, releases, floating references, skills, playbooks, and policies. This page is the field reference for `agent.json`.
@@ -132,7 +138,7 @@ A digest needs a version. A digest without one is rejected.
 
 Resolution depends on what you run:
 
-- **Draft run.** Each ref resolves to the agent owner's draft of the dependency if one exists. Otherwise it resolves to the latest release.
+- **Draft run.** Each ref resolves to the agent owner's draft of the dependency if one exists and the owner authors by live role (publisher or above). Otherwise it resolves to the latest release. A member-owned draft uses released parts only; see [Member agents](/orchestrator/member-agents/#running-it).
 - **Release.** Every ref is frozen to a version and a digest in the released spec.
 - **Release with a draft-only dependency.** The release fails. A draft cannot be frozen, so publish the dependency first.
 
@@ -222,7 +228,7 @@ Agents declare their tool capabilities by skill URN. Do not add a version or a d
 ]
 ```
 
-A draft run resolves the skill to the agent owner's draft, or to the latest release if there is no draft. Release freezes the ref to a version and digest. At MicroVM boot time, the orchestrator verifies the frozen skill's digest and mounts the skill directory as a read-only filesystem at `/mnt/drive9/skills/<skill-id>/`.
+A draft run resolves the skill to the agent owner's draft, or to the latest release if there is no draft. A member's draft agent always gets the latest release (or the `X.Y.Z` named), never a draft. Release freezes the ref to a version and digest. At MicroVM boot time, the orchestrator verifies the frozen skill's digest and mounts the skill directory as a read-only filesystem at `/mnt/drive9/skills/<skill-id>/`.
 
 The guest prompt lists only tools the host advertises for this run. A skill that is not in `skillRefs` does not contribute tools.
 
@@ -273,7 +279,7 @@ Removing a skill or a playbook, or turning `allowAnyPlaybook` off, suggests a ma
 }
 ```
 
-`extends` takes an agent URN. A draft may float, and a draft run resolves it like any other ref. Release freezes it to a version and digest. The URN kind is `agent`. An extending agent leaves `systemInstructions` and `skillRefs` empty. The overlay is the only delta. `append` joins the parent instructions, a blank line, and the child text. `replace` keeps the child text. `remove` drops a skill by URN, then `add` runs. `grant` then `revoke` edit the capability set.
+`extends` takes an agent URN. A draft may float, and a draft run resolves it like any other ref. A member cannot save an agent with `extends` or `overlay`. Release freezes it to a version and digest. The URN kind is `agent`. An extending agent leaves `systemInstructions` and `skillRefs` empty. The overlay is the only delta. `append` joins the parent instructions, a blank line, and the child text. `replace` keeps the child text. `remove` drops a skill by URN, then `add` runs. `grant` then `revoke` edit the capability set.
 
 Chains are allowed, one parent at a time, up to 8 hops. Two rules reject a merge:
 
@@ -372,7 +378,7 @@ vam agent release urn:vam:agent:local.vam.dev/vam/jira-assistant --note "Sprint 
 vam agent versions urn:vam:agent:local.vam.dev/vam/jira-assistant
 ```
 
-On a terminal, `release` with no `--version` prints the suggestion and asks. Without a terminal, pass `--version`. The same commands exist for `vam playbook` and `vam policy`. Skill packages use `vam skill publish` and `vam skill release`. See [Authoring model](/authoring/model/#draft-and-release).
+On a terminal, `release` with no `--version` prints the suggestion and asks. Without a terminal, pass `--version`. A member can run `vam agent put` for an agent in their own namespace, built from released skills, playbooks and policies. The refused fields, the namespace rule and the draft cap are on [Member agents](/orchestrator/member-agents/#saving). The same commands exist for `vam playbook` and `vam policy`, and those need `catalog:write`. Skill packages use `vam skill publish` and `vam skill release`. See [Authoring model](/authoring/model/#draft-and-release).
 
 ---
 

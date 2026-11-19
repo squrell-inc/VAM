@@ -39,10 +39,10 @@ pub const PAGE_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/v1/workspaces/:id/threads", get(list_threads))
-        .route("/v1/workspaces/:id/threads/:thread", get(get_thread))
+        .route("/v1/workspaces/{id}/threads", get(list_threads))
+        .route("/v1/workspaces/{id}/threads/{thread}", get(get_thread))
         .route(
-            "/v1/workspaces/:id/threads/:thread/messages",
+            "/v1/workspaces/{id}/threads/{thread}/messages",
             get(list_messages),
         )
 }

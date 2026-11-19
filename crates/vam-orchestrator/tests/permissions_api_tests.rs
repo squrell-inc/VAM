@@ -75,7 +75,7 @@ fn mint_user_key(
 
 async fn response_body(response: axum::response::Response) -> String {
     String::from_utf8(
-        hyper::body::to_bytes(response.into_body())
+        axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap()
             .to_vec(),
@@ -351,7 +351,7 @@ async fn member_cannot_read_or_write_the_admins_draft() {
     let member = mint_user_key(
         &store,
         "member",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "runs:write"],
     );
     let app = test_app(app_state(store));
@@ -531,7 +531,7 @@ async fn migrate_requires_an_idempotency_key_and_hides_a_foreign_draft() {
     let member = mint_user_key(
         &store,
         "member",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "runs:write"],
     );
     let app = test_app(app_state(store));

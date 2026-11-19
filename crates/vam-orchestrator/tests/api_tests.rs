@@ -12,8 +12,8 @@ use vam_network::NetResourcePool;
 use vam_orchestrator::api::auth::ControlPlanePdp;
 use vam_orchestrator::api::{self, AppState};
 use vam_orchestrator::keys::{
-    hash_api_key_secret, mint_api_key_secret, BOOTSTRAP_SCOPES, MEMBER_SCOPES, ORG_ADMIN_SCOPES,
-    PUBLISHER_SCOPES,
+    hash_api_key_secret, mint_api_key_secret, ScopeMode, BOOTSTRAP_SCOPES, MEMBER_SCOPES,
+    ORG_ADMIN_SCOPES, PUBLISHER_SCOPES,
 };
 use vam_orchestrator::manager::{drive9_runtime, run_manager_loop, SessionManager};
 use vam_orchestrator::secrets::SecretsVault;
@@ -85,6 +85,11 @@ fn bootstrap_store() -> (Arc<SqliteWorkflowStore>, String) {
     store.initialize_catalog_schema().unwrap();
     let secret = mint_api_key_secret();
     let scopes: Vec<String> = BOOTSTRAP_SCOPES.iter().map(|s| s.to_string()).collect();
+    // This key carries every scope for the implicit `local` owner. Scopes follow the owner's
+    // live role, so `local` is an Operator here (an Operator's key keeps its stored scopes).
+    store
+        .set_user_role(vam_orchestrator::users::LOCAL_USER_ID, UserRole::Operator)
+        .unwrap();
     store
         .create_api_key("test-key", "test", &secret, "User::\"tester\"", &scopes)
         .unwrap();
@@ -412,6 +417,11 @@ async fn owner_stamped_on_http_put_secret_and_catalog() {
         .iter()
         .map(|s| (*s).to_string())
         .collect();
+    // The implicit `local` owner writes the catalog here, so it is a publisher: its key's
+    // scopes follow its live role.
+    store
+        .set_user_role(vam_orchestrator::users::LOCAL_USER_ID, UserRole::Publisher)
+        .unwrap();
     store
         .create_api_key(
             "other-key",
@@ -1581,6 +1591,7 @@ async fn idempotency_run_create_is_per_user() {
     store.initialize_catalog_schema().unwrap();
     seed_test_playbook(&store);
     let (alice_secret, bob_secret) = two_member_keys(&store);
+    seed_released_agent(&store, RUN_FIXTURE_AGENT);
     let alice_run = "urn:vam:run:local.vam.dev/acme/run-alice-idemp";
     store
         .persist_run_spec_with_owner(
@@ -1595,7 +1606,7 @@ async fn idempotency_run_create_is_per_user() {
         .unwrap();
     let app = test_app(app_state_http_only(store));
 
-    let alice_body = create_run_body(alice_run, "shared-run-k");
+    let alice_body = create_released_run_body(alice_run, "shared-run-k");
     let alice_replay = app
         .clone()
         .oneshot(bearer_json(
@@ -1613,7 +1624,7 @@ async fn idempotency_run_create_is_per_user() {
     assert!(alice_resp.contains("run-alice-idemp"), "{alice_resp}");
 
     let bob_run = "urn:vam:run:local.vam.dev/acme/run-bob-idemp";
-    let mut bob_body = create_run_body(bob_run, "shared-run-k");
+    let mut bob_body = create_released_run_body(bob_run, "shared-run-k");
     bob_body["spec"]["workspaceRefUri"] = serde_json::json!("volume://bob-idemp");
     let bob_create = app
         .clone()
@@ -1651,6 +1662,7 @@ async fn workspace_prefix_isolates_users_and_rejects_guest_override() {
     seed_test_playbook(&store);
     let (alice_secret, bob_secret) = two_member_keys(&store);
     let agent_urn = "urn:vam:agent:local.vam.dev/acme/prefix-agent";
+    seed_released_agent(&store, agent_urn);
     let app = test_app(app_state_http_only(store.clone()));
 
     let alice_run = app
@@ -1660,7 +1672,7 @@ async fn workspace_prefix_isolates_users_and_rejects_guest_override() {
             "/v1/runs",
             &alice_secret,
             "alice-ws-prefix",
-            sample_run_body(
+            sample_released_run_body(
                 agent_urn,
                 "assistant",
                 "alice-ws-prefix",
@@ -1676,6 +1688,7 @@ async fn workspace_prefix_isolates_users_and_rejects_guest_override() {
     // Bob gets his own agent URN. The owner rule forbids him versioning
     // alice's, and this test is about workspace isolation, not agent sharing.
     let bob_agent_urn = "urn:vam:agent:local.vam.dev/acme/prefix-agent-bob";
+    seed_released_agent(&store, bob_agent_urn);
     let bob_run = app
         .clone()
         .oneshot(bearer_json(
@@ -1683,7 +1696,7 @@ async fn workspace_prefix_isolates_users_and_rejects_guest_override() {
             "/v1/runs",
             &bob_secret,
             "bob-ws-prefix",
-            sample_run_body(
+            sample_released_run_body(
                 bob_agent_urn,
                 "assistant",
                 "bob-ws-prefix",
@@ -1717,7 +1730,7 @@ async fn workspace_prefix_isolates_users_and_rejects_guest_override() {
 
     // Alice names bob's Space by its id: refused exactly as an id that does not exist.
     let ask = |ws: String, key: &'static str| {
-        let mut body = sample_run_body(
+        let mut body = sample_released_run_body(
             agent_urn,
             "assistant",
             key,
@@ -1786,8 +1799,9 @@ async fn spaces_are_created_once_per_key_and_renamed_in_place() {
     seed_test_playbook(&store);
     let (alice_secret, bob_secret) = two_member_keys(&store);
     let agent_urn = "urn:vam:agent:local.vam.dev/acme/prefix-agent";
+    seed_released_agent(&store, agent_urn);
     let app = test_app(app_state_http_only(store.clone()));
-    // Alice's run puts the agent in the catalog.
+    // The agent is released in setup; Alice runs it as a member.
     let run = app
         .clone()
         .oneshot(bearer_json(
@@ -1795,7 +1809,7 @@ async fn spaces_are_created_once_per_key_and_renamed_in_place() {
             "/v1/runs",
             &alice_secret,
             "seed-agent",
-            sample_run_body(
+            sample_released_run_body(
                 agent_urn,
                 "assistant",
                 "seed-agent",
@@ -1969,7 +1983,7 @@ fn encode_run_path(run_id: &str) -> String {
 
 async fn response_body(response: axum::response::Response) -> String {
     String::from_utf8(
-        hyper::body::to_bytes(response.into_body())
+        axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap()
             .to_vec(),
@@ -2044,8 +2058,7 @@ async fn bootstrap_key_can_put_agent_and_post_run() {
             "runId": {"urn": "urn:vam:run:local.vam.dev/acme/run-api-test"},
             "agentRef": {
                 "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/test-agent"},
-                "version": {"major": 1, "minor": 0, "patch": 0},
-                "digest": {"algorithm": "ALGORITHM_SHA256", "hexHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+                "version": {"major": 1, "minor": 0, "patch": 0, "prerelease": "draft"}
             },
             "playbookRef": {
                 "resourceId": {"urn": "urn:vam:playbook:local.vam.dev/acme/test-pb"},
@@ -2055,14 +2068,6 @@ async fn bootstrap_key_can_put_agent_and_post_run() {
             "inputs": {"fields": {"prompt": {"stringValue": "hello from api test"}}},
             "workspaceRefUri": "volume://mock",
             "idempotencyKey": "run-idem-1"
-        },
-        "inlineAgent": {
-            "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/test-agent"},
-            "displayName": "Test Agent",
-            "description": "inline",
-            "role": "Tester",
-            "systemInstructions": "test",
-            "allowAnyPlaybook": true
         }
     });
 
@@ -2093,8 +2098,7 @@ fn create_run_body(run_id: &str, idem: &str) -> serde_json::Value {
             "runId": {"urn": run_id},
             "agentRef": {
                 "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/test-agent"},
-                "version": {"major": 1, "minor": 0, "patch": 0},
-                "digest": {"algorithm": "ALGORITHM_SHA256", "hexHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+                "version": {"major": 1, "minor": 0, "patch": 0, "prerelease": "draft"}
             },
             "playbookRef": {
                 "resourceId": {"urn": "urn:vam:playbook:local.vam.dev/acme/test-pb"},
@@ -2104,14 +2108,6 @@ fn create_run_body(run_id: &str, idem: &str) -> serde_json::Value {
             "inputs": {"fields": {"prompt": {"stringValue": "hello from api test"}}},
             "workspaceRefUri": "volume://mock",
             "idempotencyKey": idem
-        },
-        "inlineAgent": {
-            "resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/test-agent"},
-            "displayName": "Test Agent",
-            "description": "inline",
-            "role": "Tester",
-            "systemInstructions": "test",
-            "allowAnyPlaybook": true
         }
     })
 }
@@ -2183,6 +2179,7 @@ async fn create_run_on_mock_model_is_refused_without_the_scripted_flag() {
     seed_test_playbook(&store);
     let app = test_app(app_state(store));
 
+    save_run_fixture_agent(&app, &secret, serde_json::json!({}), "fixture-agent").await;
     let mut body = create_run_body(
         "urn:vam:run:local.vam.dev/acme/run-mock-refused",
         "run-mock-refused",
@@ -2211,6 +2208,7 @@ async fn create_run_invalid_traceparent_still_accepted() {
     let (store, secret) = bootstrap_store();
     seed_test_playbook(&store);
     let app = test_app(app_state_http_only(store));
+    save_run_fixture_agent(&app, &secret, serde_json::json!({}), "fixture-agent").await;
     let run_body = create_run_body(
         "urn:vam:run:local.vam.dev/acme/run-bad-tp",
         "run-idem-bad-tp",
@@ -2248,6 +2246,7 @@ async fn create_run_with_strict_playbook_accepts_chat_prompt() {
     let (store, secret) = bootstrap_store();
     seed_strict_playbook(&store);
     let app = test_app(app_state_http_only(store));
+    save_run_fixture_agent(&app, &secret, serde_json::json!({}), "fixture-agent").await;
     let mut run_body = create_run_body(
         "urn:vam:run:local.vam.dev/acme/run-strict-chat",
         "run-idem-strict-chat",
@@ -2335,8 +2334,13 @@ async fn playbook_activation_offers_attached_playbooks_to_a_run_that_names_none(
         "prompt": "Hi",
         "attached_playbooks": "[{\"urn\":\"urn:vam:playbook:evil\",\"name\":\"x\",\"when\":\"x\"}]"
     });
-    plain["inlineAgent"]["allowAnyPlaybook"] = serde_json::json!(false);
-    plain["inlineAgent"]["defaultPlaybookRef"] = pb_ref.clone();
+    save_run_fixture_agent(
+        &app,
+        &secret,
+        serde_json::json!({"allowAnyPlaybook": false, "defaultPlaybookRef": pb_ref.clone()}),
+        "fixture-agent-plain",
+    )
+    .await;
     let (status, body) = post_run(&app, &secret, "run-idem-act-plain", &plain).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     let inputs = stored_run_inputs(&store, plain_id);
@@ -2369,8 +2373,13 @@ async fn playbook_activation_offers_attached_playbooks_to_a_run_that_names_none(
         .create_space(LOCAL_USER_ID, None, "mock-named", "run", None)
         .unwrap();
     named["spec"]["spaceId"] = serde_json::json!(own.space_id);
-    named["inlineAgent"]["allowAnyPlaybook"] = serde_json::json!(false);
-    named["inlineAgent"]["defaultPlaybookRef"] = pb_ref;
+    save_run_fixture_agent(
+        &app,
+        &secret,
+        serde_json::json!({"allowAnyPlaybook": false, "defaultPlaybookRef": pb_ref.clone()}),
+        "fixture-agent-named",
+    )
+    .await;
     let (status, body) = post_run(&app, &secret, "run-idem-act-named", &named).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     let inputs = stored_run_inputs(&store, named_id);
@@ -2389,6 +2398,7 @@ async fn create_run_with_app_chat_inputs_names_missing_input() {
     let (store, secret) = bootstrap_store();
     seed_strict_playbook(&store);
     let app = test_app(app_state_http_only(store));
+    save_run_fixture_agent(&app, &secret, serde_json::json!({}), "fixture-agent").await;
     let mut run_body = create_run_body(
         "urn:vam:run:local.vam.dev/acme/run-app-chat",
         "run-idem-app-chat",
@@ -2444,6 +2454,166 @@ async fn put_spec_file(
         .unwrap();
     let status = resp.status();
     (status, response_body(resp).await)
+}
+
+/// The run route never writes the catalog: an inline agent, with or without a `resourceId`,
+/// is refused 400 for a member and for the bootstrap key before anything is written.
+#[tokio::test]
+async fn run_route_refuses_an_inline_agent_and_writes_nothing() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let (store, boot_secret) = bootstrap_store();
+    let (alice_secret, _bob_secret) = two_member_keys(&store);
+    let app = test_app(app_state_http_only(store.clone()));
+    let urn = "urn:vam:agent:local.vam.dev/acme/inline-refused";
+    let with_id = serde_json::json!({
+        "resourceId": {"urn": urn},
+        "displayName": "Inline", "role": "Tester",
+        "systemInstructions": "test", "allowAnyPlaybook": true
+    });
+    let without_id = serde_json::json!({
+        "displayName": "Inline", "role": "Tester",
+        "systemInstructions": "test", "allowAnyPlaybook": true
+    });
+    for (who, secret) in [("boot", &boot_secret), ("alice", &alice_secret)] {
+        for (shape, agent) in [("id", &with_id), ("noid", &without_id)] {
+            let key = format!("inline-refused-{who}-{shape}");
+            let body = serde_json::json!({
+                "spec": {
+                    "workspaceRefUri": format!("volume://{key}"),
+                    "inputs": {"fields": {"prompt": {"stringValue": "hi"}}},
+                    "idempotencyKey": key
+                },
+                "inlineAgent": agent
+            });
+            // Twice with the same key: a refusal is not an idempotent replay of anything.
+            for _ in 0..2 {
+                let (status, answer) =
+                    post_json(&app, "/v1/runs", secret, &key, body.clone()).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{who} {shape}: {answer}");
+                let answer = answer.to_string();
+                assert!(answer.contains("PUT /v1/agents"), "{answer}");
+                assert!(answer.contains("agentRef"), "{answer}");
+            }
+        }
+    }
+    for owner in [LOCAL_USER_ID, "alice"] {
+        assert!(
+            store
+                .list_agent_records_visible(owner, true)
+                .unwrap()
+                .is_empty(),
+            "no agent row for {owner}"
+        );
+        assert!(
+            store.list_spaces(owner, None, None, 10).unwrap().is_empty(),
+            "no Space for {owner}"
+        );
+    }
+    assert!(store.list_runs().unwrap().is_empty(), "no run");
+}
+
+/// An inline playbook is refused the same way, naming `PUT /v1/playbooks`.
+#[tokio::test]
+async fn run_route_refuses_an_inline_playbook_and_writes_nothing() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let (store, boot_secret) = bootstrap_store();
+    let (alice_secret, _bob_secret) = two_member_keys(&store);
+    let app = test_app(app_state_http_only(store.clone()));
+    for (who, secret) in [("boot", &boot_secret), ("alice", &alice_secret)] {
+        let key = format!("inline-pb-refused-{who}");
+        let body = serde_json::json!({
+            "spec": {
+                "agentRef": {"resourceId": {"urn": "urn:vam:agent:local.vam.dev/acme/none"}},
+                "workspaceRefUri": format!("volume://{key}"),
+                "inputs": {"fields": {"prompt": {"stringValue": "hi"}}},
+                "idempotencyKey": key
+            },
+            "inlinePlaybook": {
+                "resourceId": {"urn": "urn:vam:playbook:local.vam.dev/acme/inline-pb"},
+                "displayName": "Inline", "description": "d",
+                "steps": [{"id": "s1", "description": "s", "instruction": "do", "mode": "STEP_MODE_AGENTIC"}]
+            }
+        });
+        let (status, answer) = post_json(&app, "/v1/runs", secret, &key, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{who}: {answer}");
+        let answer = answer.to_string();
+        assert!(answer.contains("PUT /v1/playbooks"), "{answer}");
+        assert!(answer.contains("playbookRef"), "{answer}");
+    }
+    for owner in [LOCAL_USER_ID, "alice"] {
+        assert!(store.list_playbooks_visible(owner).unwrap().is_empty());
+        assert!(store.list_spaces(owner, None, None, 10).unwrap().is_empty());
+    }
+    assert!(store.list_runs().unwrap().is_empty(), "no run");
+}
+
+/// A member runs a released agent: the fixture's pin moves from the draft to `1.0.0`.
+fn pin_released(mut body: serde_json::Value) -> serde_json::Value {
+    body["spec"]["agentRef"]["version"] = serde_json::json!({"major": 1, "minor": 0, "patch": 0});
+    body
+}
+
+fn create_released_run_body(run_id: &str, idem: &str) -> serde_json::Value {
+    pin_released(create_run_body(run_id, idem))
+}
+
+fn sample_released_run_body(
+    agent_urn: &str,
+    workspace: &str,
+    idem: &str,
+    run_urn: &str,
+) -> serde_json::Value {
+    pin_released(sample_run_body(agent_urn, workspace, idem, run_urn))
+}
+
+/// Releases the agent in setup (1.0.0, owned by the local user) so members can run it: a
+/// member runs released agents, never a publisher's draft.
+fn seed_released_agent(store: &SqliteWorkflowStore, urn: &str) {
+    let agent = vam_spec::v1::AgentSpec {
+        resource_id: Some(ResourceId {
+            urn: urn.to_string(),
+        }),
+        display_name: "Test Agent".to_string(),
+        description: "fixture".to_string(),
+        role: "Tester".to_string(),
+        instruction_source: Some(
+            vam_spec::v1::agent_spec::InstructionSource::SystemInstructions("test".to_string()),
+        ),
+        allow_any_playbook: true,
+        ..Default::default()
+    };
+    store
+        .put_agent_with_owner(&agent, LOCAL_USER_ID)
+        .expect("seed released agent");
+}
+
+const RUN_FIXTURE_AGENT: &str = "urn:vam:agent:local.vam.dev/acme/test-agent";
+
+/// Saves the draft agent the `create_run_body` fixture runs by `agentRef`: the run route takes
+/// no inline agent. `overrides` merges into the agent spec; the caller's key owns the draft.
+async fn save_run_fixture_agent(
+    app: &axum::Router,
+    secret: &str,
+    overrides: serde_json::Value,
+    idem: &str,
+) {
+    let mut spec = serde_json::json!({
+        "resourceId": {"urn": RUN_FIXTURE_AGENT},
+        "displayName": "Test Agent",
+        "description": "fixture",
+        "role": "Tester",
+        "systemInstructions": "test",
+        "allowAnyPlaybook": true
+    });
+    if let Some(extra) = overrides.as_object() {
+        for (k, v) in extra {
+            spec[k] = v.clone();
+        }
+    }
+    let (status, body) = put_spec_file(app, secret, "/v1/agents", idem, spec).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }
 
 fn read_json_file(path: &std::path::Path) -> serde_json::Value {
@@ -2506,6 +2676,7 @@ async fn create_run_valid_traceparent_is_accepted() {
     let (store, secret) = bootstrap_store();
     seed_test_playbook(&store);
     let app = test_app(app_state_http_only(store));
+    save_run_fixture_agent(&app, &secret, serde_json::json!({}), "fixture-agent").await;
     let run_body = create_run_body(
         "urn:vam:run:local.vam.dev/acme/run-good-tp",
         "run-idem-good-tp",
@@ -2988,8 +3159,12 @@ async fn put_secret_overwrites_same_binding_id() {
         .await
         .unwrap();
     assert_eq!(first.status(), StatusCode::OK);
-    let first_json: serde_json::Value =
-        serde_json::from_slice(&hyper::body::to_bytes(first.into_body()).await.unwrap()).unwrap();
+    let first_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let fp1 = first_json["secret"]["fingerprint"]
         .as_str()
         .unwrap()
@@ -2997,8 +3172,12 @@ async fn put_secret_overwrites_same_binding_id() {
 
     let second = app.oneshot(put("idem-b", "second-value")).await.unwrap();
     assert_eq!(second.status(), StatusCode::OK);
-    let second_json: serde_json::Value =
-        serde_json::from_slice(&hyper::body::to_bytes(second.into_body()).await.unwrap()).unwrap();
+    let second_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let fp2 = second_json["secret"]["fingerprint"]
         .as_str()
         .unwrap()
@@ -3260,8 +3439,7 @@ fn sample_run_body(
             "runId": {"urn": run_urn},
             "agentRef": {
                 "resourceId": {"urn": agent_urn},
-                "version": {"major": 1, "minor": 0, "patch": 0},
-                "digest": {"algorithm": "ALGORITHM_SHA256", "hexHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+                "version": {"major": 1, "minor": 0, "patch": 0, "prerelease": "draft"}
             },
             "playbookRef": {
                 "resourceId": {"urn": "urn:vam:playbook:local.vam.dev/acme/test-pb"},
@@ -3271,14 +3449,6 @@ fn sample_run_body(
             "inputs": {"fields": {"prompt": {"stringValue": "hello from api test"}}},
             "workspaceRefUri": format!("volume://{}", workspace),
             "idempotencyKey": idem
-        },
-        "inlineAgent": {
-            "resourceId": {"urn": agent_urn},
-            "displayName": "Test Agent",
-            "description": "inline",
-            "role": "Tester",
-            "systemInstructions": "test",
-            "allowAnyPlaybook": true
         }
     })
 }
@@ -3384,7 +3554,7 @@ async fn a_full_run_request_on_a_busy_workspace_is_not_queued_only_a_prompt_is()
         .await
         .unwrap();
     // Owner decision D: another thread on a busy workspace is queued, not refused.
-    // (The message carries an inline agent and a playbook, which a queued message may not.)
+    // (The message names a playbook, which a queued message may not.)
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -3900,6 +4070,7 @@ async fn a_steer_carries_only_a_prompt_and_the_runs_own_model() {
     inline["inlineAgent"] = serde_json::json!({"resourceId": {"urn": INBOX_AGENT}});
     let (status, body) = post_json(&app, "/v1/runs", &secret, "inline", inline).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("PUT /v1/agents"), "{body}");
     assert!(store.list_inbox_messages(INBOX_RUN).unwrap().is_empty());
     // The model the run was pinned to is fine.
     let (status, body) = post_json(
@@ -4212,6 +4383,8 @@ async fn two_agents_sharing_volume_main_get_different_workspace_ids() {
     let agent_a = "urn:vam:agent:local.vam.dev/acme/agent-a";
     let agent_b = "urn:vam:agent:local.vam.dev/acme/agent-b";
     let app = test_app(app_state(store.clone()));
+    put_test_agent(&app, &secret, agent_a, "Agent A").await;
+    put_test_agent(&app, &secret, agent_b, "Agent B").await;
 
     let a_resp = app
         .clone()
@@ -4739,8 +4912,7 @@ async fn list_runs_includes_enriched_run_status_fields() {
         "runId": {"urn": run_urn},
         "agentRef": {
             "resourceId": {"urn": agent_urn},
-            "version": {"major": 1, "minor": 0, "patch": 0},
-            "digest": {"algorithm": "ALGORITHM_SHA256", "hexHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+            "version": {"major": 1, "minor": 0, "patch": 0, "prerelease": "draft"}
         },
         "playbookRef": {
             "resourceId": {"urn": "urn:vam:playbook:local.vam.dev/acme/test-pb"},
@@ -5074,8 +5246,12 @@ mod skill_package_api {
         let _drive9 = drive9_temp();
         let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
         store.initialize_catalog_schema().unwrap();
-        store.create_user("alice", "alice").unwrap();
-        store.create_user("bob", "bob").unwrap();
+        store
+            .create_user_with_role("alice", "alice", UserRole::Publisher)
+            .unwrap();
+        store
+            .create_user_with_role("bob", "bob", UserRole::Publisher)
+            .unwrap();
         let scopes: Vec<String> = PUBLISHER_SCOPES.iter().map(|s| s.to_string()).collect();
         let alice_secret = mint_api_key_secret();
         let bob_secret = mint_api_key_secret();
@@ -5573,7 +5749,7 @@ mod skill_package_api {
         let bob = mint_user_key(
             &store,
             "bob",
-            UserRole::Member,
+            UserRole::Publisher,
             &["catalog:write", "sessions:write"],
         );
         let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
@@ -5881,12 +6057,13 @@ mod hosted_brokers {
         store.initialize_catalog_schema().unwrap();
         let secret = mint_api_key_secret();
         store
-            .create_api_key(
+            .create_api_key_owned(
                 "broker-admin",
                 "broker-admin",
                 &secret,
                 "User::\"operator\"",
                 &[vam_orchestrator::keys::BROKERS_ADMIN_SCOPE.to_string()],
+                OPERATOR_USER_ID,
             )
             .unwrap();
         let app = test_app(app_state_http_only(store));
@@ -6448,7 +6625,7 @@ async fn non_owner_cannot_release_catalog_agent() {
     let alice = mint_user_key(
         &store,
         "alice",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let bob = mint_user_key(&store, "bob", UserRole::Publisher, PUBLISHER_SCOPES);
@@ -6740,7 +6917,7 @@ async fn agent_versions_list_draft_then_releases_with_notes_and_releasers() {
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let app = test_app(app_state_http_only(store));
@@ -6825,18 +7002,33 @@ async fn owner_without_grant_cannot_release_until_org_admin_grants() {
     let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = isolate_state();
     let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
-    let alice = mint_user_key(
-        &store,
-        "alice",
-        UserRole::Member,
-        &["catalog:write", "sessions:write"],
-    );
+    // A default key follows the live role: the grant gives it catalog writes and release,
+    // the revoke takes them away again.
+    let _ = store.create_user_with_role("alice", "alice", UserRole::Member);
+    let alice = mint_api_key_secret();
+    store
+        .create_api_key_owned_with_mode(
+            "key-alice",
+            "alice",
+            &alice,
+            "User::\"alice\"",
+            &MEMBER_SCOPES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<Vec<_>>(),
+            "alice",
+            ScopeMode::Role,
+        )
+        .expect("mint alice role key");
     let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
     let app = test_app(app_state_http_only(store.clone()));
     let urn = "urn:vam:agent:local.vam.dev/acme/grant-me";
+    // Spec change (member-draft-agents Phase 3): a member holds `agents:draft`, so the PUT is
+    // no longer 403; a URN outside their namespace is a restricted-save 400, and it writes
+    // nothing. Release stays 403 below.
     assert_eq!(
         put_agent_as(&app, &alice, urn, "draft").await,
-        StatusCode::OK
+        StatusCode::BAD_REQUEST
     );
     assert_eq!(
         release_agent_as(&app, &alice, urn, "alice-no-grant").await,
@@ -6863,6 +7055,10 @@ async fn owner_without_grant_cannot_release_until_org_admin_grants() {
         response_body(grant).await
     );
     assert_eq!(store.get_user("alice").unwrap().role, UserRole::Publisher);
+    assert_eq!(
+        put_agent_as(&app, &alice, urn, "draft").await,
+        StatusCode::OK
+    );
     assert_eq!(
         release_agent_as(&app, &alice, urn, "alice-granted").await,
         StatusCode::OK
@@ -6993,7 +7189,7 @@ async fn member_cannot_reassign_catalog_owner() {
     let mallory = mint_user_key(
         &store,
         "mallory",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let _ = mint_user_key(&store, "bob", UserRole::Publisher, PUBLISHER_SCOPES);
@@ -7381,7 +7577,7 @@ async fn deactivated_owner_published_catalog_still_resolves() {
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
@@ -7807,7 +8003,7 @@ async fn catalog_visibility_http_own_drafts_and_tenant_published() {
     let alice = mint_user_key(
         &store,
         "alice",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let bob = mint_user_key(&store, "bob", UserRole::Publisher, PUBLISHER_SCOPES);
@@ -7926,13 +8122,13 @@ async fn catalog_visibility_admin_lists_foreign_agent_draft_with_owner() {
     let alice = mint_user_key(
         &store,
         "alice",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let admin = mint_user_key(&store, "admin", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
@@ -9663,7 +9859,11 @@ mod gateway {
                 .unwrap()
                 .connect_with_connector(tower::service_fn(move |_u: http::Uri| {
                     let p = p.clone();
-                    async move { tokio::net::UnixStream::connect(p).await }
+                    async move {
+                        tokio::net::UnixStream::connect(p)
+                            .await
+                            .map(hyper_util::rt::TokioIo::new)
+                    }
                 }))
                 .await
                 .unwrap();
@@ -9807,7 +10007,7 @@ async fn agent_outcomes_follow_the_versions_auth_and_hide_a_foreign_draft() {
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let app = test_app(app_state_http_only(store));
@@ -9856,7 +10056,7 @@ async fn agent_outcomes_listing_is_404_for_a_foreign_draft_only_or_unknown_agent
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let app = test_app(app_state_http_only(store));
@@ -9879,7 +10079,7 @@ async fn agent_outcomes_diff_names_the_base_and_is_404_for_a_foreign_agent() {
     let bob = mint_user_key(
         &store,
         "bob",
-        UserRole::Member,
+        UserRole::Publisher,
         &["catalog:write", "sessions:write"],
     );
     let app = test_app(app_state_http_only(store));
