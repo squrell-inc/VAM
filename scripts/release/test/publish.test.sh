@@ -205,6 +205,14 @@ new_world; pub check; pub draft
 ver draft FAKE_ATTEST_FAIL_NAME=vam-runtime-0.1.0-rc.1-x86_64-unknown-linux-musl
 expect_eq "a missing attestation fails the draft verification" 1 "$T_RC"
 expect_match "naming the file" "vam-runtime-0\.1\.0-rc\.1.*gh attestation verify failed" "$T_OUT"
+new_world; pub check; pub draft FAKE_LIST_LAG=3
+expect_eq "a draft the release list shows only on the fourth look is found" 0 "$T_RC"
+expect_match "…after saying it is not listed yet" "not listed yet \(attempt 3 of 12\)" "$T_OUT"
+[ -s "$W/state/release-id" ] && ok "…and its id is recorded" || bad "no release id recorded after the lagging list"
+new_world; pub check; pub draft FAKE_LIST_LAG=99 PUBLISH_FIND_TRIES=4
+expect_eq "a draft the list never shows fails after the tries" 1 "$T_RC"
+expect_match "…saying found 0 and to inspect the draft" "found 0; nothing is recorded, inspect the draft by hand" "$T_OUT"
+expect_eq "…after four listings of the releases following the create" "4" "$(calls | sed -n '/release create/,$p' | grep -c 'releases?per_page')"
 new_world; pub check; pub draft
 ver draft FAKE_ATTEST_FLAKY=2
 expect_eq "an attestation that appears on the third try passes" 0 "$T_RC"
