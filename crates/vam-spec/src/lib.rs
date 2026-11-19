@@ -56,6 +56,7 @@ pub use validation::{
 };
 
 pub use origin::{
-    default_namespace, Origin, RegistryDomainError, RegistryDomains, DEFAULT_MARKETPLACE_DOMAIN,
-    LOCAL_REGISTRY_DOMAIN,
+    default_namespace, namespace_base, namespace_suffixed, urn_namespace, Origin,
+    RegistryDomainError, RegistryDomains, DEFAULT_MARKETPLACE_DOMAIN, LOCAL_REGISTRY_DOMAIN,
+    NAMESPACE_BASE_MAX, NAMESPACE_SUFFIX_LENGTHS, RESERVED_NAMESPACES,
 };

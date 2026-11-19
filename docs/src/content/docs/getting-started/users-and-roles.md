@@ -10,6 +10,7 @@ proves:
   - crates/vam-orchestrator/tests/key_scope_mode_tests.rs
   - crates/vam-orchestrator/tests/login_tests.rs
   - email-username-signs-in-in-any-letter-case
+  - members-with-the-same-email-local-part-get-their-own-namespaces
   - new-user-gets-a-generated-id-it-cannot-choose
   - username-differing-only-in-letter-case-is-refused
   - user-path-resolves-by-id-then-by-login-name
@@ -76,9 +77,12 @@ user's id are the same string, the id wins. Routes that take only an id (`deacti
 
 Users that exist already keep their ids and names. Nothing is renamed on upgrade.
 
-The default URN namespace of a user is the login name lowercased. For an email name it is the part before
-the `@`, without a `+tag`: `Ada.Lovelace+work@Example.com` gives `ada.lovelace`. If that is not a valid
-segment, it is `default`.
+Each user gets a URN namespace of their own when they are created. It is the login name lowercased; for an
+email name the part before the `@`, without a `+tag`: `Ada.Lovelace+work@Example.com` gives `ada.lovelace`.
+When another user already has it, a short suffix is added (`ada.lovelace-k3f2qa`). It never changes, a
+rename included. `GET /v1/me` shows it as `defaultNamespace`, and `GET /v1/users` as `namespace`. On the
+first start after an upgrade, `vamd` gives existing users one and logs a line for each user whose
+namespace changed; their drafts stay theirs. See [Member agents](/orchestrator/member-agents/#namespaces).
 
 ### Two names that clash
 

@@ -1,0 +1,5 @@
+piece: org-member-name-not-a-slug-other
+kind: org
+role: Member
+# A second member whose local part is not a URN segment as typed: it starts and ends with `.`.
+username: ".Bob-{tag}.@Example.Test"

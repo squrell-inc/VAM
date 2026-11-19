@@ -146,6 +146,15 @@ features:
       - username-differing-only-in-letter-case-is-refused
       - user-path-resolves-by-id-then-by-login-name
       - generated-id-and-email-login-survive-a-restart
+  - id: one-namespace-per-user
+    area: "Auth and users"
+    surface: "API GET /v1/me defaultNamespace, GET /v1/users namespace; PUT /v1/agents member namespace rule; vamd start-up namespace backfill"
+    dev: [getting-started/users-and-roles]
+    arch: [orchestrator/member-agents]
+    proves:
+      - members-with-the-same-email-local-part-get-their-own-namespaces
+      - members-whose-names-are-not-slugs-get-namespaces-of-their-own
+      - member-namespaces-stay-apart-across-a-restart
   - id: change-your-own-password
     area: "Auth and users"
     surface: "CLI vam passwd; API POST /v1/me/password"

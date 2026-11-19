@@ -1,0 +1,30 @@
+id: member-namespaces-stay-apart-across-a-restart
+title: Two members with the same email local part keep their own namespaces after vamd restarts
+description: >
+  Two members sign up as ann.lee at two domains and each saves a draft agent. vamd restarts. Each
+  then saves a second, new agent under the namespace they were given before the restart, so the
+  namespace did not move, and the second member is still refused with 400 for being outside their
+  namespace when aiming at the first member's agent.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-member-same-local-part-north, as: north }
+  - { piece: org-member-same-local-part-south, as: south }
+  - skill-host-echo
+  - agent-member-draft-with-host-echo
+  - agent-member-draft-second
+when:
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: north, status: 200 }
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: south, status: 200 }
+  - restart-vamd: {}
+  - put-draft: { piece: agent-member-draft-second, as: north, status: 200 }
+  - put-draft: { piece: agent-member-draft-second, as: south, status: 200 }
+  - put-draft: { piece: agent-member-draft-with-host-echo, as: south, urnOf: north, status: 400, contains: "(your namespace)" }
+then:
+  - identity-request: { as: south, credential: key, path: "/v1/agents/{{urn:agent-member-draft-with-host-echo:north}}", status: 404 }
+  - identity-request: { as: north, credential: key, path: "/v1/agents/{{urn:agent-member-draft-second:north}}", status: 200 }
+guards:
+  - vam:crates/vam-orchestrator/src/users.rs
+  - vam:crates/vam-orchestrator/src/member_draft.rs
+  - vam:crates/vam-orchestrator/src/bin/vamd.rs
+status: active

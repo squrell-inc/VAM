@@ -33,12 +33,14 @@ deny_check() {
   cargo deny --exclude-dev check
 }
 run deny deny_check
-# The microVM lane blocks releases (launch audit S4): rust.yml must force the lane on for release
+# The microVM lane blocks releases (launch audit S4): rust.yml (through scripts/ci/plan.sh) must force the lane on for release
 # PRs (into main from feat/*, or labelled `release`) and keep the `release lane (microVM)` job that fails such a PR unless the lane is green.
 lane_check() {
   local wf=.github/workflows/rust.yml ok=1
   [ "$(grep -c "RELEASE: \${{ github.base_ref == 'main' && (startsWith(github.head_ref, 'feat/')" "$wf")" -ge 2 ] || { echo "FAIL: the changes and release-lane jobs no longer agree on what a release PR is"; ok=0; }
-  grep -q 'if \[ "$RELEASE" = "true" \]; then' "$wf" || { echo "FAIL: the changes job no longer forces the microVM lane on for release PRs"; ok=0; }
+  # The changes job plans the run with scripts/ci/plan.sh, which forces the lane on for RELEASE.
+  grep -q 'scripts/ci/plan.sh' "$wf" || { echo "FAIL: the changes job no longer plans the run with scripts/ci/plan.sh"; ok=0; }
+  grep -q 'if \[ "${RELEASE:-false}" = "true" \]; then echo true; return; fi' scripts/ci/plan.sh || { echo "FAIL: scripts/ci/plan.sh no longer forces the microVM lane on for release PRs"; ok=0; }
   grep -q '^  release-lane:$' "$wf" || { echo "FAIL: the release-lane job is gone"; ok=0; }
   grep -q 'needs: \[changes, firecracker\]' "$wf" || { echo "FAIL: release-lane no longer waits for the firecracker job"; ok=0; }
   grep -q 'if \[ "$LANE" != "success" \]; then' "$wf" || { echo "FAIL: release-lane no longer requires a green lane"; ok=0; }

@@ -27,12 +27,22 @@ scenario suite uses it.
 `scripts/ci/local.sh` runs the same checks as CI, with the same settings:
 
 ```bash
-scripts/ci/local.sh --fast   # fmt, protos, manifests, cargo check, smoke scenarios
+scripts/ci/local.sh --fast   # fmt, protos, manifests, cargo check, affected crates' tests, smoke
 scripts/ci/local.sh --full   # --fast plus clippy (-D warnings) and cargo test --workspace
 ```
 
-Run `--fast` before you open a pull request; GitHub Actions runs the full
-suite on every pull request. Use `--full` to reproduce a CI failure locally.
+Run `--fast` before you open a pull request (`--base origin/<branch>` when it
+does not target `main`). On GitHub Actions a pull request into `main` runs the
+full suite. One into any other branch runs the fast tier (checks, clippy, the
+tests of the crates it changes and their dependents); ask for more with one line
+at the start of a line in its body, every key optional:
+
+```
+CI: scenarios=<id>,<id> tests=workspace lane=yes release-build=yes
+CI: full
+```
+
+Use `--full` to reproduce a CI failure locally.
 For a single crate, `cargo test -p <crate>` is fine while you iterate.
 
 Docs changes: `cargo run -p vam-e2e -- check` lints every page's `status` and

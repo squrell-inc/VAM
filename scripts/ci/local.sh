@@ -3,8 +3,12 @@
 # settings CI uses. GitHub Actions is the merge gate for every PR; use --fast
 # before pushing and --full to reproduce a CI failure locally.
 #
-#   scripts/ci/local.sh --fast            fmt, example protos, manifests, release script tests, cargo check,
-#                                         the smoke scenarios            (a wave's own check)
+#   scripts/ci/local.sh --fast            fmt, example protos, manifests, release script tests, CI tier
+#                                         script tests, cargo check, the tests of the affected crates
+#                                         (CI's fast tier, scripts/ci/affected-crates.sh), the smoke
+#                                         scenarios                      (a wave's own check)
+#   --base REF (default origin/main)      what --fast diffs against for the affected crates: the PR's
+#                                         base, e.g. origin/feat/<epic> for a wave PR
 #   scripts/ci/local.sh --full            --fast plus the clippy gate (default and process-guest
 #                                         features, -D warnings, pinned toolchain) and
 #                                         `cargo test --workspace --no-fail-fast`. GitHub
@@ -24,13 +28,15 @@ set -euo pipefail
 mode=fast
 release=0
 scenarios=""
+base="origin/main"
 while [ $# -gt 0 ]; do
   case "$1" in
     --fast) mode=fast ;;
     --full) mode=full ;;
     --release) release=1 ;;
     --scenarios) shift; scenarios="${1:-}" ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --base) shift; base="${1:?--base needs a ref}" ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
   shift
@@ -136,7 +142,23 @@ step "manifests";             scripts/e2e/check-manifests.sh;                 re
 step "release scripts";       scripts/release/test/run.sh;                    record release-tests ok
 step "marketplace fixture";    scripts/marketplace/check-snapshot.sh;           record marketplace-snapshot ok
 step "bun tests (m365-mail)"; ensure_bun; (cd e2e/world/fixtures/marketplace-squrell && bun test tests); record bun-tests ok
+step "CI tier scripts";       scripts/ci/test/run.sh;                          record ci-tier-tests ok
 step "cargo check";           cargo check --workspace -q;                      record check ok
+
+if [ "$mode" = fast ]; then
+  # CI's fast tier: the affected crates' tests (the full workspace when a safety net is hit).
+  affected="$(scripts/ci/affected-crates.sh --base "$base")"
+  scope="$(sed -n 's/^scope=//p' <<< "$affected")"
+  crates="$(sed -n 's/^crates=//p' <<< "$affected")"
+  step "affected crates vs $base: $scope ${crates:+($crates) }- $(sed -n 's/^reason=//p' <<< "$affected")"
+  case "$scope" in
+    workspace) cargo test --workspace --no-fail-fast -q; record affected-tests "ok (workspace)" ;;
+    affected)
+      args=(); for p in $crates; do args+=(-p "$p"); done
+      cargo test "${args[@]}" --no-fail-fast -q; record affected-tests "ok ($crates)" ;;
+    *) record affected-tests "none affected" ;;
+  esac
+fi
 
 if [ "$mode" = full ]; then
   # The clippy gate. Keep CLIPPY_TOOLCHAIN equal to the `clippy` job's

@@ -1,0 +1,5 @@
+piece: org-member-same-local-part-south
+kind: org
+role: Member
+# The other member with the local part `ann.lee` (see `org-member-same-local-part-north`), typed in lower case.
+username: "ann.lee@south-{tag}.test"
