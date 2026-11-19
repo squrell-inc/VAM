@@ -58,8 +58,9 @@ workspace_version() {
 }
 
 # release_assets <version>: the file names a release of this version holds besides SHA256SUMS and
-# RELEASE_NOTES.md, one per line. The one list `assemble` (and later `publish`) checks the built
-# assets against, so a missing or stray file fails loudly. Phase B adds install.sh here.
+# RELEASE_NOTES.md, one per line: the one list SHA256SUMS, the notes table, `publish` and `verify`
+# are built from, so a missing or stray file fails loudly. install.sh is a source file that
+# `assemble` copies from the checked-out commit; the build jobs upload `built_assets`.
 release_assets() {
   local v="$1"
   printf '%s\n' \
@@ -68,8 +69,13 @@ release_assets() {
     "vam-$v-aarch64-unknown-linux-gnu.tar.gz" \
     "vam-$v-aarch64-apple-darwin.tar.gz" \
     "vam-$v-x86_64-apple-darwin.tar.gz" \
-    "vam-runtime-$v-x86_64-unknown-linux-musl"
+    "vam-runtime-$v-x86_64-unknown-linux-musl" \
+    "install.sh"
 }
+
+# built_assets <version>: what the build jobs upload (asset-* artifacts): release_assets without
+# install.sh. `assemble` checks its --assets directory against exactly this list.
+built_assets() { release_assets "$1" | grep -vx 'install.sh'; }
 
 # sha256_of <file>: the hex digest (sha256sum, or shasum on macOS).
 sha256_of() { if command -v sha256sum >/dev/null; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
