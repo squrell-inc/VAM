@@ -326,6 +326,10 @@ async fn handle_core(
         .push((method.to_string(), uri.to_string(), body.clone()));
     let ok = |v: Value| (StatusCode::OK, v.to_string());
     let m = method.as_str();
+    if path == "/v1/me" && m == "GET" {
+        // The namespace follows the key, so a test tells two identities apart.
+        return ok(json!({"defaultNamespace": format!("ns-{bearer}")}));
+    }
     if path == "/v1/health" {
         return ok(json!({"status": "SERVING_STATUS_SERVING"}));
     }

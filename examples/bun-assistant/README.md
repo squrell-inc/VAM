@@ -45,7 +45,7 @@ If a run tries to call removed tools such as `write_note` or `list_workspace`, o
 
 1. **Rebuild the guest rootfs** — `./scripts/build-rootfs.sh` (required after guest code changes; `cargo build -p vam-runtime` alone does not update the microVM image).
 2. **Rebuild `vam-runtime`** — `cargo build -p vam-runtime` (guest binary must match host orchestrator).
-3. **Refresh the agent catalog** — `vam agent put examples/bun-assistant/agent.json`, or use `vam run --file examples/bun-assistant/run.json` (inline agent is loaded automatically).
+3. **Refresh the agent catalog** — `vam agent put examples/bun-assistant/agent.json`, or use `vam run --file examples/bun-assistant/run.json` (`--file` saves `agent.json` as your draft, then runs it by reference).
 4. **Reset the workspace snapshot** — switch to a fresh volume (e.g. `volume://assistant-v2` in `run.json`) or clear the Drive9 HEAD for the workspace so the guest mounts the current skill manifest.
 5. **Check vamd traces** — look for `📋 [System Prompt]` and `🔧 [Tools Available]` lines; you should see 8+ tools including `write_file` and `glob`.
 

@@ -289,6 +289,13 @@ async fn main() {
     );
     vam_orchestrator::brokers::install_egress_max_bytes(config.egress_max_bytes);
     vam_orchestrator::registry::install_registry_domains(registry_domains);
+    let member_draft_agents_max = vam_orchestrator::member_draft::parse_member_draft_agents_max(
+        std::env::var(vam_orchestrator::member_draft::ENV_MEMBER_DRAFT_AGENTS_MAX)
+            .ok()
+            .as_deref(),
+    );
+    vam_orchestrator::member_draft::install_member_draft_agents_max(member_draft_agents_max);
+    tracing::info!(member_draft_agents_max, "vamd per-member draft agent cap");
     tracing::info!(
         registry_domain = registry_domains_log.registry_domain(),
         marketplace_domain = registry_domains_log.marketplace_domain(),

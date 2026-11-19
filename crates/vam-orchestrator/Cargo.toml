@@ -67,6 +67,11 @@ default = []
 # process (`VAMD_PROCESS_GUEST_BIN`), with no isolation, on a mock-model-only
 # loopback-only node. Never enabled by default or by a workspace dependency.
 process-guest = ["vam-core/process-guest", "vam-network/process-guest"]
+# TEST ONLY: the draft-and-release catalog writers (`put_agent`, `put_playbook`, `put_skill`,
+# `put_policy`, their `_with_owner` and `_released_with_owner` forms, `put_platform_policy`).
+# No production path writes a released row through them; integration tests seed with them.
+# Never in `default`; enabled only by this package's own dev-dependency below.
+test-support = []
 
 [[bin]]
 name = "vamd"
@@ -77,6 +82,10 @@ name = "hsp-echo-broker"
 path = "src/bin/hsp-echo-broker.rs"
 
 [dev-dependencies]
+# Enables `test-support` for this package's own tests only. The dependency is renamed: a
+# dev-dependency named `vam-orchestrator` would take over the `vam-orchestrator/process-guest`
+# feature flag that CI and `scripts/e2e/run.sh` pass, and the guest mode would silently not build.
+vam-orchestrator-test-support = { package = "vam-orchestrator", path = ".", features = ["test-support"] }
 flate2 = "1.0"
 prost-types = "0.14"
 tar = "0.4"

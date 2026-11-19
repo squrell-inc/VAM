@@ -189,7 +189,7 @@ Licensed under either of:
 
 Welcome contributions!
 
-If you find a bug or have a feature request, please open an issue on the [GitHub repository](https://github.com/your-repo/firecracker-rs-sdk). If you want to contribute code, please fork the repository, make your changes, and submit a pull request.
+If you find a bug or have a feature request, please open an issue on the [GitHub repository](https://github.com/squrell-inc/VAM/issues). If you want to contribute code, please fork the repository, make your changes, and submit a pull request.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you shall be dual licensed as above, without any

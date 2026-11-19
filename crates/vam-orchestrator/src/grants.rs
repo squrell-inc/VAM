@@ -352,7 +352,12 @@ pub fn check_call(
                 crate::catalog_resolve::ArtifactKind::Playbook,
                 reference,
                 owner,
-                crate::catalog_resolve::ResolveMode::Release,
+                // The grant owner names this ref: a Member's `-draft` ref is refused.
+                crate::catalog_resolve::caller_ref_mode(
+                    store,
+                    owner,
+                    crate::catalog_resolve::ResolveMode::Release,
+                ),
             )
             .map_err(|e| refuse("playbook_invalid", e))?;
             let prepared = crate::run_context::prepare_playbook_for_ref(

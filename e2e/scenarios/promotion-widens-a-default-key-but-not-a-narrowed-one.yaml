@@ -1,0 +1,28 @@
+id: promotion-widens-a-default-key-but-not-a-narrowed-one
+title: Promoting a member gives their default key catalog:write, and a key minted with a narrow list stays narrow
+description: >
+  A member's default key cannot write the catalog. After the user is promoted to publisher the same key
+  can, and it lists catalog:write on GET /v1/me. A second member's key, minted with an explicit list that
+  lacks catalog:write, is still refused after the same promotion and still lacks the scope.
+tags: [members, permissions]
+needs: process
+given:
+  - org-admin
+  - { piece: org-member, as: member }
+  - { piece: org-member-with-a-narrow-key, as: narrow }
+  - playbook-draft-probe
+when:
+  - put-draft: { piece: playbook-draft-probe, as: member, status: 403, contains: "catalog:write" }
+  - set-role: { as: member, role: publisher }
+  - set-role: { as: narrow, role: publisher }
+then:
+  - put-draft: { piece: playbook-draft-probe, as: member, status: 200 }
+  - identity-request: { as: member, credential: key, path: /v1/me, status: 200, contains: "catalog:write" }
+  - put-draft: { piece: playbook-draft-probe, as: narrow, status: 403, contains: "catalog:write" }
+  - identity-request: { as: narrow, credential: key, path: /v1/me, status: 200, lacks: "catalog:write" }
+guards:
+  - vam:crates/vam-orchestrator/src/keys.rs
+  - vam:crates/vam-orchestrator/src/api/auth.rs
+  - vam:crates/vam-orchestrator/src/api/catalog_auth.rs
+  - vam:crates/vam-orchestrator/src/api/users_keys_admin.rs
+status: active

@@ -14,9 +14,10 @@ use tower::ServiceExt;
 use vam_core::{CidAllocator, MockVmm};
 use vam_orchestrator::api::auth::ControlPlanePdp;
 use vam_orchestrator::api::{self, AppState};
-use vam_orchestrator::keys::{mint_api_key_secret, MEMBER_SCOPES};
+use vam_orchestrator::keys::{mint_api_key_secret, MEMBER_SCOPES, PUBLISHER_SCOPES};
 use vam_orchestrator::manager::SessionManager;
 use vam_orchestrator::secrets::SecretsVault;
+use vam_orchestrator::users::UserRole;
 use vam_orchestrator::workflow::SqliteWorkflowStore;
 use vam_orchestrator::VmmFactory;
 
@@ -45,16 +46,16 @@ fn app_state_http_only(store: Arc<SqliteWorkflowStore>) -> AppState {
     }
 }
 
-fn member_plus_catalog_scopes() -> Vec<String> {
-    let mut scopes: Vec<String> = MEMBER_SCOPES.iter().map(|s| (*s).to_string()).collect();
-    scopes.push("catalog:write".to_string());
-    scopes
-}
-
 fn two_members(store: &SqliteWorkflowStore) -> (String, String) {
-    store.create_user("alice", "alice").unwrap();
-    store.create_user("bob", "bob").unwrap();
-    let scopes = member_plus_catalog_scopes();
+    // Publishers: the walk writes the catalog, and a key's scopes follow the owner's live role.
+    // The walk's intent is owner isolation, not role.
+    store
+        .create_user_with_role("alice", "alice", UserRole::Publisher)
+        .unwrap();
+    store
+        .create_user_with_role("bob", "bob", UserRole::Publisher)
+        .unwrap();
+    let scopes: Vec<String> = PUBLISHER_SCOPES.iter().map(|s| (*s).to_string()).collect();
     let alice_secret = mint_api_key_secret();
     let bob_secret = mint_api_key_secret();
     store
@@ -556,7 +557,8 @@ async fn isolation_two_user_coverage_map_single_user_parity() {
     let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
     store.initialize_catalog_schema().unwrap();
     let secret = mint_api_key_secret();
-    let scopes = member_plus_catalog_scopes();
+    // `local` is a member: its key carries the member set (the walk never writes the catalog).
+    let scopes: Vec<String> = MEMBER_SCOPES.iter().map(|s| (*s).to_string()).collect();
     store
         .create_api_key_owned(
             "local-key",

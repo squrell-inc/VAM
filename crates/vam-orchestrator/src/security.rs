@@ -443,6 +443,14 @@ fn load_advanced_policy(
     };
     if let Some((version, expected)) = pin {
         let label = version_text(&version);
+        if session.mode == crate::catalog_resolve::ResolveMode::ReleasedOnly
+            && version.prerelease == "draft"
+        {
+            return Err(fail(format!(
+                "pinned advanced policy '{urn}' version {label} is a draft, and drafts are not \
+                 available to this agent; refusing to start the session"
+            )));
+        }
         let record = store
             .get_policy_at_version_visible(urn, &version, &session.resolve_owner)
             .map_err(|e| match e {
@@ -461,7 +469,13 @@ fn load_advanced_policy(
         }
         return Ok((record.cedar, None));
     }
-    let record = match store.get_policy_visible(urn, &session.resolve_owner) {
+    // Only a Draft-mode run may fall to its owner's draft; any other mode takes releases.
+    let looked_up = if session.mode == crate::catalog_resolve::ResolveMode::Draft {
+        store.get_policy_visible(urn, &session.resolve_owner)
+    } else {
+        store.get_policy(urn)
+    };
+    let record = match looked_up {
         Ok(record) => record,
         Err(OrchestratorError::NotFound(_)) => store.get_policy(urn).map_err(|e| match e {
             OrchestratorError::NotFound(_) => fail(format!(
@@ -6025,5 +6039,133 @@ mod permissions_mode_tests {
         let ctx = context(&store);
         assert!(!ctx.permissions_mode);
         assert!(ctx.entities_for(&store, "no_such_tool").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod advanced_policy_mode_tests {
+    use super::load_advanced_policy;
+    use crate::catalog_resolve::{pinned_resource_ref, ResolveMode};
+    use crate::policy_legacy::SessionAgent;
+    use crate::workflow::SqliteWorkflowStore;
+    use vam_spec::v1::{ResourceId, ResourceRef, RunSpec, Version};
+
+    const POLICY: &str = "urn:vam:policy:local.vam.dev/alice/advanced";
+    const RELEASED_CEDAR: &str = "permit(principal, action, resource);";
+    const DRAFT_CEDAR: &str = "forbid(principal, action, resource);";
+
+    fn floating() -> ResourceRef {
+        ResourceRef {
+            resource_id: Some(ResourceId {
+                urn: POLICY.to_string(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn session(mode: ResolveMode, pins: Vec<ResourceRef>) -> SessionAgent {
+        SessionAgent {
+            agent: None,
+            draft_run: true,
+            resolve_owner: "alice".to_string(),
+            mode,
+            run_spec: Some(RunSpec {
+                resolved_refs: pins,
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn store(release: bool) -> SqliteWorkflowStore {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store.create_user("alice", "alice").expect("alice");
+        if release {
+            store
+                .put_policy_released_with_owner(POLICY, RELEASED_CEDAR, "alice")
+                .expect("release");
+        }
+        store
+            .publish_policy_draft_with_owner(POLICY, DRAFT_CEDAR, "alice")
+            .expect("draft");
+        store
+    }
+
+    fn pin_of(store: &SqliteWorkflowStore, draft: bool) -> ResourceRef {
+        let pin = if draft {
+            store
+                .catalog_pin_at_version(
+                    "policies",
+                    POLICY,
+                    &Version {
+                        major: 1,
+                        minor: 0,
+                        patch: 0,
+                        prerelease: "draft".to_string(),
+                        build: String::new(),
+                    },
+                    "alice",
+                    false,
+                )
+                .expect("draft pin")
+        } else {
+            store
+                .latest_released_catalog_pin("policies", POLICY)
+                .expect("release pin")
+        };
+        pinned_resource_ref(POLICY, &pin, Vec::new())
+    }
+
+    #[test]
+    fn a_floating_advanced_ref_loads_the_recorded_release_never_the_owners_draft() {
+        let store = store(true);
+        let session = session(ResolveMode::ReleasedOnly, vec![pin_of(&store, false)]);
+        let (cedar, warning) =
+            load_advanced_policy(&store, "s1", &session, &floating()).expect("loads");
+        assert_eq!(cedar, RELEASED_CEDAR);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn a_boot_that_turned_released_only_fails_closed_on_a_recorded_draft_pin() {
+        let store = store(true);
+        let pins = vec![pin_of(&store, true)];
+        // The same pin boots in Draft mode (the owner still authors) ...
+        let (cedar, _) = load_advanced_policy(
+            &store,
+            "s1",
+            &session(ResolveMode::Draft, pins.clone()),
+            &floating(),
+        )
+        .expect("draft mode");
+        assert_eq!(cedar, DRAFT_CEDAR);
+        // ... and is refused once the owner does not.
+        let err = load_advanced_policy(
+            &store,
+            "s1",
+            &session(ResolveMode::ReleasedOnly, pins),
+            &floating(),
+        )
+        .expect_err("fails closed");
+        assert!(
+            err.to_string().contains("drafts are not available"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn with_no_pin_only_a_draft_mode_run_may_fall_to_the_owners_draft() {
+        let store = store(false);
+        let draft = load_advanced_policy(
+            &store,
+            "s1",
+            &session(ResolveMode::Draft, Vec::new()),
+            &floating(),
+        )
+        .expect("draft mode");
+        assert_eq!(draft.0, DRAFT_CEDAR);
+        for mode in [ResolveMode::Release, ResolveMode::ReleasedOnly] {
+            load_advanced_policy(&store, "s1", &session(mode, Vec::new()), &floating())
+                .expect_err("no release means no policy outside Draft mode");
+        }
     }
 }
