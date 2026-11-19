@@ -390,7 +390,7 @@ Guest build and the kit:
 | `node-reports-the-standard-base-it-boots` | changed: `guards` add `vam:scripts/release/build-guest.sh` and `vam:scripts/e2e/firecracker-assets.sh` (A.W3) | firecracker | unchanged | the lane builds its image with `build-guest.sh` then `build-rootfs.sh --runtime`, so this proves a prebuilt, injected runtime boots |
 
 Unchanged, regression set: `node-init-run-twice-changes-nothing-and-shows-the-key-once` (guards
-`bin/vamd.rs`; `--init` must behave as today), `node-init-check-names-what-is-missing`, and the
+`bin/vamd.rs`; `--init` must behave as today), `node-init-check-names-a-missing-broker`, and the
 marketplace scenarios (the node version they check against becomes `0.1.0+dev`).
 
 Notes for wave 0:
@@ -842,7 +842,7 @@ tracker open question 13 (below, open question 1). -->
   `--host` / `--token`, `main.rs:18-25`). `vamd` opens each broker's gateway socket at start
   (`gateway.rs:172,273`); the schedule broker needs `--gateway-socket` (the two-step start of
   `run-schedule-broker.sh:126-147`). `vam-web-broker` has no `manifest` subcommand (its manifest is
-  `scripts/web-broker/manifest.json`); schedule and notify print theirs
+  `brokers/vam-web/manifest.json`); schedule and notify print theirs
   (`vam-schedule-broker.rs:43-46`, `vam-notify-broker.rs:46-49`).
 - After A.W6, `release-build.yml` holds `assemble`; `install.sh` is one more asset there.
 
@@ -854,7 +854,7 @@ tracker open question 13 (below, open question 1). -->
 | `upgrade-refuses-a-download-whose-hash-does-not-match` | new | process | `release-server` (new piece) with overlay `release-server-bad-sum` (one wrong `SHA256SUMS` line) | the tree's copy of `vam` runs `vam upgrade --version v9.9.9`: exit non-zero, the output names the hash mismatch, the copy is byte-for-byte unchanged. Red: `upgrade` is not a command |
 | `upgrade-replaces-vam-with-the-newer-release` | new | process | `release-server` | `vam --version` and `vam node status` make no request to the server (request count 0: the CLI never calls the network unasked); `vam upgrade --check` names `v9.9.9` and changes nothing; `vam upgrade --pre` replaces the copy (the fixture archive holds a `vam` that prints `vam 9.9.9 (fixture)`), the output says the attestation was not checked because `gh` is absent; the replaced file then prints `vam 9.9.9 (fixture)` (the downgrade refusal and "up to date" are unit tests). Red: `upgrade` is not a command |
 | `node-init-installs-and-registers-the-brokers-asked-for` | new | process | org-admin (the running node the CLI registers with); fixture `node-init/ready` with the brokers `run.sh` builds beside the copied `vam` | `vam node init --root {{root}} --no-systemd --broker web,schedule --vamd {{vamd}}` with `as: org-admin` (the key a re-run is given): writes `vam-broker@web` and `vam-broker@schedule` units and their argument files (no secret in them), registers both through the API (`done broker vam.web: registered`), and `GET /v1/hosted/brokers` lists `vam.web` and `vam.schedule`; notify is left alone; a second run reports both `ok (unchanged)`; a run without a key writes nothing new and prints the command that registers each broker. Red: `--broker` unknown (usage error) |
-| `node-init-check-names-what-is-missing` | changed: `args` add `--broker web`; `contains` adds `missing broker vam-web-broker` (the bare tree has none) | process | unchanged | the check names a requested broker binary; a spec change approved with this breakdown |
+| `node-init-check-names-a-missing-broker` | changed: `args` add `--broker web`; `contains` adds `missing broker vam-web-broker` (the bare tree has none) | process | unchanged | the check names a requested broker binary; a spec change approved with this breakdown |
 
 Notes for wave 0: runner additions `home: tree` (`HOME` inside the tree) and `env` (extra
 variables) on the `cli` step, and the `release-server` piece (`crates/vam-e2e/src/release_server.rs`):
@@ -912,7 +912,7 @@ Linux and macOS (team checklist).
   `crates/vam-cli/src/cmd/{node.rs,node_install.rs,node_init.rs}`,
   `brokers/vam-web/src/bin/vam-web-broker.rs`, `scripts/run-web-broker.sh`. Tests:
   `cargo test -p vam-cli node`; the scenarios. Turns green:
-  `node-init-installs-and-registers-the-brokers-asked-for`, `node-init-check-names-what-is-missing`
+  `node-init-installs-and-registers-the-brokers-asked-for`, `node-init-check-names-a-missing-broker`
   (changed). `Decide: NOW — locked decision 14 (not scored)`
 - [ ] **RA-B.5 Docs.** `getting-started/releases.md` (the `install.sh` one-liner, with the
   tag-specific URL until `v0.1.0`), `getting-started/cli.md` (`dock`, `undock`, `upgrade`); macOS
@@ -930,7 +930,7 @@ Linux and macOS (team checklist).
 | 1 | RA-B.1 | `dock-puts-vam-on-the-path-once` | vam | Sonnet medium: a new top-level command that edits the user's login files on two OSes, idempotently | 120 min | 0; A.W1 (`main.rs`) (lane B1) | [ ] | |
 | 2 | RA-B.2 | `upgrade-refuses-a-download-whose-hash-does-not-match`, `upgrade-replaces-vam-with-the-newer-release` | vam | Sonnet high: it replaces the running binary, and the checks must come before the replace | 180 min | 1; A.W2 (`check-release-gate.sh`) (lane B1) | [ ] | |
 | 3 | RA-B.3 | — (`install-smoke` green on Linux and macOS in the PR's `release-build.yml` run) | vam | Sonnet medium: a script that downloads and runs a binary on users' machines | 120 min | 1; A.W6 (workflow order) (lane B2) | [ ] | |
-| 4 | RA-B.4 | `node-init-installs-and-registers-the-brokers-asked-for`, `node-init-check-names-what-is-missing` | vam | Sonnet medium: crosses `vam-cli` and a broker, systemd units and API registration | 150 min | 0; A.W5 (node files) (lane B2) | [ ] | |
+| 4 | RA-B.4 | `node-init-installs-and-registers-the-brokers-asked-for`, `node-init-check-names-a-missing-broker` | vam | Sonnet medium: crosses `vam-cli` and a broker, systemd units and API registration | 150 min | 0; A.W5 (node files) (lane B2) | [ ] | |
 | 5 | RA-B.5 | — | vam | Sonnet low | 60 min | 2, 3, 4; A.W7 (`releases.md`) | [ ] | |
 | close | RA-B.6 | — (`v0.1.0-rc.2` published and verified) | vam | orchestrator and owner | 150 min | rc.1 published; B base took `main` | [ ] | |
 

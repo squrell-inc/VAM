@@ -3,6 +3,8 @@ title: VAM CLI Command Reference
 description: Complete reference for the vam command-line client — managing runs, approvals, secrets, sessions, keys, and catalog specs.
 status: shipped
 proves:
+  - dock-puts-vam-on-the-path-once
+  - upgrade-replaces-vam-with-the-newer-release
   - node-reports-the-isolation-it-runs
   - crates/vam-orchestrator/tests/api_tests.rs
   - crates/vam-orchestrator/tests/login_tests.rs
@@ -544,6 +546,22 @@ vam config show
 # Preferred for humans: username + password (stores a session token)
 vam login --username local
 ```
+
+- `vam node init --broker web,schedule,notify` installs and registers the first-party brokers. See [Hosted Brokers](/hosted/overview/#install-the-brokers-with-the-node).
+
+---
+
+## 10. Install and upgrade (`vam dock`, `vam undock`, `vam upgrade`)
+
+These three commands need no node and no login. Linux and macOS only; on Windows they exit with an error until v0.2.0.
+
+```bash
+vam dock [--dir DIR] [--no-modify-path]   # copy this vam to ~/.local/bin (or DIR), add it to PATH
+vam undock [--dir DIR]                    # remove that copy and the PATH lines
+vam upgrade [--check] [--version vX | --pre]
+```
+
+`vam dock` is idempotent: a second run prints `unchanged` lines. `vam upgrade --version` and `--pre` cannot be combined. A hash mismatch exits `9` (`verify_failed`); every other failure exits non-zero with the reason on stderr. Details, the checks `upgrade` runs and the refusal inside a node bundle: [Releases](/getting-started/releases/#put-vam-on-your-path).
 
 ---
 

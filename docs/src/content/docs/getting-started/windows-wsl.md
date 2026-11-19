@@ -8,7 +8,7 @@ proves:
 
 ## Install from a release
 
-Inside WSL2 Ubuntu, the Linux x86_64 node bundle installs a node with no checkout. There is no native Windows `vam.exe` in this release; use the Linux `vam` inside WSL2.
+Inside WSL2 Ubuntu, the Linux x86_64 node bundle installs a node with no checkout. There is no native Windows `vam.exe` in this release; use the Linux `vam` inside WSL2 (`install.sh` works there too; see [Releases](/getting-started/releases/#install-the-cli-with-one-command)). A native `vam.exe` comes in v0.2.0.
 
 ```bash
 tar xzf vam-node-<V>-x86_64-unknown-linux-gnu.tar.gz
