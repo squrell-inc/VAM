@@ -2654,7 +2654,7 @@ listing merged into `vam-marketplace` `main` after the release.
 - A first-time tools-pending failure shows `needsReconnect` but opens no new notification. `Decide: BACKLOG — proof P6, cost 1`.
 - The app token-upsert route (`PUT .../oauth/tokens`) still commits `connected` before adoption (the app holds the tokens and can retry). `Decide: BACKLOG — proof 1, cost 1`.
 - The refresh-versus-admin-save races are proved by unit tests only; the filebox e2e mock cannot hold a refresh across an admin save. `Decide: BACKLOG — proof 1, cost 1`.
-- The app chose a new `Idempotency-Key` on every call, so its automatic repeat of a code exchange after a renewed login did not reuse the key the node's single-spend check keys on. `Decide: SLICE — proof 1, cost 0 → fixed in Squrell-App #13, awaiting the owner's merge`.
+- The app chose a new `Idempotency-Key` on every call, so its automatic repeat of a code exchange after a renewed login did not reuse the key the node's single-spend check keys on. `Decide: SLICE — proof 1, cost 0 → fixed in Squrell-App #13, merged 2026-11-19 (5941b3a)`.
 
 ### Phase 6 — Company address and REST from marketplaces (Zendesk)
 
