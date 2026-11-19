@@ -115,7 +115,9 @@ async fn send(
         .await
         .unwrap();
     let status = resp.status();
-    let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let text = String::from_utf8(bytes.to_vec()).unwrap();
     (
         status,
