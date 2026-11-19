@@ -868,10 +868,41 @@ fn entra_provider(def: &Connector) -> Result<&OAuth2Provider, OrchestratorError>
         _ if def.mcp.is_some() => Err(invalid(format!(
             "`{id}` is an MCP connector; connect it through /v1/mcp/connections"
         ))),
+        Some(o) if o.profile == OAuthProfile::Oauth => Err(invalid(exchange_only(&id))),
         _ => Err(invalid(format!(
             "`{id}` has no connection route (only the entra profile is supported)"
         ))),
     }
+}
+
+/// The refusal text of a connection route that cannot take an `oauth` connector's tokens: the node
+/// exchanges the code, the app never holds the tokens (CN-6.3).
+pub(crate) fn exchange_only(id: &str) -> String {
+    format!(
+        "`{id}` connects through the node's code exchange: use POST /v1/connectors/{id}/connection/oauth/code"
+    )
+}
+
+/// The provider of a REST connector the node refreshes: Entra, or `oauth` (fixed endpoints).
+fn rest_provider(def: &Connector) -> Result<&OAuth2Provider, OrchestratorError> {
+    match oauth(def) {
+        Some(o) if def.mcp.is_none() && o.profile == OAuthProfile::Oauth => Ok(o),
+        _ => entra_provider(def),
+    }
+}
+
+/// Every host an `oauth` connector's access token is pinned to: each host of each binding of the
+/// filled connector, once. (Entra keeps its one Graph host.)
+pub(crate) fn binding_hosts(def: &Connector) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for b in def.bindings.iter().flatten() {
+        for h in &b.hosts {
+            if !out.iter().any(|x| x == h) {
+                out.push(h.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Claims read from an id token. The signature is not checked (open question 8).
@@ -1076,6 +1107,7 @@ pub fn rest_connection_state(
     conn: &ConnectorConnection,
     node: Option<&NodeConnector>,
     has_refresh_token: bool,
+    node_token_endpoint: Option<&str>,
 ) -> CallerState {
     let same_tenant = node
         .and_then(|n| n.consent_tenant_id.as_deref())
@@ -1087,7 +1119,12 @@ pub fn rest_connection_state(
         .and_then(|n| n.tenant_subdomain.as_deref())
         .map(|t| t == conn.tenant_id)
         .unwrap_or(true);
-    let same_tenant = same_tenant && same_address;
+    // The token endpoint the connection was made against is the one the node's client has now (an
+    // `oauth` connector; `None` for Entra, whose endpoint follows the consent tenant above).
+    let same_endpoint = node_token_endpoint
+        .map(|e| e == conn.token_endpoint)
+        .unwrap_or(true);
+    let same_tenant = same_tenant && same_address && same_endpoint;
     if conn.status == ConnectionStatus::Connected && has_refresh_token && same_tenant {
         CallerState::Connected
     } else {
@@ -1103,15 +1140,64 @@ pub fn show_account(entry: &mut Value, state: CallerState, account: Option<&str>
     }
 }
 
-/// A refresh as `check_connection` and the swap-time refresh call it: tenant, client id, scope,
-/// refresh token. Shared (and `Send`) so a session's token source can hold one.
-pub(crate) type EntraRefresher = std::sync::Arc<
-    dyn Fn(&str, &str, &str, &SecretString) -> Result<RefreshedToken, RefreshFailure> + Send + Sync,
+/// What one refresh of a REST connection is built from: the caller builds it from the node's own
+/// state (the consent tenant, or the client the admin saved), never from a member's row or a
+/// request. Entra: the endpoint is derived from the tenant GUID. `oauth`: the endpoint is the node
+/// client's, pinned at Enable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestRefreshTarget<'a> {
+    Entra {
+        tenant: &'a str,
+        client_id: &'a str,
+        scope: &'a str,
+    },
+    Oauth {
+        token_endpoint: &'a str,
+        client_id: &'a str,
+        scope: Option<&'a str>,
+    },
+}
+
+/// A refresh as `check_connection` and the swap-time refresh call it: the target and the refresh
+/// token. Shared (and `Send`) so a session's token source can hold one.
+pub(crate) type RestRefresher = std::sync::Arc<
+    dyn for<'a> Fn(&RestRefreshTarget<'a>, &SecretString) -> Result<RefreshedToken, RefreshFailure>
+        + Send
+        + Sync,
 >;
 
-/// The real refresh: the consent tenant's endpoint, no `resource`, no client secret.
-pub(crate) fn live_refresher() -> EntraRefresher {
-    std::sync::Arc::new(crate::mcp_oauth_refresh::refresh_access_token_entra)
+/// The real refresh. Entra: the consent tenant's endpoint, no `resource`, no client secret. `oauth`:
+/// the node client's endpoint, no `resource`, no client secret, `scope` only if the file lists some.
+pub(crate) fn refresh_rest_token(
+    target: &RestRefreshTarget<'_>,
+    refresh_token: &SecretString,
+) -> Result<RefreshedToken, RefreshFailure> {
+    match *target {
+        RestRefreshTarget::Entra {
+            tenant,
+            client_id,
+            scope,
+        } => crate::mcp_oauth_refresh::refresh_access_token_entra(
+            tenant,
+            client_id,
+            scope,
+            refresh_token,
+        ),
+        RestRefreshTarget::Oauth {
+            token_endpoint,
+            client_id,
+            scope,
+        } => crate::mcp_oauth_refresh::refresh_access_token_oauth(
+            token_endpoint,
+            client_id,
+            scope,
+            refresh_token,
+        ),
+    }
+}
+
+pub(crate) fn live_refresher() -> RestRefresher {
+    std::sync::Arc::new(refresh_rest_token)
 }
 
 /// A token whose expiry is within this many seconds is refreshed before it is attached (open
@@ -1144,7 +1230,10 @@ pub(crate) fn check_connection(
     owner: &str,
     id: &str,
     now: i64,
-    refresh: impl Fn(&str, &str, &str, &SecretString) -> Result<RefreshedToken, RefreshFailure>,
+    refresh: impl for<'a> Fn(
+        &RestRefreshTarget<'a>,
+        &SecretString,
+    ) -> Result<RefreshedToken, RefreshFailure>,
 ) -> Result<CheckOutcome, OrchestratorError> {
     refresh_connection(store, vault, cfg, owner, id, now, &refresh)
 }
@@ -1185,7 +1274,10 @@ pub(crate) fn refresh_if_due(
     id: &str,
     now: i64,
     horizon_secs: i64,
-    refresh: &dyn Fn(&str, &str, &str, &SecretString) -> Result<RefreshedToken, RefreshFailure>,
+    refresh: &dyn for<'a> Fn(
+        &RestRefreshTarget<'a>,
+        &SecretString,
+    ) -> Result<RefreshedToken, RefreshFailure>,
 ) -> Freshness {
     let conn = match store.connector_connection(owner, id) {
         Ok(Some(c)) => c,
@@ -1204,6 +1296,20 @@ pub(crate) fn refresh_if_due(
     }
 }
 
+/// What a refresh needs once the node's own state has been read and checked, per profile.
+enum Prepared {
+    Entra {
+        consent: String,
+        client_id: String,
+        scope: String,
+    },
+    Oauth {
+        token_endpoint: String,
+        client_id: String,
+        scope: Option<String>,
+    },
+}
+
 #[allow(clippy::type_complexity)] // the injected refresh call; the Fn signature is the type
 fn refresh_connection(
     store: &SqliteWorkflowStore,
@@ -1212,13 +1318,16 @@ fn refresh_connection(
     owner: &str,
     id: &str,
     now: i64,
-    refresh: &dyn Fn(&str, &str, &str, &SecretString) -> Result<RefreshedToken, RefreshFailure>,
+    refresh: &dyn for<'a> Fn(
+        &RestRefreshTarget<'a>,
+        &SecretString,
+    ) -> Result<RefreshedToken, RefreshFailure>,
 ) -> Result<CheckOutcome, OrchestratorError> {
     let def = store
         .connector_entry(id)?
         .ok_or_else(|| OrchestratorError::NotFound(format!("connector `{id}`")))?
         .def;
-    let provider = entra_provider(&def)?;
+    let provider = rest_provider(&def)?;
     let mut conn = store.connector_connection(owner, id)?.ok_or_else(|| {
         OrchestratorError::NotFound(format!("connection to `{id}` (you are not connected)"))
     })?;
@@ -1230,14 +1339,6 @@ fn refresh_connection(
             "the `{id}` connector is not enabled on this node; ask your admin (`vam connectors`)"
         ))
         })?;
-    let consent = node.consent_tenant_id.clone().ok_or_else(|| {
-        OrchestratorError::Conflict(format!(
-            "an admin has not recorded Microsoft admin consent for `{id}` yet"
-        ))
-    })?;
-    let client_id = effective_client_id(&def, cfg)
-        .filter(|c| !is_placeholder_client_id(c))
-        .ok_or_else(|| OrchestratorError::Conflict(format!("`{id}` is not configured")))?;
 
     let needs_reconnect = |conn: &mut ConnectorConnection, why: &str| {
         let was = conn.status;
@@ -1253,43 +1354,161 @@ fn refresh_connection(
         Ok::<_, OrchestratorError>(CheckOutcome::NeedsReconnect(conn.clone()))
     };
 
-    // The refresh token belongs to the tenant it was issued in. If the admin has since
-    // consented for another tenant, it is never sent anywhere.
-    let endpoint_matches = entra_token_endpoint(&consent).as_deref() == Some(&conn.token_endpoint);
-    if conn.tenant_id != consent || !endpoint_matches {
-        return needs_reconnect(
-            &mut conn,
-            "connected in a different tenant than the consented one",
-        );
-    }
+    // Where the tokens are pinned, and the target of the refresh, decided from the node's state.
+    let (prepared, token_host, access_hosts) = if provider.profile == OAuthProfile::Oauth {
+        // The node client is the only source of the endpoint and the client id (pinned at Enable
+        // from the filled file); a connection row never names them.
+        let Some(client) = store.node_client(id)? else {
+            return needs_reconnect(&mut conn, "the admin removed the OAuth client");
+        };
+        let filled = provider
+            .endpoints
+            .as_ref()
+            .map(|e| e.token.as_str())
+            .filter(|t| !url_needs_address(t));
+        // A refresh token is sent only to the endpoint the connector file names now, for the address
+        // it was made under, and only if that is the endpoint the client was pinned to.
+        if filled != Some(client.token_endpoint.as_str())
+            || node.tenant_subdomain.as_deref() != Some(conn.tenant_id.as_str())
+            || conn.token_endpoint != client.token_endpoint
+        {
+            return needs_reconnect(
+                &mut conn,
+                "connected under a different company address or sign-in endpoint than the current one",
+            );
+        }
+        let Some(token_host) = crate::connector_discovery::host_of(&client.token_endpoint) else {
+            return needs_reconnect(&mut conn, "the sign-in endpoint is not usable");
+        };
+        let scope = (!provider.scopes.is_empty()).then(|| provider.scopes.join(" "));
+        let mut hosts = binding_hosts(&def);
+        if hosts.is_empty() {
+            hosts.push(token_host.clone());
+        }
+        (
+            Prepared::Oauth {
+                token_endpoint: client.token_endpoint.clone(),
+                client_id: client.client_id.clone(),
+                scope,
+            },
+            token_host,
+            hosts,
+        )
+    } else {
+        let consent = node.consent_tenant_id.clone().ok_or_else(|| {
+            OrchestratorError::Conflict(format!(
+                "an admin has not recorded Microsoft admin consent for `{id}` yet"
+            ))
+        })?;
+        let client_id = effective_client_id(&def, cfg)
+            .filter(|c| !is_placeholder_client_id(c))
+            .ok_or_else(|| OrchestratorError::Conflict(format!("`{id}` is not configured")))?;
+        // The refresh token belongs to the tenant it was issued in. If the admin has since
+        // consented for another tenant, it is never sent anywhere.
+        let endpoint_matches =
+            entra_token_endpoint(&consent).as_deref() == Some(&conn.token_endpoint);
+        if conn.tenant_id != consent || !endpoint_matches {
+            return needs_reconnect(
+                &mut conn,
+                "connected in a different tenant than the consented one",
+            );
+        }
+        let token_host = "login.microsoftonline.com".to_string();
+        let access_host = def
+            .bindings
+            .as_ref()
+            .and_then(|b| b.first())
+            .and_then(|b| b.hosts.first())
+            .cloned()
+            .unwrap_or_else(|| token_host.clone());
+        (
+            Prepared::Entra {
+                consent,
+                client_id,
+                scope: provider.scopes.join(" "),
+            },
+            token_host,
+            vec![access_host],
+        )
+    };
+
     let rt_binding = refresh_token_binding_id(id);
     if !vault.has_binding_at(SecretScope::User, owner, &rt_binding)? {
         return needs_reconnect(&mut conn, "refresh token is missing");
     }
-    let refresh_token = vault.decrypt_secret_at(SecretScope::User, owner, &rt_binding)?;
-    let scope = provider.scopes.join(" ");
-    match refresh(&consent, &client_id, &scope, &refresh_token) {
-        Ok(token) => {
-            // A rotated refresh token first, so the access token never outlives its renewal.
-            let token_host = "login.microsoftonline.com".to_string();
-            // If this write fails the new access token is never used: the stored (old) refresh
-            // token stays, and the next refresh decides whether it still works.
-            if let Some(rotated) = token.refresh_token.as_deref() {
-                put_connection_secret(vault, owner, &rt_binding, rotated, &token_host)?;
+    let refresh_token = match &prepared {
+        // An `oauth` refresh token is read only if its row is pinned to exactly the token host it is
+        // about to be sent to (it was pinned there when the code was exchanged).
+        Prepared::Oauth { .. } => {
+            let pinned = vault.decrypt_secret_at_checked(
+                SecretScope::User,
+                owner,
+                &rt_binding,
+                |meta: &crate::secrets::HostSecretMetadata| {
+                    let ok = meta.kind == SecretKind::Connection
+                        && meta.allowed_destinations.len() == 1
+                        && meta.allowed_destinations[0].eq_ignore_ascii_case(&token_host);
+                    if ok {
+                        Ok(())
+                    } else {
+                        Err(OrchestratorError::PermissionDenied(
+                            "the refresh token is not pinned to the token endpoint's host".into(),
+                        ))
+                    }
+                },
+            );
+            match pinned {
+                Err(OrchestratorError::PermissionDenied(_)) => {
+                    return needs_reconnect(
+                        &mut conn,
+                        "refresh token is not pinned to the sign-in endpoint's host",
+                    )
+                }
+                other => other?,
             }
-            let access_host = def
-                .bindings
-                .as_ref()
-                .and_then(|b| b.first())
-                .and_then(|b| b.hosts.first())
-                .cloned()
-                .unwrap_or(token_host);
+        }
+        Prepared::Entra { .. } => vault.decrypt_secret_at(SecretScope::User, owner, &rt_binding)?,
+    };
+    let target = match &prepared {
+        Prepared::Entra {
+            consent,
+            client_id,
+            scope,
+        } => RestRefreshTarget::Entra {
+            tenant: consent,
+            client_id,
+            scope,
+        },
+        Prepared::Oauth {
+            token_endpoint,
+            client_id,
+            scope,
+        } => RestRefreshTarget::Oauth {
+            token_endpoint,
+            client_id,
+            scope: scope.as_deref(),
+        },
+    };
+    match refresh(&target, &refresh_token) {
+        Ok(token) => {
+            // A rotated refresh token first, so the access token never outlives its renewal. If this
+            // write fails the new access token is never used: the stored (old) refresh token stays,
+            // and the next refresh decides whether it still works.
+            if let Some(rotated) = token.refresh_token.as_deref() {
+                put_connection_secret(
+                    vault,
+                    owner,
+                    &rt_binding,
+                    rotated,
+                    std::slice::from_ref(&token_host),
+                )?;
+            }
             put_connection_secret(
                 vault,
                 owner,
                 &access_token_binding_id(id),
                 &token.access_token,
-                &access_host,
+                &access_hosts,
             )?;
             conn.status = ConnectionStatus::Connected;
             conn.expires_at = Some(
@@ -1325,18 +1544,10 @@ fn put_connection_secret(
     owner: &str,
     binding: &str,
     value: &str,
-    host: &str,
+    hosts: &[String],
 ) -> Result<(), OrchestratorError> {
-    let write = || {
-        vault.put_secret_with_owner(
-            binding,
-            value,
-            SecretKind::Connection,
-            &[host.to_string()],
-            None,
-            owner,
-        )
-    };
+    let write =
+        || vault.put_secret_with_owner(binding, value, SecretKind::Connection, hosts, None, owner);
     write().or_else(|_| write()).map(|_| ())
 }
 
@@ -1592,6 +1803,178 @@ impl SqliteWorkflowStore {
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         put_node_connector_in(&connection, row)
     }
+}
+
+// ---- the node's code exchange for a REST connector (CN-6.3) ------------------------------------
+
+/// What one member's code exchange commits for an `oauth` connector: both tokens and the
+/// connection row, in one transaction.
+pub(crate) struct RestCommit<'a> {
+    pub(crate) owner: &'a str,
+    pub(crate) connector_id: &'a str,
+    /// The company address the sign-in was made under (stored as the row's `tenant_id`).
+    pub(crate) address: &'a str,
+    /// The token endpoint the code was exchanged at (the node client's, pinned at Enable).
+    pub(crate) token_endpoint: &'a str,
+    /// The host the refresh token is pinned to: the token endpoint's.
+    pub(crate) token_host: &'a str,
+    /// Every filled binding host: the access token is pinned to all of them.
+    pub(crate) access_hosts: &'a [String],
+    pub(crate) scopes: &'a [String],
+    pub(crate) access_token: &'a str,
+    pub(crate) refresh_token: &'a str,
+    pub(crate) expires_at: Option<i64>,
+    pub(crate) now: i64,
+}
+
+impl SqliteWorkflowStore {
+    /// Commits a member's sign-in at an `oauth` connector: the refresh token (pinned to the token
+    /// host), the access token (pinned to every filled binding host) and the `connector_connections`
+    /// row (`connected`, the address as `tenant_id`, no label), in ONE transaction. `check` runs first,
+    /// inside the transaction, and refuses (nothing written) if the client, the enable, the address
+    /// or the connector's hosts are no longer what the code was exchanged for.
+    pub(crate) fn commit_rest_connection(
+        &self,
+        vault: &SecretsVault,
+        c: &RestCommit<'_>,
+        check: &dyn Fn(&Connection) -> Result<(), OrchestratorError>,
+    ) -> Result<ConnectorConnection, OrchestratorError> {
+        validate_oauth_secret_value(c.access_token)?;
+        validate_oauth_secret_value(c.refresh_token)?;
+        let access = vault.seal(c.access_token)?;
+        let refresh = vault.seal(c.refresh_token)?;
+        let scopes =
+            serde_json::to_string(c.scopes).map_err(|e| OrchestratorError::Core(e.to_string()))?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let tx = connection.transaction()?;
+        check(&tx)?;
+        // The refresh token goes first: an access token never exists without the means to renew it.
+        for (binding, sealed, hosts) in [
+            (
+                refresh_token_binding_id(c.connector_id),
+                &refresh,
+                std::slice::from_ref(&c.token_host.to_string()).to_vec(),
+            ),
+            (
+                access_token_binding_id(c.connector_id),
+                &access,
+                c.access_hosts.to_vec(),
+            ),
+        ] {
+            crate::secrets::put_host_secret_in(
+                &tx,
+                &binding,
+                SecretKind::Connection,
+                &sealed.nonce,
+                &sealed.ciphertext,
+                &sealed.fingerprint,
+                &hosts,
+                None,
+                SecretScope::User,
+                c.owner,
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO connector_connections (owner_user_id, connector_id, status, label,
+                 tenant_id, token_endpoint, scopes_json, expires_at, connected_at, updated_at,
+                 last_check_at, last_error)
+             VALUES (?1, ?2, 'connected', NULL, ?3, ?4, ?5, ?6, ?7, ?7, NULL, NULL)
+             ON CONFLICT(owner_user_id, connector_id) DO UPDATE SET status = 'connected',
+                 label = NULL, tenant_id = excluded.tenant_id,
+                 token_endpoint = excluded.token_endpoint, scopes_json = excluded.scopes_json,
+                 expires_at = excluded.expires_at, connected_at = excluded.connected_at,
+                 updated_at = excluded.updated_at, last_check_at = NULL, last_error = NULL",
+            params![
+                c.owner,
+                c.connector_id,
+                c.address,
+                c.token_endpoint,
+                scopes,
+                c.expires_at,
+                c.now
+            ],
+        )?;
+        let row = tx.query_row(
+            &format!(
+                "SELECT {CONN_COLUMNS} FROM connector_connections
+                 WHERE owner_user_id = ?1 AND connector_id = ?2"
+            ),
+            params![c.owner, c.connector_id],
+            row_to_connection,
+        )?;
+        tx.commit()?;
+        Ok(row)
+    }
+}
+
+/// Marks every member's connection to a REST connector `needs_reconnect`, on a connection or
+/// transaction the caller holds: the admin replaced or cleared the client, so their grants belong to
+/// a client that is gone. No request is sent for them again; a new sign-in brings them back.
+pub(crate) fn mark_rest_connections_need_reconnect_in(
+    c: &Connection,
+    connector_id: &str,
+    why: &str,
+    now: i64,
+) -> Result<usize, OrchestratorError> {
+    Ok(c.execute(
+        "UPDATE connector_connections
+         SET status = 'needs_reconnect', last_error = ?2, updated_at = ?3
+         WHERE connector_id = ?1 AND status <> 'needs_reconnect'",
+        params![connector_id, why, now],
+    )?)
+}
+
+/// What revoking an `oauth` connection's refresh token needs, read before its rows are deleted.
+pub(crate) struct RestRevoke {
+    pub(crate) revocation_endpoint: String,
+    pub(crate) client_id: String,
+    pub(crate) refresh_token: SecretString,
+}
+
+/// The revocation of a member's refresh token at an `oauth` connector, only when the connector file
+/// declares `endpoints.revoke` (kept by the node only on the token endpoint's host), the grant was
+/// made at the node client's token endpoint, and the refresh token's row is pinned to that host
+/// (RFC 7009, public client, no secret). `None`: nothing to revoke. Nothing is sent here.
+pub(crate) fn prepare_rest_revoke(
+    store: &SqliteWorkflowStore,
+    vault: &SecretsVault,
+    owner: &str,
+    id: &str,
+) -> Option<RestRevoke> {
+    let client = store.node_client(id).ok().flatten()?;
+    let revocation_endpoint = client.revocation_endpoint.clone()?;
+    let conn = store.connector_connection(owner, id).ok().flatten()?;
+    if conn.token_endpoint != client.token_endpoint {
+        return None;
+    }
+    let token_host = client.token_host()?;
+    let binding = refresh_token_binding_id(id);
+    let refresh_token = vault
+        .decrypt_secret_at_checked(
+            SecretScope::User,
+            owner,
+            &binding,
+            |meta: &crate::secrets::HostSecretMetadata| {
+                if meta.allowed_destinations.len() == 1
+                    && meta.allowed_destinations[0].eq_ignore_ascii_case(&token_host)
+                {
+                    Ok(())
+                } else {
+                    Err(OrchestratorError::PermissionDenied(
+                        "the refresh token is not pinned to the token endpoint's host".into(),
+                    ))
+                }
+            },
+        )
+        .ok()?;
+    Some(RestRevoke {
+        revocation_endpoint,
+        client_id: client.client_id,
+        refresh_token,
+    })
 }
 
 /// Upserts the node row on a connection the caller already holds (inside a transaction, or not).
@@ -2362,11 +2745,17 @@ mod tests {
     }
 
     fn ok_refresh(
-        tenant: &str,
-        client_id: &str,
-        scope: &str,
+        target: &RestRefreshTarget<'_>,
         rt: &SecretString,
     ) -> Result<RefreshedToken, RefreshFailure> {
+        let RestRefreshTarget::Entra {
+            tenant,
+            client_id,
+            scope,
+        } = *target
+        else {
+            panic!("an Entra connection is refreshed with an Entra target");
+        };
         assert_eq!(tenant, TENANT);
         assert_eq!(client_id, "e2e-client");
         assert!(scope.split(' ').any(|s| s == "offline_access"));
@@ -2378,17 +2767,13 @@ mod tests {
         })
     }
     fn revoked(
-        _: &str,
-        _: &str,
-        _: &str,
+        _: &RestRefreshTarget<'_>,
         _: &SecretString,
     ) -> Result<RefreshedToken, RefreshFailure> {
         Err(RefreshFailure::needs_reauth("invalid_grant"))
     }
     fn unreachable_ms(
-        _: &str,
-        _: &str,
-        _: &str,
+        _: &RestRefreshTarget<'_>,
         _: &SecretString,
     ) -> Result<RefreshedToken, RefreshFailure> {
         Err(RefreshFailure::transient(
@@ -2396,9 +2781,7 @@ mod tests {
         ))
     }
     fn must_not_be_called(
-        _: &str,
-        _: &str,
-        _: &str,
+        _: &RestRefreshTarget<'_>,
         _: &SecretString,
     ) -> Result<RefreshedToken, RefreshFailure> {
         panic!("a refresh was sent");
@@ -2492,7 +2875,7 @@ mod tests {
             .unwrap());
         let node = store.node_connector("microsoft-365").unwrap();
         assert_eq!(
-            rest_connection_state(&row, node.as_ref(), true),
+            rest_connection_state(&row, node.as_ref(), true, None),
             CallerState::NeedsReconnect
         );
         // A later good check brings it back.
@@ -2655,7 +3038,7 @@ mod tests {
             last_error: None,
         };
         let node = consented_node(Some(TENANT), true);
-        let st = rest_connection_state(&row, Some(&node), true);
+        let st = rest_connection_state(&row, Some(&node), true, None);
         assert_eq!(st, CallerState::Connected);
         let mut e = list_entry(&m365(), &cfg_with_client(), Some(&node), Some(st), false);
         assert_eq!(e["label"], "Connected");
@@ -2668,12 +3051,12 @@ mod tests {
         assert_eq!(e["label"], "ada@contoso.com");
         // No refresh token, or a consent that moved to another tenant: reconnect.
         assert_eq!(
-            rest_connection_state(&row, Some(&node), false),
+            rest_connection_state(&row, Some(&node), false, None),
             CallerState::NeedsReconnect
         );
         let moved = consented_node(Some(OTHER), true);
         assert_eq!(
-            rest_connection_state(&row, Some(&moved), true),
+            rest_connection_state(&row, Some(&moved), true, None),
             CallerState::NeedsReconnect
         );
         let mut e = list_entry(
@@ -2837,11 +3220,11 @@ mod tests {
             ..consented_node(None, true)
         };
         assert_eq!(
-            rest_connection_state(&row, Some(&node("acme")), true),
+            rest_connection_state(&row, Some(&node("acme")), true, None),
             CallerState::Connected
         );
         assert_eq!(
-            rest_connection_state(&row, Some(&node("globex")), true),
+            rest_connection_state(&row, Some(&node("globex")), true, None),
             CallerState::NeedsReconnect
         );
     }
@@ -2926,5 +3309,419 @@ mod tests {
             None
         )
         .is_err());
+    }
+}
+
+/// The node's code exchange and refresh for an `oauth` connector (CN-6.3): the REST connection's
+/// storage, the refresh's endpoint and the refusals that send nothing.
+#[cfg(test)]
+mod oauth_rest_tests {
+    use super::*;
+    use crate::connector_client::{
+        test_support::install_company_address_rows, ClientPlan, ClientWrite, NodeClient, PlanBasis,
+        TokenAuthMethod,
+    };
+    use secrecy::ExposeSecret;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const ID: &str = "zendesk";
+
+    fn node(address: &str, enabled: bool) -> NodeConnector {
+        NodeConnector {
+            connector_id: ID.into(),
+            enabled,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            tenant_subdomain: Some(address.into()),
+            updated_at: 1,
+            updated_by: "olga".into(),
+        }
+    }
+
+    fn client_for(address: &str, client_id: &str, revoke: bool) -> NodeClient {
+        let host = format!("{address}.zendesk.com");
+        NodeClient {
+            connector_id: ID.into(),
+            client_id: client_id.into(),
+            issuer: format!("https://{host}"),
+            authorize_endpoint: format!("https://{host}/oauth/authorizations/new"),
+            token_endpoint: format!("https://{host}/oauth/tokens"),
+            revocation_endpoint: revoke.then(|| format!("https://{host}/oauth/revoke")),
+            token_auth_method: TokenAuthMethod::default(),
+            revocation_auth_method: None,
+            secret_set: false,
+            updated_at: 1,
+            updated_by: "olga".into(),
+            revision: 0,
+        }
+    }
+
+    /// Saves `address` and its client the way Enable does.
+    fn save(store: &SqliteWorkflowStore, vault: &SecretsVault, address: &str, client_id: &str) {
+        save_with(store, vault, address, client_id, false);
+    }
+
+    fn save_with(
+        store: &SqliteWorkflowStore,
+        vault: &SecretsVault,
+        address: &str,
+        client_id: &str,
+        revoke: bool,
+    ) {
+        let template = store.connector_entry(ID).unwrap().unwrap().template;
+        let stored = store.node_client(ID).unwrap();
+        let stored_address = store
+            .node_connector(ID)
+            .unwrap()
+            .and_then(|n| n.tenant_subdomain);
+        let client = client_for(address, client_id, revoke);
+        let reauth = stored.as_ref().is_some_and(|e| {
+            e.client_id != client.client_id || e.token_endpoint != client.token_endpoint
+        });
+        store
+            .put_node_with_client(
+                vault,
+                &node(address, true),
+                &ClientPlan {
+                    write: ClientWrite::Set {
+                        client: Box::new(client),
+                        secret: None,
+                    },
+                    reauth,
+                },
+                "",
+                &PlanBasis {
+                    def: &template,
+                    client: stored.as_ref(),
+                    tenant: stored_address.as_deref(),
+                },
+            )
+            .unwrap();
+    }
+
+    fn world(address: &str) -> (Arc<SqliteWorkflowStore>, Arc<SecretsVault>) {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        install_company_address_rows(&store);
+        save(&store, &vault, address, "zc1");
+        (store, vault)
+    }
+
+    fn commit(
+        store: &SqliteWorkflowStore,
+        vault: &SecretsVault,
+        owner: &str,
+        address: &str,
+        hosts: &[String],
+    ) -> ConnectorConnection {
+        let host = format!("{address}.zendesk.com");
+        let endpoint = format!("https://{host}/oauth/tokens");
+        store
+            .commit_rest_connection(
+                vault,
+                &RestCommit {
+                    owner,
+                    connector_id: ID,
+                    address,
+                    token_endpoint: &endpoint,
+                    token_host: &host,
+                    access_hosts: hosts,
+                    scopes: &["read".to_string(), "write".to_string()],
+                    access_token: "ACCESS-0000000000000000",
+                    refresh_token: "REFRESH-0000000000000000",
+                    expires_at: Some(50),
+                    now: 10,
+                },
+                &|_| Ok(()),
+            )
+            .unwrap()
+    }
+
+    fn acme_hosts() -> Vec<String> {
+        vec!["acme.zendesk.com".to_string()]
+    }
+
+    fn dests(vault: &SecretsVault, owner: &str, binding: String) -> Vec<String> {
+        vault
+            .get_metadata_at(SecretScope::User, owner, &binding)
+            .unwrap()
+            .allowed_destinations
+    }
+
+    fn read(vault: &SecretsVault, owner: &str, binding: String) -> String {
+        vault
+            .decrypt_secret_at(SecretScope::User, owner, &binding)
+            .unwrap()
+            .expose_secret()
+            .clone()
+    }
+
+    fn pin_refresh_token_elsewhere(vault: &SecretsVault) {
+        vault
+            .put_secret_with_owner(
+                &refresh_token_binding_id(ID),
+                "REFRESH-0000000000000000",
+                SecretKind::Connection,
+                &["evil.example".to_string()],
+                None,
+                "ada",
+            )
+            .unwrap();
+    }
+
+    fn rotated(
+        t: &RestRefreshTarget<'_>,
+        rt: &SecretString,
+    ) -> Result<RefreshedToken, RefreshFailure> {
+        let RestRefreshTarget::Oauth {
+            token_endpoint,
+            client_id,
+            scope,
+        } = *t
+        else {
+            panic!("an oauth connection is refreshed with an oauth target");
+        };
+        assert_eq!(token_endpoint, "https://acme.zendesk.com/oauth/tokens");
+        assert_eq!(client_id, "zc1");
+        assert_eq!(scope, Some("read write"));
+        assert_eq!(rt.expose_secret(), "REFRESH-0000000000000000");
+        Ok(RefreshedToken {
+            access_token: "ACCESS-1111111111111111".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("REFRESH-1111111111111111".into()),
+        })
+    }
+
+    fn never(
+        calls: &Arc<AtomicUsize>,
+    ) -> impl for<'a> Fn(&RestRefreshTarget<'a>, &SecretString) -> Result<RefreshedToken, RefreshFailure>
+    {
+        let calls = calls.clone();
+        move |_: &RestRefreshTarget<'_>, _: &SecretString| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(RefreshFailure::transient("must not be called"))
+        }
+    }
+
+    fn config() -> ConnectorConfig {
+        ConnectorConfig {
+            client_ids: BTreeMap::new(),
+        }
+    }
+
+    fn check(
+        store: &SqliteWorkflowStore,
+        vault: &SecretsVault,
+        calls: &Arc<AtomicUsize>,
+    ) -> CheckOutcome {
+        check_connection(store, vault, &config(), "ada", ID, 20, never(calls)).unwrap()
+    }
+
+    #[test]
+    fn a_commit_pins_the_refresh_token_to_the_token_host_and_the_access_token_to_every_binding_host(
+    ) {
+        let (store, vault) = world("acme");
+        let hosts = vec![
+            "acme.zendesk.com".to_string(),
+            "api.acme.zendesk.com".to_string(),
+        ];
+        let row = commit(&store, &vault, "ada", "acme", &hosts);
+        assert_eq!(row.status, ConnectionStatus::Connected);
+        assert_eq!(row.tenant_id, "acme");
+        assert_eq!(row.token_endpoint, "https://acme.zendesk.com/oauth/tokens");
+        assert_eq!(row.label, None);
+        assert_eq!(
+            dests(&vault, "ada", refresh_token_binding_id(ID)),
+            acme_hosts()
+        );
+        assert_eq!(dests(&vault, "ada", access_token_binding_id(ID)), hosts);
+        let meta = vault
+            .get_metadata_at(SecretScope::User, "ada", &access_token_binding_id(ID))
+            .unwrap();
+        assert_eq!(meta.kind, SecretKind::Connection);
+        let node = store.node_connector(ID).unwrap();
+        let endpoint = Some("https://acme.zendesk.com/oauth/tokens");
+        assert_eq!(
+            rest_connection_state(&row, node.as_ref(), true, endpoint),
+            CallerState::Connected
+        );
+    }
+
+    #[test]
+    fn a_commit_whose_check_refuses_writes_no_row_and_no_token() {
+        let (store, vault) = world("acme");
+        let host = "acme.zendesk.com".to_string();
+        let err = store
+            .commit_rest_connection(
+                &vault,
+                &RestCommit {
+                    owner: "ada",
+                    connector_id: ID,
+                    address: "acme",
+                    token_endpoint: "https://acme.zendesk.com/oauth/tokens",
+                    token_host: &host,
+                    access_hosts: std::slice::from_ref(&host),
+                    scopes: &[],
+                    access_token: "ACCESS-0000000000000000",
+                    refresh_token: "REFRESH-0000000000000000",
+                    expires_at: None,
+                    now: 10,
+                },
+                &|_| Err(OrchestratorError::Conflict("superseded".into())),
+            )
+            .unwrap_err();
+        assert!(matches!(err, OrchestratorError::Conflict(_)));
+        assert!(store.connector_connection("ada", ID).unwrap().is_none());
+        for binding in [refresh_token_binding_id(ID), access_token_binding_id(ID)] {
+            assert!(!vault
+                .has_binding_at(SecretScope::User, "ada", &binding)
+                .unwrap());
+        }
+    }
+
+    #[test]
+    fn a_refresh_goes_to_the_node_clients_endpoint_and_stores_the_rotated_token_first() {
+        let (store, vault) = world("acme");
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        let out = check_connection(&store, &vault, &config(), "ada", ID, 20, rotated).unwrap();
+        let CheckOutcome::Connected(row) = out else {
+            panic!("{out:?}")
+        };
+        assert_eq!(row.expires_at, Some(3620));
+        assert_eq!(
+            read(&vault, "ada", refresh_token_binding_id(ID)),
+            "REFRESH-1111111111111111"
+        );
+        assert_eq!(
+            read(&vault, "ada", access_token_binding_id(ID)),
+            "ACCESS-1111111111111111"
+        );
+        assert_eq!(
+            dests(&vault, "ada", refresh_token_binding_id(ID)),
+            acme_hosts()
+        );
+        assert_eq!(
+            dests(&vault, "ada", access_token_binding_id(ID)),
+            acme_hosts()
+        );
+    }
+
+    #[test]
+    fn a_refresh_token_made_under_acme_is_never_sent_once_the_address_is_globex() {
+        let (store, vault) = world("acme");
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        // The admin moves to globex and saves the client again: the row is marked, nothing is sent.
+        save(&store, &vault, "globex", "zc1");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let out = check(&store, &vault, &calls);
+        assert!(matches!(out, CheckOutcome::NeedsReconnect(_)), "{out:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let row = store.connector_connection("ada", ID).unwrap().unwrap();
+        assert_eq!(row.status, ConnectionStatus::NeedsReconnect);
+    }
+
+    #[test]
+    fn a_refresh_sends_nothing_when_the_address_endpoint_pin_or_client_is_not_the_nodes() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        // The node row's address moved without the client being saved again (no mark was written).
+        let (store, vault) = world("acme");
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        store.put_node_connector(&node("globex", true)).unwrap();
+        let out = check(&store, &vault, &calls);
+        assert!(matches!(out, CheckOutcome::NeedsReconnect(_)), "{out:?}");
+
+        // The row names another endpoint than the node's client.
+        let (store, vault) = world("acme");
+        let mut row = commit(&store, &vault, "ada", "acme", &acme_hosts());
+        row.token_endpoint = "https://evil.example/oauth/tokens".into();
+        store.put_connector_connection(&row).unwrap();
+        let out = check(&store, &vault, &calls);
+        assert!(matches!(out, CheckOutcome::NeedsReconnect(_)), "{out:?}");
+        let node_row = store.node_connector(ID).unwrap();
+        let endpoint = Some("https://acme.zendesk.com/oauth/tokens");
+        assert_eq!(
+            rest_connection_state(&row, node_row.as_ref(), true, endpoint),
+            CallerState::NeedsReconnect
+        );
+
+        // The refresh token's row is pinned to another host than the token endpoint's.
+        let (store, vault) = world("acme");
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        pin_refresh_token_elsewhere(&vault);
+        let out = check(&store, &vault, &calls);
+        assert!(matches!(out, CheckOutcome::NeedsReconnect(_)), "{out:?}");
+
+        // The admin cleared the client.
+        let (store, vault) = world("acme");
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM node_connector_clients", [])
+            .unwrap();
+        let out = check(&store, &vault, &calls);
+        assert!(matches!(out, CheckOutcome::NeedsReconnect(_)), "{out:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no refresh was sent");
+    }
+
+    #[test]
+    fn replacing_the_client_marks_members_connections_and_saving_the_same_one_does_not() {
+        let (store, vault) = world("acme");
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        save(&store, &vault, "acme", "zc1");
+        assert_eq!(
+            store
+                .connector_connection("ada", ID)
+                .unwrap()
+                .unwrap()
+                .status,
+            ConnectionStatus::Connected
+        );
+        save(&store, &vault, "acme", "zc2");
+        let row = store.connector_connection("ada", ID).unwrap().unwrap();
+        assert_eq!(row.status, ConnectionStatus::NeedsReconnect);
+        assert_eq!(
+            row.last_error.as_deref(),
+            Some("the admin changed the client: reconnect")
+        );
+    }
+
+    #[test]
+    fn a_revoke_is_prepared_only_when_the_file_declares_one_and_the_pins_match() {
+        let (store, vault) = world("acme");
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        assert!(prepare_rest_revoke(&store, &vault, "ada", ID).is_none());
+        save_with(&store, &vault, "acme", "zc1", true);
+        let revoke = prepare_rest_revoke(&store, &vault, "ada", ID).unwrap();
+        assert_eq!(
+            revoke.revocation_endpoint,
+            "https://acme.zendesk.com/oauth/revoke"
+        );
+        assert_eq!(revoke.client_id, "zc1");
+        assert_eq!(
+            revoke.refresh_token.expose_secret(),
+            "REFRESH-0000000000000000"
+        );
+        pin_refresh_token_elsewhere(&vault);
+        assert!(prepare_rest_revoke(&store, &vault, "ada", ID).is_none());
+    }
+
+    #[test]
+    fn an_oauth_connector_has_no_app_token_route() {
+        let (store, _vault) = world("acme");
+        let def = store.connector_entry(ID).unwrap().unwrap().def;
+        let req = PutConnectionRequest {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            id_token: "x.y.z".into(),
+            expires_in: None,
+        };
+        let err = plan_connection(&def, store.node_connector(ID).unwrap().as_ref(), &req, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("code exchange"), "{err}");
     }
 }

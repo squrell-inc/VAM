@@ -924,6 +924,15 @@ impl SqliteWorkflowStore {
                 &[mcp_url],
                 "the admin changed the client: reconnect",
             )?;
+            // A REST connector's members hold grants of the client being replaced or cleared too
+            // (`oauth` profile, CN-6.3): their rows read `needs_reconnect`, and the refresh token is
+            // never sent for them again.
+            crate::connectors::mark_rest_connections_need_reconnect_in(
+                &tx,
+                &node.connector_id,
+                "the admin changed the client: reconnect",
+                node.updated_at,
+            )?;
             set_secret_saved_while_off_in(&tx, &node.connector_id, false)?;
         } else if !node.enabled {
             // A secret saved on a disabled connector waits for the enable; a save that keeps the
@@ -985,11 +994,28 @@ pub(crate) struct NodeSave {
 /// A connector with an admin-supplied client, and the client the admin saved for it (if any).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OrgConnector {
-    pub(crate) mcp_url: String,
-    /// `clientSecret: "org_vault"`: the node holds a secret and does the code exchange.
+    /// The connector's MCP URL; `None` for a REST connector (`profile: oauth`, CN-6.3).
+    pub(crate) mcp_url: Option<String>,
+    /// `clientSecret: "org_vault"`: the node holds a secret. Either way the node does the code
+    /// exchange for an org client; without a secret it sends none.
     pub(crate) keeps_secret: bool,
     pub(crate) scopes: Vec<String>,
     pub(crate) client: Option<NodeClient>,
+    /// A REST connector's company address as the node row holds it (the one the endpoints and
+    /// hosts were filled with); `None` for an MCP connector or when no address is set.
+    pub(crate) tenant_subdomain: Option<String>,
+    /// A REST connector's token endpoint as the connector file names it now, filled with the
+    /// address (`None` while it is still templated). The node client's pinned endpoint must equal it
+    /// before a code or a refresh token is sent.
+    pub(crate) filled_token_endpoint: Option<String>,
+}
+
+impl OrgConnector {
+    /// True for a REST connector (`profile: oauth`): its connection is a `connector_connections`
+    /// row, not an MCP row.
+    pub(crate) fn is_rest(&self) -> bool {
+        self.mcp_url.is_none()
+    }
 }
 
 /// How a connector-backed MCP row gets its OAuth client.
@@ -1003,8 +1029,9 @@ pub(crate) enum RowClient {
 }
 
 impl SqliteWorkflowStore {
-    /// The connector with this id when it uses the admin's client (`provider.client: org`) and is an
-    /// MCP connector; `None` for every other connector id.
+    /// The connector with this id when it uses the admin's client (`provider.client: org`): an MCP
+    /// connector, or a REST connector with fixed endpoints (`profile: oauth`). `None` for every other
+    /// connector id.
     pub(crate) fn org_connector(
         &self,
         id: &str,
@@ -1015,18 +1042,34 @@ impl SqliteWorkflowStore {
         if client_kind(&entry.def) != ClientKind::Org {
             return Ok(None);
         }
-        let Some(policy) = crate::connectors::policy_of(id, &entry.def) else {
-            return Ok(None);
-        };
         let scopes = match &entry.def.provider {
             Provider::Oauth2(o) => o.scopes.clone(),
             Provider::ApiKey(_) => Vec::new(),
         };
+        let (mcp_url, tenant_subdomain, filled_token_endpoint) =
+            if let Some(policy) = crate::connectors::policy_of(id, &entry.def) {
+                (Some(policy.url), None, None)
+            } else if is_rest_oauth(&entry.def) {
+                let filled = match &entry.def.provider {
+                    Provider::Oauth2(o) => o
+                        .endpoints
+                        .as_ref()
+                        .map(|e| e.token.clone())
+                        .filter(|t| !crate::connectors::url_needs_address(t)),
+                    Provider::ApiKey(_) => None,
+                };
+                let address = self.node_connector(id)?.and_then(|n| n.tenant_subdomain);
+                (None, address, filled)
+            } else {
+                return Ok(None);
+            };
         Ok(Some(OrgConnector {
-            mcp_url: policy.url,
+            mcp_url,
             keeps_secret: keeps_secret(&entry.def),
             scopes,
             client: self.node_client(id)?,
+            tenant_subdomain,
+            filled_token_endpoint,
         }))
     }
 
@@ -1040,7 +1083,9 @@ impl SqliteWorkflowStore {
             return Ok(RowClient::Own);
         }
         Ok(match self.org_connector(&conn.connection_id)? {
-            Some(org) if org.mcp_url == conn.url => RowClient::Org(Box::new(org)),
+            Some(org) if org.mcp_url.as_deref() == Some(conn.url.as_str()) => {
+                RowClient::Org(Box::new(org))
+            }
             _ => RowClient::Own,
         })
     }
@@ -1068,9 +1113,11 @@ impl SqliteWorkflowStore {
         };
         Ok(match self.org_connector(&conn.connection_id)? {
             Some(org)
-                if org.client.as_ref().is_some_and(|node| {
-                    node.client_id == grant.client_id && node.token_endpoint == grant.token_endpoint
-                }) =>
+                if !org.is_rest()
+                    && org.client.as_ref().is_some_and(|node| {
+                        node.client_id == grant.client_id
+                            && node.token_endpoint == grant.token_endpoint
+                    }) =>
             {
                 RowClient::Org(Box::new(org))
             }

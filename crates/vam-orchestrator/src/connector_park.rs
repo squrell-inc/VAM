@@ -17,7 +17,7 @@ use vam_spec::v1::{
 };
 
 use crate::connection_egress::DEFAULT_TOOL_TIMEOUT;
-use crate::connectors::{self, ConnectionStatus, EntraRefresher, Freshness};
+use crate::connectors::{self, ConnectionStatus, Freshness, RestRefresher};
 use crate::secrets::{SecretScope, SecretsVault};
 use crate::workflow::SqliteWorkflowStore;
 
@@ -165,7 +165,7 @@ pub(crate) async fn precheck_with(
     store: &Arc<SqliteWorkflowStore>,
     vault: &Arc<SecretsVault>,
     cfg: &connectors::ConnectorConfig,
-    refresher: &EntraRefresher,
+    refresher: &RestRefresher,
     session_id: &str,
     owner: &str,
     tool: &str,
@@ -256,8 +256,10 @@ impl crate::security::SessionSecurityContext {
 mod tests {
     use super::*;
     use crate::connection_egress::ToolEgressRow;
+    use crate::connectors::RestRefreshTarget;
     use crate::connectors::{ConnectorConnection, NodeConnector};
     use crate::mcp_oauth_refresh::{RefreshFailure, RefreshedToken};
+    use secrecy::SecretString;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const URN: &str = "urn:vam:connector:hub.squrell.cloud/squrell/microsoft-365";
@@ -357,9 +359,9 @@ mod tests {
     fn refresher(
         calls: &Arc<AtomicUsize>,
         reply: fn() -> Result<RefreshedToken, RefreshFailure>,
-    ) -> EntraRefresher {
+    ) -> RestRefresher {
         let calls = calls.clone();
-        Arc::new(move |_, _, _, _| {
+        Arc::new(move |_: &RestRefreshTarget<'_>, _: &SecretString| {
             calls.fetch_add(1, Ordering::SeqCst);
             reply()
         })

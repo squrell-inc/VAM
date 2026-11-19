@@ -1239,7 +1239,9 @@ paths:
         The app signs the member in with Microsoft and passes the tokens here
         (`secrets:write`; Idempotency-Key required). Only for a REST connector
         (`microsoft-365`); an MCP connector connects through
-        `/v1/mcp/connections`. Refused, and nothing written, unless the node
+        `/v1/mcp/connections`, and a REST connector with fixed endpoints and the admin's
+        client (`profile: oauth`) only through `POST …/connection/oauth/code` (400, the body
+        is not read, nothing written). Refused, and nothing written, unless the node
         enabled the connector (403) with an admin consent recorded (409), and
         the id token's `tid` claim is the consent tenant (409; the claim is
         read, its signature is not checked in this phase). The access and
@@ -1337,18 +1339,29 @@ paths:
 
   /v1/connectors/{id}/connection/oauth/code:
     post:
-      summary: Exchange an authorization code on the node (admin-supplied client with a secret)
+      summary: Exchange an authorization code on the node (admin-supplied client)
       description: |
-        For an MCP connector with `provider.client: org` and `clientSecret: org_vault`
-        (`secrets:write`; Idempotency-Key required). The app runs the browser sign-in with
+        For every connector with `provider.client: org`, MCP or REST, with a secret or
+        without one (`secrets:write`; Idempotency-Key required). A connector with the
+        publisher's own client keeps the app's exchange (400 here). A client with no secret
+        (`clientSecret: none`) sends none, and a REST connector (`profile: oauth`, a
+        company-address connector) never gets the RFC 8707 `resource` nor an Authorization
+        header. For a REST connector the node writes a `connector_connections` row (the
+        company address it was made under, the filled token endpoint), the refresh token
+        pinned to the token host and the access token pinned to every filled binding host,
+        in one transaction that first re-checks the client, the enable, the address and the
+        filled hosts; it refuses (409, nothing sent) when the client was pinned to another
+        endpoint than the connector file names now, and (502, nothing stored) when the
+        provider issues no refresh token. The app runs the browser sign-in with
         PKCE against `node.client.authorizeEndpoint` and the admin's client id, then posts
         what it got. The body names no endpoint and no client; any other field is a 400.
         `redirectUri` must be the app's own: `squrell://oauth` or
         `http://127.0.0.1:<port>/<path>` with an explicit port other than 80 (a loopback URI
         with no port, or with the default port 80, is a 400). `codeVerifier` is 43-128 RFC 7636 characters.
         `vamd` posts `grant_type=authorization_code`, `code`, `code_verifier`,
-        `redirect_uri`, `client_id`, the RFC 8707 `resource` and the org's `client_secret`
-        to the token endpoint pinned at Enable (DNS-pinned public address, no redirects),
+        `redirect_uri`, `client_id`, for an MCP connector the RFC 8707 `resource`, and the
+        org's `client_secret` when the org keeps one, to the token endpoint pinned at Enable
+        (DNS-pinned public address, no redirects),
         then writes the caller's connection (the node's client id and endpoints), stores
         the refresh token and the access token in one transaction, and lists the vetted
         tools. The connection is committed with its tools pending (`needsReconnect`, no
@@ -3855,7 +3868,7 @@ paths:
 
         The app opens the browser and runs the sign-in in every flow; vamd never opens
         one. vamd does not see the authorization code either, except for a connector with
-        an admin-supplied client and secret (`clientSecret: org_vault`): the app hands it
+        an admin-supplied client (`client: org`, with a secret or without): the app hands it
         the code, verifier and redirect URI (`POST
         /v1/connectors/{id}/connection/oauth/code`), vamd exchanges the code, and this
         route answers 400 for that connector. A `clientSecret` is refused (400) for any
