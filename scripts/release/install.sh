@@ -218,6 +218,8 @@ if [ -n "$from" ]; then
 elif command -v gh >/dev/null 2>&1; then
   say "verifying the attestation with gh"
   if ! (cd "$tmp" && gh attestation verify "$archive" -R "$REPO" --signer-workflow "$REPO/$RELEASE_WORKFLOW" </dev/null); then
+    # The backticks are literal (the same message as vam upgrade), not command substitution.
+    # shellcheck disable=SC2016
     die '`gh attestation verify` refused the download; nothing was installed. If gh is not signed in, run `gh auth login`.'
   fi
   say "attestation verified with gh"
