@@ -767,6 +767,15 @@ async fn connect(
     ))
 }
 
+/// The refusal for a row that is not this connector's to replace: another server's sign-in, or one
+/// this connector did not write. A conflict (409), not a bad request: the member's own request is
+/// fine, and disconnecting that row clears it.
+fn refuse_foreign_row(id: &str) -> OrchestratorError {
+    OrchestratorError::Conflict(format!(
+        "`{id}` already has a connection this connector did not make: disconnect it first, then enter the key"
+    ))
+}
+
 /// Connects a member to an MCP connector with the API key they entered at
 /// `PUT /v1/connectors/{id}/connection` (CN-7.7). The caller holds the member's connection lock and
 /// has decided every refusal that needs no read of the row (body, enable, address, host).
@@ -795,20 +804,44 @@ pub(crate) async fn connect_api_key_mcp(
         })?;
     let host = connection_host(url).map_err(OrchestratorError::from)?;
     // The row this write replaces, read under the lock. A static row is replaced (a new key, or a
-    // server the connector's update moved); an OAuth row is a sign-in this route does not own.
-    let existing = match state.store.get_mcp_connection(scope, &owner, id) {
+    // server the connector's update moved). An OAuth row at the connector's own URL is the sign-in
+    // an update from `oauth` to `api_key` left behind (`reset_connector` keeps it, marked for
+    // reconnect): the key replaces it, and the guarded write drops its tokens in the same
+    // transaction. Any other row is not this connector's to take: disconnect it first.
+    let mut existing = match state.store.get_mcp_connection(scope, &owner, id) {
         Ok(row) => Some(row),
         Err(OrchestratorError::NotFound(_)) => None,
         Err(e) => return Err(e.into()),
     };
-    if existing
+    let mut credential_guard = None;
+    if let Some(row) = existing
         .as_ref()
-        .is_some_and(|row| row.auth_mode != McpAuthMode::Static)
+        .filter(|row| row.auth_mode != McpAuthMode::Static)
     {
-        return Err(OrchestratorError::InvalidContract(format!(
-            "`{id}` is a connector id and cannot take a row it did not write"
-        ))
-        .into());
+        if row.url != policy.url {
+            return Err(refuse_foreign_row(id).into());
+        }
+        // Hold the refresh gate so an in-flight token refresh cannot write a token back after the
+        // replace, then read the row again: a sign-in or refresh that committed while this waited
+        // changed the OAuth state the guarded write must still find equal.
+        let guard = crate::host_tools::lock_mcp_credentials(&state.store, row)
+            .await
+            .map_err(|_| {
+                OrchestratorError::CorruptState("mcp credential lock unavailable".into())
+            })?;
+        credential_guard = Some(guard);
+        existing = match state.store.get_mcp_connection(scope, &owner, id) {
+            Ok(fresh) if fresh.auth_mode != McpAuthMode::Static && fresh.url == policy.url => {
+                Some(fresh)
+            }
+            Ok(_) | Err(OrchestratorError::NotFound(_)) => {
+                return Err(OrchestratorError::Conflict(format!(
+                    "the connection `{id}` changed while this request waited: read it again and retry"
+                ))
+                .into())
+            }
+            Err(e) => return Err(e.into()),
+        };
     }
     // Always `Authorization: Bearer <key>`: a connector file's `mcp` has only a URL and tools, so
     // it cannot ask for another header and a key is never sent in a form the publisher did not
@@ -858,6 +891,12 @@ pub(crate) async fn connect_api_key_mcp(
         },
         std::slice::from_ref(&header),
     )?;
+    if let Some(guard) = credential_guard.as_mut() {
+        // The OAuth tokens are gone: callers that started with them retry instead of observing an
+        // earlier refresh failure.
+        guard.credentials_replaced();
+    }
+    drop(credential_guard);
     state.store.set_mcp_instructions(
         scope,
         &owner,

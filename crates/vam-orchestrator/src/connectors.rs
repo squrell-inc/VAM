@@ -448,11 +448,12 @@ pub fn mcp_connection_state(
 }
 
 /// The caller's state of an MCP connector that signs in with an API key (CN-7.7), from their own
-/// static MCP row: `Connected` when the row is the connector's (its URL) in static mode and its
+/// MCP row: `Connected` when the row is the connector's (its URL) in static mode and its
 /// `Authorization` header row exists (`has_header`); a row on another URL reads `NeedsReconnect`
-/// (the key was entered for another server and is never sent to this one); no row, or a row with
-/// no header, is `None` (the tile reads `connect`). It never looks at a refresh token: a key has
-/// none.
+/// (the key was entered for another server and is never sent to this one), and so does an OAuth
+/// row at the connector's URL (a sign-in from before an update to `api_key`: the key replaces
+/// it); no row, or a static row with no header, is `None` (the tile reads `connect`). It never
+/// looks at a refresh token: a key has none.
 pub fn mcp_api_key_state(
     policy: &McpPolicy,
     conn: Option<&McpConnection>,
@@ -462,7 +463,13 @@ pub fn mcp_api_key_state(
     if conn.url != policy.url {
         return Some(CallerState::NeedsReconnect);
     }
-    (conn.auth_mode == McpAuthMode::Static && has_header).then_some(CallerState::Connected)
+    match conn.auth_mode {
+        McpAuthMode::Static => has_header.then_some(CallerState::Connected),
+        // The sign-in an update from `oauth` to `api_key` left at the connector's own URL: the
+        // member enters the key to replace it (never `connect`, which would hide that they had
+        // a connection).
+        McpAuthMode::Oauth => Some(CallerState::NeedsReconnect),
+    }
 }
 
 /// The stored node state of one connector.
