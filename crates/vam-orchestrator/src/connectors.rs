@@ -1621,11 +1621,37 @@ fn refresh_connection(
         }
         Ok(())
     };
+    // A rotated refresh token is the credential live at the provider once the provider answered:
+    // the one it replaced is spent. It is kept whenever the grant it renews is still valid: the
+    // member's row not marked or replaced since (an admin's save that invalidated the grant marks
+    // it) and the same issuing client at the same token endpoint. A save that kept that client
+    // (a resave advances the revision) or a disable meanwhile does not drop it; the access token
+    // and the Connected result still need `still_current`.
+    let grant_kept = |tx: &rusqlite::Connection| -> Result<(), OrchestratorError> {
+        let Prepared::Oauth {
+            token_endpoint,
+            client_id,
+            ..
+        } = &prepared
+        else {
+            return still_current(tx);
+        };
+        let moved = || OrchestratorError::Conflict(REFRESH_SUPERSEDED.into());
+        let row_now = connector_connection_in(tx, owner, id)?.ok_or_else(moved)?;
+        let same_issuer = crate::connector_client::client_in(tx, id)?
+            .is_some_and(|n| n.client_id == *client_id && n.token_endpoint == *token_endpoint);
+        if same_grant(&row_now, &read) && same_issuer {
+            Ok(())
+        } else {
+            Err(moved())
+        }
+    };
     // One write, tried twice (a busy database is the usual failure); `Ok(false)`: not written
     // because the state moved.
     let apply = |rotated_refresh: Option<&str>,
                  access_token: Option<&str>,
-                 row: Option<&ConnectorConnection>|
+                 row: Option<&ConnectorConnection>,
+                 guard: &dyn Fn(&rusqlite::Connection) -> Result<(), OrchestratorError>|
      -> Result<bool, OrchestratorError> {
         let commit = RefreshCommit {
             owner,
@@ -1636,9 +1662,9 @@ fn refresh_connection(
             access_token,
             row,
         };
-        let mut done = store.commit_rest_refresh(vault, &commit, &still_current);
+        let mut done = store.commit_rest_refresh(vault, &commit, guard);
         if matches!(&done, Err(e) if !matches!(e, OrchestratorError::Conflict(_))) {
-            done = store.commit_rest_refresh(vault, &commit, &still_current);
+            done = store.commit_rest_refresh(vault, &commit, guard);
         }
         match done {
             Ok(()) => Ok(true),
@@ -1676,11 +1702,16 @@ fn refresh_connection(
             // never beside another token's expiry. If the second write fails the new access token is
             // never used: the stored row stays due, and the next refresh sends the rotated token.
             if let Some(rotated) = token.refresh_token.as_deref() {
-                if !apply(Some(rotated), None, None)? {
+                if !apply(Some(rotated), None, None, &grant_kept)? {
                     return superseded();
                 }
             }
-            if apply(None, Some(token.access_token.as_str()), Some(&conn))? {
+            if apply(
+                None,
+                Some(token.access_token.as_str()),
+                Some(&conn),
+                &still_current,
+            )? {
                 Ok(CheckOutcome::Connected(conn))
             } else {
                 superseded()
@@ -1692,7 +1723,7 @@ fn refresh_connection(
             conn.last_check_at = Some(now);
             conn.last_error = Some(failure.reason.clone());
             conn.updated_at = now;
-            if !apply(None, None, Some(&conn))? {
+            if !apply(None, None, Some(&conn), &still_current)? {
                 return superseded();
             }
             if was != ConnectionStatus::NeedsReconnect {
@@ -1704,7 +1735,7 @@ fn refresh_connection(
             conn.last_check_at = Some(now);
             conn.last_error = Some(failure.reason.clone());
             conn.updated_at = now;
-            if apply(None, None, Some(&conn))? {
+            if apply(None, None, Some(&conn), &still_current)? {
                 Ok(CheckOutcome::Unavailable(failure.reason))
             } else {
                 superseded()
@@ -4315,6 +4346,57 @@ mod oauth_rest_tests {
                 read(&vault, "ada", access_token_binding_id(ID)),
                 "ACCESS-0000000000000000",
                 "{answer}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rotated_refresh_token_is_kept_when_the_admin_resaves_the_same_client_or_disables_meanwhile(
+    ) {
+        let disable = |store: &SqliteWorkflowStore| {
+            let mut n = store.node_connector(ID).unwrap().unwrap();
+            n.enabled = false;
+            store.put_node_connector(&n).unwrap();
+        };
+        for meanwhile in ["same client resaved", "disabled"] {
+            let (store, vault) = world("acme");
+            commit(&store, &vault, "ada", "acme", &acme_hosts());
+            let out = check_connection(&store, &vault, &config(), "ada", ID, 20, |_, _| {
+                if meanwhile == "disabled" {
+                    disable(&store);
+                } else {
+                    save(&store, &vault, "acme", "zc1");
+                }
+                rotated_zc2(
+                    &RestRefreshTarget::Oauth {
+                        token_endpoint: "",
+                        client_id: "",
+                        scope: None,
+                    },
+                    &SecretString::new(String::new()),
+                )
+            })
+            .unwrap();
+            // The access token and the Connected result are not published under a moved state...
+            assert!(
+                matches!(out, CheckOutcome::Unavailable(_)),
+                "{meanwhile}: {out:?}"
+            );
+            assert_eq!(
+                read(&vault, "ada", access_token_binding_id(ID)),
+                "ACCESS-0000000000000000",
+                "{meanwhile}"
+            );
+            // ...but the provider spent the old refresh token: the rotated one is what is kept.
+            assert_eq!(
+                read(&vault, "ada", refresh_token_binding_id(ID)),
+                "REFRESH-2222222222222222",
+                "{meanwhile}"
+            );
+            assert_eq!(
+                dests(&vault, "ada", refresh_token_binding_id(ID)),
+                vec!["acme.zendesk.com".to_string()],
+                "{meanwhile}"
             );
         }
     }
