@@ -1,0 +1,44 @@
+id: yesterdays-mail-shows-as-the-mail-card
+title: Yesterday's mail from the installed Microsoft 365 skill shows as its mail card, trimmed to fit
+description: >
+  The admin installs the Microsoft 365 listing from the Squrell marketplace and enables the connector; the
+  member connects. The member's mailbox holds forty messages of a real mailbox's size (Graph's 152-character
+  ids, named senders, full previews). The member asks the Executive assistant for yesterday's mail; it lists
+  the last two days with the skill's guest-run search tool. The result is larger than a card may carry, so
+  the card keeps the first rows that fit and says how many more there are, and an event field records how
+  many rows the result had and how many the card kept. No card is skipped, and the model still gets every
+  message.
+tags: [connectors]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - marketplace-squrell
+  - mock-microsoft-login
+  - mock-microsoft-graph
+when:
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin }
+  - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-admin }
+  - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, as: org-member }
+  - mock-provider: { piece: mock-microsoft-graph, mailbox: 40 }
+  - chat: { text: "e2e-step:yesterday Show me the list of emails from yesterday", agent: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages, method: GET, has: [bearer=current] } }
+then:
+  - expect: { event: outbox.card, fields: { data.tool: mail_search, data.jig: m365-mail.mail_list, data.data.messages.0.subject: Mailbox message 1, data.data.messages.0.from: "Sender 1 <sender1@e2e.example>", data.trimmed.path: /messages, data.trimmed.total: 40, data.trimmed.kept: { present: true }, data.ir.nodes.more.props.text: { matches: "^and [0-9]+ more$" } } }
+  - expect: { event: card.skipped, absent: true }
+  - expect: { thread: { role: tool, contains: Mailbox message 40 } }
+guards:
+  - vam:crates/vam-orchestrator/src/outbox.rs
+  - vam:crates/vam-orchestrator/src/thread_recorder.rs
+  - vam:crates/vam-spec/src/jig.rs
+mock:
+  - when: { step: yesterday, toolName: mail_search }
+    reply: { text: "Here is yesterday's mail." }
+  - when: { step: yesterday, toolName: load_skill }
+    reply: { toolCall: { name: mail_search, args: { sinceHours: 48, top: 40 } } }
+  - when: { step: yesterday, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: m365-mail } } }
+status: pending
+expectFail: { step: then.0, class: product }
