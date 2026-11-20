@@ -817,8 +817,14 @@ impl ConnectionTokenSource for SessionConnectionSource {
         request: &ConnectionRequest<'_>,
     ) -> Result<Option<ConnectionGrant>, ConnectionRefusal> {
         match self.envelope().screen(request) {
-            // No placeholder: nothing to decide, and no read of the node's state.
-            Ok(None) => Ok(None),
+            // No placeholder of the table, and nothing that looks like one: nothing to decide, and
+            // no read of the node's state. A request carrying text with the placeholder prefix may
+            // name a connector installed after this table was built: the table is reloaded first.
+            Ok(None)
+                if !self.live_bindings || !vam_network::connection::may_carry_placeholder(request) =>
+            {
+                Ok(None)
+            }
             decided => {
                 if !self.live_bindings {
                     return decided;
@@ -2815,6 +2821,49 @@ mod installed_tests {
         );
         let shapes = &window.current().unwrap().shapes;
         assert!(shapes.is_empty(), "no shape without an address: {shapes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_request_for_a_connector_installed_after_the_session_booted_reloads_the_table() {
+        // The session booted before the connector was installed: its table has no placeholder for
+        // it. The admin installs and enables it, the member connects, and the call's request carries
+        // the new placeholder: the table is reloaded and the request gets the member's token.
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        store
+            .record_tool_egress(SESSION, &[templated_row("ticket_search")])
+            .unwrap();
+        let window = Arc::new(CallWindow::new());
+        let s = SessionConnectionSource::new(
+            window.clone(),
+            store.clone(),
+            vault.clone(),
+            SESSION.into(),
+            OWNER.into(),
+        );
+        assert!(!s.binds_host("acme.zendesk.com"), "nothing installed at the boot");
+        install_company_address_rows(&store);
+        enable_and_connect(&store, &vault, "acme", None);
+        record_intent(
+            &window,
+            &store,
+            SESSION,
+            "ticket_search",
+            "call-1",
+            1,
+            &authorized(),
+        );
+        let grant = ask(
+            &s,
+            ZPH,
+            "GET",
+            "https://acme.zendesk.com/api/v2/search.json?query=printer",
+        )
+        .unwrap()
+        .expect("the new connector's placeholder is judged, not passed through bare");
+        let mut headers = HashMap::from([("Authorization".to_string(), ZPH.to_string())]);
+        s.attach(&grant, &mut headers).await.unwrap();
+        assert_eq!(headers["Authorization"], format!("Bearer {ACCESS}"));
     }
 
     #[test]
