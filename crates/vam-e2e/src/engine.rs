@@ -3752,10 +3752,14 @@ fn screen_listing(
 ) -> Result<bool, Fail> {
     let readable = listing_must_be_read(status, bootstrap, path, what)?;
     let mut strings = Vec::new();
+    let mut not_json = false;
     match serde_json::from_str::<Value>(body) {
         Ok(v) => crate::forms::strings_of(&v, &mut strings),
         // A body that is not JSON (a plain-text error) is searched as it is.
-        Err(_) => strings.push(body.to_string()),
+        Err(_) => {
+            not_json = true;
+            strings.push(body.to_string());
+        }
     }
     let hit = strings
         .iter()
@@ -3765,6 +3769,22 @@ fn screen_listing(
             Class::Product,
             what.to_string(),
             format!("the {form} form is in the answer ({status}) of GET {path}"),
+        ));
+    }
+    // A 2xx that is not a listing (empty, or not JSON) read nothing: counting it as a read listing
+    // would let a search that saw no rows pass.
+    if readable && not_json {
+        return Err(Fail::new(
+            Class::Product,
+            what.to_string(),
+            format!(
+                "GET {path} answered {status} with {}, so it could not be searched",
+                if body.trim().is_empty() {
+                    "an empty body"
+                } else {
+                    "a body that is not JSON"
+                }
+            ),
         ));
     }
     Ok(readable)
@@ -3855,6 +3875,44 @@ mod tests {
         // A required read that fails still fails, whatever its body.
         assert!(screen_listing(500, false, "/v1/connectors", clean, &values, "w").is_err());
         assert!(screen_listing(403, true, "/v1/connectors", clean, &values, "w").is_err());
+    }
+
+    #[test]
+    fn an_empty_or_invalid_200_listing_fails_the_secret_search() {
+        let values = vec!["sk-live-0123456789abcdef".to_string()];
+        // A 2xx that is not a listing proves nothing, whoever reads it.
+        for body in ["", "  \n", "<html>ok</html>", "not json"] {
+            for bootstrap in [true, false] {
+                let e = screen_listing(200, bootstrap, "/v1/connectors", body, &values, "w")
+                    .unwrap_err();
+                assert_eq!(e.class, Class::Product, "{body:?}");
+                assert!(e.observed.contains("/v1/connectors"), "{}", e.observed);
+                assert!(e.observed.contains("200"), "{}", e.observed);
+            }
+        }
+        let e = screen_listing(200, true, "/v1/secrets", "", &values, "w").unwrap_err();
+        assert!(e.observed.contains("empty body"), "{}", e.observed);
+        // A leak in such a body is still the leak that is named, not hidden by the new failure.
+        let e = screen_listing(
+            200,
+            true,
+            "/v1/secrets",
+            "oops sk-live-0123456789abcdef",
+            &values,
+            "w",
+        )
+        .unwrap_err();
+        assert!(
+            e.observed.contains("form is in the answer"),
+            "{}",
+            e.observed
+        );
+        assert!(!e.observed.contains("sk-live"), "{}", e.observed);
+        // Valid JSON, even an empty one, is a listing that was read.
+        assert!(screen_listing(200, true, "/v1/secrets", "{}", &values, "w").unwrap());
+        assert!(screen_listing(200, false, "/v1/secrets", "[]", &values, "w").unwrap());
+        // An expected denial with a plain-text body stays a skip, as before.
+        assert!(!screen_listing(403, false, "/v1/secrets", "forbidden", &values, "w").unwrap());
     }
 
     struct NoVamd;
