@@ -4986,7 +4986,10 @@ forbid (
         let row = store
             .get_mcp_connection(SecretScope::User, "ada", "guarded")
             .unwrap();
-        assert_eq!(row.oauth.as_ref().unwrap().status, McpOauthStatus::NeedsReauth);
+        assert_eq!(
+            row.oauth.as_ref().unwrap().status,
+            McpOauthStatus::NeedsReauth
+        );
         // Against the current state it is written.
         let done = store
             .upsert_mcp_connection_guarded(

@@ -5358,10 +5358,12 @@ mod tests {
                 .await
             })
         };
-        tokio::task::spawn_blocking(move || arrived.recv_timeout(std::time::Duration::from_secs(10)))
-            .await
-            .unwrap()
-            .expect("the settings write reached its write");
+        tokio::task::spawn_blocking(move || {
+            arrived.recv_timeout(std::time::Duration::from_secs(10))
+        })
+        .await
+        .unwrap()
+        .expect("the settings write reached its write");
         // An admin's client save marks the member's row for reconnect (without the member's gate).
         upsert(&oauth(McpOauthStatus::NeedsReauth));
         release.send(()).unwrap();

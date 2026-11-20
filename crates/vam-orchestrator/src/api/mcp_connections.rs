@@ -29,8 +29,8 @@ use crate::mcp_registry::{
     sanitized_oauth_metadata, store_mcp_header_credential, store_mcp_oauth_tokens,
     suggested_read_only_tools, validate_connection_id, validate_mcp_timeout_ms, HeaderBinding,
     McpAuthMode, McpAuthWrite, McpConnection, McpHeaderInput, McpOauthMetadata,
-    McpOauthRegistrationMethod,
-    McpOauthStatus, McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision,
+    McpOauthRegistrationMethod, McpOauthStatus, McpOauthTokenWrite, McpSnapshot,
+    PinnedSnapshotDecision,
 };
 use crate::secrets::{
     authorize_org_secret_write, resolve_secret_scope, vault_owner_user_id, SecretScope,

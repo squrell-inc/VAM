@@ -1503,7 +1503,8 @@ fn an_update_that_moves_the_fixed_endpoints_clears_the_saved_client() {
     // An update that moves the token endpoint: the client was pinned to the old one.
     let mut moved = installed.template.clone();
     if let vam_spec::connector::Provider::Oauth2(o) = &mut moved.provider {
-        o.endpoints.as_mut().unwrap().token = "https://{subdomain}.zendesk.com/oauth/tokens-v2".into();
+        o.endpoints.as_mut().unwrap().token =
+            "https://{subdomain}.zendesk.com/oauth/tokens-v2".into();
     }
     reset(&store, &moved);
     assert!(

@@ -821,7 +821,8 @@ impl ConnectionTokenSource for SessionConnectionSource {
             // no read of the node's state. A request carrying text with the placeholder prefix may
             // name a connector installed after this table was built: the table is reloaded first.
             Ok(None)
-                if !self.live_bindings || !vam_network::connection::may_carry_placeholder(request) =>
+                if !self.live_bindings
+                    || !vam_network::connection::may_carry_placeholder(request) =>
             {
                 Ok(None)
             }
@@ -2841,7 +2842,10 @@ mod installed_tests {
             SESSION.into(),
             OWNER.into(),
         );
-        assert!(!s.binds_host("acme.zendesk.com"), "nothing installed at the boot");
+        assert!(
+            !s.binds_host("acme.zendesk.com"),
+            "nothing installed at the boot"
+        );
         install_company_address_rows(&store);
         enable_and_connect(&store, &vault, "acme", None);
         record_intent(

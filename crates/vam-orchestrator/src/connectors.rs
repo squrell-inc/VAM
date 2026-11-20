@@ -277,7 +277,10 @@ pub fn entries_in(c: &Connection) -> Result<Vec<ConnectorEntry>, OrchestratorErr
 /// row, never from a definition another read resolved.
 pub fn entry_for_node(e: &ConnectorEntry, node: Option<&NodeConnector>) -> ConnectorEntry {
     ConnectorEntry {
-        def: resolve(&e.template, node.and_then(|n| n.tenant_subdomain.as_deref())),
+        def: resolve(
+            &e.template,
+            node.and_then(|n| n.tenant_subdomain.as_deref()),
+        ),
         template: e.template.clone(),
         installed: e.installed.clone(),
     }
@@ -3587,12 +3590,21 @@ mod tests {
         store.put_node_connector(&row("globex")).unwrap();
         let later = store.connector_entry("zendesk").unwrap().unwrap();
         let e = entry_for_node(&later, Some(&shown_row));
-        let mut entry = list_entry(&e.def, &ConnectorConfig::default(), Some(&shown_row), None, true);
+        let mut entry = list_entry(
+            &e.def,
+            &ConnectorConfig::default(),
+            Some(&shown_row),
+            None,
+            true,
+        );
         annotate_source(&mut entry, &e, true);
         let text = entry.to_string();
         assert_eq!(entry["node"]["tenant"]["subdomain"], "acme");
         assert!(text.contains("acme.zendesk.com"), "{text}");
-        assert!(!text.contains("globex"), "a host of another read is shown: {text}");
+        assert!(
+            !text.contains("globex"),
+            "a host of another read is shown: {text}"
+        );
         assert_eq!(e.template, later.template);
     }
 

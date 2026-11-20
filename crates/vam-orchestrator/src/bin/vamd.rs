@@ -839,7 +839,9 @@ async fn main() {
     // parked on it yet: resume them now, before any request, with no lock held.
     let resumed = api::resume_connected_connector_parks(&app_state);
     if resumed > 0 {
-        tracing::info!("resumed runs parked on {resumed} connector connection(s) connected before the restart");
+        tracing::info!(
+            "resumed runs parked on {resumed} connector connection(s) connected before the restart"
+        );
     }
 
     let server_ready = ready.clone();

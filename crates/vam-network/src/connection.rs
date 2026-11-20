@@ -728,8 +728,16 @@ mod tests {
         };
         let plain = headers("Bearer real-token");
         assert!(!req(&plain, "https://api.example.com/x", b"{}"));
-        assert!(req(&headers("Bearer vamsec_new_api"), "https://api.example.com/x", b""));
-        assert!(req(&plain, "https://api.example.com/x?t=vamsec_new_api", b""));
+        assert!(req(
+            &headers("Bearer vamsec_new_api"),
+            "https://api.example.com/x",
+            b""
+        ));
+        assert!(req(
+            &plain,
+            "https://api.example.com/x?t=vamsec_new_api",
+            b""
+        ));
         assert!(req(&plain, "https://api.example.com/x", b"vamsec_new_api"));
     }
 

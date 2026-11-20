@@ -771,7 +771,13 @@ mod tests {
         // ME's sign-in committed, then the process stopped before the resume: ME's park waits on a
         // connected connection. OTHER's connection needs a reconnect: still parked. An MCP park is
         // not this pass's.
-        connect(&store, &vault, ME, ConnectionStatus::Connected, connectors::now_secs() + 3600);
+        connect(
+            &store,
+            &vault,
+            ME,
+            ConnectionStatus::Connected,
+            connectors::now_secs() + 3600,
+        );
         park(&store, "req-me", &park_key(ME, "microsoft-365"));
         connect(
             &store,

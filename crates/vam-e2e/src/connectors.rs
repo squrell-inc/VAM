@@ -2541,10 +2541,16 @@ mod tests {
         assert!(b.get("tenant").is_some_and(Value::is_null), "{b}");
         assert!(b.get("client").is_none(), "{b}");
         let b = node_reset_body(true, true);
-        assert!(b["tenant"].is_null() && b.get("client").is_some_and(Value::is_null), "{b}");
+        assert!(
+            b["tenant"].is_null() && b.get("client").is_some_and(Value::is_null),
+            "{b}"
+        );
         let b = node_reset_body(true, false);
         assert!(b.get("tenant").is_none(), "{b}");
-        assert_eq!(node_reset_body(false, false), json!({ "enabled": false, "consent": null }));
+        assert_eq!(
+            node_reset_body(false, false),
+            json!({ "enabled": false, "consent": null })
+        );
     }
 
     fn post(addr: SocketAddr, path: &str, extra: &str, body: &str) -> String {

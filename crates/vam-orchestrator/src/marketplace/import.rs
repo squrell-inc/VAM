@@ -334,7 +334,10 @@ fn prepare(
 /// No two connectors of one listing declare the same binding placeholder. Each is compared with
 /// the installed connectors at write time (`admit_connector_id`), but the whole listing is planned
 /// before any of it is inserted, so two of its own connectors would pass that check together.
-fn check_listing_placeholders(prepared: &[Prepared], listing: &str) -> Result<(), OrchestratorError> {
+fn check_listing_placeholders(
+    prepared: &[Prepared],
+    listing: &str,
+) -> Result<(), OrchestratorError> {
     let mut seen: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
     for p in prepared {
         let CheckedSpec::Connector(def) = &p.checked.spec else {
@@ -991,12 +994,16 @@ fn reset_connector(
             "the connector changed: reconnect once the admin has enabled it again",
         )?;
         // The fixed endpoints as the client was pinned to them: filled with this node's address.
-        let address = crate::connectors::node_connector_in(tx, id)?.and_then(|n| n.tenant_subdomain);
-        let fixed = |d: &vam_spec::connector::Connector| {
-            match crate::connectors::resolve(d, address.as_deref()).provider {
-                vam_spec::connector::Provider::Oauth2(o) => o.endpoints,
-                vam_spec::connector::Provider::ApiKey(_) => None,
-            }
+        let address =
+            crate::connectors::node_connector_in(tx, id)?.and_then(|n| n.tenant_subdomain);
+        let fixed = |d: &vam_spec::connector::Connector| match crate::connectors::resolve(
+            d,
+            address.as_deref(),
+        )
+        .provider
+        {
+            vam_spec::connector::Provider::Oauth2(o) => o.endpoints,
+            vam_spec::connector::Provider::ApiKey(_) => None,
         };
         let endpoints_moved = old_def.as_ref().and_then(fixed) != new_def.and_then(fixed);
         if old_url != new_url || endpoints_moved || !new_org_client {
