@@ -556,7 +556,7 @@ fn graph(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, login: &Arc<Mutex<
         .get("authorization")
         .map(|v| v.strip_prefix("Bearer ").unwrap_or(v).to_string());
     let tag = {
-        let l = login.lock().unwrap();
+        let l = login.lock().unwrap_or_else(|e| e.into_inner());
         match sent.as_deref() {
             None => "none",
             Some(t) if t.starts_with("vamsec_") => "placeholder",
@@ -568,17 +568,26 @@ fn graph(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, login: &Arc<Mutex<
     let mut fields = BTreeSet::new();
     fields.insert(format!("method={}", req.method));
     fields.insert(format!("bearer={tag}"));
-    state.lock().unwrap().log.push(Logged {
-        path: path.clone(),
-        method: req.method.clone(),
-        fields,
-    });
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .log
+        .push(Logged {
+            path: path.clone(),
+            method: req.method.clone(),
+            fields,
+        });
     if tag != "current" {
         return respond(out, 401, "application/json", r#"{"error":"unauthorized"}"#);
     }
     let query = req.path.split_once('?').map(|x| x.1).unwrap_or_default();
     if req.method == "GET" && path == "/v1.0/me/messages" && query.contains("$search=") {
-        if let Some(l) = state.lock().unwrap().log.last_mut() {
+        if let Some(l) = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .log
+            .last_mut()
+        {
             l.fields.insert("search".into());
         }
     }
@@ -641,7 +650,7 @@ fn graph(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, login: &Arc<Mutex<
         ("POST", "/v1.0/me/sendMail") => {
             // Held: the request is already logged (Graph "got it"); the answer waits.
             for _ in 0..1200 {
-                if !state.lock().unwrap().hold {
+                if !state.lock().unwrap_or_else(|e| e.into_inner()).hold {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -762,7 +771,7 @@ fn login(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
         fields.insert(k);
     }
     let (ok, new_access) = {
-        let mut st = state.lock().unwrap();
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
         st.log.push(Logged {
             path: req.path.clone(),
             method: req.method.clone(),
@@ -805,7 +814,7 @@ fn linear(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string);
     let (authed, mut fields) = {
-        let st = state.lock().unwrap();
+        let st = state.lock().unwrap_or_else(|e| e.into_inner());
         let authed = !st.revoked && !st.bearer.is_empty() && sent.as_deref() == Some(&st.bearer);
         (authed, BTreeSet::new())
     };
@@ -823,11 +832,15 @@ fn linear(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
             rpc["params"]["name"].as_str().unwrap_or_default()
         ));
     }
-    state.lock().unwrap().log.push(Logged {
-        path: req.path.clone(),
-        method: req.method.clone(),
-        fields,
-    });
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .log
+        .push(Logged {
+            path: req.path.clone(),
+            method: req.method.clone(),
+            fields,
+        });
     if !authed {
         return respond(out, 401, "application/json", r#"{"error":"unauthorized"}"#);
     }
@@ -880,7 +893,7 @@ fn log_filebox(
     path: &str,
     fields: BTreeSet<String>,
 ) -> usize {
-    let mut st = state.lock().unwrap();
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
     st.log.push(Logged {
         path: path.to_string(),
         method: req.method.clone(),
@@ -964,10 +977,15 @@ fn filebox_authorize(mut out: TcpStream, req: Req, state: &Arc<Mutex<State>>, qu
         return respond(out, 400, "text/plain", "invalid_request");
     }
     let code = rand_token();
-    state.lock().unwrap().fb.codes.insert(
-        code.clone(),
-        (get("client_id"), get("redirect_uri"), get("code_challenge")),
-    );
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .fb
+        .codes
+        .insert(
+            code.clone(),
+            (get("client_id"), get("redirect_uri"), get("code_challenge")),
+        );
     let sep = if get("redirect_uri").contains('?') {
         '&'
     } else {
@@ -996,7 +1014,7 @@ fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     };
     // What the request arrived with, for the log. The grant is decided on what is current when it
     // is consumed, after a hold.
-    let secret_label = label_of(&state.lock().unwrap());
+    let secret_label = label_of(&state.lock().unwrap_or_else(|e| e.into_inner()));
     let mut fields: BTreeSet<String> = form.keys().cloned().collect();
     for k in FILEBOX_LOGGED_VALUES {
         if let Some(v) = form.get(*k) {
@@ -1008,7 +1026,11 @@ fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     // A held refresh waits, logged, until released (at most 30 s: a stuck scenario still ends).
     if grant == "refresh_token" {
         let start = std::time::Instant::now();
-        while state.lock().unwrap().fb.hold_token
+        while state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fb
+            .hold_token
             && start.elapsed() < std::time::Duration::from_secs(30)
         {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1016,7 +1038,7 @@ fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     }
     let mut note = None;
     let result: Result<Value, (u16, &str)> = {
-        let mut st = state.lock().unwrap();
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
         if label_of(&st) != "current" || !client_id.starts_with(FILEBOX_CLIENT_PREFIX) {
             Err((401, "invalid_client"))
         } else if st.revoked && grant == "refresh_token" {
@@ -1057,7 +1079,12 @@ fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
         }
     };
     if let Some(n) = note {
-        if let Some(l) = state.lock().unwrap().log.get_mut(idx) {
+        if let Some(l) = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .log
+            .get_mut(idx)
+        {
             l.fields.insert(n.to_string());
         }
     }
@@ -1085,7 +1112,7 @@ fn filebox_mcp(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     fields.insert(format!("method={method}"));
     let mut expired = false;
     let authed = {
-        let st = state.lock().unwrap();
+        let st = state.lock().unwrap_or_else(|e| e.into_inner());
         let authed =
             !st.revoked && !st.fb.access.is_empty() && sent.as_deref() == Some(&st.fb.access);
         match &sent {
@@ -1119,7 +1146,11 @@ fn filebox_mcp(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
         // in flight on the same expired token at once.
         if expired {
             let start = std::time::Instant::now();
-            while state.lock().unwrap().fb.hold_token
+            while state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .fb
+                .hold_token
                 && start.elapsed() < std::time::Duration::from_secs(30)
             {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1209,7 +1240,15 @@ fn ticketdesk(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, company: &str
             let body = json!({ "ticket": { "id": 102, "subject": "Created by the agent", "status": "new" } });
             ticketdesk_api(out, req, state, company, &path, 201, body)
         }
-        _ => respond(out, 404, "text/plain", "not found"),
+        _ => {
+            // An unmatched request is logged too (method, host and path), so a scenario that says
+            // the provider saw no request at all (`path: "*", count: 0`) also catches discovery
+            // probes such as `/.well-known/oauth-authorization-server`.
+            let mut fields = BTreeSet::new();
+            fields.insert(format!("method={}", req.method));
+            log_ticketdesk(state, &req, &path, company, fields);
+            respond(out, 404, "text/plain", "not found")
+        }
     }
 }
 
@@ -1238,15 +1277,20 @@ fn ticketdesk_authorize(
         return respond(out, 400, "text/plain", "invalid_request");
     }
     let code = rand_token();
-    state.lock().unwrap().td.codes.insert(
-        code.clone(),
-        (
-            get("client_id"),
-            get("redirect_uri"),
-            get("code_challenge"),
-            company.to_string(),
-        ),
-    );
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .td
+        .codes
+        .insert(
+            code.clone(),
+            (
+                get("client_id"),
+                get("redirect_uri"),
+                get("code_challenge"),
+                company.to_string(),
+            ),
+        );
     let sep = if get("redirect_uri").contains('?') {
         '&'
     } else {
@@ -1289,7 +1333,7 @@ fn ticketdesk_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, company
     let idx = log_ticketdesk(state, &req, "/oauth/tokens", company, fields);
     let mut note = None;
     let result: Result<Value, (u16, &str)> = {
-        let mut st = state.lock().unwrap();
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
         if form.contains_key("client_secret") || !client_id.starts_with(TICKETDESK_CLIENT_PREFIX) {
             Err((401, "invalid_client"))
         } else if st.revoked && grant == "refresh_token" {
@@ -1331,7 +1375,12 @@ fn ticketdesk_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, company
         }
     };
     if let Some(n) = note {
-        if let Some(l) = state.lock().unwrap().log.get_mut(idx) {
+        if let Some(l) = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .log
+            .get_mut(idx)
+        {
             l.fields.insert(n.to_string());
         }
     }
@@ -1362,7 +1411,7 @@ fn ticketdesk_api(
         .get("authorization")
         .map(|v| v.strip_prefix("Bearer ").unwrap_or(v).to_string());
     let (label, authed) = {
-        let st = state.lock().unwrap();
+        let st = state.lock().unwrap_or_else(|e| e.into_inner());
         match &sent {
             None => ("none", false),
             Some(t) if t.starts_with("vamsec_") => ("placeholder", false),
@@ -1566,7 +1615,7 @@ impl Engine {
         };
         let bearer = rand_token();
         {
-            let mut st = mocks.state(kind).lock().unwrap();
+            let mut st = mocks.state(kind).lock().unwrap_or_else(|e| e.into_inner());
             *st = State::default();
             if kind == Kind::Linear {
                 st.bearer = bearer.clone();
@@ -1582,7 +1631,13 @@ impl Engine {
         if kind == Kind::Ticketdesk {
             // The value a test sends as a client secret (the provider has none) and, later, every
             // token it issues: `secret-absent: { secret: <alias> }` judges them all.
-            let wrong = mocks.state(kind).lock().unwrap().td.wrong.clone();
+            let wrong = mocks
+                .state(kind)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .td
+                .wrong
+                .clone();
             self.ctx.secrets.insert(alias.to_string(), Secret(wrong));
             self.ctx.conn.ticketdesk_alias = Some(alias.to_string());
             self.ctx.conn.ticketdesk_synced = 0;
@@ -1592,7 +1647,7 @@ impl Engine {
             // one and every token it issues: all are in the scrub list, and `secret-absent:
             // { secret: <alias> }` judges them all (the companions are `<alias>#...`).
             let (secret, wrong) = {
-                let st = mocks.state(kind).lock().unwrap();
+                let st = mocks.state(kind).lock().unwrap_or_else(|e| e.into_inner());
                 (st.fb.secret.clone(), st.fb.wrong.clone())
             };
             self.ctx.secrets.insert(alias.to_string(), Secret(secret));
@@ -1623,14 +1678,25 @@ impl Engine {
         let kind = self.provider_of(&m.piece)?;
         let mocks = self.mocks()?;
         if m.short_tokens {
-            if kind != Kind::Ticketdesk || m.expire || m.hold_token.is_some() || m.rotate_secret {
+            if kind != Kind::Ticketdesk
+                || m.expire
+                || m.hold_token.is_some()
+                || m.rotate_secret
+                || m.revoke
+                || m.hold.is_some()
+            {
                 return Err(Fail::new(
                     Class::Scenario,
                     "`shortTokens` alone on a ticketdesk mock-provider piece",
                     format!("piece `{}`", m.piece),
                 ));
             }
-            mocks.state(kind).lock().unwrap().td.short = true;
+            mocks
+                .state(kind)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .td
+                .short = true;
             return Ok(());
         }
         let filebox_only = m.expire || m.hold_token.is_some() || m.rotate_secret;
@@ -1652,7 +1718,7 @@ impl Engine {
                 ),
             ));
         }
-        let mut st = mocks.state(kind).lock().unwrap();
+        let mut st = mocks.state(kind).lock().unwrap_or_else(|e| e.into_inner());
         if filebox_only {
             if m.expire {
                 let cur = std::mem::take(&mut st.fb.access);
@@ -1847,7 +1913,10 @@ impl Engine {
         if kind == Kind::Ticketdesk {
             // The provider has no secret: whatever is sent is a value it never held.
             let mocks = self.mocks()?;
-            let st = mocks.state(Kind::Ticketdesk).lock().unwrap();
+            let st = mocks
+                .state(Kind::Ticketdesk)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             return Ok(st.td.wrong.clone());
         }
         if kind != Kind::Filebox {
@@ -1858,7 +1927,10 @@ impl Engine {
             ));
         }
         let mocks = self.mocks()?;
-        let st = mocks.state(Kind::Filebox).lock().unwrap();
+        let st = mocks
+            .state(Kind::Filebox)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         match s.which {
             SecretWhich::Current => Ok(st.fb.secret.clone()),
             SecretWhich::Rotated if st.fb.old.is_empty() => Err(Fail::new(
@@ -1878,7 +1950,13 @@ impl Engine {
             self.ctx.conn.ticketdesk_alias.clone(),
             self.connector_mocks.clone(),
         ) {
-            let issued: Vec<String> = mocks.ticketdesk.lock().unwrap().td.issued.clone();
+            let issued: Vec<String> = mocks
+                .ticketdesk
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .td
+                .issued
+                .clone();
             for (n, t) in issued
                 .iter()
                 .enumerate()
@@ -1896,7 +1974,13 @@ impl Engine {
         ) else {
             return;
         };
-        let issued: Vec<String> = mocks.filebox.lock().unwrap().fb.issued.clone();
+        let issued: Vec<String> = mocks
+            .filebox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fb
+            .issued
+            .clone();
         for (n, t) in issued.iter().enumerate().skip(self.ctx.conn.filebox_synced) {
             self.ctx
                 .secrets
@@ -2270,7 +2354,7 @@ impl Engine {
             .insert(format!("{}#refresh", c.id), Secret(refresh.clone()));
         if kind == Some(Kind::Login) {
             let mocks = self.mocks()?;
-            let mut st = mocks.login.lock().unwrap();
+            let mut st = mocks.login.lock().unwrap_or_else(|e| e.into_inner());
             st.refresh.insert(refresh.clone());
             // The graph mock compares bearers with these: a token that expires at once is
             // `stale` from the start, otherwise it is the one in force.
@@ -2791,6 +2875,23 @@ mod tests {
             .iter()
             .flat_map(|l| l.fields.iter())
             .any(|f| f.contains(&access) || f.contains(&refresh)));
+    }
+
+    #[test]
+    fn ticketdesk_logs_a_request_it_does_not_serve() {
+        let m = Mocks::start().unwrap();
+        *m.ticketdesk.lock().unwrap() = State::default();
+        let acme = m.ticketdesk_addr("acme");
+        let r = get(acme, "/.well-known/oauth-authorization-server", "");
+        assert!(r.starts_with("HTTP/1.1 404"), "{r}");
+        let st = m.ticketdesk.lock().unwrap();
+        assert!(
+            st.log
+                .iter()
+                .any(|l| l.path == "/.well-known/oauth-authorization-server"
+                    && l.fields.contains("host=acme")),
+            "a discovery probe is on the record"
+        );
     }
 
     #[test]

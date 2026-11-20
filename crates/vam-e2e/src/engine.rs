@@ -3524,7 +3524,8 @@ impl Engine {
     }
 
     /// [`Self::expect_secret_absent`] for a scenario with no run: the secret (and its companions)
-    /// must be in none of the node's connector, MCP connection and secret listings.
+    /// must be in none of the node's connector, MCP connection and secret listings, as read by the
+    /// bootstrap key and by every identity the scenario created.
     fn expect_secret_absent_without_run(
         &mut self,
         x: &crate::scenario::SecretAbsent,
@@ -3548,24 +3549,31 @@ impl Engine {
                     .map(|(_, v)| v.0.clone()),
             )
             .collect();
+        // The listings filter rows by the caller, so a member's own connection or secret shows only
+        // to that member: every identity the scenario created reads them, besides the bootstrap key.
+        let readers: Vec<Option<String>> = std::iter::once(None)
+            .chain(self.ctx.identities.values().map(|k| Some(k.0.clone())))
+            .collect();
         let mut answered = 0;
-        for path in ["/v1/connectors", "/v1/mcp/connections", "/v1/secrets"] {
-            let r = self.api.get_as(None, path).map_err(conn)?;
-            if !r.ok() {
-                continue;
-            }
-            answered += 1;
-            let mut strings = Vec::new();
-            crate::forms::strings_of(&r.json(), &mut strings);
-            let hit = strings
-                .iter()
-                .find_map(|t| values.iter().find_map(|v| crate::forms::find_form(v, t)));
-            if let Some(form) = hit {
-                return Err(Fail::new(
-                    Class::Product,
-                    what.to_string(),
-                    format!("the {form} form is in the answer of GET {path}"),
-                ));
+        for key in &readers {
+            for path in ["/v1/connectors", "/v1/mcp/connections", "/v1/secrets"] {
+                let r = self.api.get_as(key.as_deref(), path).map_err(conn)?;
+                if !r.ok() {
+                    continue;
+                }
+                answered += 1;
+                let mut strings = Vec::new();
+                crate::forms::strings_of(&r.json(), &mut strings);
+                let hit = strings
+                    .iter()
+                    .find_map(|t| values.iter().find_map(|v| crate::forms::find_form(v, t)));
+                if let Some(form) = hit {
+                    return Err(Fail::new(
+                        Class::Product,
+                        what.to_string(),
+                        format!("the {form} form is in the answer of GET {path}"),
+                    ));
+                }
             }
         }
         // A search that read nothing proves nothing.
