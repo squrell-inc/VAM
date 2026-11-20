@@ -39,7 +39,7 @@ use std::path::Path;
 use vam_spec::connector_listing::{
     connector_id_of_urn, is_reserved_connector_id, placeholders_overlap,
 };
-use vam_spec::marketplace::{urn_domain, NodeRequirement};
+use vam_spec::marketplace::{check_listing, urn_domain, Level, NodeRequirement};
 use vam_spec::package::{check_dir, ArtifactKind, CheckedPackage, CheckedSpec};
 use vam_spec::v1::{AgentSpec, Digest, PlaybookSpec, ResourceRef, SkillManifest, Version};
 
@@ -318,75 +318,22 @@ fn prepare(
             skill,
         });
     }
-    check_templated_skill_hosts(&out, &listing.id)?;
-    check_listing_placeholders(&out, &listing.id)?;
-    // One URN is one artifact.
-    let mut seen = std::collections::BTreeSet::new();
-    for p in &out {
-        if !seen.insert(p.checked.urn.clone()) {
-            return Err(invalid(format!(
-                "listing `{}` names {} twice",
-                listing.id, p.checked.urn
-            )));
-        }
-    }
-    check_listing_connector_ids(&out, &listing.id)?;
+    check_listing_rules(&out, &listing.id)?;
     Ok(out)
 }
 
-/// No two connectors of one listing have the same id (the last segment of the URN): an id names one
-/// connector on the node. Each is compared with the installed connectors at write time
-/// (`admit_connector_id`), but neither of two new ones from one listing is installed yet.
-fn check_listing_connector_ids(
-    prepared: &[Prepared],
-    listing: &str,
-) -> Result<(), OrchestratorError> {
-    let mut ids: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
-    for p in prepared {
-        if !matches!(p.checked.spec, CheckedSpec::Connector(_)) {
-            continue;
-        }
-        let urn = p.checked.urn.as_str();
-        if let Some(first) = ids.insert(connector_id_of_urn(urn), urn) {
-            return Err(invalid(format!(
-                "listing `{listing}`: the connectors {first} and {urn} have the same id `{}`: an id names one connector",
-                connector_id_of_urn(urn)
-            )));
-        }
+/// The listing's own rules, the ones `vam connector validate` runs offline
+/// (`vam_spec::marketplace::check_listing`): the first error is the refusal. A warning is for what
+/// only the offline report says.
+fn check_listing_rules(prepared: &[Prepared], listing: &str) -> Result<(), OrchestratorError> {
+    let packages: Vec<CheckedPackage> = prepared.iter().map(|p| p.checked.clone()).collect();
+    match check_listing(listing, &packages)
+        .into_iter()
+        .find(|f| f.level == Level::Error)
+    {
+        Some(f) => Err(invalid(f.message)),
+        None => Ok(()),
     }
-    Ok(())
-}
-
-/// No two connectors of one listing declare binding placeholders the egress gate cannot tell apart
-/// (the same one, or one inside the other: [`placeholders_overlap`]). Each is compared with the
-/// installed connectors at write time (`admit_connector_id`), but the whole listing is planned
-/// before any of it is inserted, so two of its own connectors would pass that check together.
-fn check_listing_placeholders(
-    prepared: &[Prepared],
-    listing: &str,
-) -> Result<(), OrchestratorError> {
-    let mut seen: Vec<(&str, &str)> = Vec::new();
-    for p in prepared {
-        let CheckedSpec::Connector(def) = &p.checked.spec else {
-            continue;
-        };
-        for b in def.bindings.iter().flatten() {
-            // A connector's own bindings are compared by the file check.
-            if let Some((ph, first)) = seen
-                .iter()
-                .find(|(ph, urn)| *urn != def.urn && placeholders_overlap(ph, &b.placeholder))
-            {
-                return Err(invalid(format!(
-                    "listing `{listing}`: the connectors {first} and {} declare the binding placeholders `{ph}` and `{}`, which the gate cannot tell apart: a placeholder must name one binding",
-                    def.urn, b.placeholder
-                )));
-            }
-        }
-        for b in def.bindings.iter().flatten() {
-            seen.push((b.placeholder.as_str(), def.urn.as_str()));
-        }
-    }
-    Ok(())
 }
 
 /// A deterministic `.tar.gz` of the regular files under `dir` (sorted, no timestamps, no owners),
@@ -745,51 +692,6 @@ struct PlanCtx<'a> {
     owner: &'a str,
     skills: Pins,
     playbooks: Pins,
-}
-
-/// A skill that names a company address host (`{subdomain}.<suffix>`) must require a connector this
-/// listing ships whose own company address has that suffix: a listing cannot aim a skill at a host
-/// its connector does not own (T1, T2).
-fn check_templated_skill_hosts(
-    prepared: &[Prepared],
-    listing_id: &str,
-) -> Result<(), OrchestratorError> {
-    for p in prepared.iter().filter(|p| p.kind == ArtifactKind::Skill) {
-        let hosts: Vec<&str> = p
-            .checked
-            .summary
-            .tools
-            .iter()
-            .flat_map(|t| t.egress.iter().map(|e| e.host.as_str()))
-            .filter(|h| h.contains('{'))
-            .collect();
-        if hosts.is_empty() {
-            continue;
-        }
-        let required = &p.checked.summary.requires_connector;
-        let suffix = prepared.iter().find_map(|c| match &c.checked.spec {
-            CheckedSpec::Connector(def) if &c.checked.urn == required => {
-                def.tenant.as_ref().map(|t| t.suffix.as_str())
-            }
-            _ => None,
-        });
-        for h in hosts {
-            let ok = suffix.is_some_and(|sfx| {
-                vam_spec::connector::templated_suffix(h).is_some_and(|got| got == sfx)
-            });
-            if !ok {
-                return Err(invalid(format!(
-                    "listing `{listing_id}`: skill {} names the host `{h}`, which is not the company address ({}) of the connector it requires: a templated host must be `{{subdomain}}.<suffix>` of the connector the listing ships",
-                    p.checked.urn,
-                    suffix.map_or_else(
-                        || "no connector of this listing with a company address".to_string(),
-                        |sfx| format!("suffix `{sfx}`")
-                    )
-                )));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// SHA-256 of the artifact's capability summary, in words an admin reviewed before installing.

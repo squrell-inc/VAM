@@ -39,4 +39,4 @@ guards:
   - vam:crates/vam-spec/src/skill_egress.rs
   - vam:crates/vam-orchestrator/src/marketplace/import.rs
 status: pending
-expectFail: { step: when.0, class: product }
+expectFail: { step: when.4, class: product }
