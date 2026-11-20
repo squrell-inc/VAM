@@ -6,6 +6,7 @@ pub mod args_digest;
 pub mod build_info;
 pub mod call_check;
 pub mod compaction;
+pub mod connection_envelope;
 pub mod connector;
 pub mod connector_kit;
 pub mod connector_listing;
