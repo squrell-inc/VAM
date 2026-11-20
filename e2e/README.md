@@ -886,7 +886,7 @@ and **single-use rotating refresh tokens** (a spent one answers `invalid_grant`)
 
 ### Skills that call Microsoft Graph as the member
 
-- `mock-provider` with `provider: microsoft-graph` serves `GET /v1.0/me/messages` (two fixed messages) and
+- `mock-provider` with `provider: microsoft-graph` serves `GET /v1.0/me/messages` (two fixed messages, with senders) and
   `POST /v1.0/me/sendMail` (202), and 404 for the rest. It answers 401 unless the bearer is the login mock's current
   access token. It logs `method=<verb>` and `bearer=current|stale|placeholder|unknown|none` per request, never a value.
   The login mock tracks the token a connect or a refresh made current; a token handed over with `expiresIn: 0` is

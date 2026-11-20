@@ -25,7 +25,8 @@ $$\text{vam} \cdot \text{v1} \cdot \langle\text{domain}\rangle \cdot \langle\tex
 | `vam.v1.inbox.discarded` | Host Orchestrator | A stop or cancel dropped a message the task never read. | inbox record (with text) |
 | `vam.v1.inbox.started` | Host Orchestrator | A queued message began its task. | inbox record |
 | `vam.v1.outbox.message` | Host Orchestrator | The agent posted text with `post_message`. | `{text}` |
-| `vam.v1.outbox.card` | Host Orchestrator | The agent showed a jig card with `show`. | `{jig, data, card_id?}` |
+| `vam.v1.outbox.card` | Host Orchestrator | The agent showed a jig card with `show`, or the host attached a skill tool's `ui.show` card to its result (`source: "tool"`). A tool result over 16 KiB keeps the first rows of the list the card binds, the IR says "and N more", and `trimmed` records the counts. | `{jig, data, card_id?}`; a tool card adds `{ir, tool, callId, skill, source, trimmed?: {path, total, kept}}` |
+| `vam.v1.card.skipped` | Host Orchestrator | A skill tool's `ui.show` card was not attached; the tool result is unchanged. | `{tool, callId, reason}`: `card_unavailable`, `result_not_an_object`, `result_does_not_fit`, `result_too_large` (no bound list to cut, or one row over 16 KiB), `rate_limited` |
 | `vam.v1.tool.invoked` | Host Orchestrator (PEP) | Tool accepted into Cedar evaluate. | `ToolInvokedPayload` (digest + optional path; optional CAS + preview) |
 | `vam.v1.policy.decided` | Host Orchestrator (PEP) | Cedar disposition for a tool intent. | `PolicyDecidedPayload` |
 | `vam.v1.skill.loaded` | Host Orchestrator (PEP) | Authorized `load_skill`. | `SkillLoadedPayload` |
