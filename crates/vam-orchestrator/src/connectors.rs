@@ -272,6 +272,17 @@ pub fn entries_in(c: &Connection) -> Result<Vec<ConnectorEntry>, OrchestratorErr
     Ok(out)
 }
 
+/// `e` with its definition filled from the published template and `node`'s company address: a
+/// response that shows `node` renders its hosts, endpoints, bindings and capabilities from the same
+/// row, never from a definition another read resolved.
+pub fn entry_for_node(e: &ConnectorEntry, node: Option<&NodeConnector>) -> ConnectorEntry {
+    ConnectorEntry {
+        def: resolve(&e.template, node.and_then(|n| n.tenant_subdomain.as_deref())),
+        template: e.template.clone(),
+        installed: e.installed.clone(),
+    }
+}
+
 /// The connector as the node uses it: `{subdomain}` filled with the node's company address. The
 /// only way code reads a templated definition. With no address the endpoints and bindings are
 /// gone and the MCP URL is still templated (see [`url_needs_address`]).
@@ -3505,6 +3516,34 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(e, OrchestratorError::InvalidContract(_)));
+    }
+
+    #[test]
+    fn an_entry_shows_the_hosts_of_the_node_row_it_shows_not_of_a_later_read() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        crate::connector_client::test_support::install_company_address_rows(&store);
+        let row = |sub: &str| NodeConnector {
+            connector_id: "zendesk".into(),
+            enabled: true,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            tenant_subdomain: Some(sub.into()),
+            updated_at: 1,
+            updated_by: "a".into(),
+        };
+        // GET read the node row at `acme`; an admin saved `globex` before it read the entries.
+        let shown_row = row("acme");
+        store.put_node_connector(&row("globex")).unwrap();
+        let later = store.connector_entry("zendesk").unwrap().unwrap();
+        let e = entry_for_node(&later, Some(&shown_row));
+        let mut entry = list_entry(&e.def, &ConnectorConfig::default(), Some(&shown_row), None, true);
+        annotate_source(&mut entry, &e, true);
+        let text = entry.to_string();
+        assert_eq!(entry["node"]["tenant"]["subdomain"], "acme");
+        assert!(text.contains("acme.zendesk.com"), "{text}");
+        assert!(!text.contains("globex"), "a host of another read is shown: {text}");
+        assert_eq!(e.template, later.template);
     }
 
     #[test]

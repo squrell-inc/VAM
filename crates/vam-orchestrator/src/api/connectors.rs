@@ -60,9 +60,12 @@ async fn list_connectors(
         .connector_entries()?
         .iter()
         .map(|e| {
-            let def = &e.def;
             let id = e.id();
             let node = nodes.iter().find(|n| n.connector_id == id);
+            // The entries were read after the node rows: an address saved in between filled them
+            // with another company. Every host shown is filled from the row this entry shows.
+            let e = &connectors::entry_for_node(e, node);
+            let def = &e.def;
             let client = clients.iter().find(|c| c.connector_id == id);
             let (mine, account) = caller_connection_state(&state, &auth, &id, node, client);
             let mut entry = connectors::list_entry(def, &cfg, node, mine, admin);
