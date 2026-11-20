@@ -1,0 +1,38 @@
+{
+  "urn": "urn:vam:connector:{{domain}}/community/{{id}}",
+  "version": "1.0.0",
+  "displayName": "{{name}}",
+  "publisher": "{{domain}}",
+  "description": "{{description}}",
+  "icon": "{{icon}}",
+  "provider": {
+    "kind": "oauth2",
+    "profile": "oauth",
+    "client": "org",
+    "clientSecret": "none",
+    "endpoints": {
+      "authorize": "https://{{host}}/oauth/authorize",
+      "token": "https://{{host}}/oauth/token"
+    },
+    "scopes": [
+      "read"
+    ],
+    "orgConsent": "none"
+  },
+  {{tenant}}"connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "none"
+  },
+  "bindings": [
+    {
+      "name": "api",
+      "placeholder": "vamsec_{{id}}_api",
+      "value": "access_token",
+      "inject": "bearer",
+      "hosts": [
+        "{{host}}"
+      ]
+    }
+  ]
+}

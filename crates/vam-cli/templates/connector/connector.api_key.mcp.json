@@ -1,0 +1,31 @@
+{
+  "urn": "urn:vam:connector:{{domain}}/community/{{id}}",
+  "version": "1.0.0",
+  "displayName": "{{name}}",
+  "publisher": "{{domain}}",
+  "description": "{{description}}",
+  "icon": "{{icon}}",
+  "provider": {
+    "kind": "api_key",
+    "fields": [
+      {
+        "name": "key",
+        "label": "{{name}} API key"
+      }
+    ]
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "none"
+  },
+  "mcp": {
+    "url": "{{mcpUrl}}",
+    "tools": [
+      {
+        "remote": "list_items",
+        "sideEffect": "READ_ONLY"
+      }
+    ]
+  }
+}

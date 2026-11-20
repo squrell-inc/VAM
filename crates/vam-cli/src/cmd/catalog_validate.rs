@@ -40,7 +40,7 @@ pub fn run(dir: &str, strict: bool, kind: Option<&str>) -> Result<()> {
     } else {
         check_one(path, kind)?
     };
-    present(&report, strict)
+    present(&report, strict, "ok      ")
 }
 
 fn check_one(path: &Path, kind: Option<&str>) -> Result<MarketplaceReport> {
@@ -95,7 +95,9 @@ fn finding_line(f: &Finding) -> String {
     }
 }
 
-fn present(report: &MarketplaceReport, strict: bool) -> Result<()> {
+/// Print the report and decide the exit code. `ok` starts each line of an artifact that passed
+/// (`vam catalog validate` pads it to the width of `error  `; `vam connector validate` does not).
+pub(super) fn present(report: &MarketplaceReport, strict: bool, ok: &str) -> Result<()> {
     let errors = report.errors();
     let warnings = report.warnings();
     let failed = errors > 0 || (strict && warnings > 0);
@@ -125,7 +127,7 @@ fn present(report: &MarketplaceReport, strict: bool) -> Result<()> {
         println!("{}", finding_line(f));
     }
     for a in &report.artifacts {
-        println!("ok      {} {}", a.kind.as_str(), a.urn);
+        println!("{ok}{} {}", a.kind.as_str(), a.urn);
     }
     println!("{summary}");
     if failed {

@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod catalog_import;
 pub mod catalog_validate;
 pub mod config;
+pub mod connector_kit;
 pub mod connectors;
 pub mod dock;
 mod dry_run;

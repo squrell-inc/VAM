@@ -19,15 +19,50 @@ pub enum ConnectorsCmd {
     },
     /// PUT /v1/connectors/<id>/node disabled (org admin). Consent and members' connections stay.
     Disable { id: String },
-    /// DELETE /v1/connectors/<id>/connection: remove your own Microsoft 365 connection (its
-    /// tokens and account). Reconnecting is done in the app.
+    /// DELETE /v1/connectors/<id>/connection: remove your own connection to a connector (its
+    /// tokens and account). Reconnecting is done in the app. A remote MCP connector is removed with
+    /// `vam mcp disconnect`.
     Disconnect { id: String },
-    /// POST /v1/connectors/<id>/connection/check: one refresh at the consented tenant. Prints
-    /// `connected`, or `needsReconnect` when Microsoft refused the saved grant.
+    /// POST /v1/connectors/<id>/connection/check: one refresh of your own connection. Prints
+    /// `connected`, or `needsReconnect` when the provider refused the saved grant.
     Check { id: String },
+    /// Write a new connector, offline: a marketplace root with the connector, a skill with one read
+    /// tool (REST), an assistant and a test file, which pass `validate` as written. The directory
+    /// must be new or empty (a `.keep` is fine).
+    Init(super::connector_kit::InitArgs),
+    /// Check a marketplace root or one listing (`listings/<id>`), offline: what an install on a node
+    /// would refuse, said before the connector is published. One line per finding; exit code 6 on
+    /// an error (and on a warning with --strict).
+    Validate {
+        /// A marketplace root, or a listing directory under one.
+        dir: String,
+        /// Treat warnings as failures (marketplace CI).
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Run a listing's tools against the mock its test file declares, offline. Not available yet.
+    Test {
+        /// A marketplace root, or a listing directory under one.
+        dir: String,
+        /// The listing to test, when the root has several.
+        #[arg(long)]
+        listing: Option<String>,
+        /// The sample company address label for a connector with one.
+        #[arg(long)]
+        subdomain: Option<String>,
+    },
 }
 
 pub async fn run(host: Option<String>, token: Option<String>, cmd: ConnectorsCmd) -> Result<()> {
+    // The kit works on files and needs no node, host or key.
+    let cmd = match cmd {
+        ConnectorsCmd::Init(args) => return super::connector_kit::init(&args),
+        ConnectorsCmd::Validate { dir, strict } => {
+            return super::connector_kit::validate(&dir, strict)
+        }
+        ConnectorsCmd::Test { dir, .. } => return super::connector_kit::test(&dir),
+        other => other,
+    };
     let cfg = config::resolve(host, token).await?;
     let c = Client::new(&cfg)?;
     match cmd {
@@ -63,6 +98,9 @@ pub async fn run(host: Option<String>, token: Option<String>, cmd: ConnectorsCmd
             let key = client::resolve_idempotency_key(None);
             let out = c.post_raw_json(&path, "{}", &key).await?;
             print_state_then_json(&out);
+        }
+        ConnectorsCmd::Init(_) | ConnectorsCmd::Validate { .. } | ConnectorsCmd::Test { .. } => {
+            unreachable!("handled before the node is resolved")
         }
     }
     Ok(())

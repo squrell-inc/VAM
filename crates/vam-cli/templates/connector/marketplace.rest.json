@@ -1,0 +1,27 @@
+{
+  "name": "{{name}} listings",
+  "publisherDomain": "{{domain}}",
+  "listings": [
+    {
+      "id": "{{id}}",
+      "displayName": "{{name}}",
+      "description": "{{description}}",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/{{id}}/connector"
+        },
+        {
+          "kind": "skill",
+          "path": "listings/{{id}}/skills/{{skill}}"
+        },
+        {
+          "kind": "agent",
+          "path": "listings/{{id}}/agents/{{agent}}"
+        }
+      ],
+      "ref": "{{id}}-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    }
+  ]
+}

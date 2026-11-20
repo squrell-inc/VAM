@@ -1,0 +1,17 @@
+{
+  "spec": {
+    "resourceId": {
+      "urn": "urn:vam:agent:{{domain}}/community/{{agent}}"
+    },
+    "displayName": "{{name}} assistant",
+    "description": "Works with the member's {{name}} items through the connector's MCP tools.",
+    "role": "{{name}} assistant",
+    "systemInstructions": "Use the {{name}} tools to answer. Read freely and ask before anything changes. Be brief and finish with task_complete.",
+    "allowAnyPlaybook": true,
+    "permissions": {
+      "tools": {
+        "default": "ask"
+      }
+    }
+  }
+}

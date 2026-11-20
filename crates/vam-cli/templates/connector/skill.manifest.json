@@ -1,0 +1,36 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:skill:{{domain}}/community/{{skill}}"
+  },
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "description": "List the member's {{name}} items",
+  "requiresConnector": "urn:vam:connector:{{domain}}/community/{{id}}",
+  "tools": [
+    {
+      "name": "{{tool}}",
+      "description": "Lists items (GET /v1/items)",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "{{command}}",
+        "entrypoint": "./{{entry}}"
+      },
+      "egress": [
+        {
+          "binding": "api",
+          "host": "{{host}}",
+          "methods": [
+            "GET"
+          ],
+          "pathPrefixes": [
+            "/v1/items"
+          ]
+        }
+      ]
+    }
+  ]
+}
