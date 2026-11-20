@@ -22,9 +22,9 @@ use vam_orchestrator::workflow::SqliteWorkflowStore;
 use vam_security::ssrf_guard::HostResolver;
 use vam_security::PolicyMode;
 use vam_spec::v1::{
-    AgentPermissions, AgentSpec, ExecuteHostToolRequest, ExecuteHostToolResponse, ExecutionLease,
-    HostDefault, InternetPermissions, PutHostedBrokerRequest, ResourceId, ToolIntentRequest,
-    WebPermissions,
+    AgentPermissions, AgentSpec, CapabilityManifest, ExecuteHostToolRequest,
+    ExecuteHostToolResponse, ExecutionLease, HostDefault, InternetPermissions, ResourceId,
+    ToolIntentRequest, WebPermissions,
 };
 use vam_spec::validation::host_tool_digest;
 use vam_web::fetch::FixtureFetcher;
@@ -40,7 +40,7 @@ const FIXTURES: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../scripts/bench/fixtures/web"
 );
-const MANIFEST: &str = include_str!("../../../scripts/web-broker/manifest.json");
+const MANIFEST: &str = include_str!("../../../brokers/vam-web/manifest.json");
 
 struct PublicDns;
 impl HostResolver for PublicDns {
@@ -91,9 +91,8 @@ struct Fx {
 
 async fn fixture(web: bool) -> Fx {
     let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
-    let request: PutHostedBrokerRequest =
-        vam_spec::encoding::json_to_proto("vam.v1.PutHostedBrokerRequest", MANIFEST).unwrap();
-    let manifest = request.manifest.unwrap();
+    let manifest: CapabilityManifest =
+        vam_spec::encoding::json_to_proto("vam.v1.CapabilityManifest", MANIFEST).unwrap();
     assert_eq!(manifest.broker_id, BROKER);
     store.upsert_hsp_broker_approval(&manifest).unwrap();
 

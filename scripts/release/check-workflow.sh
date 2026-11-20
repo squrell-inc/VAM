@@ -169,6 +169,15 @@ check_release_build() { # <json>: the reusable build workflow
   jq -e '[.jobs[] | .container? // empty | (if type == "object" then (.credentials? != null or .env? != null or .options? != null) else false end)] | any | not' <<< "$j" >/dev/null || err "a job container takes no credentials, env or options (no secrets in builds, no privileged flags)"
   jq -e '[.jobs[] | .steps[]? | select((.uses? // "") | startswith("actions/upload-artifact@")) | select((.with["retention-days"]? == null) or (.with["retention-days"] > 30))] | length == 0' <<< "$j" >/dev/null || err "upload-artifact needs retention-days, 30 at most (build-only runs leave short-lived artifacts)"
   jq -e '[.jobs[] | .steps[]? | select((.uses? // "") | startswith("actions/upload-artifact@")) | select(.with["if-no-files-found"]? != "error")] | length == 0' <<< "$j" >/dev/null || err "upload-artifact must set if-no-files-found: error (a missing asset fails the run)"
+  # install-smoke: the shipped install.sh, from the release-<version> artifact, on Linux and macOS
+  jq -e '.jobs | has("install-smoke")' <<< "$j" >/dev/null || { err "no install-smoke job (it runs install.sh on Linux and macOS against this run's assets)"; return; }
+  jq -e '.jobs["install-smoke"].needs | (if type == "string" then [.] else . end) | index("assemble") != null' <<< "$j" >/dev/null 2>&1 || err "install-smoke must need assemble (it installs from the release-<version> artifact)"
+  jq -e '.jobs["install-smoke"].strategy.matrix.os | sort == ["macos-15", "ubuntu-24.04"]' <<< "$j" >/dev/null 2>&1 || err "install-smoke must run on exactly ubuntu-24.04 and macos-15"
+  jq -e '.jobs["install-smoke"]["runs-on"] == "${{ matrix.os }}"' <<< "$j" >/dev/null 2>&1 || err "install-smoke must run on matrix.os"
+  jq -e '[.jobs["install-smoke"].steps[] | select((.uses? // "") | startswith("actions/download-artifact@")) | .with.name | tostring | startswith("release-")] | any' <<< "$j" >/dev/null || err "install-smoke must download the release-<version> artifact (the installer it tests is the one that ships)"
+  jq -e '[.jobs["install-smoke"].steps[] | select(.run? != null) | .run | select(contains("/bin/sh release/install.sh")) | contains("/bin/sh release/install.sh --from")] | (length > 0) and all' <<< "$j" >/dev/null || err "install-smoke must run every /bin/sh release/install.sh with --from <the downloaded release> (no download from GitHub releases)"
+  jq -e '[.jobs["install-smoke"].steps[] | select(.run? != null) | .run | contains("undock")] | any' <<< "$j" >/dev/null || err "install-smoke must run vam undock"
+  jq -e '[.jobs["install-smoke"].steps[] | select((.uses? // "") | startswith("actions/checkout@"))] | length == 0' <<< "$j" >/dev/null || err "install-smoke must not check out the repository (it tests the release's own install.sh)"
 }
 
 check_rust() { # <json>: guard 3 needs a complete push run on every merge into main

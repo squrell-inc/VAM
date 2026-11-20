@@ -13,6 +13,7 @@ pub mod events;
 pub mod forms;
 pub mod lint;
 pub mod mock;
+pub mod release_server;
 pub mod report;
 pub mod run_cmd;
 pub mod runner;

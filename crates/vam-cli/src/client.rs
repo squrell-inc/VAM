@@ -23,11 +23,27 @@ pub struct Client {
 
 impl Client {
     pub fn new(cfg: &ResolvedConfig) -> Result<Self> {
+        Self::with_builder(cfg, crate::transport::client_builder()?)
+    }
+
+    /// A client that trusts `ca` (a node's own certificate) instead of the configured CA file;
+    /// `None` falls back to the configured one.
+    pub fn new_with_ca(cfg: &ResolvedConfig, ca: Option<&std::path::Path>) -> Result<Self> {
+        match ca {
+            Some(p) => Self::with_builder(
+                cfg,
+                crate::transport::client_builder_with(Some(p.to_path_buf()))?,
+            ),
+            None => Self::new(cfg),
+        }
+    }
+
+    fn with_builder(cfg: &ResolvedConfig, builder: reqwest::ClientBuilder) -> Result<Self> {
         crate::transport::warn_cleartext(&cfg.host, "API key");
         Ok(Self {
             base: cfg.host.trim_end_matches('/').to_string(),
             api_key: cfg.api_key.clone(),
-            http: crate::transport::client_builder()?
+            http: builder
                 .default_headers(surface_headers())
                 .build()
                 .context("build HTTP client")?,

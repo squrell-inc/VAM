@@ -19,12 +19,12 @@ expect_eq "draft passes" 0 "$T_RC"
 expect_match "the draft is created at the commit, as a draft, titled, a pre-release and not latest" \
   "release create v0\.1\.0-rc\.1 --repo acme/vam --target $C1 --draft --title v0\.1\.0-rc\.1 --notes-file .*RELEASE_NOTES\.md --prerelease --latest=false" "$(calls)"
 expect_eq "the draft's id is recorded" "100" "$(cat "$W/state/release-id")"
-expect_eq "every file is uploaded (assets, SHA256SUMS, notes)" "8" "$(jq '.[0].assets | length' "$W/gh/releases.json")"
+expect_eq "every file is uploaded (assets, SHA256SUMS, notes)" "9" "$(jq '.[0].assets | length' "$W/gh/releases.json")"
 expect_eq "the release is a draft" "true" "$(jq -r '.[0].draft' "$W/gh/releases.json")"
 expect_eq "no tag exists yet" "0" "$(jq length "$W/gh/tags.json")"
 ver draft
 expect_eq "the draft verifies" 0 "$T_RC"
-expect_eq "eight attestation checks" "8" "$(calls | grep -c 'attestation verify /')"
+expect_eq "nine attestation checks" "9" "$(calls | grep -c 'attestation verify /')"
 expect_match "each names the repository, the signer workflow and main" "attestation verify .* -R acme/vam --signer-workflow acme/vam/\.github/workflows/release\.yml --source-ref refs/heads/main" "$(calls)"
 expect_nomatch "no source digest is demanded (the dispatch commit is not the released commit)" "--source-digest" "$(calls)"
 pub publish
@@ -34,7 +34,7 @@ expect_eq "the release is public" "false" "$(jq -r '.[0].draft' "$W/gh/releases.
 expect_eq "GitHub created the tag at the commit" "$C1" "$(jq -r '.[0].object.sha' "$W/gh/tags.json")"
 run_cmd env "$verify" release --dir "$DIST"
 expect_eq "the published release verifies" 0 "$T_RC"
-expect_eq "gh release verify-asset runs once per file" "8" "$(calls | grep -c 'release verify-asset v[^ ]* /')"
+expect_eq "gh release verify-asset runs once per file" "9" "$(calls | grep -c 'release verify-asset v[^ ]* /')"
 expect_match "gh release verify runs on the tag" "release verify v0\.1\.0-rc\.1 -R acme/vam" "$(calls)"
 
 echo "the happy path, a final"
@@ -95,7 +95,7 @@ art "build-info naming another version" "build-info.json names version" "$(bi 0.
 art "a missing build-info.json" "build-info.json is missing" "rm build-info.json"
 art "a tampered asset" "SHA256SUMS does not verify" "echo tamper >> vam-0.1.0-rc.1-aarch64-apple-darwin.tar.gz"
 art "a missing asset" "does not hold exactly the expected files" "rm vam-runtime-0.1.0-rc.1-x86_64-unknown-linux-musl"
-art "an extra file" "does not hold exactly the expected files.*install\.sh" "echo x > install.sh"
+art "an extra file" "does not hold exactly the expected files.*extra\.bin" "echo x > extra.bin"
 art "an empty asset" "missing, empty or not a regular file" ": > vam-runtime-0.1.0-rc.1-x86_64-unknown-linux-musl; sha256sum vam-runtime-0.1.0-rc.1-x86_64-unknown-linux-musl >/dev/null"
 art "SHA256SUMS missing an entry" "does not list exactly the release assets" "sed -i '1d' SHA256SUMS"
 art "notes of another tag" "not the notes of v0\.1\.0-rc\.1" "echo '# VAM v9.9.9' > RELEASE_NOTES.md"
@@ -205,13 +205,21 @@ new_world; pub check; pub draft
 ver draft FAKE_ATTEST_FAIL_NAME=vam-runtime-0.1.0-rc.1-x86_64-unknown-linux-musl
 expect_eq "a missing attestation fails the draft verification" 1 "$T_RC"
 expect_match "naming the file" "vam-runtime-0\.1\.0-rc\.1.*gh attestation verify failed" "$T_OUT"
+new_world; pub check; pub draft FAKE_LIST_LAG=3
+expect_eq "a draft the release list shows only on the fourth look is found" 0 "$T_RC"
+expect_match "…after saying it is not listed yet" "not listed yet \(attempt 3 of 12\)" "$T_OUT"
+[ -s "$W/state/release-id" ] && ok "…and its id is recorded" || bad "no release id recorded after the lagging list"
+new_world; pub check; pub draft FAKE_LIST_LAG=99 PUBLISH_FIND_TRIES=4
+expect_eq "a draft the list never shows fails after the tries" 1 "$T_RC"
+expect_match "…saying found 0 and to inspect the draft" "found 0; nothing is recorded, inspect the draft by hand" "$T_OUT"
+expect_eq "…after four listings of the releases following the create" "4" "$(calls | sed -n '/release create/,$p' | grep -c 'releases?per_page')"
 new_world; pub check; pub draft
 ver draft FAKE_ATTEST_FLAKY=2
 expect_eq "an attestation that appears on the third try passes" 0 "$T_RC"
 new_world; pub check; pub draft
 ver draft FAKE_ATTEST_FLAKY=99
 expect_eq "one that never appears fails after three tries" 1 "$T_RC"
-expect_eq "three tries for each of the eight files" "24" "$(calls | grep -c 'attestation verify /')"
+expect_eq "three tries for each of the nine files" "27" "$(calls | grep -c 'attestation verify /')"
 
 echo "a failure after publish never deletes"
 prepare_draft; pub publish
