@@ -323,6 +323,17 @@ pub fn resolve_connection_auth(
     }
 }
 
+/// How [`SqliteWorkflowStore::upsert_mcp_connection_guarded`] treats a row's sign-in columns
+/// (`auth_mode`, `oauth_metadata_json`).
+#[derive(Debug, Clone, Copy)]
+pub enum McpAuthWrite<'a> {
+    /// A settings-only write: an existing row keeps its sign-in columns as stored.
+    Keep,
+    /// The write sets the sign-in columns; `observed` is the row the request read (none for a new
+    /// connection), which the stored sign-in state must still equal.
+    Replace { observed: Option<&'a McpConnection> },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpConnection {
     pub connection_id: String,
@@ -2440,6 +2451,7 @@ fn write_mcp_connection_row(
     tools: &[McpTool],
     auth_mode: McpAuthMode,
     oauth: Option<&McpOauthMetadata>,
+    keep_auth: bool,
 ) -> Result<(), OrchestratorError> {
     validate_connection_id(connection_id)?;
     let oauth = match auth_mode {
@@ -2477,8 +2489,17 @@ fn write_mcp_connection_row(
     let oauth_json = oauth_metadata_json(oauth.as_ref())?;
     let now = now_secs();
     // `timeout_ms` is omitted: a new row takes the column default
-    // (120000) and a reconnect or refresh keeps the stored value.
-    connection.execute(
+    // (120000) and a reconnect or refresh keeps the stored value. With `keep_auth` an existing
+    // row keeps its auth mode and OAuth metadata as stored (a settings-only write must not put
+    // back a sign-in state it read before another writer changed it).
+    let sign_in_columns = if keep_auth {
+        ""
+    } else {
+        ",
+            auth_mode = excluded.auth_mode,
+            oauth_metadata_json = excluded.oauth_metadata_json"
+    };
+    let sql = format!(
         "INSERT INTO mcp_connections (
             connection_id, owner_user_id, scope, url, secret_binding_id,
             tools_snapshot_json, created_at, updated_at, header_bindings_json,
@@ -2489,9 +2510,10 @@ fn write_mcp_connection_row(
             secret_binding_id = excluded.secret_binding_id,
             tools_snapshot_json = excluded.tools_snapshot_json,
             updated_at = excluded.updated_at,
-            header_bindings_json = excluded.header_bindings_json,
-            auth_mode = excluded.auth_mode,
-            oauth_metadata_json = excluded.oauth_metadata_json",
+            header_bindings_json = excluded.header_bindings_json{sign_in_columns}"
+    );
+    connection.execute(
+        &sql,
         params![
             connection_id,
             owner,
@@ -2842,7 +2864,79 @@ impl SqliteWorkflowStore {
                 tools,
                 auth_mode,
                 oauth,
+                false,
             )?;
+        }
+        self.get_mcp_connection(scope, &owner, connection_id)
+    }
+
+    /// The connect route's write of a member's row: as [`Self::upsert_mcp_connection`], with the
+    /// row's sign-in state guarded by `auth`, checked and written under one store lock in one
+    /// transaction. [`McpAuthWrite::Keep`] leaves the stored auth mode and OAuth metadata
+    /// unchanged (a settings-only write); [`McpAuthWrite::Replace`] writes them, and when it names
+    /// the row the request observed, refuses (409) if the stored auth mode or OAuth metadata no
+    /// longer equal what was observed (another writer, such as an admin's client save marking the
+    /// row for reconnect, changed it since).
+    #[allow(clippy::too_many_arguments)] // same flat shape as `upsert_mcp_connection`
+    pub fn upsert_mcp_connection_guarded(
+        &self,
+        scope: SecretScope,
+        owner_user_id: &str,
+        connection_id: &str,
+        url: &str,
+        header_bindings: &[HeaderBinding],
+        tools: &[McpTool],
+        auth_mode: McpAuthMode,
+        oauth: Option<&McpOauthMetadata>,
+        auth: McpAuthWrite<'_>,
+    ) -> Result<McpConnection, OrchestratorError> {
+        let owner = vault_owner_user_id(scope, owner_user_id).to_string();
+        {
+            let mut connection = self
+                .connection
+                .lock()
+                .map_err(|_| OrchestratorError::StorageUnavailable)?;
+            let tx = connection.transaction()?;
+            if let McpAuthWrite::Replace {
+                observed: Some(observed),
+            } = auth
+            {
+                let stored: Option<(String, String)> = tx
+                    .query_row(
+                        "SELECT auth_mode, oauth_metadata_json FROM mcp_connections
+                         WHERE scope = ?1 AND owner_user_id = ?2 AND connection_id = ?3",
+                        params![scope.as_str(), owner, connection_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                let same = match stored {
+                    None => false,
+                    Some((mode, json)) => {
+                        let mode = McpAuthMode::parse(&mode)?;
+                        mode == observed.auth_mode
+                            && parse_oauth_metadata_json(&json, mode)? == observed.oauth
+                    }
+                };
+                if !same {
+                    return Err(OrchestratorError::Conflict(format!(
+                        "the connection `{connection_id}` changed while this request waited: read it again and retry"
+                    )));
+                }
+            }
+            write_mcp_connection_row(
+                &tx,
+                scope,
+                owner_user_id,
+                connection_id,
+                url,
+                "",
+                header_bindings,
+                tools,
+                auth_mode,
+                oauth,
+                matches!(auth, McpAuthWrite::Keep),
+            )?;
+            tx.commit()?;
         }
         self.get_mcp_connection(scope, &owner, connection_id)
     }
@@ -2900,6 +2994,7 @@ impl SqliteWorkflowStore {
                 c.tools,
                 McpAuthMode::Oauth,
                 Some(c.oauth),
+                false,
             )?;
             for (binding_id, sealed, host) in [
                 (
@@ -4827,6 +4922,88 @@ forbid (
             last_refresh_at: None,
             last_refresh_error: None,
         }
+    }
+
+    #[test]
+    fn a_guarded_connect_write_keeps_or_checks_the_sign_in_state_another_writer_changed() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        let url = "https://mcp.example.com/mcp";
+        let write = |meta: &McpOauthMetadata| {
+            store
+                .upsert_mcp_connection(
+                    SecretScope::User,
+                    "ada",
+                    "guarded",
+                    url,
+                    "",
+                    &[],
+                    &[],
+                    McpAuthMode::Oauth,
+                    Some(meta),
+                )
+                .unwrap()
+        };
+        let observed = write(&sample_oauth_meta());
+        // Meanwhile an admin's save marks the row for reconnect.
+        let mut marked = sample_oauth_meta();
+        marked.status = McpOauthStatus::NeedsReauth;
+        write(&marked);
+        // A settings-only write carrying the observed (connected) state leaves the mark.
+        let kept = store
+            .upsert_mcp_connection_guarded(
+                SecretScope::User,
+                "ada",
+                "guarded",
+                url,
+                &[],
+                &[tool("t")],
+                McpAuthMode::Oauth,
+                observed.oauth.as_ref(),
+                McpAuthWrite::Keep,
+            )
+            .unwrap();
+        assert_eq!(kept.oauth.unwrap().status, McpOauthStatus::NeedsReauth);
+        assert_eq!(kept.tools.len(), 1, "the settings write itself landed");
+        // A write that changes the sign-in, made against the stale observation, is refused.
+        let mut fresh = sample_oauth_meta();
+        fresh.client_id = "client-456".into();
+        let err = store
+            .upsert_mcp_connection_guarded(
+                SecretScope::User,
+                "ada",
+                "guarded",
+                url,
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&fresh),
+                McpAuthWrite::Replace {
+                    observed: Some(&observed),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, OrchestratorError::Conflict(_)), "{err:?}");
+        let row = store
+            .get_mcp_connection(SecretScope::User, "ada", "guarded")
+            .unwrap();
+        assert_eq!(row.oauth.as_ref().unwrap().status, McpOauthStatus::NeedsReauth);
+        // Against the current state it is written.
+        let done = store
+            .upsert_mcp_connection_guarded(
+                SecretScope::User,
+                "ada",
+                "guarded",
+                url,
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&fresh),
+                McpAuthWrite::Replace {
+                    observed: Some(&row),
+                },
+            )
+            .unwrap();
+        assert_eq!(done.oauth.unwrap().client_id, "client-456");
     }
 
     #[test]

@@ -1702,6 +1702,72 @@ fn refresh_connection(
     }
 }
 
+/// Named one-shot signals a handler fires at a point a test must wait for (for example "the
+/// exchange has read the client and is about to wait for the member's lock"). Test builds only:
+/// an unarmed signal is a no-op.
+#[cfg(test)]
+pub(crate) mod test_signal {
+    use std::collections::HashMap;
+    use std::sync::{mpsc, Mutex, OnceLock};
+
+    fn slots() -> &'static Mutex<HashMap<String, mpsc::Sender<()>>> {
+        static SLOTS: OnceLock<Mutex<HashMap<String, mpsc::Sender<()>>>> = OnceLock::new();
+        SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Arms `name`; the receiver gets one message when a handler fires it.
+    pub(crate) fn arm(name: &str) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        slots()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), tx);
+        rx
+    }
+
+    type Pause = (mpsc::Sender<()>, tokio::sync::oneshot::Receiver<()>);
+
+    fn pauses() -> &'static Mutex<HashMap<String, Pause>> {
+        static PAUSES: OnceLock<Mutex<HashMap<String, Pause>>> = OnceLock::new();
+        PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Arms a pause at `name`: the first receiver gets a message when a handler reaches it, and
+    /// the handler waits there until the sender is used (or dropped).
+    pub(crate) fn arm_pause(name: &str) -> (mpsc::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+        let (arrived_tx, arrived_rx) = mpsc::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        pauses()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), (arrived_tx, release_rx));
+        (arrived_rx, release_tx)
+    }
+
+    /// Waits at `name` if a test armed a pause there; otherwise returns at once.
+    pub(crate) async fn pause(name: &str) {
+        let armed = pauses()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        if let Some((arrived, release)) = armed {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
+
+    /// Fires `name` once, if a test armed it.
+    pub(crate) fn fire(name: &str) {
+        let tx = slots()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        if let Some(tx) = tx {
+            let _ = tx.send(());
+        }
+    }
+}
+
 /// Serialises writes to one user's connection to one connector (a check against a disconnect
 /// must not bring the rows back).
 pub(crate) async fn lock_connection(owner: &str, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
