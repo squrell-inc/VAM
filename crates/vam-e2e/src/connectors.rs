@@ -263,6 +263,10 @@ pub struct MockProviderStep {
     /// Filebox only: the provider's client secret changes; the old one is refused.
     #[serde(default)]
     pub rotate_secret: bool,
+    /// Graph only: the mailbox list (`GET /v1.0/me/messages` without `$search`) answers this many
+    /// messages of a real mailbox's size (152-character ids, a named sender, a 255-character
+    /// preview), newest first, at most `$top`. Unset: the two short fixture messages.
+    pub mailbox: Option<usize>,
     /// Ticketdesk only: access tokens issued from now on live 60 s (`expires_in: 60`), inside the
     /// node's swap window, so every call refreshes first.
     #[serde(default)]
@@ -330,6 +334,8 @@ struct State {
     refresh: BTreeSet<String>,
     /// Graph: `sendMail` is logged and then held until released.
     hold: bool,
+    /// Graph: the mailbox list answers this many full-size messages (`None`: the fixture two).
+    mailbox: Option<usize>,
     /// Filebox: the provider's own state.
     fb: Filebox,
     /// Ticketdesk: the provider's own state.
@@ -546,6 +552,33 @@ fn serve_graph(listener: TcpListener, state: Arc<Mutex<State>>, login: Arc<Mutex
     });
 }
 
+/// One message as a real mailbox lists it: a 152-character id (Graph's length), a named sender,
+/// a 255-character preview. Message `i` is "Mailbox message <i>".
+fn full_size_message(i: usize) -> Value {
+    let id = format!("AAMkAGI2{i:04}{}", "A".repeat(140));
+    json!({
+        "id": id,
+        "subject": format!("Mailbox message {i}"),
+        "from": { "emailAddress": {
+            "name": format!("Sender {i}"),
+            "address": format!("sender{i}@e2e.example"),
+        } },
+        "receivedDateTime": format!("2026-11-19T{:02}:{:02}:00Z", 23 - (i / 60) % 24, 59 - i % 60),
+        "bodyPreview": format!("Preview of message {i}. {}", "Lorem ipsum dolor sit amet. ".repeat(9))
+            .chars()
+            .take(255)
+            .collect::<String>(),
+        "isRead": i.is_multiple_of(3),
+    })
+}
+
+/// The value of `name` in a raw query string (`$top=40&...`), undecoded.
+fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))
+}
+
 /// The Graph mock: messages (list, `$search`, by id), calendarView, findMeetingTimes, draft, send,
 /// events and sendMail (which can be held), 404 for the rest. It logs the method and a
 /// `bearer=` tag (`current`, `stale`, `placeholder`, `unknown` or `none`), never a token value.
@@ -591,15 +624,29 @@ fn graph(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, login: &Arc<Mutex<
             l.fields.insert("search".into());
         }
     }
+    let mailbox = state.lock().unwrap_or_else(|e| e.into_inner()).mailbox;
     let id_of = |prefix: &str| {
         path.strip_prefix(prefix)
             .filter(|r| !r.is_empty() && !r.contains('/'))
     };
     match (req.method.as_str(), path.as_str()) {
+        ("GET", "/v1.0/me/messages") if !query.contains("$search=") && mailbox.is_some() => {
+            let top = query_param(query, "$top")
+                .and_then(|t| t.parse::<usize>().ok())
+                .unwrap_or(10);
+            let n = mailbox.unwrap_or_default().min(top);
+            let body = json!({ "value": (1..=n).map(full_size_message).collect::<Vec<_>>() });
+            respond(out, 200, "application/json", &body.to_string());
+        }
         ("GET", "/v1.0/me/messages") => {
             let body = json!({ "value": [
-                { "id": "m1", "subject": "Quarterly planning notes" },
-                { "id": "m2", "subject": "Lunch on Friday" }
+                { "id": "m1", "subject": "Quarterly planning notes",
+                  "from": { "emailAddress": { "name": "Ana", "address": "ana@e2e.example" } },
+                  "receivedDateTime": "2026-11-19T09:00:00Z", "bodyPreview": "Please plan the quarter.",
+                  "isRead": false },
+                { "id": "m2", "subject": "Lunch on Friday",
+                  "from": { "emailAddress": { "address": "bo@e2e.example" } },
+                  "receivedDateTime": "2026-11-19T08:00:00Z", "bodyPreview": "Shall we?", "isRead": true }
             ]});
             respond(out, 200, "application/json", &body.to_string());
         }
@@ -1764,6 +1811,27 @@ impl Engine {
                 }
                 self.ctx.secrets.insert(latest, Secret(new));
             }
+            return Ok(());
+        }
+        if let Some(n) = m.mailbox {
+            if kind != Kind::Graph {
+                return Err(Fail::new(
+                    Class::Scenario,
+                    "`mailbox` on a microsoft-graph mock-provider piece",
+                    format!("piece `{}`", m.piece),
+                ));
+            }
+            if m.hold.is_some() || m.revoke {
+                return Err(Fail::new(
+                    Class::Scenario,
+                    "`mailbox` alone on a microsoft-graph mock-provider step",
+                    format!(
+                        "piece `{}`: `mailbox` is not combined with `hold` or `revoke`",
+                        m.piece
+                    ),
+                ));
+            }
+            st.mailbox = Some(n);
             return Ok(());
         }
         if let Some(h) = m.hold {

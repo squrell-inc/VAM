@@ -932,11 +932,15 @@ loopback `Host`, so the listener is what names the company (`host=<company>` in 
 
 ### Skills that call Microsoft Graph as the member
 
-- `mock-provider` with `provider: microsoft-graph` serves `GET /v1.0/me/messages` (two fixed messages) and
+- `mock-provider` with `provider: microsoft-graph` serves `GET /v1.0/me/messages` (two fixed messages, with senders) and
   `POST /v1.0/me/sendMail` (202), and 404 for the rest. It answers 401 unless the bearer is the login mock's current
   access token. It logs `method=<verb>` and `bearer=current|stale|placeholder|unknown|none` per request, never a value.
   The login mock tracks the token a connect or a refresh made current; a token handed over with `expiresIn: 0` is
   stale from the start.
+- `mock-provider: { piece, mailbox: N }` (Graph only): from then on the mailbox list (`GET /v1.0/me/messages` without
+  `$search`) answers N messages of a real mailbox's size, at most `$top` (default 10): 152-character ids, sender
+  `Sender <i> <sender<i>@e2e.example>`, subject `Mailbox message <i>`, a 255-character preview, newest first. Use it
+  where the size of a result matters (a card that must be trimmed to fit).
 - `connector-connect` takes `expiresIn` (seconds, `microsoft-365`): sent as `expiresIn` in the connection body.
   `expect: { secret-absent: { secret: microsoft-365 } }` judges the connection's access and refresh tokens.
 - `mock-requests` takes `method` and `path: "*"` (any path), and `count: 0` passes when nothing was seen. `with: <field>`
