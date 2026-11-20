@@ -1,8 +1,7 @@
-//! `vam connector init` and `vam connector validate`: the developer kit, offline (no vamd, no
-//! token). `vam connector test` is registered and says it is not available yet (CN-7.5).
+//! `vam connector init`, `validate` and `test`: the developer kit, offline (no vamd, no token).
 //!
-//! `init <dir>` writes a marketplace root for one connector that passes `validate` (and, once it
-//! exists, `test`) as written:
+//! `init <dir>` writes a marketplace root for one connector that passes `validate` and `test` as
+//! written:
 //!
 //! ```text
 //! marketplace.json
@@ -23,6 +22,10 @@
 //! `check_marketplace_root`, listing rules included (`check_listing`): what an install would
 //! refuse. Output is `vam catalog validate`'s, with `ok <kind> <urn>` lines; exit 6 on an error
 //! (and on a warning with `--strict`).
+//!
+//! `test <dir>` runs each tool of a listing's skills against the mock its test file declares, behind
+//! the egress gate's own screening, offline (see [`runner`]); `pass <tool>` or `fail <tool>: <the
+//! gate's words>`, exit 6 on any failure.
 
 use std::fs;
 use std::path::Path;
@@ -131,7 +134,7 @@ pub fn init(args: &InitArgs) -> Result<()> {
         println!("wrote {path}");
     }
     println!(
-        "next: vam connector validate {dir}   (then `vam connector test {dir}` once it is available)",
+        "next: vam connector validate {dir}   (then `vam connector test {dir}`)",
         dir = args.dir
     );
     Ok(())
@@ -148,16 +151,19 @@ pub fn validate(dir: &str, strict: bool) -> Result<()> {
     present(&report, strict, "ok ")
 }
 
-/// `vam connector test`: not built yet (CN-7.5).
-pub fn test(_dir: &str) -> Result<()> {
-    Err(fail(
-        ExitCode::Failure,
-        "`vam connector test` is not available yet: run `vam connector validate` for the checks that exist",
-    ))
+/// `vam connector test`: the tools of a listing against the mock its test file declares (CN-7.5).
+pub fn test(dir: &str, listing: Option<&str>, subdomain: Option<&str>) -> Result<()> {
+    runner::test(dir, listing, subdomain)
 }
 
 /// `listings/<id>` under a marketplace root: that listing alone.
 fn check_listing_dir(path: &Path, shown: &str) -> Result<MarketplaceReport> {
+    let (root, id) = locate_listing(path, shown)?;
+    Ok(check_marketplace_listing(&root, &id))
+}
+
+/// The marketplace root and the id of the listing directory `path` (`listings/<id>` under a root).
+fn locate_listing(path: &Path, shown: &str) -> Result<(std::path::PathBuf, String)> {
     let not_a_root = || {
         fail(
             ExitCode::Invalid,
@@ -178,7 +184,7 @@ fn check_listing_dir(path: &Path, shown: &str) -> Result<MarketplaceReport> {
     {
         return Err(not_a_root());
     }
-    Ok(check_marketplace_listing(root, id))
+    Ok((root.to_path_buf(), id.to_string()))
 }
 
 // ---- the files init writes -----------------------------------------------------------------------
@@ -421,6 +427,8 @@ fn write_files(root: &Path, files: &[(String, String)]) -> Result<()> {
     }
     Ok(())
 }
+
+mod runner;
 
 #[cfg(test)]
 mod tests;

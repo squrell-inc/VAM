@@ -338,10 +338,10 @@ fn a_warning_fails_only_with_strict() {
 }
 
 #[test]
-fn test_says_it_is_not_available_yet() {
-    let e = test("anywhere").unwrap_err();
-    assert_eq!(crate::output::classify(&e).0, ExitCode::Failure);
-    assert!(e.to_string().contains("not available yet"), "{e}");
+fn test_names_a_path_that_is_neither_a_root_nor_a_listing() {
+    let e = test("anywhere", None, None).unwrap_err();
+    assert_eq!(crate::output::classify(&e).0, ExitCode::Invalid);
+    assert!(e.to_string().contains("neither a marketplace root"), "{e}");
 }
 
 #[test]

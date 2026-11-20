@@ -13,6 +13,17 @@ fn vam(args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// Like [`vam`], with this process's `PATH` (a tool's interpreter is found through it).
+fn vam_on_path(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_vam"))
+        .args(args)
+        .env_clear()
+        .env("HOME", std::env::temp_dir())
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .unwrap()
+}
+
 fn text(o: &Output) -> String {
     format!(
         "{}{}",
@@ -62,7 +73,7 @@ wrote listings/notesdesk/skills/notesdesk-read/SKILLS.md
 wrote listings/notesdesk/skills/notesdesk-read/read.py
 wrote listings/notesdesk/agents/notesdesk-assistant/agent.json
 wrote listings/notesdesk/tests/connector-test.json
-next: vam connector validate {d}   (then `vam connector test {d}` once it is available)
+next: vam connector validate {d}   (then `vam connector test {d}`)
 "
         )
     );
@@ -166,7 +177,7 @@ fn init_refuses_what_validate_would_and_what_it_cannot_overwrite() {
 }
 
 #[test]
-fn connector_is_an_alias_and_test_is_not_available_yet() {
+fn connector_is_an_alias_and_test_skips_a_listing_without_a_test_file() {
     for word in ["connector", "connectors"] {
         let out = vam(&[
             word,
@@ -180,8 +191,13 @@ fn connector_is_an_alias_and_test_is_not_available_yet() {
         "test",
         fixture("marketplace-squrell").to_str().unwrap(),
     ]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
-    assert!(text(&out).contains("`vam connector test` is not available yet"));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        text(&out)
+            .contains("skip microsoft-365: no listings/microsoft-365/tests/connector-test.json"),
+        "{}",
+        text(&out)
+    );
     let out = vam(&["--help"]);
     let help = text(&out);
     assert!(
@@ -195,4 +211,47 @@ fn connector_is_an_alias_and_test_is_not_available_yet() {
         assert!(help.contains(&format!("  {sub} ")), "{sub}: {help}");
     }
     assert!(!help.contains("Microsoft 365 connection"), "{help}");
+}
+
+/// `init` output passes `test` as written; a broken tool prints the gate's words and exits 6.
+#[test]
+fn test_passes_the_init_output_and_fails_a_broken_tool_in_the_gates_words() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path().join("kit");
+    let d = dir.to_str().unwrap();
+    assert!(vam(&init_args(d, &["--runtime", "python3"]))
+        .status
+        .success());
+    let out = vam_on_path(&["connector", "test", d]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert_eq!(
+        text(&out),
+        "pass notesdesk_read
+1 case(s) passed, 0 failed
+the key never reached a tool
+"
+    );
+    assert!(!text(&out).contains("vamkey_"));
+
+    let out = vam_on_path(&[
+        "connector",
+        "test",
+        fixture("connector-kit/broken-tool").to_str().unwrap(),
+    ]);
+    let shown = text(&out);
+    assert_eq!(out.status.code(), Some(6), "{shown}");
+    assert!(shown.contains("pass note_search"), "{shown}");
+    assert!(
+        shown.contains("fail note_leak: ")
+            && shown.contains("only valid as the Authorization value"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("fail note_wander: ") && shown.contains("declared shape"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("vamkey_") && !shown.contains("the key never reached a tool"),
+        "{shown}"
+    );
 }
