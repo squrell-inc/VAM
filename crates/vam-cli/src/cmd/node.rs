@@ -48,6 +48,18 @@ pub enum NodeCmd {
         /// runtime is the `vam-runtime` beside `vam`.
         #[arg(long, value_name = "DIR", conflicts_with = "checkout")]
         kit: Option<std::path::PathBuf>,
+        /// First-party brokers to install and register with `vamd`: `web`, `schedule`,
+        /// `notify` (comma separated or repeated). Default: none. Each binary must sit beside
+        /// `vam`. Registration needs an API key (the admin key a first run mints, `--token`,
+        /// `VAM_API_KEY` or the signed-in config); without one the command that registers each
+        /// broker is printed.
+        #[arg(
+            long = "broker",
+            value_delimiter = ',',
+            value_enum,
+            value_name = "NAME"
+        )]
+        brokers: Vec<super::node_broker::Broker>,
     },
     /// The notification channels this node offers (operator): show them, or set the adapter, the
     /// vault secret names it reads its tokens from, the org's kind defaults and the app URL.
@@ -95,10 +107,12 @@ pub async fn run(host: Option<String>, token: Option<String>, cmd: NodeCmd) -> R
         host_name,
         checkout,
         kit,
+        brokers,
     } = cmd
     {
+        let brokers = super::node_broker::dedupe(&brokers);
         if check {
-            return super::node_init::run_check(root, vamd, kit);
+            return super::node_init::run_check(root, vamd, kit, &brokers);
         }
         return super::node_install::run_install(super::node_install::Options {
             root: root.unwrap_or_else(|| std::path::PathBuf::from("/")),
@@ -110,6 +124,9 @@ pub async fn run(host: Option<String>, token: Option<String>, cmd: NodeCmd) -> R
             host_name,
             checkout,
             kit,
+            brokers,
+            api_host: host,
+            api_token: token,
         })
         .await;
     }

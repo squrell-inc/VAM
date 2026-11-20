@@ -4,8 +4,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use vam_web::fetch::{FixtureFetcher, NetworkFetcher, PageFetcher, DEFAULT_DOCS_URL};
+use vam_web::manifest::MANIFEST_JSON;
 use vam_web::provider::brave::BraveProvider;
 use vam_web::provider::mock::MockProvider;
 use vam_web::provider::SearchProvider;
@@ -24,9 +25,13 @@ enum ProviderKind {
 #[command(
     name = "vam-web-broker",
     version = vam_spec::build_info!().leaked_version_line(),
-    about = "HSP web broker: web_search and web_fetch. The search key arrives per invoke from vamd, never from the environment."
+    about = "HSP web broker: web_search and web_fetch. The search key arrives per invoke from vamd, never from the environment.",
+    args_conflicts_with_subcommands = true
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Unix domain socket path.
     #[arg(long)]
     socket: Option<PathBuf>,
@@ -51,6 +56,12 @@ struct Args {
     docs_url: String,
 }
 
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Print the manifest to register with `PUT /v1/hosted/brokers`.
+    Manifest,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
@@ -61,6 +72,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
     let args = Args::parse();
+    if let Some(Command::Manifest) = args.command {
+        println!("{MANIFEST_JSON}");
+        return Ok(());
+    }
 
     let (provider, fetcher): (Arc<dyn SearchProvider>, Arc<dyn PageFetcher>) = match args.provider {
         ProviderKind::Brave => (

@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: release-artifacts
-current_phase: A (all waves merged into feat/release-artifacts-a 2026-11-18; the close, RA-A.15, waits for the owner)
+current_phase: B (Phase A closed: `v0.1.0-rc.1` published 2026-11-19; B waves 0-5 merged into feat/release-artifacts-b; the close, RA-B.6, waits for the B release PR)
 base_branch: main (cross-cutting; Phase A from feat/release-artifacts-a, Phase B from feat/release-artifacts-b, one release PR each)
 design_docs:
   - design/release-artifacts.md
@@ -390,7 +390,7 @@ Guest build and the kit:
 | `node-reports-the-standard-base-it-boots` | changed: `guards` add `vam:scripts/release/build-guest.sh` and `vam:scripts/e2e/firecracker-assets.sh` (A.W3) | firecracker | unchanged | the lane builds its image with `build-guest.sh` then `build-rootfs.sh --runtime`, so this proves a prebuilt, injected runtime boots |
 
 Unchanged, regression set: `node-init-run-twice-changes-nothing-and-shows-the-key-once` (guards
-`bin/vamd.rs`; `--init` must behave as today), `node-init-check-names-what-is-missing`, and the
+`bin/vamd.rs`; `--init` must behave as today), `node-init-check-names-a-missing-broker`, and the
 marketplace scenarios (the node version they check against becomes `0.1.0+dev`).
 
 Notes for wave 0:
@@ -698,11 +698,24 @@ binaries, attestations), with no line yet.
   `macos-lima.md` gets the macOS CLI from the release, the node still from source. `proves` names
   the Phase A scenarios. `Decide: NOW — proof 2 (honest docs at the phase close), cost 0`
 
-- [ ] **RA-A.15 `v0.1.0-rc.1`.** Release PR `release: release-artifacts A` merged; prepare PR
+- [x] **RA-A.15 `v0.1.0-rc.1`.** Release PR `release: release-artifacts A` merged; prepare PR
   `0.1.0-rc.1` merged into `main`; its push run green (lane included); one publish dispatch; the
   owner reads the summary and approves; every check of the proof table; negatives; design §9
   corrected where the run proved it wrong (a `design/` edit in the close PR). Orchestrator and
   owner. `Decide: NOW — the phase exit`
+  *Done 2026-11-19:* release PR #81 (87de561); prepare PR #90 (dbb71bc). The first dispatch
+  (run 44518686068) failed at `publish.sh draft`: the release list did not yet show the draft just
+  created, so no id was recorded and the cleanup left an empty untagged draft; no tag. Hotfix #92
+  (55e183a) retries the lookup (12 × 5 s); the owner deleted the leftover draft by hand. The second
+  dispatch (run 44540853308) published `v0.1.0-rc.1` at 14:36:40Z: immutable pre-release, 8 assets
+  (4 `vam` archives, the node bundle, `vam-runtime`, `SHA256SUMS`, `RELEASE_NOTES.md`), 2
+  attestations each, every guard and both `verify.sh` steps green. **Deviation:** the `commit`
+  input was left blank, so the tag is on `main`'s head 55e183a (the #92 merge), not on the prepare
+  merge dbb71bc; the trees differ only in `scripts/release/`, which no asset contains. Owner
+  settings: the `release` environment allows administrators to bypass (the owner's choice while
+  they are the only contributor; design §9 said off); the `v*` tag ruleset blocks deletion,
+  update and force push with no bypass actors. Not run: a second dispatch to see guard 5 refuse
+  (it starts a real run; the owner's call).
 
 #### Waves
 
@@ -716,7 +729,7 @@ binaries, attestations), with no line yet.
 | 5 | RA-A.11 | `node-init-from-a-release-bundle-needs-no-checkout`, `node-init-from-a-newer-bundle-keeps-the-state` | vam | Sonnet medium: precedence and stamp rules the plan cannot fully specify | 120 min | 0, 1 (`node.rs`), 3 (`--runtime`) (lane A1) | [x] | #48 |
 | 6 (split: 6a RA-A.12, 6b RA-A.13) | RA-A.12, RA-A.13 | — (PR run: `SHA256SUMS`, notes, scans; publish lint and fixture tests) | vam | Sonnet high: write permissions, tag creation and attestation | 180 min | 4 (lane A2) | [x] | #56, #64 |
 | 7 | RA-A.14 | — | vam | Sonnet low | 60 min | 1, 5; beside 6 (lane A1) | [x] | #55 |
-| close | RA-A.15 | — (`v0.1.0-rc.1` published and verified) | vam | orchestrator and owner | 150 min | A release merged; prepare PR; the owner's §9 settings | [ ] | |
+| close | RA-A.15 | — (`v0.1.0-rc.1` published and verified) | vam | orchestrator and owner | 150 min | A release merged; prepare PR; the owner's §9 settings | [x] | #81, #90, #92 |
 
 Lane (the microVM lane runs on the PR): W0 yes (`crates/vam-e2e`, `e2e/`), W1 yes
 (`vam-orchestrator`, `proto/`), W2 yes (`rust.yml`, `scripts/e2e/`; `skip-vm-lane` is fine),
@@ -842,7 +855,7 @@ tracker open question 13 (below, open question 1). -->
   `--host` / `--token`, `main.rs:18-25`). `vamd` opens each broker's gateway socket at start
   (`gateway.rs:172,273`); the schedule broker needs `--gateway-socket` (the two-step start of
   `run-schedule-broker.sh:126-147`). `vam-web-broker` has no `manifest` subcommand (its manifest is
-  `scripts/web-broker/manifest.json`); schedule and notify print theirs
+  `brokers/vam-web/manifest.json`); schedule and notify print theirs
   (`vam-schedule-broker.rs:43-46`, `vam-notify-broker.rs:46-49`).
 - After A.W6, `release-build.yml` holds `assemble`; `install.sh` is one more asset there.
 
@@ -854,7 +867,7 @@ tracker open question 13 (below, open question 1). -->
 | `upgrade-refuses-a-download-whose-hash-does-not-match` | new | process | `release-server` (new piece) with overlay `release-server-bad-sum` (one wrong `SHA256SUMS` line) | the tree's copy of `vam` runs `vam upgrade --version v9.9.9`: exit non-zero, the output names the hash mismatch, the copy is byte-for-byte unchanged. Red: `upgrade` is not a command |
 | `upgrade-replaces-vam-with-the-newer-release` | new | process | `release-server` | `vam --version` and `vam node status` make no request to the server (request count 0: the CLI never calls the network unasked); `vam upgrade --check` names `v9.9.9` and changes nothing; `vam upgrade --pre` replaces the copy (the fixture archive holds a `vam` that prints `vam 9.9.9 (fixture)`), the output says the attestation was not checked because `gh` is absent; the replaced file then prints `vam 9.9.9 (fixture)` (the downgrade refusal and "up to date" are unit tests). Red: `upgrade` is not a command |
 | `node-init-installs-and-registers-the-brokers-asked-for` | new | process | org-admin (the running node the CLI registers with); fixture `node-init/ready` with the brokers `run.sh` builds beside the copied `vam` | `vam node init --root {{root}} --no-systemd --broker web,schedule --vamd {{vamd}}` with `as: org-admin` (the key a re-run is given): writes `vam-broker@web` and `vam-broker@schedule` units and their argument files (no secret in them), registers both through the API (`done broker vam.web: registered`), and `GET /v1/hosted/brokers` lists `vam.web` and `vam.schedule`; notify is left alone; a second run reports both `ok (unchanged)`; a run without a key writes nothing new and prints the command that registers each broker. Red: `--broker` unknown (usage error) |
-| `node-init-check-names-what-is-missing` | changed: `args` add `--broker web`; `contains` adds `missing broker vam-web-broker` (the bare tree has none) | process | unchanged | the check names a requested broker binary; a spec change approved with this breakdown |
+| `node-init-check-names-a-missing-broker` | changed: `args` add `--broker web`; `contains` adds `missing broker vam-web-broker` (the bare tree has none) | process | unchanged | the check names a requested broker binary; a spec change approved with this breakdown |
 
 Notes for wave 0: runner additions `home: tree` (`HOME` inside the tree) and `env` (extra
 variables) on the `cli` step, and the `release-server` piece (`crates/vam-e2e/src/release_server.rs`):
@@ -870,7 +883,7 @@ Linux and macOS (team checklist).
 
 #### Items
 
-- [ ] **RA-B.1 `vam dock` and `vam undock`.** Per design §5.7, Linux and macOS only: `~/.local/bin`
+- [x] **RA-B.1 `vam dock` and `vam undock`.** Per design §5.7, Linux and macOS only: `~/.local/bin`
   by default; marked lines (`# added by vam dock`) in the listed login profiles (never system
   files); `--dir`, `--no-modify-path`; idempotent; `undock` removes only what `dock` wrote. On
   another OS, `dock` says it is not supported yet. Also adds the `upgrade` subcommand as a stub
@@ -878,7 +891,7 @@ Linux and macOS (team checklist).
   `crates/vam-cli/src/{main.rs,cmd/mod.rs,cmd/dock.rs}`. Tests: unit tests on temp homes; the
   scenario. Turns green: `dock-puts-vam-on-the-path-once`. `Decide: NOW — locked decision 15 (not
   scored)`
-- [ ] **RA-B.2 `vam upgrade`.** `--check` (reads only), `--version vX` (pins, may downgrade),
+- [x] **RA-B.2 `vam upgrade`.** `--check` (reads only), `--version vX` (pins, may downgrade),
   `--pre` (allows an rc). Reads the GitHub releases API (with `GH_TOKEN` or `GITHUB_TOKEN` when set,
   never stored); picks the `.tar.gz` for the target `vam` was built for; downloads it and
   `SHA256SUMS`; checks the hash; then `gh attestation verify <archive> -R squrell-inc/VAM
@@ -892,7 +905,7 @@ Linux and macOS (team checklist).
   `cargo test -p vam-cli upgrade`; the two scenarios. Turns green:
   `upgrade-refuses-a-download-whose-hash-does-not-match`, `upgrade-replaces-vam-with-the-newer-release`.
   `Decide: NOW — locked decision 15 (not scored)`
-- [ ] **RA-B.3 `install.sh`.** A release asset made in `assemble` and listed in `SHA256SUMS`: pick
+- [x] **RA-B.3 `install.sh`.** A release asset made in `assemble` and listed in `SHA256SUMS`: pick
   the archive for the OS and CPU (Linux x86_64/aarch64, macOS arm64/x86_64); `--version vX`
   (required while no final exists, open question 2); download the archive and `SHA256SUMS`;
   check; extract to a temp directory; run `vam dock`; print each step first. `release-build.yml`:
@@ -901,7 +914,7 @@ Linux and macOS (team checklist).
   `scripts/release/install.sh` (new), `scripts/release/package.sh`,
   `.github/workflows/release-build.yml`, `scripts/release/check-workflow.sh`. Tests: `shellcheck`;
   the PR run. `Decide: NOW — locked decision 15 (not scored)`
-- [ ] **RA-B.4 `vam node init --broker web,schedule,notify`.** `vam-web-broker manifest` prints its
+- [x] **RA-B.4 `vam node init --broker web,schedule,notify`.** `vam-web-broker manifest` prints its
   manifest (the crate becomes the one source; `run-web-broker.sh` reads it). Per open question 7:
   one template unit, an argument file per broker (no secrets), sockets 0600 under the state
   directory, started after `vamd`; registration through `PUT /v1/hosted/brokers` with the
@@ -912,9 +925,9 @@ Linux and macOS (team checklist).
   `crates/vam-cli/src/cmd/{node.rs,node_install.rs,node_init.rs}`,
   `brokers/vam-web/src/bin/vam-web-broker.rs`, `scripts/run-web-broker.sh`. Tests:
   `cargo test -p vam-cli node`; the scenarios. Turns green:
-  `node-init-installs-and-registers-the-brokers-asked-for`, `node-init-check-names-what-is-missing`
+  `node-init-installs-and-registers-the-brokers-asked-for`, `node-init-check-names-a-missing-broker`
   (changed). `Decide: NOW — locked decision 14 (not scored)`
-- [ ] **RA-B.5 Docs.** `getting-started/releases.md` (the `install.sh` one-liner, with the
+- [x] **RA-B.5 Docs.** `getting-started/releases.md` (the `install.sh` one-liner, with the
   tag-specific URL until `v0.1.0`), `getting-started/cli.md` (`dock`, `undock`, `upgrade`); macOS
   quarantine for a browser download (open question 5); `hosted/overview.md` (installing brokers
   with `--broker`, registering on a re-run). `Decide: NOW — the tracker's item`
@@ -926,12 +939,12 @@ Linux and macOS (team checklist).
 
 | Wave | Items | Turns green | Repo | Model | Budget | Depends on | Status | PR |
 |---|---|---|---|---|---|---|---|---|
-| 0 | scenarios (+ `home: tree`, `env`, the `release-server` piece) | — (pending, red for the right reason) | vam | Sonnet low | 90 min | A.W0 (the B base is cut after it) (lane B1) | [ ] | |
-| 1 | RA-B.1 | `dock-puts-vam-on-the-path-once` | vam | Sonnet medium: a new top-level command that edits the user's login files on two OSes, idempotently | 120 min | 0; A.W1 (`main.rs`) (lane B1) | [ ] | |
-| 2 | RA-B.2 | `upgrade-refuses-a-download-whose-hash-does-not-match`, `upgrade-replaces-vam-with-the-newer-release` | vam | Sonnet high: it replaces the running binary, and the checks must come before the replace | 180 min | 1; A.W2 (`check-release-gate.sh`) (lane B1) | [ ] | |
-| 3 | RA-B.3 | — (`install-smoke` green on Linux and macOS in the PR's `release-build.yml` run) | vam | Sonnet medium: a script that downloads and runs a binary on users' machines | 120 min | 1; A.W6 (workflow order) (lane B2) | [ ] | |
-| 4 | RA-B.4 | `node-init-installs-and-registers-the-brokers-asked-for`, `node-init-check-names-what-is-missing` | vam | Sonnet medium: crosses `vam-cli` and a broker, systemd units and API registration | 150 min | 0; A.W5 (node files) (lane B2) | [ ] | |
-| 5 | RA-B.5 | — | vam | Sonnet low | 60 min | 2, 3, 4; A.W7 (`releases.md`) | [ ] | |
+| 0 | scenarios (+ `home: tree`, `env`, the `release-server` piece) | — (pending, red for the right reason) | vam | Sonnet low | 90 min | A.W0 (the B base is cut after it) (lane B1) | [x] | #40 |
+| 1 | RA-B.1 | `dock-puts-vam-on-the-path-once` | vam | Sonnet medium: a new top-level command that edits the user's login files on two OSes, idempotently | 120 min | 0; A.W1 (`main.rs`) (lane B1) | [x] | #46 |
+| 2 | RA-B.2 | `upgrade-refuses-a-download-whose-hash-does-not-match`, `upgrade-replaces-vam-with-the-newer-release` | vam | Sonnet high: it replaces the running binary, and the checks must come before the replace | 180 min | 1; A.W2 (`check-release-gate.sh`) (lane B1) | [x] | #66 |
+| 3 | RA-B.3 | — (`install-smoke` green on Linux and macOS in the PR's `release-build.yml` run) | vam | Sonnet medium: a script that downloads and runs a binary on users' machines | 120 min | 1; A.W6 (workflow order) (lane B2) | [x] | #84 |
+| 4 | RA-B.4 | `node-init-installs-and-registers-the-brokers-asked-for`, `node-init-check-names-a-missing-broker` | vam | Sonnet medium: crosses `vam-cli` and a broker, systemd units and API registration | 150 min | 0; A.W5 (node files) (lane B2) | [x] | #67 |
+| 5 | RA-B.5 | — | vam | Sonnet low | 60 min | 2, 3, 4; A.W7 (`releases.md`) | [x] | #89 |
 | close | RA-B.6 | — (`v0.1.0-rc.2` published and verified) | vam | orchestrator and owner | 150 min | rc.1 published; B base took `main` | [ ] | |
 
 B.W2 and B.W4 may run side by side (different files). Lane: W0 yes (`crates/vam-e2e`, `e2e/`), W2
@@ -1148,3 +1161,5 @@ Each has a default; see design §10 for the reasoning.
 | 2026-11-17 | 0-6 | **Breakdowns of all phases drafted** (phase-breakdown agent, Opus 5.5 high; the owner asked for the whole plan in one pass with parallel lanes; Phases 3-6 are drafts re-validated at phase start), waiting for the owner. New "Execution plan": one `feat/` base per phase, P1.W1-W2 ride the P0 release so `release.yml` reaches `main` early, lanes A-F with a file-order table, 12 owner gates, rc.1-rc.4 then `v0.1.0`, about 47 h on the critical path (about 88 h serial). Scenario delta: P0 4 new; P1 3 guards-only; P2 none (lint, scratch rehearsal, verified rc.1); P3 4 new, 2 changed; P4 none new (arm64 run of three `node-init-*`, Lima run); P5 3 new; P6 none. Waves: P0 4 (low, medium, medium, low), P1 4 + close (high, low, medium, medium), P2 1 + close (high), P3 8 (low ×3, medium ×3, high, low), P4 3 + close (low, medium, low), P5 5 + close (low, medium, high, medium, low), P6 1 + close (low). Found in the code: `hsp.rs:489` is a test and `Register` carries no broker version back (RA-3.5); the Debian pin is already multi-arch; `rust.yml` cancels `main` push runs; guard 7 makes a run about 40 min; no `latest` release during the rcs; `node init` cannot register brokers without a key on a re-run (RA-3.6). Scoreboard: 0 green, 0 red (not written), 0 fix cycles |
 | 2026-11-18 | A, B, Final | **Plan restructured on the owner's decision** after an independent review (phase-breakdown agent, Opus 5.5 high), waiting for the owner's approval. Review findings: rc.1 was not installable (no kit until old Phase 3); guard 7 repeated the release gate the push run already ran (`rust.yml:121-123`); a dry run before each publish duplicated the approval gate; each of seven phases carried its own release overhead. Now: **Phase A** (rc.1: version identity, release scripts and workflow, `build-guest.sh` and `--runtime`, reusable `release-build.yml` with the kit, `vam node init --kit`, publish; 8 waves: low, medium, high, low, medium, medium, high, low), **Phase B** (rc.2: `vam dock`, `vam upgrade`, `install.sh`, `--broker` via the API; 6 waves: low, medium, high, medium, medium, low; own cloud session from day one), **Final** (`v0.1.0`, upgrade rc.2 to `v0.1.0` recorded), and **`v0.2.0`** (Lima and Windows, a minor; not broken down). Decisions changed: 3 (build info read in binary crates only), 5 (guard 7 is now `cargo deny check advisories`; builds beside `validate`), 7 (draft targets the commit, tag at publish; no scratch rehearsal, no routine dry run), 8 (reusable build workflow; AlmaLinux 9 fallback), 10 (SBOM files deferred), 11 (no proto asset; aarch64 and Windows to `v0.2.0`), 14 (brokers registered through the API), 15 (Windows to `v0.2.0`). Scenario delta: A 5 new + 3 guards-only; B 4 new + 1 changed; Final none. Estimate: about 21 h on the critical path (was 47 h), about 45 h serial (was 88 h). Scoreboard: 0 green, 0 red (not written), 0 fix cycles |
 | 2026-11-18 | A | **Phase A waves all merged into `feat/release-artifacts-a`** (orchestrator; wave agents Sonnet, medium or high). W3 #30 (`build-guest.sh`, `build-rootfs.sh --runtime`); W0 #31 (5 pending scenarios, runner `cli` fields); W2 #32 (prepare, guards, `release.yml`, `deny.toml`); W1 #41 (build info, `--version`, `GET /v1/node` `build`, `vam node status`); W4 #47 (`release-build.yml`, every v0.1.0 asset); W5 #48 (`vam node init --kit`); W7 #55 (releases page, version docs); W6 split on its plan turn into W6a #56 (`assemble`: scan, `SHA256SUMS`, notes) and W6b #64 (`publish`: draft, attest, verify, publish). Sync #59 took `main` (#34 shellcheck fixes; #37 reqwest 0.13, axum 0.8, tonic/prost 0.14, rustls 0.23, rusqlite 0.43) and dropped 13 `deny.toml` ignores. Owner rulings recorded: decision 8's AlmaLinux 9 container used for every Linux gnu build (zig's linker rejects cargo-auditable's `--undefined`); cargo-audit 0.23.0 (0.21 fails on CVSS 4.0 entries); attest action `actions/attest@1e69f48a` (v4.2.2) in `release.yml`'s publish job, verified with `--signer-workflow` and `--source-ref refs/heads/main` (not `--source-digest`, which is the dispatch commit); the unremapped guest init (decision 11) may hold cargo registry and build-script `out/` paths, every other build path fails the scan; `RELEASE_NOTES.md` is attested too. CI fixes found on the way: BSD `wc` padding, GITHUB_PATH reaching only later steps, static-pie wording in `file`, `cargo audit`'s `--ignore` before `bin`, the quinn/rustix bumps lost in the lock merge. Scoreboard: Phase A scenarios 5 green of 5 (`cli-prints-its-version-and-commit`, `vamd-prints-its-version-without-starting`, `node-status-shows-the-node-and-cli-versions`, `node-init-from-a-release-bundle-needs-no-checkout`, `node-init-from-a-newer-bundle-keeps-the-state`), 0 red; fix cycles: W4 4, W5 1, W6a 1, sync 1; two macOS runner cancellations re-run once each; wall time: all waves on 2026-11-18 |
+| 2026-11-19 | A | **Phase A closed: `v0.1.0-rc.1` published** (orchestrator and owner). Release PR #81 merged into `main` on the owner's word; prepare PR #90 (dbb71bc). First dispatch failed at `publish.sh draft` (list lag after create; empty untagged draft left, no tag); hotfix #92 retries the lookup; owner deleted the draft; second dispatch run 44540853308 published at 14:36:40Z, 8 assets, 2 attestations each, `verify.sh` green on draft and release. Deviation: blank `commit` input tagged 55e183a (#92 merge) instead of dbb71bc; only `scripts/release/` differs. Design §9 corrected: environment bypass is the owner's choice, fill in `commit`, a failure before the draft id is recorded can leave a draft to delete by hand. Scoreboard: Phase A scenarios 5 green, 0 red; fix cycles: publish 1 (#92); musl job re-run once (apt mirror 503); wall time: rc.1 on 2026-11-19 |
+| 2026-11-19 | B | **Phase B waves all merged into `feat/release-artifacts-b`** (orchestrator; wave agents Sonnet, medium or high). W0 #40 (scenarios pending, `release-server` piece); W1 #46 (`vam dock`, `vam undock`); W2 #66 (`vam upgrade`); W4 #67 (`vam node init --broker`); W3 #84 (`install.sh`, `install-smoke`); W5 #89 (docs). Syncs #43, #51 (A base into B), #65, #83 (`main` into B after the A release). CI fixes on the way: `release_server` read the whole request head (#67), shellcheck SC2016 note in `install.sh` (#84), `cargo deny --exclude-dev` for the 0.21.0 panic. Next: merge `main` into B once, then the B release PR on the owner's word, then rc.2 with `commit` filled in. Scoreboard: Phase B scenarios 5 green of 5 (`dock-puts-vam-on-the-path-once`, `upgrade-refuses-a-download-whose-hash-does-not-match`, `upgrade-replaces-vam-with-the-newer-release`, `node-init-installs-and-registers-the-brokers-asked-for`, `node-init-check-names-a-missing-broker`), 0 red; wall time: waves 2026-11-18 to 2026-11-19 |

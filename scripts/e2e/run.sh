@@ -59,14 +59,15 @@ if [ "$fc" -eq 1 ]; then
   fi
 elif [ -z "${VAM_E2E_SKIP_BUILD:-}" ]; then
   cargo build -q -p vam-orchestrator -p vam-runtime -p vam-cli -p vam-e2e -p vam-schedule -p vam-web \
-    --features vam-orchestrator/process-guest,vam-runtime/process-guest
+    --features vam-orchestrator/process-guest,vam-runtime/process-guest,vam-cli/upgrade-seam
   # The fake-transport notification broker is built on its own and last: a build of the same
   # package without the feature would replace target/debug/vam-notify-broker.
   cargo build -q -p vam-notify --features fake-transport
   mkdir -p "$bin_dir"
   cp -f "$target_dir/debug/vamd" "$bin_dir/vamd"
   cp -f "$target_dir/debug/vam-runtime" "$bin_dir/vam-runtime"
-  # The built `vam`, for the verify-receipt step (offline receipt and pack checks).
+  # The built `vam` (with the `upgrade-seam` test feature: `vam upgrade` reaches the fixture release
+  # server through VAM_UPGRADE_API_URL), for the verify-receipt and upgrade steps.
   cp -f "$target_dir/debug/vam" "$bin_dir/vam"
   # The test broker the `trigger-test-broker` piece starts (and `fire-trigger` drives).
   cp -f "$target_dir/debug/hsp-echo-broker" "$bin_dir/hsp-echo-broker"

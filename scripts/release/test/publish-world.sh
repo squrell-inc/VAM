@@ -19,10 +19,10 @@ new_world() {
   (cd "$W/dist" && release_assets "$v" | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
   printf '# VAM v%s\n\nnotes\n' "$v" > "$W/dist/RELEASE_NOTES.md"
   jq -n --arg v "$v" --arg c "$C1" '{version: $v, commit: $c, channel: "release", run_id: "777", assets: []}' > "$W/dist/build-info.json"
-  export PATH="$W/bin:$PATH" FAKE_GH_DIR="$W/gh" RETRY_SLEEP=0
+  export PATH="$W/bin:$PATH" FAKE_GH_DIR="$W/gh" RETRY_SLEEP=0 PUBLISH_FIND_SLEEP=0
   export REPO=acme/vam VERSION="$v" COMMIT="$C1" VALIDATED_COMMIT="$C1" VALIDATED_VERSION="$v" INPUT_VERSION="$v"
   export DIST="$W/dist" GITHUB_RUN_ID=777 PUBLISH_STATE="$W/state"
-  unset FAKE_FAIL FAKE_NO_RELEASE_VERIFY FAKE_NO_SOURCE_REF FAKE_CORRUPT FAKE_PENDING FAKE_NO_TAG FAKE_TAG_SHA FAKE_ANNOTATED FAKE_ATTEST_FAIL_NAME FAKE_ATTEST_FLAKY
+  unset FAKE_FAIL FAKE_NO_RELEASE_VERIFY FAKE_NO_SOURCE_REF FAKE_CORRUPT FAKE_PENDING FAKE_NO_TAG FAKE_TAG_SHA FAKE_ANNOTATED FAKE_ATTEST_FAIL_NAME FAKE_ATTEST_FLAKY FAKE_LIST_LAG
   : > "$W/gh/calls.log"
 }
 # pub <step> [VAR=value ...]: runs publish.sh <step>, with extra environment, capturing $T_OUT and $T_RC

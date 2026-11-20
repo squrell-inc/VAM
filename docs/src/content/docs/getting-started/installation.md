@@ -10,6 +10,7 @@ proves:
   - node-reports-the-standard-base-it-boots
   - plain-chat-gets-a-reply
   - vamd-refuses-plain-http-by-default
+  - node-init-installs-and-registers-the-brokers-asked-for
   - vm-restores-from-the-golden-snapshot
   - node-init-from-a-release-bundle-needs-no-checkout
 ---
@@ -44,6 +45,8 @@ sudo ./vam node init --check
 sudo ./vam node init
 ```
 
+To install the first-party brokers in the same run, add `--broker web,schedule,notify`. See [Install the brokers with the node](/hosted/overview/#install-the-brokers-with-the-node).
+
 The steps below are the same for both ways. With a bundle, Docker builds the base from the bundle's own recipe.
 
 ## Install a node from source
@@ -76,7 +79,7 @@ The first run prints the admin key **once, on your terminal**, and tells you to 
 
 ### Re-running is safe
 
-Run `sudo vam node init` again at any time (after an upgrade, or to repair a file). Every step compares first and writes only what differs: a second run says `unchanged` throughout, changes no file and shows no key.
+Run `sudo vam node init` again at any time (after an upgrade, or to repair a file). Every step compares first and writes only what differs: a second run says `unchanged` throughout, changes no file and shows no key. It does not run `vamd --init` again when the state and the certificate already exist.
 
 ---
 

@@ -11,7 +11,8 @@
 # FAKE_CORRUPT=<name> stores that uploaded file with an extra byte; FAKE_PENDING=<name> leaves it
 # in state "starter"; FAKE_NO_TAG=1 publishes without creating the tag; FAKE_TAG_SHA=<sha> creates
 # it elsewhere; FAKE_ANNOTATED=1 creates an annotated tag object; FAKE_ATTEST_FAIL_NAME=<basename>
-# fails the attestation of that file; FAKE_ATTEST_FLAKY=<n> fails the first n attestation checks.
+# fails the attestation of that file; FAKE_ATTEST_FLAKY=<n> fails the first n attestation checks;
+# FAKE_LIST_LAG=<n> leaves drafts out of the first n release listings.
 set -uo pipefail
 d="${FAKE_GH_DIR:?FAKE_GH_DIR is not set}"
 mkdir -p "$d/assets"
@@ -89,7 +90,14 @@ case "$cmd $sub" in
         esac ;;
       repos/*/releases)
         failing list && { echo "gh: server error (HTTP 500)" >&2; exit 1; }
-        cat "$d/releases.json" ;;
+        # FAKE_LIST_LAG=<n>: the first n listings leave out drafts (GitHub's list can lag a new draft).
+        lagged="$(cat "$d/list-lag-count" 2>/dev/null || echo 0)"
+        if [ "$lagged" -lt "${FAKE_LIST_LAG:-0}" ] && jq -e 'any(.[]; .draft == true)' "$d/releases.json" >/dev/null; then
+          echo $((lagged + 1)) > "$d/list-lag-count"
+          jq -c 'map(select(.draft != true))' "$d/releases.json"
+        else
+          cat "$d/releases.json"
+        fi ;;
       *) echo "fake gh: unhandled api path $path" >&2; exit 1 ;;
     esac ;;
 

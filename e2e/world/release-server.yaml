@@ -1,0 +1,9 @@
+piece: release-server
+kind: release-server
+# A loopback, GitHub-like releases API (list, latest, by tag) and the assets of one pre-release,
+# `v9.9.9`: `vam-9.9.9-<host target>.tar.gz` (the files of the fixture directory) and a
+# `SHA256SUMS` the runner computes. `{{url:release-server}}` is the API base. The runner counts the
+# requests it answers.
+fixture: release/server
+releaseTag: v9.9.9
+prerelease: true

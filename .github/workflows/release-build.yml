@@ -21,6 +21,8 @@ name: Release build
 #   vam-node-<v>-x86_64-unknown-linux-gnu.tar.gz   node bundle (vamd, vam, three brokers, vam-runtime, base kit)
 #   vam-runtime-<v>-x86_64-unknown-linux-musl      the guest init alone
 #   vam-<v>-<target>.tar.gz                        vam for x86_64/aarch64 Linux gnu and macOS arm64/x86_64
+# `install.sh` is no build output: assemble copies scripts/release/install.sh into the release, and
+# `install-smoke` runs that copy on Linux and macOS against this run's own assets.
 # Pull request and weekly runs build the Cargo.toml version on channel `dev`; release.yml passes the
 # version being released and channel `release`.
 on:
@@ -404,3 +406,71 @@ jobs:
           path: release/*
           if-no-files-found: error
           retention-days: 7
+
+  # The installer the release ships (scripts/release/install.sh, copied into the release by
+  # assemble) run as the release's own asset against the run's own archives: `--from` reads them
+  # from the downloaded release-<version> artifact, so nothing is fetched from a GitHub release.
+  # HOME is a scratch directory, so `vam dock` edits a throwaway profile. Linux x86_64 takes the
+  # x86_64-unknown-linux-gnu archive under dash; macos-15 is arm64 and takes aarch64-apple-darwin
+  # under the bash 3.2 that macOS ships as /bin/sh.
+  install-smoke:
+    name: install-smoke (${{ matrix.os }})
+    needs: [meta, assemble]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-${{ needs.meta.outputs.version }}
+          path: release
+      - name: Lint the installer
+        if: ${{ runner.os == 'Linux' }}
+        run: shellcheck -s sh release/install.sh
+      - name: Install from the release assets
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          /bin/sh release/install.sh --from release --version "v$VERSION"
+          vam="$HOME/.local/bin/vam"
+          test -x "$vam"
+          "$vam" --version | tee "$RUNNER_TEMP/version.txt"
+          grep -Eq "^vam ${VERSION}(\+dev(\.[0-9]+)?)?( |\$)" "$RUNNER_TEMP/version.txt"
+          grep -qs 'added by vam dock' "$HOME/.profile" "$HOME/.zprofile"
+      - name: A second run changes nothing
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/home"
+          /bin/sh release/install.sh --from release --version "v$VERSION" | tee "$RUNNER_TEMP/again.txt"
+          grep -q 'unchanged' "$RUNNER_TEMP/again.txt"
+          test "$(cat "$HOME/.profile" "$HOME/.zprofile" 2>/dev/null | grep -c 'added by vam dock')" = 1
+      - name: A hash that does not match installs nothing
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/home2"
+          mkdir -p "$HOME" "$RUNNER_TEMP/bad"
+          for f in release/*; do ln -s "$PWD/$f" "$RUNNER_TEMP/bad/$(basename "$f")"; done
+          rm "$RUNNER_TEMP/bad/SHA256SUMS"
+          awk '{ printf "%064d  %s\n", 0, $2 }' release/SHA256SUMS > "$RUNNER_TEMP/bad/SHA256SUMS"
+          if /bin/sh release/install.sh --from "$RUNNER_TEMP/bad" --version "v$VERSION"; then
+            echo "the installer accepted a hash that does not match" >&2; exit 1
+          fi
+          test ! -e "$HOME/.local/bin/vam"
+          test -z "$(ls -A "$HOME")"
+      - name: Undock
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/home"
+          "$HOME/.local/bin/vam" undock
+          test ! -e "$HOME/.local/bin/vam"
+          if grep -qs 'added by vam dock' "$HOME/.profile" "$HOME/.zprofile"; then
+            echo "the PATH line was left behind" >&2; exit 1
+          fi

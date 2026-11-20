@@ -157,8 +157,16 @@ cmd_draft() {
     || die "gh release create failed"
   # The draft has no tag, so it is found by listing. The check proved no release of this tag existed and
   # the `release` concurrency group runs one release at a time, so exactly one draft is ours.
-  json="$(gh_releases)" || die "cannot list the releases to find the draft just created"
-  n="$(jq --arg t "$tag" '[.[] | select(.tag_name == $t)] | length' <<< "$json")"
+  # The release list can lag a just-created draft (seen on the first rc.1 run: found 0), so look again
+  # for up to PUBLISH_FIND_TRIES x PUBLISH_FIND_SLEEP seconds before giving up.
+  local tries="${PUBLISH_FIND_TRIES:-12}" pause="${PUBLISH_FIND_SLEEP:-5}" i=1
+  while :; do
+    json="$(gh_releases)" || die "cannot list the releases to find the draft just created"
+    n="$(jq --arg t "$tag" '[.[] | select(.tag_name == $t)] | length' <<< "$json")"
+    [ "$n" = 0 ] && [ "$i" -lt "$tries" ] || break
+    echo "publish: the new draft is not listed yet (attempt $i of $tries); waiting ${pause}s" >&2
+    sleep "$pause"; i=$((i + 1))
+  done
   [ "$n" = 1 ] || die "expected exactly one release for $tag after creating the draft, found $n; nothing is recorded, inspect the draft by hand"
   id="$(jq -r --arg t "$tag" '.[] | select(.tag_name == $t) | .id' <<< "$json")"
   [[ "$id" =~ ^[0-9]+$ ]] || die "the draft has no numeric id"

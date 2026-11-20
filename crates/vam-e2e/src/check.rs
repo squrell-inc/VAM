@@ -114,6 +114,15 @@ pub fn check(root: &Path) -> Vec<CheckError> {
         }
         match w.kind {
             PieceKind::Org | PieceKind::Secret | PieceKind::Broker => {}
+            PieceKind::ReleaseServer => {
+                if w.fixture.is_none() || w.tamper.as_deref().is_some_and(|t| t != "sum") {
+                    errors.push(CheckError::new(
+                        &p,
+                        "piece-body",
+                        "a release-server piece needs `fixture` (the files of the archive) and `tamper` is `sum` or omitted",
+                    ));
+                }
+            }
             PieceKind::GitMarketplace => {
                 if w.fixture.is_none() || !w.url.as_deref().is_some_and(|u| u.starts_with("https://")) {
                     errors.push(CheckError::new(
@@ -801,11 +810,72 @@ fn check_scenario(
                     }
                 }
                 for (f, c) in &x.files {
-                    if c.contains.is_none() && c.absent.is_none() && !c.unchanged {
+                    if c.contains.is_none()
+                        && c.absent.is_none()
+                        && c.exists.is_none()
+                        && !c.unchanged
+                    {
                         errors.push(CheckError::new(
                             p,
                             "cli",
-                            format!("{pos}: `files.{f}` needs `contains`, `absent` or `unchanged`"),
+                            format!(
+                                "{pos}: `files.{f}` needs `contains`, `absent`, `exists` or `unchanged`"
+                            ),
+                        ));
+                    }
+                    if c.count.is_some() && c.contains.is_none() {
+                        errors.push(CheckError::new(
+                            p,
+                            "cli",
+                            format!("{pos}: `files.{f}.count` needs `contains`"),
+                        ));
+                    }
+                }
+                if x.home.as_deref().is_some_and(|h| h != "tree") {
+                    errors.push(CheckError::new(
+                        p,
+                        "cli",
+                        format!("{pos}: `home` is `tree` or omitted"),
+                    ));
+                }
+                if x.exec.is_some() && (x.copy_cli.is_some() || !x.copy_bins.is_empty()) {
+                    errors.push(CheckError::new(
+                        p,
+                        "cli",
+                        format!("{pos}: `exec` runs a file already in the tree; it takes no `copyCli` or `copyBins`"),
+                    ));
+                }
+                if !x.copy_bins.is_empty() && x.copy_cli.is_none() {
+                    errors.push(CheckError::new(
+                        p,
+                        "cli",
+                        format!("{pos}: `copyBins` needs `copyCli` (the programs go beside it)"),
+                    ));
+                }
+                for b in &x.copy_bins {
+                    if !matches!(
+                        b.as_str(),
+                        "vam-web-broker" | "vam-schedule-broker" | "vam-notify-broker"
+                    ) {
+                        errors.push(CheckError::new(
+                            p,
+                            "cli",
+                            format!("{pos}: `copyBins` entry `{b}` is a broker binary"),
+                        ));
+                    }
+                }
+                if let Some(r) = &x.requests {
+                    let ok = cat
+                        .piece(&r.piece)
+                        .is_some_and(|w| w.kind == PieceKind::ReleaseServer)
+                        && s.given.iter().any(|g| g.alias() == r.piece);
+                    if !ok {
+                        errors.push(CheckError::new(
+                            p,
+                            "cli",
+                            format!(
+                                "{pos}: `requests.piece` names a `release-server` piece in `given`"
+                            ),
                         ));
                     }
                 }

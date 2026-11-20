@@ -243,6 +243,21 @@ jobs:
           path: release/*
           if-no-files-found: error
           retention-days: 7
+  install-smoke:
+    needs: [meta, assemble]
+    runs-on: \${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@$SHA # v7.0.0
+        with:
+          name: release-1
+          path: release
+      - run: /bin/sh release/install.sh --from release --version v1 && vam undock
 YAML
 python3 -I - "$t_tmp/m" <<'PY'
 import sys
@@ -367,6 +382,34 @@ rb_fails "an unpinned upload-artifact" "not pinned by a full 40-hex" "actions/up
           name: asset-node" "actions/upload-artifact@v6 # v6.0.0
         with:
           name: asset-node"
+echo "release-build.yml: the install-smoke job"
+rb_fails "no install-smoke job" "no install-smoke job" "  install-smoke:
+    name: install-smoke" "  install-smokex:
+    name: install-smoke"
+rb_fails "install-smoke that does not wait for assemble" "install-smoke must need assemble" "    needs: [meta, assemble]
+    runs-on: \${{ matrix.os }}" "    needs: [meta]
+    runs-on: \${{ matrix.os }}"
+rb_fails "install-smoke without macOS" "exactly ubuntu-24.04 and macos-15" "        os: [ubuntu-24.04, macos-15]" "        os: [ubuntu-24.04]"
+rb_fails "install-smoke that downloads another artifact" "download the release-<version> artifact" "          name: release-\${{ needs.meta.outputs.version }}
+          path: release
+      - name: Lint" "          name: asset-vam
+          path: release
+      - name: Lint"
+rb_fails "install-smoke that does not use --from" "with --from" "          /bin/sh release/install.sh --from release --version \"v\$VERSION\"
+          vam=" "          /bin/sh release/install.sh --version \"v\$VERSION\"
+          vam="
+rb_fails "install-smoke that never undocks" "must run vam undock" '          "$HOME/.local/bin/vam" undock' '          rm -f "$HOME/.local/bin/vam"'
+rb_fails "install-smoke with write permissions" "permissions must be exactly contents: read" "        os: [ubuntu-24.04, macos-15]
+    permissions:
+      contents: read" "        os: [ubuntu-24.04, macos-15]
+    permissions:
+      contents: write"
+rb_fails "install-smoke with the version input inside run:" "inputs.version.*inside run:" "        run: shellcheck -s sh release/install.sh" "        run: echo \${{ inputs.version }}"
+rb_fails "an unpinned action in install-smoke" "not pinned by a full 40-hex" "      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-" "      - uses: actions/download-artifact@v7 # v7.0.0
+        with:
+          name: release-"
 rb_fails "the version input inside run:" "inputs.version.*inside run:" "        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools" "        run: echo \${{ inputs.version }}"
 rb_fails "a container image pinned by tag" "pinned by digest" "    container:
       image: almalinux@sha256:02df05719ef287ebd0df0a1eedb9172a00bd70703aed7b25660e426b8e0d6047
@@ -422,7 +465,9 @@ rb_fails "no assemble job" "no assemble job" "  assemble:
 rb_fails "assemble that does not wait for a build job" "assemble must need meta and every build job" "    needs: [meta, guest, node-x86_64, cli-linux, cli-macos]" "    needs: [meta, guest, node-x86_64, cli-linux]"
 rb_fails "assemble that does not run assemble.sh" "does not run scripts/release/assemble.sh" "          scripts/release/assemble.sh --version" "          echo scripts/release/skip.sh --version"
 rb_fails "assemble that downloads a narrower set" "asset-.* artifacts" "          pattern: asset-*" "          pattern: asset-node*"
-rb_fails "assemble uploading something else" "release-<version> artifact" "          name: release-\${{ needs.meta.outputs.version }}" "          name: assembled"
+rb_fails "assemble uploading something else" "release-<version> artifact" "          name: release-\${{ needs.meta.outputs.version }}
+          path: release/*" "          name: assembled
+          path: release/*"
 rb_fails "a token in a build job" "only assemble gets github.token" "      VAM_BUILD_CHANNEL: \${{ needs.meta.outputs.channel }}
       COMMIT: \${{ needs.meta.outputs.commit }}
     steps:

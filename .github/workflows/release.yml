@@ -134,7 +134,7 @@ jobs:
           scripts/release/publish.sh check
       - name: Create the draft release and upload every file
         run: scripts/release/publish.sh draft
-      # One provenance attestation for the six assets (subjects listed in SHA256SUMS), one for
+      # One provenance attestation for the seven assets, install.sh included (subjects listed in SHA256SUMS), one for
       # SHA256SUMS and the notes. Signed by this workflow, so `--signer-workflow` names release.yml.
       - name: Attest the assets
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
