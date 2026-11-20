@@ -43,7 +43,7 @@ pub enum ConnectorsCmd {
     /// Run a listing's tools against the mock its test file declares, offline: each tool of a
     /// case runs behind the egress gate's own screening, with a generated key the tool never sees.
     /// Prints `pass <tool>` or `fail <tool>: <the gate's words>` per case; exit code 6 on any
-    /// failure. The tools' code runs on this machine with a cleared environment and no sandbox
+    /// failure, and when no case ran at all. The tools' code runs on this machine with a cleared environment and no sandbox
     /// (it is your own code); nothing is sent off the machine. A remote MCP connector runs
     /// nothing here: only its test file is checked.
     Test {

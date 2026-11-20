@@ -186,17 +186,19 @@ fn connector_is_an_alias_and_test_skips_a_listing_without_a_test_file() {
         ]);
         assert!(out.status.success(), "{word}: {}", text(&out));
     }
+    // Every listing is skipped: no case ran, which is not a pass.
     let out = vam(&[
         "connector",
         "test",
         fixture("marketplace-squrell").to_str().unwrap(),
     ]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let shown = text(&out);
+    assert_eq!(out.status.code(), Some(6), "{shown}");
     assert!(
-        text(&out)
-            .contains("skip microsoft-365: no listings/microsoft-365/tests/connector-test.json"),
-        "{}",
-        text(&out)
+        shown.contains("skip microsoft-365: no listings/microsoft-365/tests/connector-test.json")
+            && shown.contains("no case ran")
+            && !shown.contains("the key never reached a tool"),
+        "{shown}"
     );
     let out = vam(&["--help"]);
     let help = text(&out);
@@ -254,4 +256,79 @@ the key never reached a tool
         !shown.contains("vamkey_") && !shown.contains("the key never reached a tool"),
         "{shown}"
     );
+}
+
+/// A root where no case ran exits 6 and says so; a root with one REST case still passes; a remote
+/// MCP listing counts as checked (exit 0, with its skip line), alone or named by `--listing`.
+#[test]
+fn test_with_no_case_run_exits_6_but_a_checked_mcp_listing_does_not() {
+    let t = tempfile::tempdir().unwrap();
+    // A root whose one listing has no test file (the kit's own output, the file removed).
+    let rest = t.path().join("rest");
+    let d = rest.to_str().unwrap();
+    assert!(vam(&init_args(d, &["--runtime", "python3"]))
+        .status
+        .success());
+    std::fs::remove_file(rest.join("listings/notesdesk/tests/connector-test.json")).unwrap();
+    for json in [false, true] {
+        let mut args = vec!["connector", "test", d];
+        if json {
+            args.insert(0, "--json");
+        }
+        let out = vam_on_path(&args);
+        let shown = text(&out);
+        assert_eq!(out.status.code(), Some(6), "json={json}: {shown}");
+        assert!(
+            shown.contains("no case ran") && !shown.contains("the key never reached a tool"),
+            "json={json}: {shown}"
+        );
+    }
+    // Naming the listing says the file is missing, and exits 6 as before.
+    let out = vam_on_path(&["connector", "test", d, "--listing", "notesdesk"]);
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out));
+
+    // One REST case still passes.
+    let ok = t.path().join("ok");
+    let d = ok.to_str().unwrap();
+    assert!(vam(&init_args(d, &["--runtime", "python3"]))
+        .status
+        .success());
+    let out = vam_on_path(&["connector", "test", d]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        text(&out).contains("the key never reached a tool") && !text(&out).contains("no case ran"),
+        "{}",
+        text(&out)
+    );
+
+    // A remote MCP listing was checked: nothing to run, and that is not a failure.
+    let mcp = t.path().join("mcp");
+    let d = mcp.to_str().unwrap();
+    let out = vam(&[
+        "connector",
+        "init",
+        d,
+        "--id",
+        "bugwatch",
+        "--auth",
+        "discover",
+        "--mcp-url",
+        "https://mcp.bugwatch.example/mcp",
+        "--domain",
+        "kit.community.example",
+    ]);
+    assert!(out.status.success(), "{}", text(&out));
+    for extra in [&[][..], &["--listing", "bugwatch"][..]] {
+        let mut args = vec!["connector", "test", d];
+        args.extend_from_slice(extra);
+        let out = vam_on_path(&args);
+        let shown = text(&out);
+        assert_eq!(out.status.code(), Some(0), "{extra:?}: {shown}");
+        assert!(
+            shown.contains("skip bugwatch: a remote MCP connector")
+                && shown.contains("no case ran")
+                && !shown.contains("the key never reached a tool"),
+            "{extra:?}: {shown}"
+        );
+    }
 }

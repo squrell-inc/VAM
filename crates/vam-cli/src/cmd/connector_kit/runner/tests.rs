@@ -907,8 +907,11 @@ fn an_unknown_tool_a_missing_file_and_a_wrong_listing_are_named() {
     );
 
     fs::remove_file(&path).unwrap();
-    // without --listing the listing is skipped; named, it is a failure
-    test(&dir_arg(&root), None, None).unwrap();
+    // without --listing the listing is skipped, and with nothing else checked no case ran: that is
+    // not a pass. Named, the missing file is a failure.
+    let e = test(&dir_arg(&root), None, None).unwrap_err();
+    assert_eq!(crate::output::classify(&e).0, ExitCode::Invalid);
+    assert!(e.to_string().contains("no case ran"), "{e}");
     let e = test(&dir_arg(&root), Some("notesdesk"), None).unwrap_err();
     assert_eq!(crate::output::classify(&e).0, ExitCode::Invalid);
     let e = test(&dir_arg(&root), Some("nothere"), None).unwrap_err();
