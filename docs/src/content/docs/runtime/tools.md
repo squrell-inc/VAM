@@ -121,8 +121,12 @@ declare 1 to 8 REST `bindings` (1 to 4 hosts each, `value: access_token`, `injec
 exactly `vamsec_<connector id>_<binding name>`; a skill's `egress[].host` may be `{subdomain}.<dns name>` and a
 listing is refused when that is not the suffix of the connector it ships. The listing's capability summary shows
 the admin the sign-in endpoints, the bindings, the company address (label and suffix) and the templated hosts.
-The member signs in through the node's code exchange (below); attaching the member's token to these hosts is not
-yet built.
+The member signs in through the node's code exchange (below). The node attaches the member's access token to a
+request only when the guest sent the connector's binding placeholder as the `Authorization` value, the request's
+host is one of the binding's hosts as filled with the node's company address, and the call matches an egress shape
+the calling skill tool declared in its manifest (method, path, `{subdomain}` filled from the connector, never from
+the skill); the token is read after those checks and never enters the guest. A placeholder anywhere else, on another
+company's host or outside the shape is refused.
 
 ### The admin's client: the node exchanges the code
 
