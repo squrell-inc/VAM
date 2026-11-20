@@ -26,9 +26,11 @@ const EPOCH: u64 = 1_767_225_600;
 
 // ---- step and expect shapes ------------------------------------------------------------------
 
-/// `git-tag: { piece, tag, move, overlay }`: adds a tag to the marketplace repo. With `overlay`
-/// (a fixture directory under `e2e/world/fixtures`) its files are copied over the work tree and
-/// committed first, so the tag names a new commit. `move: true` lets an existing tag move.
+/// `git-tag: { piece, tag, move, overlay, root }`: adds a tag to the marketplace repo. With
+/// `overlay` (a fixture directory under `e2e/world/fixtures`) its files are copied over the work
+/// tree and committed first, so the tag names a new commit. With `root: { same: true }` the tree
+/// the previous `cli` step left is committed the same way (a kit the CLI wrote is what gets
+/// tagged). `move: true` lets an existing tag move.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitTag {
@@ -37,6 +39,15 @@ pub struct GitTag {
     #[serde(default, rename = "move")]
     pub move_: bool,
     pub overlay: Option<String>,
+    pub root: Option<GitTagRoot>,
+}
+
+/// `root: { same: true }` of `git-tag`: the content to commit is the scratch tree of the previous
+/// `cli` step.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitTagRoot {
+    pub same: bool,
 }
 
 /// `marketplace-add: { piece, as, refused, contains }`: `POST /v1/marketplaces` with the piece's
@@ -399,6 +410,22 @@ impl Engine {
     pub(super) fn git_tag(&mut self, t: &GitTag) -> Result<(), Fail> {
         let root = self.mkt_root()?;
         let wp = self.piece_def(&t.piece)?;
+        if t.root.as_ref().is_some_and(|r| r.same) {
+            let tree = self
+                .ctx
+                .cli_root
+                .clone()
+                .filter(|d| d.is_dir())
+                .ok_or_else(|| {
+                    Fail::new(
+                        Class::Scenario,
+                        format!("git-tag `{}` with `root: {{ same: true }}`", t.tag),
+                        "no earlier `cli` step left a tree",
+                    )
+                })?;
+            return tag_repo(&root, &wp.piece, "main", t, Some(&tree))
+                .map_err(|e| Fail::new(Class::Harness, format!("git-tag `{}`", t.tag), e));
+        }
         let overlay = match &t.overlay {
             Some(o) => Some(
                 wp.fixture_dir
@@ -831,6 +858,7 @@ mod tests {
             tag: "v2".into(),
             move_: false,
             overlay: None,
+            root: None,
         };
         tag_repo(&root, "p", "main", &t, Some(&overlay)).unwrap();
         let v2 = rev(&root, "p", "refs/tags/v2");

@@ -1,0 +1,13 @@
+piece: mock-notesdesk-server
+kind: mock-provider
+# A runner-hosted loopback stand-in for a publisher's REST service (fictional "Notesdesk"), built from the test file
+# the publisher ships with the listing: `tests/connector-test.json` of the fixture below (the format of
+# `vam_spec::connector_kit`, which `vam connector test` reads too). One loopback listener per host the file names
+# (`api.notesdesk.example` and `eu.api.notesdesk.example`), each reached through the `rest:<https origin>` seam key.
+# Every route needs `Authorization: Bearer <key>` with the one API key the runner made for the scenario (else 401);
+# a request no route matches is 404. It logs `host=<first label>` (`api`, `eu`), `method=`, `path=`,
+# `bearer=current|stale|placeholder|unknown|none` and `query-key=present|none`, never a value. The key is in the scrub
+# list under the piece's alias. `connector-connect: { apiKey: { piece, which: other } }` makes the provider replace its key
+# (the old one is `bearer=stale` from then on) and types the new one.
+provider: declared
+fixture: marketplace-community-connectors/listings/notesdesk-connector
