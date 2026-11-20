@@ -189,7 +189,10 @@ pub struct Binding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingValue {
+    /// The member's OAuth access token (`oauth2` providers).
     AccessToken,
+    /// The API key the member entered (the `api_key` provider).
+    ApiKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,6 +519,58 @@ fn check_tenant(c: &Connector) -> Result<(), ConnectorError> {
     }
 }
 
+/// Longest label of an API key field.
+const API_KEY_LABEL_MAX: usize = 64;
+
+/// The rules of the `api_key` provider: exactly one field (`provider.fields`), a name of
+/// `[a-z][a-z0-9_]{0,31}`, a one-line label of 1 to 64 characters, bindings that carry the key
+/// (`value: api_key`) as a bearer (`inject: bearer`: a named header is not available yet).
+fn check_api_key_provider(p: &ApiKeyProvider, c: &Connector) -> Result<(), ConnectorError> {
+    if p.fields.len() != 1 {
+        return bad(format!(
+            "an api_key connector asks for one field: `provider.fields` lists {} (this version takes exactly one)",
+            p.fields.len()
+        ));
+    }
+    let f = &p.fields[0];
+    let name_ok = !f.name.is_empty()
+        && f.name.len() <= 32
+        && f.name.starts_with(|ch: char| ch.is_ascii_lowercase())
+        && f.name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if !name_ok {
+        return bad(format!(
+            "provider.fields[0].name `{}` must be 1 to 32 characters of a-z, 0-9 or '_', starting with a letter",
+            f.name
+        ));
+    }
+    let label_len = f.label.chars().count();
+    if f.label.trim().is_empty()
+        || label_len > API_KEY_LABEL_MAX
+        || f.label.chars().any(char::is_control)
+    {
+        return bad(format!(
+            "provider.fields[0].label must be 1 to {API_KEY_LABEL_MAX} characters, on one line"
+        ));
+    }
+    for b in c.bindings.iter().flatten() {
+        if b.value != BindingValue::ApiKey {
+            return bad(format!(
+                "binding `{}`: `value: access_token` is for an oauth2 provider; a binding of an api_key connector must use `value: api_key`",
+                b.name
+            ));
+        }
+        if b.inject != Inject::Bearer {
+            return bad(format!(
+                "binding `{}`: `inject` must be `bearer` for an api_key connector (`inject: header` is not available yet)",
+                b.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
     if !valid_urn(&c.urn) {
         return bad(format!("urn must be {URN_PREFIX}<host>/<publisher>/<name>"));
@@ -578,11 +633,7 @@ pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
                 }
             }
         }
-        Provider::ApiKey(p) => {
-            if p.fields.is_empty() || p.fields.iter().any(|f| f.name.trim().is_empty()) {
-                return bad("api_key needs named fields");
-            }
-        }
+        Provider::ApiKey(p) => check_api_key_provider(p, c)?,
     }
     if let Some(bs) = &c.bindings {
         if bs.is_empty() {
@@ -590,6 +641,12 @@ pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
         }
         let mut names = HashSet::new();
         for b in bs {
+            if b.value == BindingValue::ApiKey && !matches!(c.provider, Provider::ApiKey(_)) {
+                return bad(format!(
+                    "binding `{}`: `value: api_key` is only for an api_key provider; an oauth2 connector's binding uses `value: access_token`",
+                    b.name
+                ));
+            }
             if b.name.trim().is_empty() || b.placeholder.trim().is_empty() {
                 return bad("binding name and placeholder must not be empty");
             }
@@ -878,6 +935,55 @@ mod tests {
         let mut v = org_client();
         v["provider"]["clientSecret"] = json!("squrell_relay");
         assert!(err(v).contains("squrell_relay"));
+    }
+
+    fn api_key_file() -> Value {
+        let mut v = linear();
+        v["provider"] =
+            json!({ "kind": "api_key", "fields": [{ "name": "key", "label": "Linear API key" }] });
+        v
+    }
+
+    #[test]
+    fn an_api_key_file_round_trips_and_each_refusal_names_its_field() {
+        let c = parse_connector(&api_key_file().to_string()).unwrap();
+        assert!(matches!(&c.provider, Provider::ApiKey(p) if p.fields.len() == 1));
+        let again = parse_connector(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(c, again);
+        // Two fields, a bad name, an empty label.
+        let mut v = api_key_file();
+        v["provider"]["fields"] = json!([
+            { "name": "a", "label": "A" }, { "name": "b", "label": "B" }
+        ]);
+        assert!(err(v).contains("one field"));
+        let mut v = api_key_file();
+        v["provider"]["fields"] = json!([{ "name": "Key", "label": "Key" }]);
+        assert!(err(v).contains("provider.fields[0].name"));
+        let mut v = api_key_file();
+        v["provider"]["fields"] = json!([{ "name": "key", "label": "" }]);
+        assert!(err(v).contains("provider.fields[0].label"));
+    }
+
+    #[test]
+    fn the_binding_value_follows_the_provider() {
+        let rest = |provider: Value, value: &str, inject: &str| {
+            let mut v = linear();
+            v.as_object_mut().unwrap().remove("mcp");
+            v["provider"] = provider;
+            v["bindings"] = json!([{ "name": "api", "placeholder": "vamsec_x_api", "value": value,
+                "inject": inject, "hosts": ["api.example.org"] }]);
+            v
+        };
+        let key = json!({ "kind": "api_key", "fields": [{ "name": "key", "label": "Key" }] });
+        assert!(parse_connector(&rest(key.clone(), "api_key", "bearer").to_string()).is_ok());
+        let e = err(rest(key.clone(), "access_token", "bearer"));
+        assert!(e.contains("value: api_key") && e.contains("`api`"), "{e}");
+        let e = err(rest(key, "api_key", "header"));
+        assert!(e.contains("`inject`") && e.contains("`api`"), "{e}");
+        let oauth = json!({ "kind": "oauth2", "profile": "discover", "clientSecret": "none",
+            "scopes": [], "orgConsent": "none" });
+        let e = err(rest(oauth, "api_key", "bearer"));
+        assert!(e.contains("only for an api_key provider"), "{e}");
     }
 
     #[test]

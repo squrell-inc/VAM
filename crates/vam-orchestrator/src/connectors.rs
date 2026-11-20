@@ -116,6 +116,12 @@ pub fn builtin(id: &str) -> Option<Connector> {
         .find(|c| connector_id(c) == id)
 }
 
+/// True when the connector signs in with an API key each member enters (provider `api_key`): it has
+/// no OAuth client and no admin consent, so the node's admin saves neither.
+pub(crate) fn is_api_key(c: &Connector) -> bool {
+    matches!(c.provider, Provider::ApiKey(_))
+}
+
 fn oauth(c: &Connector) -> Option<&OAuth2Provider> {
     match &c.provider {
         Provider::Oauth2(o) => Some(o),
@@ -572,6 +578,11 @@ pub fn plan_put(
     let tenant = match &req.consent {
         None | Some(None) => None,
         Some(Some(c)) => {
+            if is_api_key(def) {
+                return Err(invalid(format!(
+                    "`{id}` signs in with an API key each member enters: it takes no admin consent"
+                )));
+            }
             if consent_kind == OrgConsent::None {
                 return Err(invalid(format!("`{id}` takes no admin consent")));
             }

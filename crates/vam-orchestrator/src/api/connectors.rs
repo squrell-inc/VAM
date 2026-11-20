@@ -5536,6 +5536,82 @@ mod tests {
         assert_eq!(stored_header(&state, "static-keep"), "Bearer new");
     }
 
+    /// A marketplace connector that signs in with an API key (REST, one bearer binding).
+    fn install_notesdesk(store: &SqliteWorkflowStore) {
+        let json = serde_json::json!({
+            "urn": "urn:vam:connector:connectors.community.example/community/notesdesk",
+            "version": "1.0.0", "displayName": "Notesdesk", "publisher": "Community Tools Ltd",
+            "description": "Notes.", "icon": "notesdesk",
+            "provider": { "kind": "api_key",
+                          "fields": [{ "name": "key", "label": "Notesdesk API key" }] },
+            "connection": { "holder": "user", "multiAccount": false, "label": "none" },
+            "bindings": [{ "name": "api", "placeholder": "vamsec_notesdesk_api",
+                           "value": "api_key", "inject": "bearer",
+                           "hosts": ["api.notesdesk.example"] }]
+        });
+        let urn = json["urn"].as_str().unwrap().to_string();
+        let c = store.connection.lock().unwrap();
+        c.execute(
+            "INSERT INTO connector_releases (urn, major, minor, patch, digest, spec_bytes, created_at,
+                 updated_at, owner_user_id) VALUES (?1, 1, 0, 0, 'd', ?2, 1, 1, 'system')",
+            rusqlite::params![urn, json.to_string().as_bytes()],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO catalog_origins (kind, urn, major, minor, patch, marketplace_id, listing_id,
+                 git_ref, commit_sha, package_digest, installed_at)
+             VALUES ('connector', ?1, 1, 0, 0, 'm-1', 'notesdesk-connector', 'notesdesk-v1', 'c', 'd', 1)",
+            [urn],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_api_key_connector_takes_no_client_and_no_consent_and_lists_its_field() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        let node = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                call(
+                    &app,
+                    "PUT",
+                    "/v1/connectors/notesdesk/node",
+                    "orgadmin-secret",
+                    Some(body),
+                )
+                .await
+            }
+        };
+        for body in [
+            serde_json::json!({ "enabled": true, "client": { "clientId": "c-1" } }),
+            serde_json::json!({ "enabled": true, "client": { "clientId": "c-1", "clientSecret": "s" } }),
+            serde_json::json!({ "enabled": true, "consent": { "tenantId": "11111111-2222-3333-4444-555555555555" } }),
+        ] {
+            let (s, b) = node(body).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+            assert!(b.to_string().contains("API key"), "{b}");
+        }
+        // Nothing was saved by the refused bodies.
+        assert!(state.store.node_connector("notesdesk").unwrap().is_none());
+        let (s, e) = node(serde_json::json!({ "enabled": true })).await;
+        assert_eq!(s, StatusCode::OK, "{e}");
+        assert_eq!(e["provider"]["kind"], "api_key");
+        assert_eq!(e["provider"]["fields"][0]["label"], "Notesdesk API key");
+        // A member reads the same entry: the sign-in kind and the label, and the connect state.
+        let (s, l) = call(&app, "GET", "/v1/connectors", "member-secret", None).await;
+        assert_eq!(s, StatusCode::OK);
+        let entry = l["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "notesdesk")
+            .unwrap();
+        assert_eq!(entry["state"], "connect", "{entry}");
+        assert_eq!(entry["provider"]["kind"], "api_key");
+        assert_eq!(entry["provider"]["fields"][0]["label"], "Notesdesk API key");
+    }
+
     #[tokio::test]
     async fn a_check_whose_request_goes_away_keeps_the_members_lock_until_the_refresh_returns() {
         let (app, _state, p) = fixed_endpoint_node("fixedcheck.example", false).await;

@@ -577,6 +577,18 @@ pub struct ConnectorSummary {
     /// The company address the admin will enter at Enable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant: Option<TenantSummary>,
+    /// What a member is asked to enter (provider `api_key`): the label of the one field. Absent
+    /// for every other provider, so an existing summary, and the digest of an installed release,
+    /// is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<FieldSummary>,
+}
+
+/// One field a member enters to connect (the label only: the name is internal).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldSummary {
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -838,6 +850,16 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
         }),
         _ => None,
     };
+    let fields: Vec<FieldSummary> = match &c.provider {
+        crate::connector::Provider::ApiKey(p) => p
+            .fields
+            .iter()
+            .map(|f| FieldSummary {
+                label: f.label.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let tenant = c.tenant.as_ref().map(|t| TenantSummary {
         label: t.label.clone(),
         suffix: t.suffix.clone(),
@@ -865,6 +887,7 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
             bindings,
             endpoints,
             tenant,
+            fields,
         }),
         ..Default::default()
     }

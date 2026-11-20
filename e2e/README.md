@@ -967,8 +967,9 @@ host; the listener names the host in the log. One declared piece per scenario.
   `eu.api.notesdesk.example`), `keyed-bugwatch-connector` (connector `keyed-bugwatch`: `api_key`, MCP
   `https://mcp.bugwatch.example/mcp`, vetted `list_issues` and `get_issue`; served by `mock-linear-server`) and
   `api-key-with-two-fields` (two fields, refused). The overlay `marketplace-community-connectors-notesdesk-update/` is the tag
-  `notesdesk-connector-v1.1.0`: the connector's binding and the skill's shapes also name `eu.api.notesdesk.example`. Until the
-  node supports the `api_key` kind these listings show an `error` in their summary.
+  `notesdesk-connector-v1.1.0`: the connector's binding and the skill's shapes also name `eu.api.notesdesk.example`. The node
+  accepts the `api_key` kind: a listing's summary shows `provider: api_key` and the field's label (`fields: [{ label }]`); the
+  key itself is entered through `PUT /v1/connectors/{id}/connection` (a later wave).
   A header-named key (`inject: header` with a `headerName`) is not exercised yet: no fixture uses it.
 
 **The kit.** Scenarios that run the CLI use `cli` steps on a copy of a tree under `world/fixtures/connector-kit/`:
