@@ -488,16 +488,19 @@ fn attach_show_card_at(
         );
         return skip("result_does_not_fit");
     }
-    // Over the card limit: keep the rows of the bound list that fit (the model's result is
-    // unchanged); a result that cannot be cut is skipped.
-    let (ir, data, trimmed) = if result_text.len() > MAX_CARD_DATA_BYTES {
-        match trim::trim_to_fit(&card.ir, &data) {
-            Some(t) => {
-                let note = serde_json::json!({ "path": t.path, "total": t.total, "kept": t.kept });
-                (t.ir, t.data, Some(note))
-            }
-            None => return skip("result_too_large"),
+    // Over the card limit (measured as compact JSON, so whitespace in the tool's output does not
+    // count): keep the rows of the bound list that fit. The model's result is unchanged. A result
+    // that cannot be cut, or whose cut no longer fits the card's schema (`minItems`), is skipped.
+    let compact_len = serde_json::to_vec(&data).map_or(usize::MAX, |b| b.len());
+    let (ir, data, trimmed) = if compact_len > MAX_CARD_DATA_BYTES {
+        let Some(t) = trim::trim_to_fit(&card.ir, &data) else {
+            return skip("result_too_large");
+        };
+        if vam_spec::jig::check_data_against(&card.schema, &t.data).is_err() {
+            return skip("result_too_large");
         }
+        let note = serde_json::json!({ "path": t.path, "total": t.total, "kept": t.kept });
+        (t.ir, t.data, Some(note))
     } else {
         (card.ir, data, None)
     };

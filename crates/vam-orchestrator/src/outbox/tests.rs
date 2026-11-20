@@ -1183,6 +1183,77 @@ mod tool_cards {
     }
 
     #[test]
+    fn whitespace_in_the_tool_output_does_not_count_toward_the_card_limit() {
+        let (session, _dir) = seeded("tc-padded", true);
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        let run = fresh_run();
+        let padded = format!(
+            "{}{{\"messages\":[{{\"from\":\"a\",\"subject\":\"One\"}},{{\"from\":\"b\",\"subject\":\"Two\"}}]}}{}",
+            " ".repeat(9_000),
+            "\n".repeat(9_000)
+        );
+        assert!(padded.len() > vam_spec::outbox::MAX_CARD_DATA_BYTES);
+        attach_show_card(&store, &session, &run, "mail_list", "c1", &padded);
+        let cards = events(&store, &run, TYPE_OUTBOX_CARD);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0]["data"]["data"]["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(cards[0]["data"].get("trimmed").is_none());
+    }
+
+    #[test]
+    fn a_cut_that_breaks_the_cards_schema_is_skipped() {
+        // The tool's output schema wants at least 60 messages; any cut keeps fewer.
+        let session = "tc-min-items".to_string();
+        let schema = serde_json::json!({
+            "type": "object", "required": ["messages"],
+            "properties": { "messages": { "type": "array", "minItems": 60,
+                "items": { "type": "object", "properties": { "subject": { "type": "string" } } } } }
+        });
+        let ir = serde_json::json!({
+            "version": 1, "catalog": "vam/1", "root": "root", "state": {},
+            "nodes": {
+                "root": { "type": "List", "props": { "items": { "$data": "/messages" } }, "children": ["t"] },
+                "t": { "type": "Text", "props": { "text": { "$item": "/subject" } } }
+            },
+            "inputSchema": schema.clone(),
+        });
+        let card = crate::skill_cards::ToolCard {
+            skill: "mail".into(),
+            jig: "mail.mail_list".into(),
+            ir,
+            schema,
+        };
+        let mut cards = std::collections::HashMap::new();
+        cards.insert(
+            "mail_list".to_string(),
+            crate::skill_cards::ToolCards {
+                declares_show: true,
+                show: Some(card),
+                ..Default::default()
+            },
+        );
+        crate::skill_cards::seed_for_test(&session, cards);
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        let run = fresh_run();
+        let rows: Vec<serde_json::Value> = (1..=60)
+            .map(|i| serde_json::json!({ "subject": format!("Message {i} {}", "x".repeat(400)) }))
+            .collect();
+        let big = serde_json::json!({ "messages": rows }).to_string();
+        attach_show_card(&store, &session, &run, "mail_list", "c1", &big);
+        assert!(events(&store, &run, TYPE_OUTBOX_CARD).is_empty());
+        let skipped = events(&store, &run, TYPE_CARD_SKIPPED);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0]["data"]["reason"], "result_too_large");
+        crate::skill_cards::forget_session(&session);
+    }
+
+    #[test]
     fn a_card_that_failed_at_seed_is_card_unavailable_and_a_tool_without_ui_is_silent() {
         let (session, _dir) = seeded("tc-bad", false);
         let store = SqliteWorkflowStore::in_memory().unwrap();

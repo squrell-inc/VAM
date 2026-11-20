@@ -624,7 +624,7 @@ fn graph(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, login: &Arc<Mutex<
             l.fields.insert("search".into());
         }
     }
-    let mailbox = state.lock().unwrap().mailbox;
+    let mailbox = state.lock().unwrap_or_else(|e| e.into_inner()).mailbox;
     let id_of = |prefix: &str| {
         path.strip_prefix(prefix)
             .filter(|r| !r.is_empty() && !r.contains('/'))
@@ -1819,6 +1819,16 @@ impl Engine {
                     Class::Scenario,
                     "`mailbox` on a microsoft-graph mock-provider piece",
                     format!("piece `{}`", m.piece),
+                ));
+            }
+            if m.hold.is_some() || m.revoke {
+                return Err(Fail::new(
+                    Class::Scenario,
+                    "`mailbox` alone on a microsoft-graph mock-provider step",
+                    format!(
+                        "piece `{}`: `mailbox` is not combined with `hold` or `revoke`",
+                        m.piece
+                    ),
                 ));
             }
             st.mailbox = Some(n);

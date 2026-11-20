@@ -1511,8 +1511,9 @@ one of its files.
    *Amended (2026-11-20, fix/jig-cards-marketplace, orchestrator-approved):* a
    result over 16 KiB keeps the first rows of the array the card's `List` binds,
    with "and N more" and `trimmed {path, total, kept}` on `outbox.card`;
-   `card.skipped result_too_large` only when there is no bound list or one row
-   is over the limit. Real Graph mail (152-character ids) passed 16 KiB at about
+   `card.skipped result_too_large` only when the raw result is over 1 MiB (not
+   parsed), there is no bound list, one row is over the limit, or the cut breaks
+   the card's schema (`minItems`). The 16 KiB is measured on compact JSON. Real Graph mail (152-character ids) passed 16 KiB at about
    28 messages, so "yesterday's mail" lost its card.
 6. **Prefill of an ask card.** Default: a state variable named like a tool
    argument starts with that argument's value; others keep the IR's defaults.
