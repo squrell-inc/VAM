@@ -54,4 +54,4 @@ mock:
   - when: { step: vendor, stepStart: true }
     reply: { toolCall: { name: keyed-bugwatch__export_workspace, args: {} } }
 status: pending
-expectFail: { step: when.2, class: product }
+expectFail: { step: when.5, class: product }

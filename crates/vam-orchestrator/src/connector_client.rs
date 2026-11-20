@@ -253,6 +253,9 @@ pub fn check_request(
             }
             Ok(ClientIntent::Keep)
         }
+        Some(_) if crate::connectors::is_api_key(def) => Err(invalid(format!(
+            "`{id}` signs in with an API key each member enters: it takes no OAuth client"
+        ))),
         Some(_) if !org => Err(invalid(format!(
             "`{id}` uses the publisher's own OAuth client; it takes no client"
         ))),

@@ -5382,6 +5382,236 @@ mod tests {
         assert_eq!(stored.timeout_ms, 90_000);
     }
 
+    /// A hand-added static MCP server on loopback, answering `host`; `tools_ok` false makes its
+    /// `tools/list` fail.
+    fn static_mcp_server(
+        host: &str,
+        tools_ok: Arc<AtomicBool>,
+    ) -> Arc<std::sync::Mutex<crate::mcp_client::mock::Seen>> {
+        let (url, seen) = crate::mcp_client::mock::spawn(move |method, id, params| {
+            if method == "tools/list" && !tools_ok.load(std::sync::atomic::Ordering::SeqCst) {
+                return Some((
+                    "application/json".into(),
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id,
+                        "error": { "code": -32000, "message": "tools are down" } })
+                    .to_string(),
+                ));
+            }
+            crate::mcp_client::mock::standard(method, id, params)
+        });
+        crate::mcp_oauth_refresh::test_seam::serve(host, url::Url::parse(&url).unwrap());
+        seen
+    }
+
+    fn static_connect_body(id: &str, host: &str, authorization: &str) -> serde_json::Value {
+        serde_json::json!({
+            "connectionId": id,
+            "url": format!("https://{host}/mcp"),
+            "secretValue": authorization,
+        })
+    }
+
+    fn stored_header(state: &AppState, id: &str) -> String {
+        secrecy::ExposeSecret::expose_secret(
+            &state
+                .vault
+                .decrypt_secret_at(
+                    crate::secrets::SecretScope::User,
+                    "ada",
+                    &format!("{id}/auth-header"),
+                )
+                .unwrap(),
+        )
+        .clone()
+    }
+
+    #[tokio::test]
+    async fn two_first_time_static_connects_leave_the_accepted_ones_header_in_force() {
+        let (app, state) = app_world_with_state();
+        let host = "mcp.static-race.example";
+        static_mcp_server(host, Arc::new(AtomicBool::new(true)));
+        let connect = |app: axum::Router, key: &'static str, authorization: &'static str| {
+            tokio::spawn(async move {
+                call_with_key(
+                    &app,
+                    "PUT",
+                    "/v1/mcp/connections",
+                    "member-secret",
+                    Some(static_connect_body("static-race", host, authorization)),
+                    key,
+                )
+                .await
+            })
+        };
+        let wait = |arrived: std::sync::mpsc::Receiver<()>| {
+            tokio::task::spawn_blocking(move || {
+                arrived.recv_timeout(std::time::Duration::from_secs(10))
+            })
+        };
+        // A and B are both first-time connects: each has read "no row" and listed the tools, and
+        // each stops just before its row write.
+        let (arrived_a, release_a) =
+            crate::connectors::test_signal::arm_pause("mcp-connect-write:static-race");
+        let a = connect(app.clone(), "race-a", "Bearer token-A");
+        wait(arrived_a)
+            .await
+            .unwrap()
+            .expect("A reached its row write");
+        let (arrived_b, release_b) =
+            crate::connectors::test_signal::arm_pause("mcp-connect-write:static-race");
+        let b = connect(app.clone(), "race-b", "Bearer token-B");
+        wait(arrived_b)
+            .await
+            .unwrap()
+            .expect("B reached its row write");
+        // A's row commits; B is refused.
+        release_a.send(()).unwrap();
+        let (s, body) = a.await.unwrap();
+        assert_eq!(s, StatusCode::OK, "{body}");
+        release_b.send(()).unwrap();
+        let (s, body) = b.await.unwrap();
+        assert_eq!(s, StatusCode::CONFLICT, "{body}");
+        // The request the member was told succeeded is the one in force.
+        assert_eq!(
+            stored_header(&state, "static-race"),
+            "Bearer token-A",
+            "the accepted row's header is not the refused request's value"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_static_connect_whose_tool_listing_fails_keeps_the_old_header() {
+        let (app, state) = app_world_with_state();
+        let host = "mcp.static-keep.example";
+        let tools_ok = Arc::new(AtomicBool::new(true));
+        let seen = static_mcp_server(host, tools_ok.clone());
+        let (s, body) = call_with_key(
+            &app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(static_connect_body("static-keep", host, "Bearer old")),
+            "keep-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(stored_header(&state, "static-keep"), "Bearer old");
+        // The server now refuses the listing; the member replaces the header.
+        tools_ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (s, body) = call_with_key(
+            &app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(static_connect_body("static-keep", host, "Bearer new")),
+            "keep-2",
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{body}");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .auth
+                .iter()
+                .any(|a| a.as_deref() == Some("Bearer new")),
+            "the listing was tried with the new header"
+        );
+        assert_eq!(
+            stored_header(&state, "static-keep"),
+            "Bearer old",
+            "a refused connect replaced a working header"
+        );
+        // A listing that works takes the new header.
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (s, body) = call_with_key(
+            &app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(static_connect_body("static-keep", host, "Bearer new")),
+            "keep-3",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(stored_header(&state, "static-keep"), "Bearer new");
+    }
+
+    /// A marketplace connector that signs in with an API key (REST, one bearer binding).
+    fn install_notesdesk(store: &SqliteWorkflowStore) {
+        let json = serde_json::json!({
+            "urn": "urn:vam:connector:connectors.community.example/community/notesdesk",
+            "version": "1.0.0", "displayName": "Notesdesk", "publisher": "Community Tools Ltd",
+            "description": "Notes.", "icon": "notesdesk",
+            "provider": { "kind": "api_key",
+                          "fields": [{ "name": "key", "label": "Notesdesk API key" }] },
+            "connection": { "holder": "user", "multiAccount": false, "label": "none" },
+            "bindings": [{ "name": "api", "placeholder": "vamsec_notesdesk_api",
+                           "value": "api_key", "inject": "bearer",
+                           "hosts": ["api.notesdesk.example"] }]
+        });
+        let urn = json["urn"].as_str().unwrap().to_string();
+        let c = store.connection.lock().unwrap();
+        c.execute(
+            "INSERT INTO connector_releases (urn, major, minor, patch, digest, spec_bytes, created_at,
+                 updated_at, owner_user_id) VALUES (?1, 1, 0, 0, 'd', ?2, 1, 1, 'system')",
+            rusqlite::params![urn, json.to_string().as_bytes()],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO catalog_origins (kind, urn, major, minor, patch, marketplace_id, listing_id,
+                 git_ref, commit_sha, package_digest, installed_at)
+             VALUES ('connector', ?1, 1, 0, 0, 'm-1', 'notesdesk-connector', 'notesdesk-v1', 'c', 'd', 1)",
+            [urn],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_api_key_connector_takes_no_client_and_no_consent_and_lists_its_field() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        let node = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                call(
+                    &app,
+                    "PUT",
+                    "/v1/connectors/notesdesk/node",
+                    "orgadmin-secret",
+                    Some(body),
+                )
+                .await
+            }
+        };
+        for body in [
+            serde_json::json!({ "enabled": true, "client": { "clientId": "c-1" } }),
+            serde_json::json!({ "enabled": true, "client": { "clientId": "c-1", "clientSecret": "s" } }),
+            serde_json::json!({ "enabled": true, "consent": { "tenantId": "11111111-2222-3333-4444-555555555555" } }),
+        ] {
+            let (s, b) = node(body).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+            assert!(b.to_string().contains("API key"), "{b}");
+        }
+        // Nothing was saved by the refused bodies.
+        assert!(state.store.node_connector("notesdesk").unwrap().is_none());
+        let (s, e) = node(serde_json::json!({ "enabled": true })).await;
+        assert_eq!(s, StatusCode::OK, "{e}");
+        assert_eq!(e["provider"]["kind"], "api_key");
+        assert_eq!(e["provider"]["fields"][0]["label"], "Notesdesk API key");
+        // A member reads the same entry: the sign-in kind and the label, and the connect state.
+        let (s, l) = call(&app, "GET", "/v1/connectors", "member-secret", None).await;
+        assert_eq!(s, StatusCode::OK);
+        let entry = l["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "notesdesk")
+            .unwrap();
+        assert_eq!(entry["state"], "connect", "{entry}");
+        assert_eq!(entry["provider"]["kind"], "api_key");
+        assert_eq!(entry["provider"]["fields"][0]["label"], "Notesdesk API key");
+    }
+
     #[tokio::test]
     async fn a_check_whose_request_goes_away_keeps_the_members_lock_until_the_refresh_returns() {
         let (app, _state, p) = fixed_endpoint_node("fixedcheck.example", false).await;

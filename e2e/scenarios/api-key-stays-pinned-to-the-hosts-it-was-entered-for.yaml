@@ -68,4 +68,4 @@ mock:
   - when: { step: eu, stepStart: true }
     reply: { toolCall: { name: load_skill, args: { skill: notesdesk-notes } } }
 status: pending
-expectFail: { step: when.2, class: product }
+expectFail: { step: when.5, class: product }
