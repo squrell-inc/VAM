@@ -1306,39 +1306,54 @@ pub(crate) fn write_connection(
         client_id: None,
     };
     if let Err(err) = store.put_connector_connection(&row) {
-        delete_connection_secrets(vault, owner, id);
+        // Best effort: the write's own error is the one the caller needs.
+        let _ = delete_connection_secrets(vault, owner, id);
         return Err(err);
     }
     store.resolve_connection_needs_reauth(owner, id, "acted");
     Ok(row)
 }
 
-/// Removes the token rows and the API key row (a missing one is fine).
-pub(crate) fn delete_connection_secrets(vault: &SecretsVault, owner: &str, id: &str) {
+/// Removes the token rows and the API key row. A missing row is fine; any other failure is
+/// returned (after every row has been tried), so a disconnect never reports success while a
+/// credential survives.
+pub(crate) fn delete_connection_secrets(
+    vault: &SecretsVault,
+    owner: &str,
+    id: &str,
+) -> Result<(), OrchestratorError> {
+    let mut first_error = None;
     for binding in [
         refresh_token_binding_id(id),
         access_token_binding_id(id),
         api_key_binding_id(id),
     ] {
-        let _ = vault.delete_secret_at(SecretScope::User, owner, &binding);
+        match vault.delete_secret_at(SecretScope::User, owner, &binding) {
+            Ok(_) | Err(OrchestratorError::NotFound(_)) => {}
+            Err(err) => {
+                first_error.get_or_insert(err);
+            }
+        }
     }
+    first_error.map_or(Ok(()), Err)
 }
 
-/// `DELETE …/connection`: the rows, the token secrets. `NotFound` when there is no connection.
+/// `DELETE …/connection`: the token secrets, then the row. The vault rows go FIRST and a failure
+/// is returned with the row kept, so the member can retry and the row never outlives a request that
+/// answered "disconnected" while the key was still stored. `NotFound` when there is no connection.
 pub(crate) fn disconnect(
     store: &SqliteWorkflowStore,
     vault: &SecretsVault,
     owner: &str,
     id: &str,
 ) -> Result<(), OrchestratorError> {
+    // Rows without a table row (an interrupted write) go too.
+    delete_connection_secrets(vault, owner, id)?;
     if !store.delete_connector_connection(owner, id)? {
-        // Rows without a table row (an interrupted write) still go.
-        delete_connection_secrets(vault, owner, id);
         return Err(OrchestratorError::NotFound(format!(
             "connection to `{id}` (you are not connected)"
         )));
     }
-    delete_connection_secrets(vault, owner, id);
     store.resolve_connection_needs_reauth(owner, id, "dismissed");
     Ok(())
 }

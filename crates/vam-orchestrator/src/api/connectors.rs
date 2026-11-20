@@ -6228,6 +6228,76 @@ mod tests {
         assert_eq!(s, StatusCode::NOT_FOUND);
     }
 
+    /// Makes every delete of `binding` from the vault fail, as a vault that cannot be written
+    /// would (the vault shares the store's database, so a trigger is the failure).
+    fn fail_vault_delete(state: &AppState, binding: &str) {
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER vault_delete_fails BEFORE DELETE ON host_secrets
+                 WHEN old.binding_id = '{binding}'
+                 BEGIN SELECT RAISE(ABORT, 'vault is read only'); END;"
+            ))
+            .unwrap();
+    }
+
+    fn vault_delete_works_again(state: &AppState) {
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER vault_delete_fails;")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_that_cannot_delete_the_key_fails_keeps_the_row_and_a_retry_succeeds() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        let (s, _) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK);
+        fail_vault_delete(&state, KEY_ROW);
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/notesdesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{b}");
+        assert!(!s.is_success(), "{b}");
+        assert!(!b.to_string().contains(KEY), "{b}");
+        // The key and the row are both still there: the member is told, and can retry.
+        assert!(key_meta(&state, "ada").is_ok());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_some());
+        vault_delete_works_again(&state);
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/notesdesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(key_meta(&state, "ada").is_err());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_none());
+    }
+
     #[tokio::test]
     async fn a_host_change_by_an_update_keeps_the_key_but_reads_needs_reconnect_until_it_is_entered_again(
     ) {
@@ -6986,6 +7056,45 @@ mod tests {
         // The refused write stored no key, in the transaction or outside it.
         assert!(!has_mcp_header(&state));
         assert!(mcp_row(&state).unwrap().header_bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_mcp_disconnect_that_cannot_delete_the_key_fails_keeps_the_row_and_a_retry_succeeds()
+    {
+        let host = "mcp.bugwatch-disconnect.example";
+        let (app, state, _seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        let (s, _) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "d-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        fail_vault_delete(&state, MCP_HEADER_ROW);
+        let disconnect = || {
+            call(
+                &app,
+                "DELETE",
+                "/v1/connectors/keyed-bugwatch/connection",
+                "member-secret",
+                None,
+            )
+        };
+        let (s, b) = disconnect().await;
+        assert!(!s.is_success(), "{s} {b}");
+        assert!(!b.to_string().contains(MCP_KEY), "{b}");
+        assert!(
+            mcp_row(&state).is_ok(),
+            "the row stays so the member can retry"
+        );
+        assert!(has_mcp_header(&state));
+        assert_eq!(bugwatch_state(&app).await, "connected");
+        vault_delete_works_again(&state);
+        let (s, b) = disconnect().await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(mcp_row(&state).is_err());
+        assert!(!has_mcp_header(&state));
     }
 
     #[tokio::test]
