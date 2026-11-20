@@ -1428,3 +1428,86 @@ fn two_marketplace_connectors_cannot_share_a_binding_placeholder() {
     let third = placeholder_connector("zen_other", "api");
     admit_connector_id(&conn, &third.urn, &third).unwrap();
 }
+
+// ---- one listing's own connectors and an update's fixed endpoints (release review of #112) ------
+
+fn prepared_connector(def: vam_spec::connector::Connector) -> Prepared {
+    Prepared {
+        kind: ArtifactKind::Connector,
+        path: format!("connectors/{}", def.urn),
+        checked: vam_spec::package::CheckedPackage {
+            kind: ArtifactKind::Connector,
+            urn: def.urn.clone(),
+            version: String::new(),
+            summary: vam_spec::package::summarize_connector(&def),
+            spec: vam_spec::package::CheckedSpec::Connector(Box::new(def)),
+            warnings: Vec::new(),
+        },
+        skill: None,
+    }
+}
+
+#[test]
+fn a_listing_whose_own_connectors_share_a_binding_placeholder_is_refused() {
+    // `zen` with `desk_api` and `zen_desk` with `api` are one placeholder, in one listing: neither is
+    // installed yet, so the installed-connector check alone would admit both.
+    let both = [
+        prepared_connector(placeholder_connector("zen", "desk_api")),
+        prepared_connector(placeholder_connector("zen_desk", "api")),
+    ];
+    let e = check_listing_placeholders(&both, "two-connectors").unwrap_err();
+    assert!(
+        matches!(e, E::InvalidContract(_)) && e.to_string().contains("vamsec_zen_desk_api"),
+        "{e:?}"
+    );
+    // Distinct placeholders in one listing are fine.
+    let fine = [
+        prepared_connector(placeholder_connector("zen", "desk_api")),
+        prepared_connector(placeholder_connector("zen_other", "api")),
+    ];
+    check_listing_placeholders(&fine, "two-connectors").unwrap();
+}
+
+#[test]
+fn an_update_that_moves_the_fixed_endpoints_clears_the_saved_client() {
+    let store = SqliteWorkflowStore::in_memory().unwrap();
+    crate::connector_client::test_support::install_company_address_rows(&store);
+    let mut node = node_row("zendesk", true);
+    node.tenant_subdomain = Some("acme".into());
+    store.put_node_connector(&node).unwrap();
+    let save_client = |store: &SqliteWorkflowStore| {
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO node_connector_clients (connector_id, client_id, issuer,
+                     authorize_endpoint, token_endpoint, secret_set, updated_at, updated_by)
+                 VALUES ('zendesk', 'zc1', 'https://acme.zendesk.com',
+                     'https://acme.zendesk.com/oauth/authorizations/new',
+                     'https://acme.zendesk.com/oauth/tokens', 0, 1, 'olga')",
+                [],
+            )
+            .unwrap();
+    };
+    let installed = store.connector_entry("zendesk").unwrap().unwrap();
+    let urn = installed.template.urn.clone();
+    let reset = |store: &SqliteWorkflowStore, new: &vam_spec::connector::Connector| {
+        let conn = store.connection.lock().unwrap();
+        reset_connector(&conn, &urn, "", Some(new), true, true, "admin", 2).unwrap();
+    };
+    // An update whose endpoints are the same keeps the client (only the enable is reset).
+    save_client(&store);
+    reset(&store, &installed.template);
+    assert!(store.node_client("zendesk").unwrap().is_some());
+    // An update that moves the token endpoint: the client was pinned to the old one.
+    let mut moved = installed.template.clone();
+    if let vam_spec::connector::Provider::Oauth2(o) = &mut moved.provider {
+        o.endpoints.as_mut().unwrap().token = "https://{subdomain}.zendesk.com/oauth/tokens-v2".into();
+    }
+    reset(&store, &moved);
+    assert!(
+        store.node_client("zendesk").unwrap().is_none(),
+        "the client pinned to the old endpoint is kept"
+    );
+}

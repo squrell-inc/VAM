@@ -317,6 +317,7 @@ fn prepare(
         });
     }
     check_templated_skill_hosts(&out, &listing.id)?;
+    check_listing_placeholders(&out, &listing.id)?;
     // One URN is one artifact.
     let mut seen = std::collections::BTreeSet::new();
     for p in &out {
@@ -328,6 +329,29 @@ fn prepare(
         }
     }
     Ok(out)
+}
+
+/// No two connectors of one listing declare the same binding placeholder. Each is compared with
+/// the installed connectors at write time (`admit_connector_id`), but the whole listing is planned
+/// before any of it is inserted, so two of its own connectors would pass that check together.
+fn check_listing_placeholders(prepared: &[Prepared], listing: &str) -> Result<(), OrchestratorError> {
+    let mut seen: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for p in prepared {
+        let CheckedSpec::Connector(def) = &p.checked.spec else {
+            continue;
+        };
+        for b in def.bindings.iter().flatten() {
+            if let Some(first) = seen.insert(b.placeholder.as_str(), def.urn.as_str()) {
+                if first != def.urn {
+                    return Err(invalid(format!(
+                        "listing `{listing}`: the connectors {first} and {} both declare the binding placeholder `{}`: a placeholder must name one binding",
+                        def.urn, b.placeholder
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A deterministic `.tar.gz` of the regular files under `dir` (sorted, no timestamps, no owners),
@@ -931,13 +955,16 @@ fn admit_connector_id(
 /// marked `needs_reauth`, so nothing is sent on the old shape (a member connects again after the
 /// admin enabled it again). A connector that was not installed before has no connections.
 ///
-/// An admin-supplied client (CN-5.2) was pinned from the old MCP URL's metadata and approved with
-/// it: when the URL moved, or the connector no longer uses the org's client, the stored client and
-/// its secret are removed and the admin enters them again with the next Enable.
+/// An admin-supplied client (CN-5.2) was pinned from the old MCP URL's metadata, or from the old
+/// fixed endpoints (CN-6.2), and approved with it: when the URL or the fixed endpoints (filled
+/// with the node's company address) moved, or the connector no longer uses the org's client, the
+/// stored client and its secret are removed and the admin enters them again with the next Enable.
+#[allow(clippy::too_many_arguments)] // one call site; the flat list mirrors what it compares
 fn reset_connector(
     tx: &Connection,
     urn: &str,
     new_url: &str,
+    new_def: Option<&vam_spec::connector::Connector>,
     new_org_client: bool,
     had_before: bool,
     by: &str,
@@ -952,8 +979,10 @@ fn reset_connector(
     if had_before {
         // The rows on the server the connector named before and on the one it names now are the
         // members' connections to it; a server added by hand under the same id is not.
-        let old_url = super::connector_store::installed_by_id_in(tx, id)?
-            .and_then(|i| i.def.mcp.map(|m| m.url))
+        let old_def = super::connector_store::installed_by_id_in(tx, id)?.map(|i| i.def);
+        let old_url = old_def
+            .as_ref()
+            .and_then(|d| d.mcp.as_ref().map(|m| m.url.clone()))
             .unwrap_or_default();
         crate::mcp_registry::mark_connector_rows_need_reauth(
             tx,
@@ -961,7 +990,16 @@ fn reset_connector(
             &[old_url.as_str(), new_url],
             "the connector changed: reconnect once the admin has enabled it again",
         )?;
-        if old_url != new_url || !new_org_client {
+        // The fixed endpoints as the client was pinned to them: filled with this node's address.
+        let address = crate::connectors::node_connector_in(tx, id)?.and_then(|n| n.tenant_subdomain);
+        let fixed = |d: &vam_spec::connector::Connector| {
+            match crate::connectors::resolve(d, address.as_deref()).provider {
+                vam_spec::connector::Provider::Oauth2(o) => o.endpoints,
+                vam_spec::connector::Provider::ApiKey(_) => None,
+            }
+        };
+        let endpoints_moved = old_def.as_ref().and_then(fixed) != new_def.and_then(fixed);
+        if old_url != new_url || endpoints_moved || !new_org_client {
             crate::connector_client::clear_client_in(tx, id)?;
         }
     }
@@ -1035,19 +1073,23 @@ fn write(
         let same = old
             .is_some_and(|o| !o.summary_digest.is_empty() && o.summary_digest == pl.summary_digest);
         if !same {
-            let (new_url, new_org_client) =
-                match &prepared_by_urn(&prepared, &pl.urn).map(|p| &p.checked.spec) {
-                    Some(CheckedSpec::Connector(def)) => (
-                        def.mcp.as_ref().map(|m| m.url.clone()).unwrap_or_default(),
-                        crate::connector_client::client_kind(def)
-                            == vam_spec::connector::ClientKind::Org,
-                    ),
-                    _ => (String::new(), false),
-                };
+            let new_def = match prepared_by_urn(&prepared, &pl.urn).map(|p| &p.checked.spec) {
+                Some(CheckedSpec::Connector(def)) => Some(&**def),
+                _ => None,
+            };
+            let (new_url, new_org_client) = match new_def {
+                Some(def) => (
+                    def.mcp.as_ref().map(|m| m.url.clone()).unwrap_or_default(),
+                    crate::connector_client::client_kind(def)
+                        == vam_spec::connector::ClientKind::Org,
+                ),
+                None => (String::new(), false),
+            };
             reset_connector(
                 &tx,
                 &pl.urn,
                 &new_url,
+                new_def,
                 new_org_client,
                 old.is_some(),
                 by,
