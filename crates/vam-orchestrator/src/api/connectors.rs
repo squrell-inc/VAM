@@ -421,8 +421,9 @@ async fn delete_connection(
         connectors::RestRevokePlan::Nothing
     };
     connectors::disconnect(&state.store, &state.vault, &owner, &id)?;
-    // The answer says when the provider's grant may remain: not revoked (another client issued it,
-    // or its pins no longer match) or the revocation did not go through.
+    // The answer says when the provider's grant may remain: not revoked (another or an unknown
+    // client issued it, the admin cleared the client, or its pins no longer match) or the
+    // revocation did not go through.
     let mut may_remain = matches!(plan, connectors::RestRevokePlan::Skipped);
     if let connectors::RestRevokePlan::Send(r) = plan {
         let sent = tokio::task::spawn_blocking(move || {

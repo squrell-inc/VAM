@@ -2271,8 +2271,9 @@ pub(crate) enum RestRevokePlan {
     Nothing,
     /// The file declares a revocation endpoint but the refresh token is not sent: the grant was
     /// issued to another client than the node has now (revocation must authenticate as the client
-    /// that issued it, RFC 7009 section 2.1), or its pin or endpoint no longer match. The rows go;
-    /// the provider's grant may remain, and the answer says so.
+    /// that issued it, RFC 7009 section 2.1), the issuing client is not known (a row with no
+    /// `client_id`) or the admin cleared the client, or its pin or endpoint no longer match. The
+    /// rows go; the provider's grant may remain, and the answer says so.
     Skipped,
     /// Send the revocation.
     Send(RestRevoke),
@@ -2282,8 +2283,9 @@ pub(crate) enum RestRevokePlan {
 /// declares `endpoints.revoke` (kept by the node only on the token endpoint's host), the grant was
 /// made at the node client's token endpoint **by the node client's own client id**, and the refresh
 /// token's row is pinned to that host (RFC 7009, public client, no secret). A grant whose issuing
-/// client is not the node's now is [`RestRevokePlan::Skipped`]: no credentials are sent. A row from
-/// before the issuing client was kept (`client_id` NULL) is revoked as the node's client, as before.
+/// client is not the node's now is [`RestRevokePlan::Skipped`]: no credentials are sent. So is a
+/// grant whose issuing client is unknown (`client_id` NULL) or whose client the admin cleared, when
+/// the connector declares a revocation endpoint: the grant exists and nothing can revoke it.
 /// Nothing is sent here.
 pub(crate) fn prepare_rest_revoke(
     store: &SqliteWorkflowStore,
@@ -2291,21 +2293,26 @@ pub(crate) fn prepare_rest_revoke(
     owner: &str,
     id: &str,
 ) -> RestRevokePlan {
-    let Some(client) = store.node_client(id).ok().flatten() else {
+    let Some(conn) = store.connector_connection(owner, id).ok().flatten() else {
         return RestRevokePlan::Nothing;
+    };
+    let Some(client) = store.node_client(id).ok().flatten() else {
+        // The admin cleared the client: the member's grant remains at a provider that could
+        // revoke it, but no client is left to authenticate as.
+        return if declares_revocation(store, id) {
+            RestRevokePlan::Skipped
+        } else {
+            RestRevokePlan::Nothing
+        };
     };
     let Some(revocation_endpoint) = client.revocation_endpoint.clone() else {
         return RestRevokePlan::Nothing;
     };
-    let Some(conn) = store.connector_connection(owner, id).ok().flatten() else {
-        return RestRevokePlan::Nothing;
+    let Some(issued_to) = conn.client_id.clone() else {
+        // Which client issued the grant is not known: it is not revoked as the node's client.
+        return RestRevokePlan::Skipped;
     };
-    if conn.token_endpoint != client.token_endpoint
-        || conn
-            .client_id
-            .as_deref()
-            .is_some_and(|issued| issued != client.client_id)
-    {
+    if conn.token_endpoint != client.token_endpoint || issued_to != client.client_id {
         return RestRevokePlan::Skipped;
     }
     let Some(token_host) = client.token_host() else {
@@ -2332,9 +2339,21 @@ pub(crate) fn prepare_rest_revoke(
     };
     RestRevokePlan::Send(RestRevoke {
         revocation_endpoint,
-        client_id: conn.client_id.unwrap_or(client.client_id),
+        client_id: issued_to,
         refresh_token,
     })
+}
+
+/// Whether the connector's file, as published, declares a revocation endpoint.
+fn declares_revocation(store: &SqliteWorkflowStore, id: &str) -> bool {
+    store
+        .connector_entry(id)
+        .ok()
+        .flatten()
+        .is_some_and(|e| match &e.template.provider {
+            Provider::Oauth2(o) => o.endpoints.as_ref().is_some_and(|e| e.revoke.is_some()),
+            _ => false,
+        })
 }
 
 /// Upserts the node row on a connection the caller already holds (inside a transaction, or not).
@@ -4152,14 +4171,61 @@ mod oauth_rest_tests {
             ),
             "no credentials go out under another client's id; the provider's grant may remain"
         );
-        // A row from before the issuing client was kept (NULL) is revoked as the node's client.
+        // A row with no issuing client (NULL) is not revoked as the node's client either.
         let mut legacy = store.connector_connection("ada", ID).unwrap().unwrap();
         legacy.client_id = None;
         store.put_connector_connection(&legacy).unwrap();
-        let RestRevokePlan::Send(r) = prepare_rest_revoke(&store, &vault, "ada", ID) else {
-            panic!("a legacy row is revoked as before");
+        assert!(
+            matches!(
+                prepare_rest_revoke(&store, &vault, "ada", ID),
+                RestRevokePlan::Skipped
+            ),
+            "an unknown issuing client is not the node's client"
+        );
+    }
+
+    #[test]
+    fn a_grant_whose_client_the_admin_cleared_may_remain_when_the_file_declares_a_revocation() {
+        let clear = |store: &SqliteWorkflowStore| {
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .execute("DELETE FROM node_connector_clients", [])
+                .unwrap();
         };
-        assert_eq!(r.client_id, "zc2");
+        // The file declares a revocation endpoint.
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        crate::connector_client::test_support::install_company_address_variant(&store, |j| {
+            j["provider"]["endpoints"]["revoke"] =
+                serde_json::json!("https://{subdomain}.zendesk.com/oauth/revoke");
+        });
+        save_with(&store, &vault, "acme", "zc1", true);
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        clear(&store);
+        assert!(
+            matches!(
+                prepare_rest_revoke(&store, &vault, "ada", ID),
+                RestRevokePlan::Skipped
+            ),
+            "the grant remains and nothing can revoke it: the answer says so"
+        );
+        // No grant: nothing to say.
+        store.delete_connector_connection("ada", ID).unwrap();
+        assert!(matches!(
+            prepare_rest_revoke(&store, &vault, "ada", ID),
+            RestRevokePlan::Nothing
+        ));
+        // A file with no revocation endpoint: nothing could have revoked it either way.
+        let (store, vault) = world("acme");
+        save(&store, &vault, "acme", "zc1");
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        clear(&store);
+        assert!(matches!(
+            prepare_rest_revoke(&store, &vault, "ada", ID),
+            RestRevokePlan::Nothing
+        ));
     }
 
     #[test]
