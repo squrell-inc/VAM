@@ -3259,6 +3259,10 @@ release.
 - The `ticket_create` write path has no scenario; the real-instance run covers it. `Decide: BACKLOG — proof 1, cost 1`.
 - `docs/api/openapi.yaml` does not describe the summary's `tenant`, `bindings` and `endpoints`. `Decide: NOW at the next docs pass — proof 1, cost 1`.
 - App: an address-only Enable form for a tenant connector with the publisher's client, and a live host preview before save. `Decide: BACKLOG — proof 1, cost 2`.
+- From the #112 review (orchestrator's decisions):
+  - Stale-URL MCP rows are dropped only for marketplace-installed and tenant-declaring connectors; hand-added rows under a built-in id on another URL keep working (locked Phase 1 Q6). Widening it would reopen Q6. `Decide: BACKLOG — proof 1, cost 1`.
+  - A transient failure after the code may have left still answers a retryable 502, and a same-key retry answers "already submitted" (which tells the member to sign in again). A code is single-use, so this is confusing, not unsafe; the pinned "unreachable provider is retryable" behaviour is kept. `Decide: BACKLOG — proof 1, cost 1`.
+  - The egress swap carries no credential generation: a re-sign-in in the middle of one call can shorten that call's token horizon. A fix threads a generation through the broker and precheck. `Decide: BACKLOG — proof 1, cost 2`.
 
 ### Phase 7 — Developer kit and API keys
 
