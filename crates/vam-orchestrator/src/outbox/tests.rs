@@ -1157,6 +1157,32 @@ mod tool_cards {
     }
 
     #[test]
+    fn an_oversize_list_result_is_a_trimmed_card_and_the_count_is_recorded() {
+        let (session, _dir) = seeded("tc-trim", true);
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        let run = fresh_run();
+        let rows: Vec<serde_json::Value> = (1..=60)
+            .map(|i| serde_json::json!({ "from": format!("s{i}@e2e.example"), "subject": format!("Message {i} {}", "x".repeat(400)) }))
+            .collect();
+        let big = serde_json::json!({ "messages": rows }).to_string();
+        assert!(big.len() > vam_spec::outbox::MAX_CARD_DATA_BYTES);
+        attach_show_card(&store, &session, &run, "mail_list", "c1", &big);
+        assert!(events(&store, &run, TYPE_CARD_SKIPPED).is_empty());
+        let cards = events(&store, &run, TYPE_OUTBOX_CARD);
+        assert_eq!(cards.len(), 1);
+        let d = &cards[0]["data"];
+        let kept = d["trimmed"]["kept"].as_u64().unwrap() as usize;
+        assert_eq!(d["trimmed"]["total"], 60);
+        assert_eq!(d["trimmed"]["path"], "/messages");
+        assert_eq!(d["data"]["messages"].as_array().unwrap().len(), kept);
+        assert_eq!(
+            d["ir"]["nodes"]["more"]["props"]["text"],
+            format!("and {} more", 60 - kept)
+        );
+        assert!(d["data"].to_string().len() <= vam_spec::outbox::MAX_CARD_DATA_BYTES);
+    }
+
+    #[test]
     fn a_card_that_failed_at_seed_is_card_unavailable_and_a_tool_without_ui_is_silent() {
         let (session, _dir) = seeded("tc-bad", false);
         let store = SqliteWorkflowStore::in_memory().unwrap();

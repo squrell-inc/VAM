@@ -542,8 +542,13 @@ fn graph(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, login: &Arc<Mutex<
         }
         ("GET", "/v1.0/me/messages") => {
             let body = json!({ "value": [
-                { "id": "m1", "subject": "Quarterly planning notes" },
-                { "id": "m2", "subject": "Lunch on Friday" }
+                { "id": "m1", "subject": "Quarterly planning notes",
+                  "from": { "emailAddress": { "name": "Ana", "address": "ana@e2e.example" } },
+                  "receivedDateTime": "2026-11-19T09:00:00Z", "bodyPreview": "Please plan the quarter.",
+                  "isRead": false },
+                { "id": "m2", "subject": "Lunch on Friday",
+                  "from": { "emailAddress": { "address": "bo@e2e.example" } },
+                  "receivedDateTime": "2026-11-19T08:00:00Z", "bodyPreview": "Shall we?", "isRead": true }
             ]});
             respond(out, 200, "application/json", &body.to_string());
         }

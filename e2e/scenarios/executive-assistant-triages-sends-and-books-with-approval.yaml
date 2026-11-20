@@ -34,7 +34,7 @@ when:
   - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/messages/m1, method: GET, count: 1 } }
   - expect: { mock-requests: { piece: mock-microsoft-graph, path: /v1.0/me/findMeetingTimes, method: POST, count: 1 } }
   # The installed skill's tools run in the guest: their cards come from the host's thread recorder.
-  - expect: { event: outbox.card, fields: { data.tool: mail_search, data.jig: m365-mail.mail_list, data.data.messages.0.id: m1 } }
+  - expect: { event: outbox.card, fields: { data.tool: mail_search, data.jig: m365-mail.mail_list, data.data.messages.0.id: m1, data.data.messages.0.from: "Ana <ana@e2e.example>" } }
   - expect: { event: outbox.card, fields: { data.tool: calendar_find_slots, data.jig: m365-mail.slot_list } }
   - chat: { text: "e2e-step:send Send the reply to Ana", agent: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", as: org-member }
   - expect: { approval: pending, tool: mail_send, fields: { card.data.to: ana@e2e.example } }
