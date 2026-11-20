@@ -2911,10 +2911,16 @@ mod tests {
         use crate::mcp_registry::{
             McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
         };
+        // A revocation endpoint is on the old server's token host: the refresh token is pinned
+        // there, and a revoke goes only to a host the token is pinned to.
+        let token_endpoint = match &revocation {
+            Some(revoke) => format!("{}/token", revoke.trim_end_matches("/revoke")),
+            None => "https://auth.old-home.example/token".into(),
+        };
         let oauth = McpOauthMetadata {
             resource: "https://mcp.old-home.example/mcp".into(),
             authorization_server: "https://auth.old-home.example".into(),
-            token_endpoint: "https://auth.old-home.example/token".into(),
+            token_endpoint,
             revocation_endpoint: revocation,
             client_id: "c-old".into(),
             registration_method: McpOauthRegistrationMethod::Manual,

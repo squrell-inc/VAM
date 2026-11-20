@@ -112,6 +112,16 @@ pub fn destination_within_domains(destination: &str, domains: &[String]) -> bool
     })
 }
 
+/// True when `destinations` names exactly `host`: trimmed, trailing dot removed,
+/// case-insensitive. No pattern matching: `*` or `*.example.com` never matches.
+pub(crate) fn destinations_name_host(destinations: &[String], host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.');
+    !host.is_empty()
+        && destinations
+            .iter()
+            .any(|dest| dest.trim().trim_end_matches('.').eq_ignore_ascii_case(host))
+}
+
 /// May a secret pinned to `destinations` be sent to `host`? Same rule as the
 /// egress gate: an exact host, a `*.base` pattern (strict subdomains) or `*`.
 /// An empty list allows nothing.
@@ -721,13 +731,7 @@ impl SecretsVault {
                     "secret '{binding_id}' is not an MCP connection credential and is never sent as an MCP header"
                 )));
             }
-            let pinned = !host.is_empty()
-                && meta.allowed_destinations.iter().any(|dest| {
-                    dest.trim()
-                        .trim_end_matches('.')
-                        .eq_ignore_ascii_case(host)
-                });
-            if !pinned {
+            if !destinations_name_host(&meta.allowed_destinations, host) {
                 return Err(OrchestratorError::PermissionDenied(format!(
                     "MCP credential '{binding_id}' is not pinned to host '{host}': reconnect the connection"
                 )));
