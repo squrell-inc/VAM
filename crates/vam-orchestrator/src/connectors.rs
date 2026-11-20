@@ -1629,20 +1629,22 @@ fn refresh_connection(
     // member's row not marked or replaced since (an admin's save that invalidated the grant marks
     // it) and the same issuing client at the same token endpoint. A save that kept that client
     // (a resave advances the revision) or a disable meanwhile does not drop it; the access token
-    // and the Connected result still need `still_current`.
+    // and the Connected result still need `still_current`. For Microsoft 365 the issuer is the
+    // consent tenant: the rotated token is kept while the admin's consent is the one it was
+    // refreshed under, enabled or not; a consent withdrawn or recorded for another tenant drops it.
     let grant_kept = |tx: &rusqlite::Connection| -> Result<(), OrchestratorError> {
-        let Prepared::Oauth {
-            token_endpoint,
-            client_id,
-            ..
-        } = &prepared
-        else {
-            return still_current(tx);
-        };
         let moved = || OrchestratorError::Conflict(REFRESH_SUPERSEDED.into());
         let row_now = connector_connection_in(tx, owner, id)?.ok_or_else(moved)?;
-        let same_issuer = crate::connector_client::client_in(tx, id)?
-            .is_some_and(|n| n.client_id == *client_id && n.token_endpoint == *token_endpoint);
+        let same_issuer = match &prepared {
+            Prepared::Entra { consent, .. } => node_connector_in(tx, id)?
+                .is_some_and(|n| n.consent_tenant_id.as_deref() == Some(consent.as_str())),
+            Prepared::Oauth {
+                token_endpoint,
+                client_id,
+                ..
+            } => crate::connector_client::client_in(tx, id)?
+                .is_some_and(|n| n.client_id == *client_id && n.token_endpoint == *token_endpoint),
+        };
         if same_grant(&row_now, &read) && same_issuer {
             Ok(())
         } else {
@@ -3267,6 +3269,67 @@ mod tests {
             )
             .unwrap();
         assert_eq!(meta.kind, SecretKind::Connection);
+    }
+
+    #[test]
+    fn an_entra_rotated_refresh_token_survives_a_disable_but_not_a_consent_change() {
+        let cfg = cfg_with_client();
+        for meanwhile in [
+            "disabled",
+            "consent withdrawn",
+            "consent for another tenant",
+        ] {
+            let (store, vault) = rest_world();
+            connect(&store, &vault, "ada");
+            let out = check_connection(
+                &store,
+                &vault,
+                &cfg,
+                "ada",
+                "microsoft-365",
+                200,
+                |t, rt| {
+                    let mut n = store.node_connector("microsoft-365").unwrap().unwrap();
+                    match meanwhile {
+                        "disabled" => n.enabled = false,
+                        "consent withdrawn" => n.consent_tenant_id = None,
+                        _ => n.consent_tenant_id = Some("another-tenant".into()),
+                    }
+                    store.put_node_connector(&n).unwrap();
+                    ok_refresh(t, rt)
+                },
+            )
+            .unwrap();
+            // The access token and the Connected result are not published under a moved state.
+            assert!(
+                matches!(out, CheckOutcome::Unavailable(_)),
+                "{meanwhile}: {out:?}"
+            );
+            let read = |b: String| {
+                vault
+                    .decrypt_secret_at(SecretScope::User, "ada", &b)
+                    .unwrap()
+                    .expose_secret()
+                    .clone()
+            };
+            assert_ne!(
+                read(access_token_binding_id("microsoft-365")),
+                "NEW-ACCESS-cccccccccccccccc",
+                "{meanwhile}"
+            );
+            // The provider spent the old refresh token: under the same consent the rotated one is
+            // kept, enabled or not; a withdrawn or changed consent discards it.
+            let want = if meanwhile == "disabled" {
+                "NEW-REFRESH-dddddddddddddd"
+            } else {
+                REFRESH
+            };
+            assert_eq!(
+                read(refresh_token_binding_id("microsoft-365")),
+                want,
+                "{meanwhile}"
+            );
+        }
     }
 
     #[test]

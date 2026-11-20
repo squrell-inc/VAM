@@ -1469,6 +1469,78 @@ fn a_listing_whose_own_connectors_share_a_binding_placeholder_is_refused() {
 }
 
 #[test]
+fn placeholders_the_gate_cannot_tell_apart_are_refused_in_a_listing_and_against_installed() {
+    // `vamsec_zen_desk` is inside `vamsec_zen_desk_api`: a request carrying the second carries both,
+    // and the gate refuses it (it finds placeholders by substring).
+    let both = [
+        prepared_connector(placeholder_connector("zen", "desk")),
+        prepared_connector(placeholder_connector("zen_desk", "api")),
+    ];
+    let e = check_listing_placeholders(&both, "two-connectors").unwrap_err();
+    assert!(
+        matches!(e, E::InvalidContract(_)) && e.to_string().contains("vamsec_zen_desk"),
+        "{e:?}"
+    );
+    // Either order.
+    let both = [
+        prepared_connector(placeholder_connector("zen_desk", "api")),
+        prepared_connector(placeholder_connector("zen", "desk")),
+    ];
+    assert!(check_listing_placeholders(&both, "two-connectors").is_err());
+
+    // Installed `zen` with `desk`: the longer `zen_desk` + `api` is refused, and the shorter one
+    // against an installed longer one too.
+    let store = SqliteWorkflowStore::in_memory().unwrap();
+    crate::connector_client::test_support::install_company_address_variant(&store, |j| {
+        j["urn"] = "urn:vam:connector:connectors.community.example/community/zen".into();
+        j["bindings"][0]["name"] = "desk".into();
+        j["bindings"][0]["placeholder"] = "vamsec_zen_desk".into();
+    });
+    let conn = store.connection.lock().unwrap();
+    let longer = placeholder_connector("zen_desk", "api");
+    let e = admit_connector_id(&conn, &longer.urn, &longer).unwrap_err();
+    assert!(
+        matches!(e, E::Conflict(_)) && e.to_string().contains("placeholder"),
+        "{e:?}"
+    );
+    // A placeholder that only shares a prefix is told apart.
+    let apart = placeholder_connector("zen_other", "api");
+    admit_connector_id(&conn, &apart.urn, &apart).unwrap();
+    drop(conn);
+    let store = SqliteWorkflowStore::in_memory().unwrap();
+    crate::connector_client::test_support::install_company_address_variant(&store, |j| {
+        j["urn"] = "urn:vam:connector:connectors.community.example/community/zen_desk".into();
+        j["bindings"][0]["name"] = "api".into();
+        j["bindings"][0]["placeholder"] = "vamsec_zen_desk_api".into();
+    });
+    let conn = store.connection.lock().unwrap();
+    let shorter = placeholder_connector("zen", "desk");
+    let e = admit_connector_id(&conn, &shorter.urn, &shorter).unwrap_err();
+    assert!(matches!(e, E::Conflict(_)), "{e:?}");
+}
+
+#[test]
+fn a_listing_whose_connectors_share_an_id_is_refused_before_any_write() {
+    // Two URNs, one id: the second would replace the first's node row, client and connections.
+    let mut other = placeholder_connector("zen", "desk_api");
+    other.urn = "urn:vam:connector:connectors.community.example/elsewhere/zen".into();
+    let both = [
+        prepared_connector(placeholder_connector("zen", "desk_api")),
+        prepared_connector(other),
+    ];
+    let e = check_listing_connector_ids(&both, "two-connectors").unwrap_err();
+    assert!(
+        matches!(e, E::InvalidContract(_)) && e.to_string().contains("`zen`"),
+        "{e:?}"
+    );
+    let fine = [
+        prepared_connector(placeholder_connector("zen", "desk_api")),
+        prepared_connector(placeholder_connector("zen_other", "api")),
+    ];
+    check_listing_connector_ids(&fine, "two-connectors").unwrap();
+}
+
+#[test]
 fn an_update_that_moves_the_fixed_endpoints_clears_the_saved_client() {
     let store = SqliteWorkflowStore::in_memory().unwrap();
     crate::connector_client::test_support::install_company_address_rows(&store);
