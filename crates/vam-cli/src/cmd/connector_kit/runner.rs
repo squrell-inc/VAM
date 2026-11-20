@@ -36,7 +36,8 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use vam_security::secret_forms::SecretRedactor;
 use vam_spec::connection_envelope::{
-    may_carry_placeholder, ActiveCall, BindingSpec, CallWindow, ConnectionRequest, Envelope, Shape,
+    inject_header, may_carry_placeholder, ActiveCall, BindingSpec, CallWindow, ConnectionRequest,
+    Envelope, HeaderInject, Shape,
 };
 use vam_spec::connector::{
     check_subdomain, fill_subdomain, templated_suffix, BindingValue, Connector,
@@ -347,6 +348,7 @@ impl World {
                 name: b.name.clone(),
                 placeholder: b.placeholder.clone(),
                 hosts: b.hosts.clone(),
+                header: HeaderInject::of(b),
             })
             .collect();
         if bindings.is_empty() {
@@ -858,32 +860,57 @@ impl Stub {
                 self.bad_gateway(&refusal.text)
             }
             Ok(Some(grant)) => {
-                // Only an admitted request gets the credential.
-                headers.retain(|k, _| !k.eq_ignore_ascii_case("authorization"));
-                headers.insert(
-                    "Authorization".into(),
-                    format!("Bearer {}", self.credential),
-                );
+                // Only an admitted request gets the credential, put where the gate puts it: the
+                // one header the binding names, or `Authorization: Bearer`.
+                let header = self
+                    .envelope
+                    .binding(&grant.connector, &grant.binding)
+                    .and_then(|b| b.header.clone());
+                match &header {
+                    None => {
+                        headers.retain(|k, _| !k.eq_ignore_ascii_case("authorization"));
+                        headers.insert(
+                            "Authorization".into(),
+                            format!("Bearer {}", self.credential),
+                        );
+                    }
+                    Some(h) => {
+                        if let Err(refusal) =
+                            inject_header(&mut headers, &h.name, &h.prefix, &self.credential)
+                        {
+                            self.log(Event::Refused(refusal.text.clone()));
+                            return self.bad_gateway(&refusal.text);
+                        }
+                    }
+                }
                 let Some((host, target)) = split_url(&url) else {
                     return self.bad_gateway("unreadable URL");
                 };
                 if !self.file.serves(&host) {
                     return self.unanswerable(&host);
                 }
+                let injected = match &header {
+                    None => format!("Bearer {}", self.credential),
+                    Some(h) => format!("{}{}", h.prefix, self.credential),
+                };
                 let answer = upstream(
                     &self.file,
                     &host,
                     &grant.method,
                     &target,
                     &headers,
-                    &self.credential,
+                    header.as_ref().map_or("authorization", |h| h.name.as_str()),
+                    &injected,
                 );
                 let placeholder = self
                     .envelope
                     .binding(&grant.connector, &grant.binding)
                     .map_or("", |b| b.placeholder.as_str());
-                let redactor =
-                    SecretRedactor::with_replacement(&[self.credential.as_bytes()], placeholder);
+                // The key, and the whole header value a provider may echo as it is.
+                let redactor = SecretRedactor::with_replacement(
+                    &[injected.as_bytes(), self.credential.as_bytes()],
+                    placeholder,
+                );
                 let body = redactor.redact_bytes(answer.body.as_bytes()).into_owned();
                 self.log(Event::Answered(answer.status));
                 Reply {
@@ -926,19 +953,21 @@ impl Stub {
     }
 }
 
-/// The declared mock: every route needs `Authorization: Bearer <the credential>` (401 otherwise); a
-/// request no route matches is 404 (behind the key), as the e2e runner's declared mock answers.
+/// The declared mock: every route needs the credential where the binding puts it, `Authorization:
+/// Bearer <credential>` or the named header with its prefix (`expected`; 401 otherwise); a request
+/// no route matches is 404 (behind the key), as the e2e runner's declared mock answers.
 fn upstream(
     file: &ConnectorTestFile,
     host: &str,
     method: &str,
     target: &str,
     headers: &HashMap<String, String>,
-    credential: &str,
+    header_name: &str,
+    expected: &str,
 ) -> MockAnswer {
-    let keyed = headers.iter().any(|(k, v)| {
-        k.eq_ignore_ascii_case("authorization") && *v == format!("Bearer {credential}")
-    });
+    let keyed = headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case(header_name) && v == expected);
     if keyed {
         file.answer_for(host, method, target)
     } else {

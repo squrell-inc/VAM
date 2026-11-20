@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use vam_network::{
     ActiveCall, BindingSpec, CallWindow, ConnectionGrant, ConnectionRefusal, ConnectionRequest,
-    ConnectionTokenSource, Envelope, Shape, WriteTicket,
+    ConnectionTokenSource, Envelope, HeaderInject, Shape, WriteTicket,
 };
 use vam_spec::v1::{tool_intent_response::Disposition, SkillManifest, ToolIntentResponse};
 
@@ -51,8 +51,9 @@ pub fn builtin_bindings() -> Vec<BindingSpec> {
                 .into_iter()
                 .map(move |b| BindingSpec {
                     connector: urn.clone(),
-                    name: b.name,
-                    placeholder: b.placeholder,
+                    name: b.name.clone(),
+                    placeholder: b.placeholder.clone(),
+                    header: HeaderInject::of(&b),
                     hosts: b.hosts,
                 })
         })
@@ -88,6 +89,7 @@ fn entry_bindings(e: &ConnectorEntry) -> Vec<BindingSpec> {
             connector: e.def.urn.clone(),
             name: b.name.clone(),
             placeholder: b.placeholder.clone(),
+            header: HeaderInject::of(b),
             hosts: e
                 .def
                 .bindings
@@ -536,8 +538,28 @@ pub struct SessionConnectionSource {
     refresher: RestRefresher,
     /// Calls whose intent check just refreshed (shared with the port-52 handler).
     intent_refreshes: Arc<IntentRefreshes>,
-    /// `(token, placeholder)` pairs attached in this session, newest last, for the response scrub.
-    attached: Mutex<Vec<(SecretString, String)>>,
+    /// What was attached in this session, newest last, for the response scrub.
+    attached: Mutex<Vec<Attached>>,
+}
+
+/// A credential this session attached: the secret, the placeholder a scrub puts back, and for a
+/// named header with a prefix the whole value the header held (`<prefix><key>`), which a provider
+/// may echo as it is.
+struct Attached {
+    secret: SecretString,
+    placeholder: String,
+    injected: Option<SecretString>,
+}
+
+/// What [`SessionConnectionSource::token_for`] found for a grant.
+struct Credential {
+    secret: SecretString,
+    placeholder: String,
+    /// The vault row it was read from (named in the audit event).
+    row: String,
+    /// The named header an API key goes in; `None`: `Authorization: Bearer`. From the connector
+    /// file's binding, never from the request.
+    header: Option<HeaderInject>,
 }
 
 impl std::fmt::Debug for SessionConnectionSource {
@@ -649,10 +671,7 @@ impl SessionConnectionSource {
     /// connection made after the session booted is used; one that was revoked, a connector that
     /// was disabled and an address that moved are not (the grant was made against the boot-time
     /// table, this is the second, live check).
-    async fn token_for(
-        &self,
-        grant: &ConnectionGrant,
-    ) -> Result<(SecretString, String, String), ConnectionRefusal> {
+    async fn token_for(&self, grant: &ConnectionGrant) -> Result<Credential, ConnectionRefusal> {
         let tool = grant.tool.as_str();
         // The intent gate (`connector_park`) normally decides these first; this is the backstop
         // for a connection that went away after the intent.
@@ -693,15 +712,27 @@ impl SessionConnectionSource {
                     Self::refuse(tool, "unknown binding")
                 }
             })?;
-        // What the binding carries: an OAuth access token or the member's API key, as a bearer.
-        // The value must be the kind the connector's sign-in produces, never the other.
+        // What the binding carries: an OAuth access token as a bearer, or the member's API key as a
+        // bearer or in the one header the file names. The value must be the kind the connector's
+        // sign-in produces, never the other.
         use vam_spec::connector::{BindingValue, Inject};
-        let api_key = match (binding.value, binding.inject) {
-            (BindingValue::AccessToken, Inject::Bearer) => false,
-            (BindingValue::ApiKey, Inject::Bearer) => true,
+        let header = HeaderInject::of(binding);
+        let api_key = match (binding.value, binding.inject, &header) {
+            (BindingValue::AccessToken, Inject::Bearer, _) => false,
+            (BindingValue::ApiKey, Inject::Bearer, _) => true,
+            (BindingValue::ApiKey, Inject::Header, Some(_)) => true,
             _ => return Err(Self::refuse(tool, "this binding cannot be attached")),
         };
         if api_key != crate::connectors::is_api_key(&def) {
+            return Err(Self::refuse(tool, "this binding cannot be attached"));
+        }
+        // The request was screened for this placeholder site; the file may have changed since the
+        // table was built (an update that moved the header). The key goes only where it was screened.
+        let screened = self
+            .envelope()
+            .binding(&grant.connector, &grant.binding)
+            .map(|b| b.header.clone());
+        if screened.as_ref() != Some(&header) {
             return Err(Self::refuse(tool, "this binding cannot be attached"));
         }
         if binding.hosts.iter().all(|h| *h != grant.host) {
@@ -826,7 +857,12 @@ impl SessionConnectionSource {
                 },
             )
             .map_err(|_| not_connected(&name))?;
-        Ok((token, binding.placeholder.clone(), row))
+        Ok(Credential {
+            secret: token,
+            placeholder: binding.placeholder.clone(),
+            row,
+            header,
+        })
     }
 
     fn audit(&self, binding_id: &str, purpose: &str) {
@@ -877,14 +913,30 @@ impl ConnectionTokenSource for SessionConnectionSource {
     ) -> Result<(), ConnectionRefusal> {
         // The call the grant was made for must still be the active one.
         self.envelope().recheck(grant)?;
-        let (token, placeholder, row) = self.token_for(grant).await?;
+        let credential = self.token_for(grant).await?;
         // A refresh can take seconds: the call must still be the active one.
         self.envelope().recheck(grant)?;
-        vam_network::connection::set_bearer(headers, token.expose_secret());
-        self.audit(&row, "connection");
+        // Only now, after the envelope admitted the request: the one header the binding names (or
+        // Authorization), every other spelling of it dropped.
+        let key = credential.secret.expose_secret();
+        let injected = match &credential.header {
+            None => {
+                vam_network::connection::set_bearer(headers, key);
+                None
+            }
+            Some(h) => {
+                vam_network::connection::set_header(headers, &h.name, &h.prefix, key)?;
+                (!h.prefix.is_empty()).then(|| SecretString::new(format!("{}{key}", h.prefix)))
+            }
+        };
+        self.audit(&credential.row, "connection");
         let mut kept = self.attached.lock().unwrap_or_else(|e| e.into_inner());
-        kept.retain(|(t, _)| t.expose_secret() != token.expose_secret());
-        kept.push((token, placeholder));
+        kept.retain(|a| a.secret.expose_secret() != credential.secret.expose_secret());
+        kept.push(Attached {
+            secret: credential.secret,
+            placeholder: credential.placeholder,
+            injected,
+        });
         let over = kept.len().saturating_sub(SCRUB_KEEP);
         kept.drain(..over);
         Ok(())
@@ -917,8 +969,21 @@ impl ConnectionTokenSource for SessionConnectionSource {
 
     fn scrub(&self, response: &mut vam_spec::v1::EgressResponse) {
         let kept = self.attached.lock().unwrap_or_else(|e| e.into_inner());
-        for (token, placeholder) in kept.iter() {
-            vam_network::connection::scrub_secret(response, token.expose_secret(), placeholder);
+        for a in kept.iter() {
+            // The whole header value first (a response that echoes `<prefix><key>` loses both),
+            // then the key alone.
+            if let Some(whole) = &a.injected {
+                vam_network::connection::scrub_secret(
+                    response,
+                    whole.expose_secret(),
+                    &a.placeholder,
+                );
+            }
+            vam_network::connection::scrub_secret(
+                response,
+                a.secret.expose_secret(),
+                &a.placeholder,
+            );
         }
     }
 
@@ -2473,6 +2538,7 @@ mod installed_tests {
             name: "api".into(),
             placeholder: ph.into(),
             hosts: vec![host.into()],
+            header: None,
         };
         let with = |bindings: Vec<BindingSpec>| {
             SessionConnectionSource::with_bindings(
@@ -3501,5 +3567,266 @@ mod api_key_tests {
         // The row is stored raw, so the node reads it as the file says; the connector entry is
         // only usable when it validates, which it does not.
         assert!(store.connector_entry(NID).unwrap().is_none());
+    }
+
+    // ---- a binding that names the header the key goes in -------------------------------------
+
+    /// A world whose connector injects the key into `X-Api-Key` (with `prefix`, if any).
+    fn header_world(prefix: Option<&str>) -> World {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        install_api_key_variant(&store, |j| {
+            j["bindings"][0]["inject"] = serde_json::json!("header");
+            j["bindings"][0]["headerName"] = serde_json::json!("X-Api-Key");
+            if let Some(p) = prefix {
+                j["bindings"][0]["prefix"] = serde_json::json!(p);
+            }
+        });
+        store.put_node_connector(&node(true)).unwrap();
+        let w = World {
+            store,
+            vault,
+            window: Arc::new(CallWindow::new()),
+        };
+        enter(&w, OWNER, KEY1, &[API]);
+        w
+    }
+
+    fn ask_with(
+        s: &SessionConnectionSource,
+        url: &str,
+        h: &[(&str, &str)],
+    ) -> Result<Option<ConnectionGrant>, ConnectionRefusal> {
+        let headers: HashMap<String, String> = h
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        s.authorize(&ConnectionRequest {
+            method: "GET",
+            url,
+            headers: &headers,
+            body: b"",
+        })
+    }
+
+    fn headers_of(h: &[(&str, &str)]) -> HashMap<String, String> {
+        h.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_header_binding_attaches_the_key_in_its_named_header_and_in_no_other() {
+        let w = header_world(None);
+        let s = source(&w);
+        open(&w);
+        let url = format!("https://{API}/v1/notes?query=printer");
+        let guest = [
+            ("x-api-key", NPH),
+            ("X-Other", "1"),
+            ("Authorization", "Bearer guest-own"),
+        ];
+        let grant = ask_with(&s, &url, &guest).unwrap().expect("grant");
+        let mut headers = headers_of(&guest);
+        s.attach(&grant, &mut headers).await.unwrap();
+        // The key is in exactly one header, spelled as the connector file spells it.
+        assert_eq!(headers["X-Api-Key"], KEY1);
+        assert!(!headers.contains_key("x-api-key"));
+        assert_eq!(headers.values().filter(|v| v.contains(KEY1)).count(), 1);
+        // No other header changed: the guest's own Authorization is its own.
+        assert_eq!(headers["Authorization"], "Bearer guest-own");
+        assert_eq!(headers["X-Other"], "1");
+        assert_eq!(headers.len(), 3);
+        let events = w.store.read_outbox_for_run(SESSION, 0).unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e.payload.contains("connector/notesdesk/api-key")));
+        assert!(events.iter().all(|e| !e.payload.contains(KEY1)));
+    }
+
+    #[tokio::test]
+    async fn the_guest_cannot_change_which_header_carries_the_key() {
+        let w = header_world(None);
+        let s = source(&w);
+        open(&w);
+        let url = format!("https://{API}/v1/notes");
+        // The placeholder anywhere but the named header is refused at the envelope: the guest
+        // cannot ask for the key in Authorization, a header of its choosing, the URL or the body.
+        for guest in [
+            vec![("Authorization", NPH)],
+            vec![("Authorization", "Bearer vamsec_notesdesk_api")],
+            vec![("X-Api-Key", NPH), ("Authorization", NPH)],
+            vec![("X-Api-Key", NPH), ("X-Other-Key", NPH)],
+            vec![("X-Other-Key", NPH)],
+            vec![("X-Api-Key", NPH), ("x-api-key", "guest-value")],
+            vec![("X-Api-Key", "guest-value"), ("x-api-key", NPH)],
+        ] {
+            let e = ask_with(&s, &url, &guest).unwrap_err();
+            assert!(
+                e.text.contains("the `X-Api-Key` value"),
+                "{guest:?}: {}",
+                e.text
+            );
+        }
+        let e = ask_with(&s, &format!("{url}?k={NPH}"), &[("X-Api-Key", NPH)]).unwrap_err();
+        assert!(e.text.contains("the `X-Api-Key` value"), "{}", e.text);
+        // A request that names the header it wishes for changes nothing: the gate puts the key in
+        // the file's header and in no header the guest names.
+        let guest = [
+            ("X-Api-Key", NPH),
+            ("X-Key-Header", "Authorization"),
+            ("X-Api-Key-Name", "Cookie"),
+            ("Host", "api.notesdesk.example"),
+        ];
+        let grant = ask_with(&s, &url, &guest).unwrap().unwrap();
+        let mut headers = headers_of(&guest);
+        s.attach(&grant, &mut headers).await.unwrap();
+        assert_eq!(headers["X-Api-Key"], KEY1);
+        for name in ["X-Key-Header", "X-Api-Key-Name", "Host"] {
+            assert!(!headers[name].contains(KEY1), "{name}");
+        }
+        assert!(!headers.contains_key("Authorization") && !headers.contains_key("Cookie"));
+        // Every spelling of the header the guest sent is overwritten, and only one remains.
+        let guest = [("X-Api-Key", NPH), ("x-API-key", NPH), ("X-API-KEY", NPH)];
+        let grant = ask_with(&s, &url, &guest).unwrap().unwrap();
+        let mut headers = headers_of(&guest);
+        s.attach(&grant, &mut headers).await.unwrap();
+        assert_eq!(headers.len(), 1, "{headers:?}");
+        assert_eq!(headers["X-Api-Key"], KEY1);
+    }
+
+    #[tokio::test]
+    async fn the_key_is_set_only_after_the_envelope_admitted_the_request() {
+        let w = header_world(None);
+        let s = source(&w);
+        open(&w);
+        // A request outside the shape never reaches `attach`: the envelope refuses it and no key
+        // is read (no audit event), even though the placeholder sits in the right header.
+        for url in [
+            format!("https://{API}/v1/admin/export"),
+            format!("https://{EU}/v1/notes"),
+            "https://evil.example/v1/notes".to_string(),
+        ] {
+            let e = ask_with(&s, &url, &[("X-Api-Key", NPH)]).unwrap_err();
+            assert!(e.text.contains("shape"), "{url}: {}", e.text);
+        }
+        assert!(w.store.read_outbox_for_run(SESSION, 0).unwrap().is_empty());
+        // And an attach for a grant whose call ended attaches nothing and touches no header.
+        let url = format!("https://{API}/v1/notes");
+        let grant = ask_with(&s, &url, &[("X-Api-Key", NPH)]).unwrap().unwrap();
+        w.window.clear();
+        let mut headers = headers_of(&[("X-Api-Key", NPH)]);
+        assert!(s.attach(&grant, &mut headers).await.is_err());
+        assert_eq!(headers["X-Api-Key"], NPH);
+    }
+
+    #[tokio::test]
+    async fn the_prefix_is_part_of_the_value_and_of_the_scrub() {
+        use base64::Engine as _;
+        let w = header_world(Some("Token "));
+        let s = source(&w);
+        open(&w);
+        let url = format!("https://{API}/v1/notes");
+        // The guest may send the placeholder bare or after the prefix.
+        for sent in [NPH.to_string(), format!("Token {NPH}")] {
+            let grant = ask_with(&s, &url, &[("X-Api-Key", &sent)])
+                .unwrap()
+                .unwrap();
+            let mut headers = headers_of(&[("X-Api-Key", &sent)]);
+            s.attach(&grant, &mut headers).await.unwrap();
+            assert_eq!(headers["X-Api-Key"], format!("Token {KEY1}"), "{sent}");
+        }
+        assert!(ask_with(&s, &url, &[("X-Api-Key", &format!("Bearer {NPH}"))]).is_err());
+        // The scrub covers the injected value, prefix included, in headers and body, and its
+        // encodings: nothing of the key or of `Token <key>` is left.
+        let whole = format!("Token {KEY1}");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&whole);
+        let mut resp = vam_spec::v1::EgressResponse {
+            status_code: 200,
+            headers: HashMap::from([
+                ("X-Echo".to_string(), whole.clone()),
+                ("X-Key".to_string(), KEY1.to_string()),
+            ]),
+            body: format!("seen {whole}; again {KEY1}; basic {b64}").into_bytes(),
+            error: None,
+        };
+        s.scrub(&mut resp);
+        let body = String::from_utf8(resp.body).unwrap();
+        assert!(
+            !body.contains(KEY1) && !body.contains(&whole) && !body.contains(&b64),
+            "{body}"
+        );
+        assert!(body.contains(NPH), "{body}");
+        for (k, v) in &resp.headers {
+            assert!(!v.contains(KEY1) && !v.contains("Token "), "{k}: {v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_key_header_the_file_moved_after_the_screen_is_never_used_for_that_request() {
+        let w = header_world(None);
+        let s = source(&w);
+        open(&w);
+        let url = format!("https://{API}/v1/notes");
+        let grant = ask_with(&s, &url, &[("X-Api-Key", NPH)]).unwrap().unwrap();
+        // An update moves the key to another header after the request was screened.
+        let urn = NURN;
+        let moved = serde_json::json!({
+            "urn": urn, "version": "1.1.0", "displayName": "Notesdesk",
+            "publisher": "Community Tools Ltd", "description": "Notes.", "icon": "notesdesk",
+            "provider": { "kind": "api_key", "fields": [{ "name": "key", "label": "Key" }] },
+            "connection": { "holder": "user", "multiAccount": false, "label": "none" },
+            "bindings": [{ "name": "api", "placeholder": NPH, "value": "api_key",
+                           "inject": "header", "headerName": "X-Other-Key", "hosts": [API] }]
+        });
+        w.store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE connector_releases SET spec_bytes = ?1 WHERE urn = ?2",
+                params![moved.to_string().as_bytes(), urn],
+            )
+            .unwrap();
+        let mut headers = headers_of(&[("X-Api-Key", NPH)]);
+        let e = s.attach(&grant, &mut headers).await.unwrap_err();
+        assert!(e.text.contains("cannot be attached"), "{}", e.text);
+        assert_eq!(headers["X-Api-Key"], NPH);
+        assert!(!headers.values().any(|v| v.contains(KEY1)));
+    }
+
+    #[test]
+    fn a_connector_file_that_names_a_forbidden_header_is_never_offered() {
+        // The file validator refuses each name, so such a connector cannot be installed and no
+        // binding of it is ever reserved or attached (the row is stored raw here, as an import that
+        // skipped the check would have).
+        for name in [
+            "Host",
+            "authorization",
+            "Cookie",
+            "Proxy-Authorization",
+            "Connection",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Keep-Alive",
+            "TE",
+            "Trailer",
+            "Upgrade",
+            "X Bad",
+            "",
+        ] {
+            let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+            install_api_key_variant(&store, |j| {
+                j["bindings"][0]["inject"] = serde_json::json!("header");
+                j["bindings"][0]["headerName"] = serde_json::json!(name);
+            });
+            assert!(store.connector_entry(NID).unwrap().is_none(), "{name:?}");
+            assert!(
+                !resolved_bindings(&store)
+                    .iter()
+                    .any(|b| b.placeholder == NPH),
+                "{name:?}"
+            );
+        }
     }
 }

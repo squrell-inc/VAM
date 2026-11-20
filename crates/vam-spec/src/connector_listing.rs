@@ -10,7 +10,7 @@
 //! | the id (last URN segment) is a short slug and not Squrell's (`microsoft-365`, `linear`, any `spec/connectors/` file) | a fixed id must mean the same connector on every node |
 //! | provider `oauth2`, profile `discover`, `clientSecret: none` or (with `client: org`) `org_vault`, `orgConsent: none` | the only sign-ins a node can run for a marketplace connector: the publisher's public client, or the org's own client whose id and secret the node's admin enters at Enable (the file carries neither) |
 //! | `squrell_relay` | refused: Squrell's relay is for Squrell's own connectors |
-//! | `api_key` provider | exactly one field; the member enters the key at the node, which keeps it pinned to the connector's hosts and attaches it as a bearer: REST `bindings` (`value: api_key`, `inject: bearer`) or an `mcp` server, never both |
+//! | `api_key` provider | exactly one field; the member enters the key at the node, which keeps it pinned to the connector's hosts and attaches it as a bearer or in the one header the binding names: REST `bindings` (`value: api_key`, `inject: bearer`, or `inject: header` with a `headerName` that is a plain header name, never `Authorization`, `Host`, `Cookie`, `Proxy-*` or a framing header) or an `mcp` server, never both |
 //! | `entra`, `google`, `slack` | refused: `entra` needs REST bindings (tokens attached to requests the guest makes), the others need a client secret |
 //! | `mcp` with an `https` URL on a full DNS name, 1 to 64 vetted tools, no `bindings` | a tool list the admin can read; no token reaches the guest |
 //! | names that pass for Squrell or a built-in connector | an Unverified connector must not look verified |
@@ -22,8 +22,8 @@
 use serde_json::Value;
 
 use crate::connector::{
-    is_placeholder_client_id, parse_connector, url_host, ClientKind, ClientSecret, Connector,
-    ConnectorError, Inject, OAuthProfile, OrgConsent, Provider, BUILTIN_CONNECTOR_FILES,
+    is_placeholder_client_id, parse_connector, url_host, BindingValue, ClientKind, ClientSecret,
+    Connector, ConnectorError, Inject, OAuthProfile, OrgConsent, Provider, BUILTIN_CONNECTOR_FILES,
 };
 
 /// Ids only Squrell's built-in connectors may have (design decision D26). Every id of a file in
@@ -234,11 +234,24 @@ fn check_marketplace_bindings(c: &Connector, id: &str) -> Result<(), ConnectorEr
                 b.name
             ));
         }
-        if b.inject != Inject::Bearer {
-            return bad(format!(
-                "binding `{}`: only `inject: bearer` is available to a marketplace connector",
-                b.name
-            ));
+        // A key may also go in the one header the binding names (`headerName`, checked by the file
+        // validator); a token is a bearer, and nothing is ever put in a query string.
+        let allowed = match b.inject {
+            Inject::Bearer => true,
+            Inject::Header => b.value == BindingValue::ApiKey,
+            Inject::Query => false,
+        };
+        if !allowed {
+            return bad(match b.value {
+                BindingValue::ApiKey => format!(
+                    "binding `{}`: only `inject: bearer` or `inject: header` is available to a marketplace connector",
+                    b.name
+                ),
+                BindingValue::AccessToken => format!(
+                    "binding `{}`: only `inject: bearer` is available to a marketplace connector",
+                    b.name
+                ),
+            });
         }
         let want = format!("vamsec_{id}_{}", b.name);
         if b.placeholder != want {
@@ -1085,16 +1098,55 @@ mod tests {
     }
 
     #[test]
-    fn an_api_key_binding_is_a_bearer_and_inject_header_names_the_field() {
-        for inject in ["header", "query"] {
+    fn an_api_key_binding_is_a_bearer_or_a_named_header_never_a_query() {
+        let mut v = api_key_rest();
+        v["bindings"][0]["inject"] = json!("query");
+        let e = err(v);
+        assert!(
+            e.contains("`inject`") && e.contains("bearer") && e.contains("`api`"),
+            "query: {e}"
+        );
+        // A header binding needs its name, which the file validator checks.
+        let mut v = api_key_rest();
+        v["bindings"][0]["inject"] = json!("header");
+        assert!(err(v).contains("needs a `headerName`"));
+        let mut v = api_key_rest();
+        v["bindings"][0]["inject"] = json!("header");
+        v["bindings"][0]["headerName"] = json!("X-Api-Key");
+        v["bindings"][0]["prefix"] = json!("Token ");
+        let c = parse_marketplace_connector(&v.to_string()).unwrap();
+        assert_eq!(
+            c.bindings.unwrap()[0].header_name.as_deref(),
+            Some("X-Api-Key")
+        );
+        // Each name a key is never put in is refused with the import's words, in any letter case.
+        for name in [
+            "Host",
+            "authorization",
+            "COOKIE",
+            "Proxy-Authorization",
+            "proxy-x",
+            "Connection",
+            "content-length",
+            "Transfer-Encoding",
+            "Keep-Alive",
+            "te",
+            "Trailer",
+            "Upgrade",
+        ] {
             let mut v = api_key_rest();
-            v["bindings"][0]["inject"] = json!(inject);
+            v["bindings"][0]["inject"] = json!("header");
+            v["bindings"][0]["headerName"] = json!(name);
             let e = err(v);
             assert!(
-                e.contains("`inject`") && e.contains("bearer") && e.contains("`api`"),
-                "{inject}: {e}"
+                e.contains("`headerName`") && e.contains("`api`"),
+                "{name}: {e}"
             );
         }
+        let mut v = api_key_rest();
+        v["bindings"][0]["inject"] = json!("header");
+        v["bindings"][0]["headerName"] = json!("X Api Key");
+        assert!(err(v).contains("RFC 9110"));
         let mut v = api_key_rest();
         v["bindings"][0]["placeholder"] = json!("vamsec_other_api");
         assert!(err(v).contains("must be `vamsec_notesdesk_api`"));

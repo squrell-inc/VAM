@@ -19,6 +19,17 @@ fn binding(name: &str, placeholder: &str) -> BindingSpec {
         name: name.into(),
         placeholder: placeholder.into(),
         hosts: vec![HOST.into()],
+        header: None,
+    }
+}
+
+fn header_binding(name: &str, prefix: &str) -> BindingSpec {
+    BindingSpec {
+        header: Some(HeaderInject {
+            name: name.into(),
+            prefix: prefix.into(),
+        }),
+        ..binding("api", PH)
     }
 }
 
@@ -157,8 +168,10 @@ fn a_route_the_mock_lacks_is_404_behind_the_key() {
 fn the_mock_needs_the_key_it_was_handed() {
     let f = file(r#"[{"method":"GET","prefix":"/v1","status":200}]"#);
     let h = |auth: &str| HashMap::from([("Authorization".to_string(), auth.to_string())]);
-    let ask =
-        |headers: &HashMap<String, String>| upstream(&f, HOST, "GET", "/v1/x", headers, KEY).status;
+    let bearer = format!("Bearer {KEY}");
+    let ask = |headers: &HashMap<String, String>| {
+        upstream(&f, HOST, "GET", "/v1/x", headers, "authorization", &bearer).status
+    };
     assert_eq!(ask(&h(&format!("Bearer {KEY}"))), 200);
     assert_eq!(ask(&h("Bearer vamkey_other")), 401);
     assert_eq!(ask(&h(KEY)), 401);
@@ -1069,4 +1082,120 @@ fn the_hint_file_holds_the_sample_address_and_no_credential() {
         lines.iter().map(|l| &l.failure).collect::<Vec<_>>()
     );
     assert!(!skill.join(".vam").exists());
+}
+
+#[test]
+fn a_header_binding_puts_the_key_in_its_named_header_and_the_mock_wants_it_there() {
+    let routes = r#"[{"method":"GET","prefix":"/v1/notes","status":200,"body":{"notes":["Printer notes"]}}]"#;
+    for (name, prefix, sent) in [
+        ("X-Api-Key", "", PH.to_string()),
+        ("X-Api-Key", "", format!("  {PH}")),
+        ("X-Token", "Token ", format!("Token {PH}")),
+        ("X-Token", "Token ", PH.to_string()),
+    ] {
+        let s = stub_for(
+            vec![header_binding(name, prefix)],
+            vec![read_shape()],
+            Some(URN),
+            file(routes),
+        );
+        let r = s.handle(&request(
+            "GET",
+            "https://api.notesdesk.example/v1/notes",
+            // The guest spells the header its own way: it is replaced, not added to.
+            &[(&name.to_ascii_lowercase(), sent.as_str())],
+            b"",
+        ));
+        assert_eq!(r.status, 200, "{name}: {}", text(&r));
+        assert!(text(&r).contains("Printer notes"));
+    }
+    // The upstream mock answers 401 unless the key is in that header with that prefix: an
+    // Authorization bearer is no key for a header binding.
+    let f = file(routes);
+    let with = |h: &[(&str, &str)]| {
+        let headers: HashMap<String, String> = h
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        upstream(
+            &f,
+            HOST,
+            "GET",
+            "/v1/notes",
+            &headers,
+            "X-Token",
+            &format!("Token {KEY}"),
+        )
+        .status
+    };
+    assert_eq!(with(&[("x-token", &format!("Token {KEY}"))]), 200);
+    assert_eq!(with(&[("X-Token", KEY)]), 401);
+    assert_eq!(with(&[("Authorization", &format!("Bearer {KEY}"))]), 401);
+    assert_eq!(with(&[]), 401);
+}
+
+#[test]
+fn a_header_binding_scrubs_the_key_and_the_prefixed_value_from_the_answer() {
+    let s = stub_for(
+        vec![header_binding("X-Token", "Token ")],
+        vec![read_shape()],
+        Some(URN),
+        file(&format!(
+            r#"[{{"method":"GET","prefix":"/v1/notes","status":200,"body":{{"echo":"Token {KEY}","key":"{KEY}"}}}}]"#
+        )),
+    );
+    let r = s.handle(&request(
+        "GET",
+        "https://api.notesdesk.example/v1/notes",
+        &[("X-Token", &format!("Token {PH}"))],
+        b"",
+    ));
+    let body = text(&r);
+    assert_eq!(r.status, 200, "{body}");
+    assert!(!body.contains(KEY) && !body.contains("Token "), "{body}");
+    assert!(body.contains(PH), "{body}");
+}
+
+#[test]
+fn a_header_binding_refuses_the_placeholder_anywhere_but_its_header() {
+    let word = "only valid as the `X-Api-Key` value";
+    let s = || {
+        stub_for(
+            vec![header_binding("X-Api-Key", "")],
+            vec![read_shape()],
+            Some(URN),
+            file("[]"),
+        )
+    };
+    let url = "https://api.notesdesk.example/v1/notes";
+    refused_with(
+        &s(),
+        request("GET", url, &[("Authorization", PH)], b""),
+        word,
+    );
+    refused_with(
+        &s(),
+        request("GET", url, &[("X-Api-Key", PH), ("X-Echo", PH)], b""),
+        word,
+    );
+    refused_with(
+        &s(),
+        request("GET", &format!("{url}?key={PH}"), &[("X-Api-Key", PH)], b""),
+        word,
+    );
+    refused_with(
+        &s(),
+        request("POST", url, &[("X-Api-Key", PH)], PH.as_bytes()),
+        word,
+    );
+    refused_with(
+        &s(),
+        request(
+            "GET",
+            url,
+            &[("X-Api-Key", PH), ("x-api-key", "other")],
+            b"",
+        ),
+        word,
+    );
 }
