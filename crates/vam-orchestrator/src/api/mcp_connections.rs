@@ -17,19 +17,20 @@ use crate::error::OrchestratorError;
 use crate::mcp_client::{
     connection_host, enforce_registered_host, McpTool, DEFAULT_MCP_TIMEOUT_MS,
 };
+use secrecy::SecretString;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mcp_registry::{
     apply_oauth_token_metadata, assert_no_visible_name_collision,
-    decide_pinned_snapshot_with_instructions, fetch_tools_snapshot, flagged_vendor_text,
+    decide_pinned_snapshot_with_instructions, fetch_tools_snapshot_staged, flagged_vendor_text,
     mcp_auth_binding_id, mcp_capabilities, mcp_oauth_refresh_token_binding_id,
     merge_header_bindings, normalize_connect_headers, parse_side_effect_class,
     resolve_connection_auth, sanitize_oauth_last_refresh_error, sanitized_oauth_metadata,
-    store_mcp_header_credential, store_mcp_oauth_tokens, suggested_read_only_tools,
+    stage_mcp_header_credential, store_mcp_oauth_tokens, suggested_read_only_tools,
     validate_connection_id, validate_mcp_timeout_ms, HeaderBinding, McpAuthMode, McpAuthWrite,
     McpConnection, McpHeaderInput, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
-    McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision,
+    McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision, StagedHeader,
 };
 use crate::secrets::{
     authorize_org_secret_write, resolve_secret_scope, vault_owner_user_id, SecretScope,
@@ -351,23 +352,27 @@ fn credential_caller(scope: SecretScope, owner: &str) -> &str {
     }
 }
 
+/// The tool listing of a connect. `staged` is the plaintext (binding id, value) of the headers
+/// this connect has sealed but not stored yet; every other binding is read from the vault.
 async fn snapshot(
     state: &AppState,
     scope: SecretScope,
     owner: &str,
     url: &str,
     header_bindings: &[HeaderBinding],
+    staged: Vec<(String, SecretString)>,
 ) -> Result<McpSnapshot, ApiError> {
     let vault = state.vault.clone();
     let caller = credential_caller(scope, owner).to_string();
     let url = url.to_string();
     let header_bindings = header_bindings.to_vec();
     tokio::task::spawn_blocking(move || {
-        fetch_tools_snapshot(
+        fetch_tools_snapshot_staged(
             &vault,
             &caller,
             &url,
             &header_bindings,
+            &staged,
             DEFAULT_MCP_TIMEOUT_MS,
         )
     })
@@ -577,12 +582,17 @@ async fn connect(
         })
         .collect();
     let normalized = normalize_connect_headers(secret_value.as_deref(), &header_inputs)?;
+    // The header values are validated and sealed here, not stored: the guarded row write below
+    // stores them in its own transaction, after it has checked that nothing changed. A connect that
+    // is refused, or that fails before then (a refused tool listing, drift, a name clash), leaves
+    // the vault exactly as it was. The tool listing gets the new plaintext from memory.
+    let mut staged: Vec<StagedHeader> = Vec::with_capacity(normalized.len());
+    let mut staged_plaintext: Vec<(String, SecretString)> = Vec::with_capacity(normalized.len());
     let mut stored_bindings = Vec::with_capacity(normalized.len());
     for (name, value) in &normalized {
-        let binding_id = store_mcp_header_credential(
+        let header = stage_mcp_header_credential(
             &state.vault,
             scope,
-            &owner,
             &req.connection_id,
             name,
             value,
@@ -592,8 +602,10 @@ async fn connect(
         )?;
         stored_bindings.push(HeaderBinding {
             name: name.clone(),
-            binding_id,
+            binding_id: header.binding_id.clone(),
         });
+        staged_plaintext.push((header.binding_id.clone(), SecretString::new(value.clone())));
+        staged.push(header);
     }
     let leaving_static_for_oauth = existing.as_ref().is_some_and(|prior| {
         prior.auth_mode == McpAuthMode::Static && auth_mode == McpAuthMode::Oauth
@@ -617,7 +629,15 @@ async fn connect(
             existing.as_ref().and_then(|c| c.instructions.clone()),
         )
     } else {
-        let mut listed = snapshot(&state, scope, &owner, &req.url, &header_bindings).await?;
+        let mut listed = snapshot(
+            &state,
+            scope,
+            &owner,
+            &req.url,
+            &header_bindings,
+            staged_plaintext,
+        )
+        .await?;
         if let Some(p) = &policy {
             listed.tools.retain(|t| p.is_vetted(&t.name));
         }
@@ -673,6 +693,7 @@ async fn connect(
         auth_mode,
         oauth.as_ref(),
         auth_write,
+        &staged,
     )?;
     if instructions.is_some() {
         state.store.set_mcp_instructions(

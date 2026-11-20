@@ -5382,6 +5382,160 @@ mod tests {
         assert_eq!(stored.timeout_ms, 90_000);
     }
 
+    /// A hand-added static MCP server on loopback, answering `host`; `tools_ok` false makes its
+    /// `tools/list` fail.
+    fn static_mcp_server(
+        host: &str,
+        tools_ok: Arc<AtomicBool>,
+    ) -> Arc<std::sync::Mutex<crate::mcp_client::mock::Seen>> {
+        let (url, seen) = crate::mcp_client::mock::spawn(move |method, id, params| {
+            if method == "tools/list" && !tools_ok.load(std::sync::atomic::Ordering::SeqCst) {
+                return Some((
+                    "application/json".into(),
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id,
+                        "error": { "code": -32000, "message": "tools are down" } })
+                    .to_string(),
+                ));
+            }
+            crate::mcp_client::mock::standard(method, id, params)
+        });
+        crate::mcp_oauth_refresh::test_seam::serve(host, url::Url::parse(&url).unwrap());
+        seen
+    }
+
+    fn static_connect_body(id: &str, host: &str, authorization: &str) -> serde_json::Value {
+        serde_json::json!({
+            "connectionId": id,
+            "url": format!("https://{host}/mcp"),
+            "secretValue": authorization,
+        })
+    }
+
+    fn stored_header(state: &AppState, id: &str) -> String {
+        secrecy::ExposeSecret::expose_secret(
+            &state
+                .vault
+                .decrypt_secret_at(
+                    crate::secrets::SecretScope::User,
+                    "ada",
+                    &format!("{id}/auth-header"),
+                )
+                .unwrap(),
+        )
+        .clone()
+    }
+
+    #[tokio::test]
+    async fn two_first_time_static_connects_leave_the_accepted_ones_header_in_force() {
+        let (app, state) = app_world_with_state();
+        let host = "mcp.static-race.example";
+        static_mcp_server(host, Arc::new(AtomicBool::new(true)));
+        let connect = |app: axum::Router, key: &'static str, authorization: &'static str| {
+            tokio::spawn(async move {
+                call_with_key(
+                    &app,
+                    "PUT",
+                    "/v1/mcp/connections",
+                    "member-secret",
+                    Some(static_connect_body("static-race", host, authorization)),
+                    key,
+                )
+                .await
+            })
+        };
+        let wait = |arrived: std::sync::mpsc::Receiver<()>| {
+            tokio::task::spawn_blocking(move || {
+                arrived.recv_timeout(std::time::Duration::from_secs(10))
+            })
+        };
+        // A and B are both first-time connects: each has read "no row" and listed the tools, and
+        // each stops just before its row write.
+        let (arrived_a, release_a) =
+            crate::connectors::test_signal::arm_pause("mcp-connect-write:static-race");
+        let a = connect(app.clone(), "race-a", "Bearer token-A");
+        wait(arrived_a)
+            .await
+            .unwrap()
+            .expect("A reached its row write");
+        let (arrived_b, release_b) =
+            crate::connectors::test_signal::arm_pause("mcp-connect-write:static-race");
+        let b = connect(app.clone(), "race-b", "Bearer token-B");
+        wait(arrived_b)
+            .await
+            .unwrap()
+            .expect("B reached its row write");
+        // A's row commits; B is refused.
+        release_a.send(()).unwrap();
+        let (s, body) = a.await.unwrap();
+        assert_eq!(s, StatusCode::OK, "{body}");
+        release_b.send(()).unwrap();
+        let (s, body) = b.await.unwrap();
+        assert_eq!(s, StatusCode::CONFLICT, "{body}");
+        // The request the member was told succeeded is the one in force.
+        assert_eq!(
+            stored_header(&state, "static-race"),
+            "Bearer token-A",
+            "the accepted row's header is not the refused request's value"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_static_connect_whose_tool_listing_fails_keeps_the_old_header() {
+        let (app, state) = app_world_with_state();
+        let host = "mcp.static-keep.example";
+        let tools_ok = Arc::new(AtomicBool::new(true));
+        let seen = static_mcp_server(host, tools_ok.clone());
+        let (s, body) = call_with_key(
+            &app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(static_connect_body("static-keep", host, "Bearer old")),
+            "keep-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(stored_header(&state, "static-keep"), "Bearer old");
+        // The server now refuses the listing; the member replaces the header.
+        tools_ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (s, body) = call_with_key(
+            &app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(static_connect_body("static-keep", host, "Bearer new")),
+            "keep-2",
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{body}");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .auth
+                .iter()
+                .any(|a| a.as_deref() == Some("Bearer new")),
+            "the listing was tried with the new header"
+        );
+        assert_eq!(
+            stored_header(&state, "static-keep"),
+            "Bearer old",
+            "a refused connect replaced a working header"
+        );
+        // A listing that works takes the new header.
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (s, body) = call_with_key(
+            &app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(static_connect_body("static-keep", host, "Bearer new")),
+            "keep-3",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(stored_header(&state, "static-keep"), "Bearer new");
+    }
+
     #[tokio::test]
     async fn a_check_whose_request_goes_away_keeps_the_members_lock_until_the_refresh_returns() {
         let (app, _state, p) = fixed_endpoint_node("fixedcheck.example", false).await;
