@@ -37,7 +37,7 @@ tokio = { version = "1.34", features = ["full"] }
 toml = "0.8"
 uuid = { version = "1.8", features = ["v4"] }
 tempfile = "3.8"
-vam-security = { workspace = true, features = ["tls-roots"] }
+vam-security = { workspace = true, features = ["tls-roots", "secret-forms"] }
 vam-spec.workspace = true
 vam-telemetry.workspace = true
 

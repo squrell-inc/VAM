@@ -40,7 +40,12 @@ pub enum ConnectorsCmd {
         #[arg(long)]
         strict: bool,
     },
-    /// Run a listing's tools against the mock its test file declares, offline. Not available yet.
+    /// Run a listing's tools against the mock its test file declares, offline: each tool of a
+    /// case runs behind the egress gate's own screening, with a generated key the tool never sees.
+    /// Prints `pass <tool>` or `fail <tool>: <the gate's words>` per case; exit code 6 on any
+    /// failure. The tools' code runs on this machine with a cleared environment and no sandbox
+    /// (it is your own code); nothing is sent off the machine. A remote MCP connector runs
+    /// nothing here: only its test file is checked.
     Test {
         /// A marketplace root, or a listing directory under one.
         dir: String,
@@ -60,7 +65,11 @@ pub async fn run(host: Option<String>, token: Option<String>, cmd: ConnectorsCmd
         ConnectorsCmd::Validate { dir, strict } => {
             return super::connector_kit::validate(&dir, strict)
         }
-        ConnectorsCmd::Test { dir, .. } => return super::connector_kit::test(&dir),
+        ConnectorsCmd::Test {
+            dir,
+            listing,
+            subdomain,
+        } => return super::connector_kit::test(&dir, listing.as_deref(), subdomain.as_deref()),
         other => other,
     };
     let cfg = config::resolve(host, token).await?;
