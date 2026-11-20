@@ -2512,3 +2512,156 @@ fn new_tool_results_name_the_tool_from_the_call_and_skip_seen_messages() {
         vec![("other".to_string(), "c2".to_string(), "x".to_string())]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tool cards for guest-run tools (CN-3.4): the recorder attaches the skill's `show` card at the
+// first sight of the tool's result in a request.
+
+mod guest_tool_cards {
+    use super::*;
+    use crate::events::{TYPE_CARD_SKIPPED, TYPE_OUTBOX_CARD};
+    use crate::session::ToolCatalogEntry;
+
+    // Each case has its own session and run: the card map and the once-per-call set are global.
+    struct Ids {
+        session: String,
+        run: String,
+    }
+
+    fn ids(case: &str) -> Ids {
+        Ids {
+            session: format!("sess-guest-cards-{case}"),
+            run: format!("urn:vam:run:guest-cards-{case}"),
+        }
+    }
+    const FIT: &str = r#"{"messages":[{"from":"ana@e2e.example","subject":"Plan"}]}"#;
+
+    fn entry(name: &str, command: &str) -> ToolCatalogEntry {
+        ToolCatalogEntry {
+            tool_name: name.into(),
+            command: command.into(),
+            entrypoint: format!("./{name}.ts"),
+            digest: String::new(),
+            side_effect: vam_spec::v1::SideEffectClass::ReadOnly as i32,
+            skill_name: String::new(),
+            approval_required: false,
+        }
+    }
+
+    fn store(id: &Ids, catalog: &[ToolCatalogEntry]) -> Arc<SqliteWorkflowStore> {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        store
+            .create_session(&id.session, None, "vm", "ws", "storage-default")
+            .unwrap();
+        store
+            .persist_run_spec(
+                &id.run,
+                r#"{"inputs":{"prompt":"go"}}"#,
+                Some(&id.session),
+                "urn:vam:agent:test",
+                None,
+                "User::\"tester\"",
+            )
+            .unwrap();
+        store.record_tool_catalog(&id.session, catalog).unwrap();
+        Arc::new(store)
+    }
+
+    fn recorder(f: &Fixture, id: &Ids, store: &Arc<SqliteWorkflowStore>) -> Arc<ThreadRecorder> {
+        let scope = f.scope_for(THREAD);
+        Arc::new(
+            ThreadRecorder::with_resolver(
+                id.session.clone(),
+                f.root(),
+                Arc::new(move || Ok(scope.clone())),
+            )
+            .with_commit_store(store.clone()),
+        )
+    }
+
+    fn events(store: &SqliteWorkflowStore, id: &Ids, kind: &str) -> Vec<serde_json::Value> {
+        store
+            .read_outbox_for_run(&id.run, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.event_type == kind)
+            .map(|e| serde_json::from_str(&e.payload).unwrap())
+            .collect()
+    }
+
+    /// One round: the model calls `tool` (call `c1`), the guest runs it, and the next request
+    /// carries `result`; then a third request repeats the same history.
+    async fn round_trip(rec: &ThreadRecorder, tool: &str, result: &str) {
+        let tools = vec![tool_spec(tool, "a mail tool")];
+        let u = msg("user", "List my mail");
+        let c1 = call("c1", tool, "{}");
+        let a1 = assistant_calls("", vec![c1.clone()]);
+        let t1 = tool_msg("c1", result);
+        rec.on_request(request(1, "SYS", vec![u.clone()], tools.clone()))
+            .await;
+        rec.on_response(response(1, "", vec![c1])).await;
+        rec.on_request(request(
+            2,
+            "SYS",
+            vec![u.clone(), a1.clone(), t1.clone()],
+            tools.clone(),
+        ))
+        .await;
+        rec.on_response(response(2, "Listed.", vec![])).await;
+        rec.on_request(request(3, "SYS", vec![u, a1, t1], tools))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_guest_tool_result_gets_the_skills_card_once() {
+        let id = ids("once");
+        let (_session, _dir) = crate::skill_cards::tests_support::seeded(&id.session, true);
+        let f = fixture();
+        let store = store(&id, &[entry("mail_list", "bun")]);
+        let rec = recorder(&f, &id, &store);
+        round_trip(&rec, "mail_list", FIT).await;
+        let cards = events(&store, &id, TYPE_OUTBOX_CARD);
+        assert_eq!(
+            cards.len(),
+            1,
+            "one card for one call, however often it is seen"
+        );
+        let d = &cards[0]["data"];
+        assert_eq!(d["tool"], "mail_list");
+        assert_eq!(d["callId"], "c1");
+        assert_eq!(d["source"], "tool");
+        assert_eq!(d["jig"], "mail.mail_list");
+        assert_eq!(d["data"]["messages"][0]["subject"], "Plan");
+        assert!(events(&store, &id, TYPE_CARD_SKIPPED).is_empty());
+        crate::skill_cards::forget_session(&id.session);
+    }
+
+    #[tokio::test]
+    async fn a_host_run_tool_is_left_to_the_host_and_a_misfit_is_skipped() {
+        // A tool the host runs: the host attached its card where it ran, so the recorder adds none.
+        let host = ids("host");
+        let (_s1, _d1) = crate::skill_cards::tests_support::seeded(&host.session, true);
+        let f = fixture();
+        let store_host = store(&host, &[entry("mail_list", "host")]);
+        round_trip(&recorder(&f, &host, &store_host), "mail_list", FIT).await;
+        assert!(events(&store_host, &host, TYPE_OUTBOX_CARD).is_empty());
+        assert!(events(&store_host, &host, TYPE_CARD_SKIPPED).is_empty());
+        crate::skill_cards::forget_session(&host.session);
+        // A guest result that breaks the card's schema: `card.skipped`, no card.
+        let guest = ids("misfit");
+        let (_s2, _d2) = crate::skill_cards::tests_support::seeded(&guest.session, true);
+        let f = fixture();
+        let store_guest = store(&guest, &[entry("mail_list", "bun")]);
+        round_trip(
+            &recorder(&f, &guest, &store_guest),
+            "mail_list",
+            r#"{"messages":[{"from":5}]}"#,
+        )
+        .await;
+        assert!(events(&store_guest, &guest, TYPE_OUTBOX_CARD).is_empty());
+        let skipped = events(&store_guest, &guest, TYPE_CARD_SKIPPED);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0]["data"]["reason"], "result_does_not_fit");
+        crate::skill_cards::forget_session(&guest.session);
+    }
+}
