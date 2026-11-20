@@ -899,6 +899,143 @@ pub fn refresh_token_binding_id(connector_id: &str) -> String {
     format!("connector/{connector_id}/oauth/refresh-token")
 }
 
+/// `connector/<id>/api-key`: the API key a member entered for an `api_key` connector (`connection`
+/// kind, pinned to the connector's filled binding hosts). Never an `egress` row (locked decision 7).
+pub fn api_key_binding_id(connector_id: &str) -> String {
+    format!("connector/{connector_id}/api-key")
+}
+
+/// Shortest and longest API key a member may enter, in bytes.
+pub const API_KEY_MIN_BYTES: usize = 8;
+pub const API_KEY_MAX_BYTES: usize = 4096;
+
+/// The fixed refusal of a body that is not `{ apiKey }`. A serde error can quote the value it
+/// rejected, so no parse error text is ever returned.
+pub(crate) const API_KEY_BODY_TEXT: &str = "connection body must be { apiKey }";
+
+/// The fixed refusal of a key that does not fit the limits. It never quotes the value.
+pub(crate) const API_KEY_VALUE_TEXT: &str =
+    "apiKey must be 8 to 4096 bytes, with no whitespace or control characters";
+
+/// Body of `PUT /v1/connectors/{id}/connection` for an `api_key` connector. Holds a secret: no
+/// `Debug` output of its field.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PutApiKeyRequest {
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for PutApiKeyRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PutApiKeyRequest { .. }")
+    }
+}
+
+/// Parses the body of `PUT …/connection` for an API key connector: a JSON object with exactly
+/// `apiKey` (serde would also read a bare array as the struct's fields). Every failure is the same
+/// fixed text: a serde error can quote the value it rejected.
+pub fn parse_api_key_body(body: &str) -> Result<PutApiKeyRequest, OrchestratorError> {
+    let bad = || invalid(API_KEY_BODY_TEXT);
+    let value: Value = serde_json::from_str(body).map_err(|_| bad())?;
+    if !value.is_object() {
+        return Err(bad());
+    }
+    serde_json::from_value(value).map_err(|_| bad())
+}
+
+/// A key is kept exactly as typed (never trimmed): 8 to 4096 bytes, no whitespace, no control
+/// character. The refusal is one fixed text.
+pub fn check_api_key_value(value: &str) -> Result<(), OrchestratorError> {
+    if value.len() < API_KEY_MIN_BYTES
+        || value.len() > API_KEY_MAX_BYTES
+        || value.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(invalid(API_KEY_VALUE_TEXT));
+    }
+    Ok(())
+}
+
+/// What a `PUT …/connection` of an API key will write once every rule has passed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ApiKeyPlan {
+    /// The company address the key is entered under (`tenant_id` of the row); "" without one.
+    pub address: String,
+    /// Every filled binding host: the key is pinned to all of them.
+    pub hosts: Vec<String>,
+}
+
+/// Decides a `PUT …/connection` of an API key: the plan, or the refusal. Nothing is written here.
+///
+/// - not a REST connector that signs in with an API key: 400;
+/// - not enabled on this node: 403 (the Phase 6 words); no company address: 409;
+/// - a body or key that does not fit the limits: 400 (a fixed text, never the key).
+///
+/// `template` is the file as published and `node` the row the caller read: the hosts are the
+/// template filled with that row's address.
+pub fn plan_api_key_connection(
+    template: &Connector,
+    node: Option<&NodeConnector>,
+    req: &PutApiKeyRequest,
+) -> Result<ApiKeyPlan, OrchestratorError> {
+    let id = connector_id(template);
+    if !is_api_key(template) {
+        return Err(invalid(format!("`{id}` does not sign in with an API key")));
+    }
+    if template.mcp.is_some() {
+        return Err(invalid(format!(
+            "`{id}` is an MCP connector; its API key cannot be entered on this node yet"
+        )));
+    }
+    let node = node.filter(|n| n.enabled).ok_or_else(|| {
+        OrchestratorError::PermissionDenied(format!(
+            "the `{id}` connector is not enabled on this node; ask your admin (`vam connectors`)"
+        ))
+    })?;
+    let address = match (template.tenant.is_some(), node.tenant_subdomain.as_deref()) {
+        (true, None) => {
+            return Err(OrchestratorError::Conflict(format!(
+                "the `{id}` connector needs a company address; ask your admin (`vam connectors`)"
+            )))
+        }
+        (true, Some(a)) => a.to_string(),
+        (false, _) => String::new(),
+    };
+    check_api_key_value(&req.api_key)?;
+    let filled = resolve(template, node.tenant_subdomain.as_deref());
+    let hosts = binding_hosts(&filled);
+    if hosts.is_empty() {
+        return Err(OrchestratorError::Conflict(format!(
+            "the `{id}` connector names no host to pin the key to; ask your admin (`vam connectors`)"
+        )));
+    }
+    Ok(ApiKeyPlan { address, hosts })
+}
+
+/// True when the member's key row for `id` is a `connection`-kind row pinned to exactly `hosts`
+/// (the connector's filled binding hosts now). A row pinned to other hosts is never sent.
+pub(crate) fn api_key_pinned(
+    store: &SqliteWorkflowStore,
+    owner: &str,
+    id: &str,
+    hosts: &[String],
+) -> bool {
+    if hosts.is_empty() {
+        return false;
+    }
+    let Ok(meta) =
+        store.get_host_secret_metadata(SecretScope::User, owner, &api_key_binding_id(id))
+    else {
+        return false;
+    };
+    let mut pinned = meta.allowed_destinations;
+    let mut want = hosts.to_vec();
+    pinned.sort();
+    pinned.dedup();
+    want.sort();
+    want.dedup();
+    meta.kind == SecretKind::Connection && pinned == want
+}
+
 /// The Entra provider of a REST connector, or why this id cannot take a REST connection.
 fn entra_provider(def: &Connector) -> Result<&OAuth2Provider, OrchestratorError> {
     let id = connector_id(def);
@@ -919,6 +1056,14 @@ fn entra_provider(def: &Connector) -> Result<&OAuth2Provider, OrchestratorError>
 pub(crate) fn exchange_only(id: &str) -> String {
     format!(
         "`{id}` connects through the node's code exchange: use POST /v1/connectors/{id}/connection/oauth/code"
+    )
+}
+
+/// The refusal text of an OAuth route asked about an `api_key` connector: it has no tokens and no
+/// code exchange, only the member's own key.
+pub(crate) fn api_key_only(id: &str) -> String {
+    format!(
+        "`{id}` signs in with an API key: connect it with PUT /v1/connectors/{id}/connection {{ apiKey }}"
     )
 }
 
@@ -1115,9 +1260,13 @@ pub(crate) fn write_connection(
     Ok(row)
 }
 
-/// Removes both token rows (a missing one is fine).
+/// Removes the token rows and the API key row (a missing one is fine).
 pub(crate) fn delete_connection_secrets(vault: &SecretsVault, owner: &str, id: &str) {
-    for binding in [refresh_token_binding_id(id), access_token_binding_id(id)] {
+    for binding in [
+        refresh_token_binding_id(id),
+        access_token_binding_id(id),
+        api_key_binding_id(id),
+    ] {
         let _ = vault.delete_secret_at(SecretScope::User, owner, &binding);
     }
 }
@@ -1141,8 +1290,11 @@ pub(crate) fn disconnect(
     Ok(())
 }
 
-/// The caller's state from their own connection row. `Connected` only while the tokens exist and
-/// the connection is in the tenant the admin consented for now; otherwise `NeedsReconnect`.
+/// The caller's state from their own connection row. `Connected` only while the credential exists
+/// (`has_refresh_token`: the refresh token of an OAuth connection; for an `api_key` connection, that
+/// the key row exists and its pin equals the connector's filled binding hosts now, see
+/// [`rest_state_for`]) and the connection is in the tenant and at the company address the node has
+/// now; otherwise `NeedsReconnect`.
 pub fn rest_connection_state(
     conn: &ConnectorConnection,
     node: Option<&NodeConnector>,
@@ -1170,6 +1322,27 @@ pub fn rest_connection_state(
     } else {
         CallerState::NeedsReconnect
     }
+}
+
+/// [`rest_connection_state`] for `def`, the connector filled with the node's address (the api_key
+/// branch). An `api_key` connection is `Connected` when its row is connected, the key row exists with
+/// a pin equal to `def`'s binding hosts, and the address is the node's; otherwise `NeedsReconnect`: a
+/// host change by an update leaves the key where it is and never sends it to the new host.
+/// `has_refresh_token` is read only for an OAuth connection.
+pub(crate) fn rest_state_for(
+    store: &SqliteWorkflowStore,
+    def: &Connector,
+    owner: &str,
+    conn: &ConnectorConnection,
+    node: Option<&NodeConnector>,
+    has_refresh_token: impl FnOnce() -> bool,
+    node_token_endpoint: Option<&str>,
+) -> CallerState {
+    if is_api_key(def) {
+        let pinned = api_key_pinned(store, owner, &connector_id(def), &binding_hosts(def));
+        return rest_connection_state(conn, node, pinned, None);
+    }
+    rest_connection_state(conn, node, has_refresh_token(), node_token_endpoint)
 }
 
 /// On a connected tile the label is the account (`member@contoso.com`); the app writes
@@ -2207,6 +2380,70 @@ impl SqliteWorkflowStore {
                 c.now,
                 c.client_id
             ],
+        )?;
+        let row = connector_connection_in(&tx, c.owner, c.connector_id)?.ok_or_else(|| {
+            OrchestratorError::CorruptState("connection row missing after its write".into())
+        })?;
+        tx.commit()?;
+        Ok(row)
+    }
+}
+
+/// What a member's API key entry commits: the key and the connection row.
+pub(crate) struct ApiKeyCommit<'a> {
+    pub(crate) owner: &'a str,
+    pub(crate) connector_id: &'a str,
+    /// The company address the key is entered under (the row's `tenant_id`; "" without one).
+    pub(crate) address: &'a str,
+    /// Every filled binding host: the key is pinned to all of them.
+    pub(crate) hosts: &'a [String],
+    pub(crate) api_key: &'a str,
+    pub(crate) now: i64,
+}
+
+impl SqliteWorkflowStore {
+    /// Commits a member's API key: the `connector/<id>/api-key` vault row (sealed before the
+    /// transaction opens, `connection` kind, pinned to `c.hosts`) and the `connector_connections`
+    /// row (`connected`, the address as `tenant_id`, no token endpoint, no expiry), in ONE
+    /// transaction. `check` runs first inside it and refuses (nothing written) if the enable, the
+    /// address or the connector's hosts are no longer what the key was entered for.
+    pub(crate) fn commit_api_key_connection(
+        &self,
+        vault: &SecretsVault,
+        c: &ApiKeyCommit<'_>,
+        check: &dyn Fn(&Connection) -> Result<(), OrchestratorError>,
+    ) -> Result<ConnectorConnection, OrchestratorError> {
+        check_api_key_value(c.api_key)?;
+        let sealed = vault.seal(c.api_key)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let tx = connection.transaction()?;
+        check(&tx)?;
+        crate::secrets::put_host_secret_in(
+            &tx,
+            &api_key_binding_id(c.connector_id),
+            SecretKind::Connection,
+            &sealed.nonce,
+            &sealed.ciphertext,
+            &sealed.fingerprint,
+            c.hosts,
+            None,
+            SecretScope::User,
+            c.owner,
+        )?;
+        tx.execute(
+            "INSERT INTO connector_connections (owner_user_id, connector_id, status, label,
+                 tenant_id, token_endpoint, scopes_json, expires_at, connected_at, updated_at,
+                 last_check_at, last_error, client_id)
+             VALUES (?1, ?2, 'connected', NULL, ?3, '', '[]', NULL, ?4, ?4, NULL, NULL, NULL)
+             ON CONFLICT(owner_user_id, connector_id) DO UPDATE SET status = 'connected',
+                 label = NULL, tenant_id = excluded.tenant_id, token_endpoint = '',
+                 scopes_json = '[]', expires_at = NULL, connected_at = excluded.connected_at,
+                 updated_at = excluded.updated_at, last_check_at = NULL, last_error = NULL,
+                 client_id = NULL",
+            params![c.owner, c.connector_id, c.address, c.now],
         )?;
         let row = connector_connection_in(&tx, c.owner, c.connector_id)?.ok_or_else(|| {
             OrchestratorError::CorruptState("connection row missing after its write".into())

@@ -23,7 +23,7 @@ pub use capability::NetworkCapabilities;
 pub use config::{AllowedPortRange, NetworkConfig, NetworkMode, SessionNetworkSpec};
 pub use connection::{
     is_read_method, ActiveCall, BindingSpec, CallWindow, ConnectionGrant, ConnectionRefusal,
-    ConnectionRequest, ConnectionTokenSource, Envelope, Shape, WriteTicket,
+    ConnectionRequest, ConnectionTokenSource, Envelope, HeaderInject, Shape, WriteTicket,
 };
 pub use dns::SessionDnsProxy;
 pub use error::VamNetworkError;

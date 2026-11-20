@@ -64,7 +64,7 @@ async fn list_connectors(
             let e = &connectors::entry_for_node(e, node);
             let def = &e.def;
             let client = clients.iter().find(|c| c.connector_id == id);
-            let (mine, account) = caller_connection_state(&state, &auth, &id, node, client);
+            let (mine, account) = caller_connection_state(&state, &auth, def, node, client);
             let mut entry = connectors::list_entry(def, &cfg, node, mine, admin);
             connectors::show_account(
                 &mut entry,
@@ -89,26 +89,33 @@ async fn list_connectors(
 fn caller_connection_state(
     state: &AppState,
     auth: &AuthContext,
-    id: &str,
+    def: &vam_spec::connector::Connector,
     node: Option<&connectors::NodeConnector>,
     client: Option<&connector_client::NodeClient>,
 ) -> (Option<connectors::CallerState>, Option<String>) {
+    let id = connectors::connector_id(def);
+    let id = id.as_str();
     let scope = SecretScope::User;
     let owner = vault_owner_user_id(scope, auth.owner_user_id()).to_string();
     let Some(policy) = state.store.mcp_policy(id).ok().flatten() else {
         let Ok(Some(conn)) = state.store.connector_connection(&owner, id) else {
             return (None, None);
         };
-        let has_refresh = state
-            .vault
-            .has_binding_at(scope, &owner, &connectors::refresh_token_binding_id(id))
-            .unwrap_or(false);
         // An `oauth` connector's connection is judged against the token endpoint of the node's
-        // client as well (a connection made against another is not this company's).
-        let st = connectors::rest_connection_state(
+        // client as well (a connection made against another is not this company's). An `api_key`
+        // connection is judged by its key's pin against the filled hosts (`rest_state_for`).
+        let st = connectors::rest_state_for(
+            &state.store,
+            def,
+            &owner,
             &conn,
             node,
-            has_refresh,
+            || {
+                state
+                    .vault
+                    .has_binding_at(scope, &owner, &connectors::refresh_token_binding_id(id))
+                    .unwrap_or(false)
+            },
             client.map(|c| c.token_endpoint.as_str()),
         );
         return (Some(st), conn.label);
@@ -136,10 +143,13 @@ fn entry_for(
     auth: &AuthContext,
     e: &connectors::ConnectorEntry,
 ) -> Result<Value, OrchestratorError> {
-    let def = &e.def;
     let id = e.id();
     let (node, client) = state.store.node_connector_and_client(&id)?;
-    let (mine, account) = caller_connection_state(state, auth, &id, node.as_ref(), client.as_ref());
+    // Every host shown is filled from the node row this response shows, not from the definition the
+    // caller resolved before it (an admin's save or an update may have landed between).
+    let e = &connectors::entry_for_node(e, node.as_ref());
+    let def = &e.def;
+    let (mine, account) = caller_connection_state(state, auth, def, node.as_ref(), client.as_ref());
     let mut entry = connectors::list_entry(
         def,
         &connectors::config(),
@@ -264,8 +274,13 @@ async fn put_node(
     }
     // The node row and the client are the ones this save committed, read in its transaction: a
     // concurrent save cannot pair this node row with another save's client (or with none).
-    let (mine, account) =
-        caller_connection_state(&state, &auth, &id, Some(&saved.node), saved.client.as_ref());
+    let (mine, account) = caller_connection_state(
+        &state,
+        &auth,
+        &def,
+        Some(&saved.node),
+        saved.client.as_ref(),
+    );
     let mut entry = connectors::list_entry(&def, &cfg, Some(&saved.node), mine, true);
     connectors::show_account(
         &mut entry,
@@ -347,6 +362,10 @@ async fn put_connection(
         .authorize(&auth, "PutConnectorConnection", CONNECTION_SCOPE)?;
     let idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let def = entry_or_404(&state, &id)?;
+    // A connector that signs in with an API key takes the member's key and nothing else (CN-7.6).
+    if connectors::is_api_key(&def.template) {
+        return put_api_key_connection(&state, &auth, &def, &body).await;
+    }
     // A connector with fixed endpoints and the admin's client connects only through the node's code
     // exchange (CN-6.3): tokens the app holds cannot be tied to the company address, so they are
     // refused before the body is read. Nothing is written. The Entra route below is unchanged.
@@ -383,6 +402,78 @@ async fn put_connection(
     Ok(json_http_response(
         StatusCode::OK,
         entry_for(&state, &auth, &def)?.to_string(),
+    ))
+}
+
+/// `PUT /v1/connectors/{id}/connection` for an `api_key` connector: the member's own key (CN-7.6).
+///
+/// The body is `{ apiKey }` and nothing else. Every refusal is decided before anything is written
+/// and is a fixed text that never quotes the key: not enabled (403), no company address (409), a
+/// body or key that does not fit (400). Under the member's connection lock, ONE transaction writes
+/// the `connector_connections` row and the `connector/<id>/api-key` vault row (`connection` kind,
+/// sealed before the transaction, pinned to the filled binding hosts); the enable, the address and
+/// the hosts are checked again inside it. Then this member's parks on the connector continue. No
+/// request is made to the provider. The answer is the member's list entry: no key is in it.
+async fn put_api_key_connection(
+    state: &AppState,
+    auth: &AuthContext,
+    found: &connectors::ConnectorEntry,
+    body: &str,
+) -> Result<Response, ApiError> {
+    let id = found.id();
+    // A fixed message: a serde error can quote the value it rejected, and this body holds a key.
+    let req = connectors::parse_api_key_body(body)?;
+    let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
+    {
+        let _gate = connectors::lock_connection(&owner, &id).await;
+        let now = connectors::now_secs();
+        let node = state.store.node_connector(&id)?;
+        // Every refusal is decided here, before any write.
+        let plan = connectors::plan_api_key_connection(&found.template, node.as_ref(), &req)?;
+        // Inside the transaction: the connector is still enabled, still at the address and still
+        // names the hosts the key is about to be pinned to (an admin's save or a listing update
+        // that landed meanwhile stores nothing).
+        let (check_id, address, hosts) = (id.clone(), plan.address.clone(), plan.hosts.clone());
+        let still_current = move |tx: &rusqlite::Connection| -> Result<(), OrchestratorError> {
+            let node_now = connectors::node_connector_in(tx, &check_id)?;
+            let enabled = node_now.as_ref().is_some_and(|n| n.enabled);
+            let same_address =
+                connectors::address_key(node_now.and_then(|n| n.tenant_subdomain).as_deref())
+                    == address;
+            let same_file = connectors::entry_in(tx, &check_id)?.is_some_and(|e| {
+                connectors::is_api_key(&e.def) && connectors::binding_hosts(&e.def) == hosts
+            });
+            if enabled && same_address && same_file {
+                Ok(())
+            } else {
+                Err(OrchestratorError::Conflict(format!(
+                    "the `{check_id}` connector changed while the key was being saved: read it again and retry"
+                )))
+            }
+        };
+        state.store.commit_api_key_connection(
+            &state.vault,
+            &connectors::ApiKeyCommit {
+                owner: &owner,
+                connector_id: &id,
+                address: &plan.address,
+                hosts: &plan.hosts,
+                api_key: &req.api_key,
+                now,
+            },
+            &still_current,
+        )?;
+        // The member's reconnect notification (if any) is resolved: they entered the key again.
+        state
+            .store
+            .resolve_connection_needs_reauth(&owner, &id, "acted");
+    }
+    // The lock is released: a resumed intent takes it. Only this owner's parks on this connector
+    // continue (the key carries the owner).
+    super::reauth::resume_key(state, &crate::connector_park::park_key(&owner, &id));
+    Ok(json_http_response(
+        StatusCode::OK,
+        entry_for(state, auth, found)?.to_string(),
     ))
 }
 
@@ -455,6 +546,14 @@ async fn check_connection(
         .authorize(&auth, "CheckConnectorConnection", CONNECTION_SCOPE)?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let def = entry_or_404(&state, &id)?;
+    // An API key has nothing to refresh and nothing at the provider to ask: the answer is the
+    // stored state (the row, the key's pin and the address), with no request made.
+    if connectors::is_api_key(&def.template) {
+        return Ok(json_http_response(
+            StatusCode::OK,
+            entry_for(&state, &auth, &def)?.to_string(),
+        ));
+    }
     let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
     // The lock moves into the worker: a client that goes away mid-refresh does not release it while
     // the refresh is still running, so a sign-in cannot interleave with a stale check result.
@@ -516,6 +615,10 @@ async fn exchange_code(
         .authorize(&auth, "ExchangeConnectorCode", CONNECTION_SCOPE)?;
     let idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let found = entry_or_404(&state, &id)?;
+    // An API key has no code to exchange: the member enters the key itself (CN-7.6).
+    if connectors::is_api_key(&found.template) {
+        return Err(OrchestratorError::InvalidContract(connectors::api_key_only(&id)).into());
+    }
     // A fixed message: a serde error can quote the value it rejected, and this body holds a code.
     let req: connector_client::CodeExchangeRequest = serde_json::from_str(&body).map_err(|_| {
         OrchestratorError::InvalidContract(
@@ -5538,7 +5641,15 @@ mod tests {
 
     /// A marketplace connector that signs in with an API key (REST, one bearer binding).
     fn install_notesdesk(store: &SqliteWorkflowStore) {
-        let json = serde_json::json!({
+        install_notesdesk_with(store, |_| {});
+    }
+
+    /// [`install_notesdesk`] with the file edited by `edit` first.
+    fn install_notesdesk_with(
+        store: &SqliteWorkflowStore,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) {
+        let mut json = serde_json::json!({
             "urn": "urn:vam:connector:connectors.community.example/community/notesdesk",
             "version": "1.0.0", "displayName": "Notesdesk", "publisher": "Community Tools Ltd",
             "description": "Notes.", "icon": "notesdesk",
@@ -5549,6 +5660,7 @@ mod tests {
                            "value": "api_key", "inject": "bearer",
                            "hosts": ["api.notesdesk.example"] }]
         });
+        edit(&mut json);
         let urn = json["urn"].as_str().unwrap().to_string();
         let c = store.connection.lock().unwrap();
         c.execute(
@@ -5660,5 +5772,565 @@ mod tests {
         )
         .await;
         assert!(late.is_ok(), "the lock is free once the refresh returned");
+    }
+
+    // ---- the API key connection (CN-7.6) ---------------------------------------------------------
+
+    const KEY: &str = "ndk_live_0123456789abcdef";
+    const KEY_ROW: &str = "connector/notesdesk/api-key";
+
+    async fn enable_notesdesk(app: &axum::Router, body: serde_json::Value) {
+        let (s, b) = call(
+            app,
+            "PUT",
+            "/v1/connectors/notesdesk/node",
+            "orgadmin-secret",
+            Some(body),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+    }
+
+    async fn put_key(
+        app: &axum::Router,
+        secret: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        call(
+            app,
+            "PUT",
+            "/v1/connectors/notesdesk/connection",
+            secret,
+            Some(body),
+        )
+        .await
+    }
+
+    fn key_meta(
+        state: &AppState,
+        owner: &str,
+    ) -> Result<crate::secrets::HostSecretMetadata, OrchestratorError> {
+        state
+            .store
+            .get_host_secret_metadata(SecretScope::User, owner, KEY_ROW)
+    }
+
+    fn stored_key(state: &AppState, owner: &str) -> String {
+        use secrecy::ExposeSecret;
+        state
+            .vault
+            .decrypt_secret_at(SecretScope::User, owner, KEY_ROW)
+            .unwrap()
+            .expose_secret()
+            .clone()
+    }
+
+    async fn member_entry(app: &axum::Router) -> serde_json::Value {
+        let (s, l) = call(app, "GET", "/v1/connectors", "member-secret", None).await;
+        assert_eq!(s, StatusCode::OK);
+        l["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "notesdesk")
+            .cloned()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_api_key_is_stored_pinned_to_the_filled_hosts_and_shown_nowhere() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        assert_eq!(member_entry(&app).await["state"], "connect");
+
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected", "{b}");
+        // The vault row: this member's, `connection` kind, pinned to the one filled host.
+        let meta = key_meta(&state, "ada").unwrap();
+        assert_eq!(meta.kind, crate::secrets::SecretKind::Connection);
+        assert_eq!(meta.allowed_destinations, vec!["api.notesdesk.example"]);
+        assert_eq!(stored_key(&state, "ada"), KEY);
+        // The row: connected, no token endpoint, no expiry, the empty address.
+        let row = state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, crate::connectors::ConnectionStatus::Connected);
+        assert_eq!(row.token_endpoint, "");
+        assert_eq!(row.tenant_id, "");
+        assert_eq!(row.expires_at, None);
+        // No answer holds the key, for the member or for the admin; and it is one vault row only.
+        for secret in ["member-secret", "orgadmin-secret"] {
+            let (_, l) = call(&app, "GET", "/v1/connectors", secret, None).await;
+            assert!(!l.to_string().contains(KEY), "{secret}: {l}");
+        }
+        assert!(!b.to_string().contains(KEY));
+        // Only the member's own tile reads connected.
+        let (_, l) = call(&app, "GET", "/v1/connectors", "orgadmin-secret", None).await;
+        let admin_entry = l["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "notesdesk")
+            .unwrap();
+        assert_eq!(admin_entry["state"], "connect");
+        assert!(key_meta(&state, "olga").is_err());
+        // A replaced key is the stored one.
+        let (s, b) = put_key(
+            &app,
+            "member-secret",
+            serde_json::json!({ "apiKey": "ndk_live_ZZZZZZZZZZZZZZZZ" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(stored_key(&state, "ada"), "ndk_live_ZZZZZZZZZZZZZZZZ");
+        assert!(!b.to_string().contains("ndk_live_"));
+    }
+
+    #[tokio::test]
+    async fn every_api_key_refusal_is_a_fixed_text_that_never_quotes_the_key() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        let long = "k".repeat(4097);
+        let bad_values: Vec<String> = vec![
+            "short".into(),
+            "1234567".into(),
+            long,
+            " ndk_live_0123456789".into(),
+            "ndk_live_0123456789 ".into(),
+            "ndk live 0123456789".into(),
+            "ndk_live_\n0123456789".into(),
+            "ndk_live_\t0123456789".into(),
+            "ndk_live_\r\n0123456789".into(),
+            "ndk_live_\u{0}0123456789".into(),
+            "ndk_live_\u{7f}0123456789".into(),
+            "ndk_live_\u{a0}0123456789".into(),
+            "ndk_live_\u{2028}0123456789".into(),
+        ];
+        for v in &bad_values {
+            let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": v })).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+            assert!(
+                b.to_string().contains(
+                    "apiKey must be 8 to 4096 bytes, with no whitespace or control characters"
+                ),
+                "{b}"
+            );
+            let shown = b.to_string();
+            assert!(
+                !shown.contains("ndk_live_") && !shown.contains(&"k".repeat(20)),
+                "{b}"
+            );
+        }
+        // A body that is not exactly `{ apiKey }`: one fixed text, the value is never echoed.
+        for raw in [
+            serde_json::json!({}),
+            serde_json::json!({ "apiKey": KEY, "extra": 1 }),
+            serde_json::json!({ "apiKey": KEY, "accessToken": "x" }),
+            serde_json::json!({ "apiKey": 12345678 }),
+            serde_json::json!({ "api_key": KEY }),
+            serde_json::json!([KEY]),
+            serde_json::json!({ "accessToken": KEY, "refreshToken": KEY, "idToken": KEY }),
+        ] {
+            let (s, b) = put_key(&app, "member-secret", raw).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+            assert!(
+                b.to_string().contains("connection body must be { apiKey }"),
+                "{b}"
+            );
+            assert!(!b.to_string().contains(KEY), "{b}");
+        }
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/v1/connectors/notesdesk/connection")
+            .header("authorization", "Bearer member-secret")
+            .header("idempotency-key", "k-1")
+            .body(Body::from(format!("{{\"apiKey\": \"{KEY}\" ")))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let text = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec())
+            .unwrap();
+        assert!(!text.contains(KEY), "{text}");
+        // Nothing was written by any refusal.
+        assert!(key_meta(&state, "ada").is_err());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_none());
+        // The limits themselves are accepted, and the key is kept exactly as typed.
+        for ok in [
+            "12345678".to_string(),
+            "k".repeat(4096),
+            "ünïcode-key-çhars".to_string(),
+        ] {
+            let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": ok })).await;
+            assert_eq!(s, StatusCode::OK, "{b}");
+            assert_eq!(stored_key(&state, "ada"), ok);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_key_is_refused_before_enable_and_before_the_company_address() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        // Not enabled: 403 with the Phase 6 words; a disabled row too.
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        assert!(b.to_string().contains("ask your admin"), "{b}");
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        enable_notesdesk(&app, serde_json::json!({ "enabled": false })).await;
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        assert!(!b.to_string().contains(KEY));
+        assert!(key_meta(&state, "ada").is_err());
+
+        // A connector with a company address: enabled with none stored is a 409, nothing written.
+        let (app, state) = app_world_with_state();
+        install_notesdesk_with(&state.store, |j| {
+            j["tenant"] = serde_json::json!({
+                "name": "subdomain", "suffix": "notesdesk.example", "label": "Notesdesk address"
+            });
+            j["bindings"][0]["hosts"] = serde_json::json!(["{subdomain}.notesdesk.example"]);
+        });
+        state
+            .store
+            .put_node_connector(&crate::connectors::NodeConnector {
+                connector_id: "notesdesk".into(),
+                enabled: true,
+                consent_tenant_id: None,
+                consent_recorded_at: None,
+                consent_recorded_by: None,
+                tenant_subdomain: None,
+                updated_at: 1,
+                updated_by: "olga".into(),
+            })
+            .unwrap();
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("company address"), "{b}");
+        assert!(key_meta(&state, "ada").is_err());
+        // With the address the key is pinned to the filled host and the row carries the address.
+        enable_notesdesk(
+            &app,
+            serde_json::json!({ "enabled": true, "tenant": { "subdomain": "acme" } }),
+        )
+        .await;
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected");
+        assert_eq!(
+            key_meta(&state, "ada").unwrap().allowed_destinations,
+            vec!["acme.notesdesk.example"]
+        );
+        assert_eq!(
+            state
+                .store
+                .connector_connection("ada", "notesdesk")
+                .unwrap()
+                .unwrap()
+                .tenant_id,
+            "acme"
+        );
+        // A move of the address reads needsReconnect: the key stays pinned to the old host.
+        enable_notesdesk(
+            &app,
+            serde_json::json!({ "enabled": true, "tenant": { "subdomain": "globex" } }),
+        )
+        .await;
+        assert_eq!(member_entry(&app).await["state"], "needsReconnect");
+        assert_eq!(
+            key_meta(&state, "ada").unwrap().allowed_destinations,
+            vec!["acme.notesdesk.example"]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_api_key_is_the_members_own_and_needs_the_connection_scope() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        state
+            .store
+            .create_api_key_owned(
+                "readonly-key",
+                "ada",
+                "readonly-secret",
+                "User::\"ada\"",
+                &["node:read".to_string()],
+                "ada",
+            )
+            .unwrap();
+        let (s, b) = put_key(
+            &app,
+            "readonly-secret",
+            serde_json::json!({ "apiKey": KEY }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        assert!(key_meta(&state, "ada").is_err());
+        // No key at all: not authorized.
+        let (s, _) = put_key(&app, "nobody", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        // The member writes their own row; the admin's is untouched, and the admin's key is theirs.
+        let (s, _) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(state
+            .store
+            .connector_connection("olga", "notesdesk")
+            .unwrap()
+            .is_none());
+        let (s, _) = put_key(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "apiKey": "ndk_admin_0123456789" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(stored_key(&state, "ada"), KEY);
+        assert_eq!(stored_key(&state, "olga"), "ndk_admin_0123456789");
+        // The Entra body is not taken for an API key connector, and writes nothing more.
+        let (s, b) = put_key(
+            &app,
+            "member-secret",
+            serde_json::json!({ "accessToken": "a1234567", "refreshToken": "r1234567", "idToken": "x.y.z" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert_eq!(stored_key(&state, "ada"), KEY);
+    }
+
+    #[tokio::test]
+    async fn disconnect_and_check_for_an_api_key_ask_the_provider_nothing() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        let (s, _) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK);
+        // The check answers the stored state (the node has no route to any provider here: a
+        // provider call would have to fail the test by hanging or erroring).
+        let (s, b) = call(
+            &app,
+            "POST",
+            "/v1/connectors/notesdesk/connection/check",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected");
+        assert!(!b.to_string().contains(KEY));
+        // A key pinned to other hosts reads needsReconnect on the check as on the tile.
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE host_secrets SET allowed_destinations_json = '[\"evil.example\"]' WHERE binding_id = ?1",
+                [KEY_ROW],
+            )
+            .unwrap();
+        let (_, b) = call(
+            &app,
+            "POST",
+            "/v1/connectors/notesdesk/connection/check",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(b["state"], "needsReconnect", "{b}");
+        // A code exchange is refused for an API key connector, before anything is read.
+        let (s, b) = call(
+            &app,
+            "POST",
+            "/v1/connectors/notesdesk/connection/oauth/code",
+            "member-secret",
+            Some(serde_json::json!({ "code": "c", "codeVerifier": "v", "redirectUri": "squrell://oauth" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(b.to_string().contains("API key"), "{b}");
+        // Disconnect removes the row and the key, whether or not the node still enables it.
+        enable_notesdesk(&app, serde_json::json!({ "enabled": false })).await;
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/notesdesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(b.get("providerGrantMayRemain").is_none(), "{b}");
+        assert!(key_meta(&state, "ada").is_err());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_none());
+        let (s, _) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/notesdesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_host_change_by_an_update_keeps_the_key_but_reads_needs_reconnect_until_it_is_entered_again(
+    ) {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        let (s, _) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(member_entry(&app).await["state"], "connected");
+        // The listing is updated: the connector now also names the EU host.
+        let urn = "urn:vam:connector:connectors.community.example/community/notesdesk";
+        let updated = serde_json::json!({
+            "urn": urn,
+            "version": "1.1.0", "displayName": "Notesdesk", "publisher": "Community Tools Ltd",
+            "description": "Notes.", "icon": "notesdesk",
+            "provider": { "kind": "api_key",
+                          "fields": [{ "name": "key", "label": "Notesdesk API key" }] },
+            "connection": { "holder": "user", "multiAccount": false, "label": "none" },
+            "bindings": [{ "name": "api", "placeholder": "vamsec_notesdesk_api",
+                           "value": "api_key", "inject": "bearer",
+                           "hosts": ["api.notesdesk.example", "eu.api.notesdesk.example"] }]
+        });
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE connector_releases SET spec_bytes = ?1 WHERE urn = ?2",
+                rusqlite::params![updated.to_string().as_bytes(), urn],
+            )
+            .unwrap();
+        // The key is kept where it was, pinned to the old host, and reads needsReconnect.
+        let entry = member_entry(&app).await;
+        assert_eq!(entry["state"], "needsReconnect", "{entry}");
+        assert_eq!(
+            key_meta(&state, "ada").unwrap().allowed_destinations,
+            vec!["api.notesdesk.example"]
+        );
+        assert_eq!(stored_key(&state, "ada"), KEY);
+        // Entering it again pins it to both hosts and the tile reads connected.
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected");
+        assert_eq!(
+            key_meta(&state, "ada").unwrap().allowed_destinations,
+            vec!["api.notesdesk.example", "eu.api.notesdesk.example"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listing_update_that_lands_during_the_save_stores_nothing() {
+        // The transaction checks the hosts again: a connector whose hosts moved since the plan was
+        // made refuses the write.
+        let (_app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        let node = crate::connectors::NodeConnector {
+            connector_id: "notesdesk".into(),
+            enabled: true,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            tenant_subdomain: None,
+            updated_at: 1,
+            updated_by: "olga".into(),
+        };
+        state.store.put_node_connector(&node).unwrap();
+        let hosts = vec!["api.notesdesk.example".to_string()];
+        let moved = |_: &rusqlite::Connection| -> Result<(), OrchestratorError> {
+            Err(OrchestratorError::Conflict("moved".into()))
+        };
+        let commit = crate::connectors::ApiKeyCommit {
+            owner: "ada",
+            connector_id: "notesdesk",
+            address: "",
+            hosts: &hosts,
+            api_key: KEY,
+            now: 1,
+        };
+        assert!(state
+            .store
+            .commit_api_key_connection(&state.vault, &commit, &moved)
+            .is_err());
+        assert!(key_meta(&state, "ada").is_err());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn the_entry_a_write_returns_is_filled_from_the_node_row_it_shows() {
+        use crate::keys::{ApiKeyRecord, AuthSource, AuthenticatedKey};
+        let (_app, state) = app_world_with_state();
+        install_notesdesk_with(&state.store, |j| {
+            j["tenant"] = serde_json::json!({
+                "name": "subdomain", "suffix": "notesdesk.example", "label": "Notesdesk address"
+            });
+            j["bindings"][0]["hosts"] = serde_json::json!(["{subdomain}.notesdesk.example"]);
+        });
+        let node = |sub: &str| crate::connectors::NodeConnector {
+            connector_id: "notesdesk".into(),
+            enabled: true,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            tenant_subdomain: Some(sub.into()),
+            updated_at: 1,
+            updated_by: "olga".into(),
+        };
+        // The entry the route resolved when the node was at `old`...
+        state.store.put_node_connector(&node("old")).unwrap();
+        let stale = state.store.connector_entry("notesdesk").unwrap().unwrap();
+        assert_eq!(
+            stale.def.bindings.as_ref().unwrap()[0].hosts,
+            vec!["old.notesdesk.example"]
+        );
+        // ...and an admin's save that moved the address before the response is built.
+        state.store.put_node_connector(&node("acme")).unwrap();
+        let auth = crate::api::auth::AuthContext {
+            key: AuthenticatedKey {
+                record: ApiKeyRecord {
+                    key_id: "k".into(),
+                    name: "k".into(),
+                    sha256_secret: "h".into(),
+                    principal: "User::\"ada\"".into(),
+                    scopes: default_scopes_for_role(UserRole::Member),
+                    created_at: 1,
+                    owner_user_id: "ada".into(),
+                    ..Default::default()
+                },
+                source: AuthSource::ApiKey,
+                role: UserRole::Member,
+            },
+        };
+        let entry = super::entry_for(&state, &auth, &stale).unwrap();
+        assert_eq!(
+            entry["bindings"][0]["hosts"],
+            serde_json::json!(["acme.notesdesk.example"]),
+            "{entry}"
+        );
+        assert_eq!(
+            entry["node"]["tenant"]["hosts"],
+            serde_json::json!(["acme.notesdesk.example"]),
+            "{entry}"
+        );
     }
 }

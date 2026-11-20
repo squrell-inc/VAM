@@ -27,6 +27,9 @@ proves:
   - crates/vam-orchestrator/tests/mcp_credentials_stay_host_side.rs::the_secrets_api_cannot_write_the_connection_kind
   - crates/vam-orchestrator/tests/mcp_credentials_stay_host_side.rs::connection_credential_cannot_be_rewritten_as_egress
   - crates/vam-network/src/broker.rs::a_connection_bound_destination_is_secret_bound_with_or_without_a_placeholder
+  - member-enters-an-api-key-and-a-listing-skill-uses-it-without-holding-it
+  - crates/vam-orchestrator/src/api/connectors.rs::every_api_key_refusal_is_a_fixed_text_that_never_quotes_the_key
+  - crates/vam-orchestrator/src/api/connectors.rs::an_api_key_is_stored_pinned_to_the_filled_hosts_and_shown_nowhere
 ---
 
 `vamd` serves a JSON API under `/v1`, over TLS by default (see [Host daemon](/orchestrator/overview/)).
@@ -158,10 +161,30 @@ type's name.
 
 `PUT /v1/secrets` and `PUT /v1/org/secrets` write two kinds: `1` inference and `2` egress. A list
 may also show `3`, connection: the credential of an MCP connection, written only by
-`/v1/mcp/connections`. The secrets API refuses to write it, and a row of that kind cannot be
-rewritten as egress (`SecretKind::from_proto`, `secrets.rs`). Proved by
-`the_secrets_api_cannot_write_the_connection_kind` and
-`connection_credential_cannot_be_rewritten_as_egress`.
+`/v1/mcp/connections` and by the connector routes (`/v1/connectors/{id}/connection`). The secrets
+API refuses to write it, and a row of that kind cannot be rewritten as egress
+(`SecretKind::from_proto`, `secrets.rs`). Proved by `the_secrets_api_cannot_write_the_connection_kind`
+and `connection_credential_cannot_be_rewritten_as_egress`.
+
+## An API key connection
+
+A connector whose sign-in is an API key (`provider.kind: "api_key"`, one field) is connected by the member
+with `PUT /v1/connectors/{id}/connection` and the body `{ "apiKey": "..." }` (`secrets:write`, an
+`Idempotency-Key`, the member's own connection only). The key is 8 to 4096 bytes with no whitespace or control
+character and is kept exactly as typed. A body that is not exactly `{ apiKey }` or a key outside the limits is a
+400 with a fixed text that never quotes the key; a connector the admin has not enabled is a 403 ("ask your
+admin"); one with a company address the node has not got is a 409. The node makes no request to the provider.
+In one transaction it writes the member's connection row and the vault row `connector/<id>/api-key`
+(`connection` kind, pinned to every host of the connector's bindings with the company address filled in), then
+continues the runs this member has parked on the connector. No route returns the key: the answer is the
+member's connector entry. `DELETE …/connection` removes both rows and `POST …/connection/check` answers the
+stored state, each with no provider call; the code exchange refuses an API key connector. Entering a key
+again replaces it. The connection reads `connected` only while the key row is pinned to the connector's
+current binding hosts and the address is the node's; a listing update that adds a host leaves the key where it
+is and reads `needsReconnect` until the key is entered again, and nothing is sent to the new host first. The
+OpenAPI file has the shapes. Proved by
+`member-enters-an-api-key-and-a-listing-skill-uses-it-without-holding-it`; the refusals and the pin by unit tests in
+`api/connectors.rs` and `connection_egress.rs`.
 
 ## A response too big to scrub
 

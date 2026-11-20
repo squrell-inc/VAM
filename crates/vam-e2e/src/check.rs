@@ -1209,7 +1209,17 @@ fn check_scenario(
             }
             Step::CreateSpace(c) => {
                 lint(errors, p, "label", &c.label);
-                refer(errors, p, &pos, &aliases, c.agent.as_deref())
+                // A literal URN names an agent a marketplace installed, as for `chat`.
+                refer(
+                    errors,
+                    p,
+                    &pos,
+                    &aliases,
+                    c.agent
+                        .as_deref()
+                        .filter(|a| !a.starts_with("urn:vam:agent:")),
+                );
+                refer_org(errors, p, &pos, &org_aliases, c.as_.as_deref());
             }
             Step::RenameSpace(x) => lint(errors, p, "label", &x.label),
             Step::RenameThread(x) => lint(errors, p, "label", &x.label),

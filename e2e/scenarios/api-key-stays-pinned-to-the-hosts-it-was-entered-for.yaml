@@ -34,6 +34,7 @@ when:
   - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: askAdmin, node.enabled: false, origin.ref: notesdesk-connector-v1.1.0 } } }
   - connector-node: { id: notesdesk, enabled: true, as: org-administrator }
   - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: needsReconnect, bindings.0.hosts.1: eu.api.notesdesk.example } } }
+  - create-space: { label: "After the update", agent: "urn:vam:agent:connectors.community.example/community/notesdesk-assistant", as: org-member }
   - chat: { text: "e2e-step:eu Find the printer notes in the EU region", agent: "urn:vam:agent:connectors.community.example/community/notesdesk-assistant", as: org-member, wait: false }
   - expect: { run: paused }
   - expect: { approval: pending, tool: note_search }
@@ -67,5 +68,6 @@ mock:
     reply: { toolCall: { name: note_search, args: { host: eu.api.notesdesk.example, query: printer } } }
   - when: { step: eu, stepStart: true }
     reply: { toolCall: { name: load_skill, args: { skill: notesdesk-notes } } }
-status: pending
-expectFail: { step: when.5, class: product }
+  - when: { step: eu, afterTool: note_search }
+    reply: { text: Found the note in the EU region. }
+status: active

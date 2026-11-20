@@ -39,6 +39,32 @@ pub struct BindingSpec {
     pub name: String,
     pub placeholder: String,
     pub hosts: Vec<String>,
+    /// `Some` for an `inject: header` binding: the one header that carries the credential. `None`
+    /// for a bearer binding, whose one placeholder site is `Authorization`.
+    pub header: Option<HeaderInject>,
+}
+
+/// Where an `inject: header` binding puts its credential. Read from the connector file's binding
+/// ([`HeaderInject::of`]), never from a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderInject {
+    /// The header name as the file spells it (compared case-insensitively against a request's).
+    pub name: String,
+    /// Text put before the credential in the header value; empty for none.
+    pub prefix: String,
+}
+
+impl HeaderInject {
+    /// The header of a binding that injects into a named header; `None` for any other binding.
+    pub fn of(b: &crate::connector::Binding) -> Option<Self> {
+        match (b.inject, &b.header_name) {
+            (crate::connector::Inject::Header, Some(name)) => Some(Self {
+                name: name.clone(),
+                prefix: b.prefix.clone().unwrap_or_default(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// The host's record of the tool call that is running now.
@@ -204,11 +230,20 @@ impl Envelope {
         let window = self.window.current();
         let tool = window.as_ref().map(|c| c.tool.as_str());
 
-        if !placeholder_only_in_authorization(req, &spec.placeholder) {
-            return Err(self.refuse_form(
-                tool,
-                "the placeholder is only valid as the Authorization value",
-            ));
+        match &spec.header {
+            None if !placeholder_only_in_authorization(req, &spec.placeholder) => {
+                return Err(self.refuse_form(
+                    tool,
+                    "the placeholder is only valid as the Authorization value",
+                ));
+            }
+            Some(h) if !placeholder_only_in_header(req, &spec.placeholder, h) => {
+                return Err(self.refuse_form(
+                    tool,
+                    &format!("the placeholder is only valid as the `{}` value", h.name),
+                ));
+            }
+            _ => {}
         }
         let target = match Target::parse(req.url) {
             Ok(t) => t,
@@ -364,6 +399,62 @@ fn placeholder_only_in_authorization(req: &ConnectionRequest<'_>, placeholder: &
     for (name, value) in req.headers {
         if name.eq_ignore_ascii_case("authorization") {
             if !authorization_is(value, placeholder) {
+                return false;
+            }
+            seen = true;
+        } else if value.contains(placeholder) {
+            return false;
+        }
+    }
+    seen
+}
+
+/// Puts `<prefix><value>` in the one header `name`, after removing every letter case of that name
+/// from `headers`, and touches no other header. Refused, with nothing changed, when `name` is not an
+/// RFC 9110 header name or is one an injected key must never land in (`Host`, `Authorization`,
+/// `Cookie`, `Proxy-*`, the framing headers), or when `prefix` or `value` holds a control character.
+/// The gate (`vam_network::connection::set_header`) and `vam connector test` both inject through this.
+pub fn inject_header(
+    headers: &mut HashMap<String, String>,
+    name: &str,
+    prefix: &str,
+    value: &str,
+) -> Result<(), ConnectionRefusal> {
+    if crate::connector::check_header_name(name).is_err()
+        || prefix.chars().any(char::is_control)
+        || value.chars().any(char::is_control)
+    {
+        return Err(ConnectionRefusal {
+            text: "Connection credential refused: this binding cannot be attached.".into(),
+            rule: "connection egress (header)".into(),
+        });
+    }
+    headers.retain(|k, _| !k.eq_ignore_ascii_case(name));
+    headers.insert(name.to_string(), format!("{prefix}{value}"));
+    Ok(())
+}
+
+/// The placeholder of a header binding is in no URL, no body, no header name, and no header but
+/// the one the binding names; and every header of that name (any letter case) is exactly the
+/// placeholder, bare or after the binding's prefix. `Authorization` is not that header, so a
+/// placeholder there is refused like one in any other header.
+fn placeholder_only_in_header(
+    req: &ConnectionRequest<'_>,
+    placeholder: &str,
+    header: &HeaderInject,
+) -> bool {
+    if req.url.contains(placeholder)
+        || contains_bytes(req.body, placeholder.as_bytes())
+        || req.headers.keys().any(|k| k.contains(placeholder))
+    {
+        return false;
+    }
+    let prefixed = format!("{}{placeholder}", header.prefix);
+    let mut seen = false;
+    for (name, value) in req.headers {
+        if name.eq_ignore_ascii_case(&header.name) {
+            let v = value.trim();
+            if v != placeholder && v != prefixed {
                 return false;
             }
             seen = true;
@@ -555,6 +646,7 @@ mod tests {
                 name: "graph".into(),
                 placeholder: PH.into(),
                 hosts: vec!["graph.microsoft.com".into()],
+                header: None,
             }],
             window,
         )
@@ -1040,5 +1132,225 @@ mod tests {
         assert!(prefix_admits("/a/b", &segs("/a/b/")));
         assert!(!prefix_admits("/a/b", &segs("/a")));
         assert!(!prefix_admits("/a/b", &segs("/a/bc")));
+    }
+
+    // ---- a binding that injects into a named header --------------------------------------------
+
+    const KPH: &str = "vamsec_notesdesk_api";
+    const KURN: &str = "urn:vam:connector:connectors.community.example/community/notesdesk";
+
+    fn key_shape() -> Shape {
+        Shape {
+            binding: "api".into(),
+            host: "api.notesdesk.example".into(),
+            methods: vec!["GET".into()],
+            path_prefixes: vec!["/v1/notes".into()],
+            paths: vec![],
+        }
+    }
+
+    fn key_envelope(header: Option<HeaderInject>) -> Envelope {
+        let window = Arc::new(CallWindow::new());
+        window.open(ActiveCall::new(
+            "c1",
+            "note_search",
+            Some(KURN.into()),
+            vec![key_shape()],
+            Duration::from_secs(60),
+        ));
+        Envelope::new(
+            vec![BindingSpec {
+                connector: KURN.into(),
+                name: "api".into(),
+                placeholder: KPH.into(),
+                hosts: vec!["api.notesdesk.example".into()],
+                header,
+            }],
+            window,
+        )
+    }
+
+    fn named(name: &str, prefix: &str) -> Option<HeaderInject> {
+        Some(HeaderInject {
+            name: name.into(),
+            prefix: prefix.into(),
+        })
+    }
+
+    const KURL: &str = "https://api.notesdesk.example/v1/notes";
+
+    fn pairs(h: &[(&str, &str)]) -> HashMap<String, String> {
+        h.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[track_caller]
+    fn refused_site(e: &Envelope, url: &str, h: &HashMap<String, String>, body: &[u8], site: &str) {
+        let r = screen(e, "GET", url, h, body).expect_err("must be refused");
+        assert!(r.text.contains("declared shape"), "{}", r.text);
+        assert!(r.text.contains(site), "{}: {site}", r.text);
+        assert!(r.text.len() <= 200, "{}", r.text.len());
+        assert!(!r.text.contains(KPH), "{}", r.text);
+    }
+
+    #[test]
+    fn a_header_binding_takes_the_placeholder_as_the_whole_value_of_its_header() {
+        let e = key_envelope(named("X-Api-Key", ""));
+        for h in [
+            pairs(&[("X-Api-Key", KPH)]),
+            pairs(&[("x-api-key", KPH)]),
+            pairs(&[("X-API-KEY", KPH)]),
+            pairs(&[("X-Api-Key", &format!("  {KPH} "))]),
+            // Two spellings of the header, both exactly the placeholder.
+            pairs(&[("X-Api-Key", KPH), ("x-api-key", KPH)]),
+            pairs(&[("X-Api-Key", KPH), ("Accept", "application/json")]),
+        ] {
+            let g =
+                screen(&e, "GET", KURL, &h, b"").unwrap_or_else(|r| panic!("{h:?}: {}", r.text));
+            assert_eq!(g.unwrap().binding, "api");
+        }
+        // With a declared prefix the header is the placeholder after the prefix, or bare.
+        let e = key_envelope(named("X-Token", "Token "));
+        for v in [format!("Token {KPH}"), KPH.to_string()] {
+            let h = pairs(&[("X-Token", &v)]);
+            assert!(screen(&e, "GET", KURL, &h, b"").unwrap().is_some(), "{v}");
+        }
+        for v in [
+            format!("Bearer {KPH}"),
+            format!("Token {KPH} extra"),
+            format!("token {KPH}"),
+            format!("Token  {KPH}"),
+            format!("{KPH}{KPH}"),
+            format!("x{KPH}"),
+        ] {
+            let h = pairs(&[("X-Token", &v)]);
+            refused_site(&e, KURL, &h, b"", "only valid as the `X-Token` value");
+        }
+    }
+
+    #[test]
+    fn a_header_binding_refuses_the_placeholder_anywhere_else() {
+        let e = key_envelope(named("X-Api-Key", ""));
+        let site = "only valid as the `X-Api-Key` value";
+        let good = pairs(&[("X-Api-Key", KPH)]);
+        // In the URL (path, query, fragment), in the body.
+        for url in [
+            format!("{KURL}?key={KPH}"),
+            format!("{KURL}/{KPH}"),
+            format!("{KURL}#{KPH}"),
+        ] {
+            refused_site(&e, &url, &good, b"", site);
+        }
+        refused_site(&e, KURL, &good, KPH.as_bytes(), site);
+        refused_site(
+            &e,
+            KURL,
+            &good,
+            format!("{{\"key\":\"{KPH}\"}}").as_bytes(),
+            site,
+        );
+        // In another header, in Authorization (the bearer's site), in a header name, and in the
+        // named header's own value together with other text.
+        for h in [
+            pairs(&[("X-Api-Key", KPH), ("X-Echo", KPH)]),
+            pairs(&[("X-Api-Key", KPH), ("Authorization", KPH)]),
+            pairs(&[
+                ("X-Api-Key", KPH),
+                ("Authorization", &format!("Bearer {KPH}")),
+            ]),
+            pairs(&[("X-Api-Key", KPH), (KPH, "1")]),
+            pairs(&[("Authorization", KPH)]),
+            pairs(&[("X-Other-Key", KPH)]),
+            pairs(&[("X-Api-Key-2", KPH)]),
+            pairs(&[("X-Api-Key", &format!("{KPH},{KPH}"))]),
+            pairs(&[("X-Api-Key", &format!("a {KPH}"))]),
+            // Two spellings, one of them not the placeholder: the guest cannot smuggle its own
+            // value into the header the key goes in.
+            pairs(&[("X-Api-Key", KPH), ("x-api-key", "other")]),
+            pairs(&[("X-Api-Key", KPH), ("x-api-key", &format!("Bearer {KPH}"))]),
+        ] {
+            refused_site(&e, KURL, &h, b"", site);
+        }
+        // The named header is required: no header, no admission (and no key to attach).
+        refused_site(&e, KURL, &pairs(&[("Accept", "*/*")]), KPH.as_bytes(), site);
+        // Another binding's placeholder or none at all takes the static path, as before.
+        let other = pairs(&[("X-Api-Key", "vamsec_other_api")]);
+        assert_eq!(screen(&e, "GET", KURL, &other, b"").unwrap(), None);
+    }
+
+    #[test]
+    fn a_bearer_binding_is_unchanged_and_never_takes_a_named_header() {
+        let e = key_envelope(None);
+        let bearer = pairs(&[("Authorization", &format!("Bearer {KPH}"))]);
+        assert!(screen(&e, "GET", KURL, &bearer, b"").unwrap().is_some());
+        // The same words as ever.
+        let r = screen(&e, "GET", KURL, &pairs(&[("X-Api-Key", KPH)]), b"").unwrap_err();
+        assert!(
+            r.text
+                .contains("the placeholder is only valid as the Authorization value"),
+            "{}",
+            r.text
+        );
+        let r = screen(
+            &e,
+            "GET",
+            KURL,
+            &pairs(&[("Authorization", KPH), ("X-Api-Key", KPH)]),
+            b"",
+        )
+        .unwrap_err();
+        assert!(r.text.contains("Authorization value"), "{}", r.text);
+    }
+
+    #[test]
+    fn a_header_binding_still_needs_the_shape_the_host_and_the_call() {
+        let e = key_envelope(named("X-Api-Key", ""));
+        let h = pairs(&[("X-Api-Key", KPH)]);
+        for url in [
+            "https://api.notesdesk.example/v1/admin/export",
+            "https://eu.api.notesdesk.example/v1/notes",
+            "https://api.notesdesk.example.evil.example/v1/notes",
+            "http://api.notesdesk.example/v1/notes",
+        ] {
+            let r = screen(&e, "GET", url, &h, b"").unwrap_err();
+            assert!(r.text.contains("declared shape"), "{url}: {}", r.text);
+        }
+        assert!(screen(&e, "POST", KURL, &h, b"").is_err());
+        e.window().clear();
+        let r = screen(&e, "GET", KURL, &h, b"").unwrap_err();
+        assert!(r.text.contains("no tool call is active"), "{}", r.text);
+    }
+
+    #[test]
+    fn the_header_inject_of_a_binding_comes_only_from_the_file() {
+        let file = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "name": "api", "placeholder": KPH, "value": "api_key",
+                "inject": "bearer", "hosts": ["api.notesdesk.example"]
+            });
+            for (k, val) in extra.as_object().unwrap() {
+                v[k] = val.clone();
+            }
+            serde_json::from_value::<crate::connector::Binding>(v).unwrap()
+        };
+        assert_eq!(HeaderInject::of(&file(serde_json::json!({}))), None);
+        assert_eq!(
+            HeaderInject::of(&file(
+                serde_json::json!({ "inject": "header", "headerName": "X-Api-Key" })
+            )),
+            named("X-Api-Key", "")
+        );
+        assert_eq!(
+            HeaderInject::of(&file(serde_json::json!({
+                "inject": "header", "headerName": "X-Token", "prefix": "Token "
+            }))),
+            named("X-Token", "Token ")
+        );
+        // A header name on a bearer binding is ignored here (the file validator refuses it).
+        assert_eq!(
+            HeaderInject::of(&file(serde_json::json!({ "headerName": "X-Api-Key" }))),
+            None
+        );
     }
 }

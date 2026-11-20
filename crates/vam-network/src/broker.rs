@@ -2644,6 +2644,7 @@ mod tests {
                         name: "graph".into(),
                         placeholder: PH.into(),
                         hosts: vec!["graph.microsoft.com".into()],
+                        header: None,
                     }],
                     window,
                 ),

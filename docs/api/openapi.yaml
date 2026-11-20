@@ -1154,7 +1154,7 @@ paths:
         is 409 (the text names the client id); one that keeps a secret
         (`clientSecret: org_vault`) needs a secret stored or given (400), also
         when the body has no `client` and the saved client has none. On a
-        body with a client, the node reads the provider's OAuth metadata from
+        body with a client, for an MCP connector the node reads the provider's OAuth metadata from
         the connector's MCP URL (RFC 9728, whose `resource` must name that
         server, then RFC 8414 / OpenID Connect) over
         https to public addresses only, requires S256, and pins the
@@ -1163,7 +1163,10 @@ paths:
         when the provider lists it, else `client_secret_basic` when it lists it
         or says nothing; neither is 409); a provider that
         cannot be read is 502 and one whose metadata cannot be used is 409,
-        and nothing is written. A save planned from state another admin's save
+        and nothing is written. A REST connector with fixed endpoints
+        (`profile: oauth`) reads no metadata: it pins its endpoints from the
+        connector file filled with the company address, so those two answers are
+        for an MCP connector only. A save planned from state another admin's save
         has since changed (the saved client or the connector's definition) is
         409 ("the client changed while saving; save again") and writes nothing. The secret becomes one org-scope `connection`
         vault row pinned to the token endpoint's host; it is never returned,
@@ -1236,9 +1239,34 @@ paths:
 
   /v1/connectors/{id}/connection:
     put:
-      summary: Connect a REST connector (Microsoft 365)
+      summary: Connect a REST connector (Microsoft 365, or an API key)
       description: |
-        The app signs the member in with Microsoft and passes the tokens here
+        **An API key** (a connector whose `provider.kind` is `api_key`). The member
+        types the key and the app passes it here as `{ apiKey }` (`secrets:write`;
+        Idempotency-Key required; the member's own connection only, never an admin's
+        for everyone). The key is 8 to 4096 bytes with no whitespace or control
+        character and is kept exactly as typed; the body takes no other field. Every
+        refusal is a fixed text that never quotes the key (400 a body that is not
+        `{ apiKey }` or a key that does not fit; 403 the connector is not enabled on
+        this node, "ask your admin"; 409 a connector with a company address that has
+        none). Nothing is sent to the provider: the key is not checked at connect, so
+        a key the provider rejects reaches the tool as the provider's own 401 and the
+        member replaces it. In ONE transaction the node writes the member's
+        connection row and the `connection`-kind vault row `connector/<id>/api-key`
+        (readable by `vamd` only, never a guest binding, never an `egress` secret, not
+        writable through `/v1/secrets`), pinned to every host of the connector's
+        bindings with the company address filled in. Entering a key again replaces it:
+        the next call sends the new one. The key is attached by the node's egress gate
+        only to a pinned host, inside the shape the calling tool declared, for an enabled
+        connector, as `Authorization: Bearer <key>` (`inject: bearer`) or as the one
+        header the binding names (`inject: header`, `headerName`, optional `prefix`); a
+        guest holds only the binding's placeholder. A connection whose key row is not
+        pinned to the connector's current hosts (a listing update added a host) or whose
+        address is not the node's reads `needsReconnect` until the key is entered
+        again, and nothing is sent to the new host first. The answer is the caller's
+        list entry (`state: connected`) and carries no key.
+
+        **Microsoft 365.** The app signs the member in with Microsoft and passes the tokens here
         (`secrets:write`; Idempotency-Key required). Only for a REST connector
         (`microsoft-365`); an MCP connector connects through
         `/v1/mcp/connections`, and a REST connector with fixed endpoints and the admin's
@@ -1261,14 +1289,21 @@ paths:
           required: true
           schema:
             type: string
-          description: Connector id, `microsoft-365`.
+          description: Connector id, `microsoft-365` or an API key connector.
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/PutConnectorConnectionRequest"
+              oneOf:
+                - $ref: "#/components/schemas/PutConnectorConnectionRequest"
+                - $ref: "#/components/schemas/PutConnectorApiKeyRequest"
+            examples:
+              apiKey:
+                summary: An API key connector
+                value:
+                  apiKey: ndk_live_0123456789abcdef
       responses:
         "200":
           description: Connected. The caller's list entry.
@@ -1277,7 +1312,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ConnectorEntry"
         "400":
-          description: Unknown body field, an empty token, an id token that cannot be read, or an MCP connector.
+          description: Unknown body field, an empty token, an id token that cannot be read, or an MCP connector; for an API key connector, a body that is not `{ apiKey }` or a key outside the limits (a fixed text, the key is never quoted).
           content:
             application/json:
               schema:
@@ -1295,7 +1330,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "409":
-          description: No admin consent is recorded, or the sign-in is from another Microsoft tenant than the consented one.
+          description: No admin consent is recorded, or the sign-in is from another Microsoft tenant than the consented one; for an API key connector, a company address the node has not got.
           content:
             application/json:
               schema:
@@ -1303,9 +1338,11 @@ paths:
     delete:
       summary: Disconnect a REST connector
       description: |
-        Removes the caller's own token rows and connection row (`secrets:write`;
-        Idempotency-Key required). Allowed while the connector is disabled. 404
-        when the caller is not connected. The answer is the caller's list entry.
+        Removes the caller's own token rows (or, for an API key connector, the key row) and
+        connection row (`secrets:write`; Idempotency-Key required). Allowed while the connector
+        is disabled. 404 when the caller is not connected. No request is made to a provider for
+        an API key. The answer is the caller's list entry as it reads after the delete: `connect`
+        while the connector is enabled, `askAdmin` once the admin has disabled it.
         For a connector with `profile: oauth` whose file declares a revocation endpoint,
         the node revokes the refresh token there (RFC 7009, as the client that issued the
         grant). When it did not or could not (the admin replaced or cleared the client since,
@@ -1321,7 +1358,7 @@ paths:
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "200":
-          description: "Disconnected. The caller's list entry (state `connect`), with `providerGrantMayRemain: true` when the provider's grant may still be active."
+          description: "Disconnected. The caller's list entry after the delete (state `connect` while the connector is enabled, `askAdmin` when it is not), with `providerGrantMayRemain: true` when the provider's grant may still be active."
           content:
             application/json:
               schema:
@@ -1474,7 +1511,11 @@ paths:
     post:
       summary: Check a REST connection with one refresh
       description: |
-        One token refresh at the consent tenant's token endpoint
+        For an API key connector there is nothing to refresh: the answer is the stored state
+        (the member's row, the key's pin against the connector's current hosts, the address),
+        and no request is made to the provider.
+
+        For an OAuth connector: one token refresh at the consent tenant's token endpoint
         (`secrets:write`; Idempotency-Key required; empty or `{}` body). The
         request carries `grant_type=refresh_token`, `refresh_token`,
         `client_id` and the definition's `scope`; it never carries `resource`
@@ -7168,6 +7209,17 @@ components:
           type: integer
           minimum: 0
           description: Seconds the access token lives (optional).
+    PutConnectorApiKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [apiKey]
+      properties:
+        apiKey:
+          type: string
+          writeOnly: true
+          minLength: 8
+          maxLength: 4096
+          description: "The member's API key, kept exactly as typed: 8 to 4096 bytes, no whitespace or control character. Never returned, never logged, never in an error."
     ConnectorEntry:
       type: object
       required: [id, displayName, publisher, description, icon, state, label, node]
@@ -7265,6 +7317,38 @@ components:
             hosts:
               type: array
               items: { type: string }
+              description: "The hosts the connector reaches with a member's credential (a company address is shown as `{subdomain}.<suffix>` until it is entered)."
+            bindings:
+              type: array
+              description: REST connectors. The name and hosts each binding attaches the member's credential to.
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  hosts:
+                    type: array
+                    items: { type: string }
+            endpoints:
+              type: object
+              description: "Fixed sign-in endpoints (`profile: oauth`)."
+              properties:
+                authorize: { type: string }
+                token: { type: string }
+                revoke: { type: string }
+            tenant:
+              type: object
+              description: "The company address the admin enters at Enable."
+              properties:
+                label: { type: string }
+                suffix: { type: string }
+                text: { type: string, description: "\"company address: <label> (…<suffix>)\"." }
+            fields:
+              type: array
+              description: "`provider: api_key`. What a member is asked to enter: the label of the one field."
+              items:
+                type: object
+                properties:
+                  label: { type: string }
             tools:
               type: array
               items:
@@ -7278,13 +7362,47 @@ components:
         provider:
           type: object
           description: Present once enabled. `clientId` is this node's; there is no `resource`.
+          properties:
+            kind:
+              type: string
+              enum: [oauth2, api_key]
+              description: "How a member signs in. `api_key`: the member types a key (`PUT …/connection` with `{ apiKey }`)."
+            fields:
+              type: array
+              description: "`kind: api_key` only. What the member is asked to enter: exactly one field."
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  label: { type: string, description: The text for the key field. }
         connection:
           type: object
           description: Present once enabled.
         bindings:
           type: array
-          items: { type: object }
           description: Present once enabled, for REST connectors.
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              placeholder: { type: string, description: The one value a guest ever holds for this binding. }
+              value:
+                type: string
+                enum: [access_token, api_key]
+                description: What the node attaches in its place.
+              inject:
+                type: string
+                enum: [bearer, header, query]
+                description: "`bearer`: `Authorization: Bearer <credential>`. `header`: the header named by `headerName`, with the optional `prefix`, only for an API key. `query` is never attached."
+              headerName:
+                type: string
+                description: "`inject: header` only. The one header that carries the key (an RFC 9110 token; `Host`, `Authorization`, `Cookie`, `Proxy-*`, `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade` and `Content-Length` are refused). The guest never picks it."
+              prefix:
+                type: string
+                description: "`inject: header` only. Text put before the key in that header, for example `Token `."
+              hosts:
+                type: array
+                items: { type: string }
         mcp:
           type: object
           description: Present once enabled, for MCP connectors (url and vetted tools).
