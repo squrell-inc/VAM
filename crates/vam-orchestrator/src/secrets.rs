@@ -678,6 +678,42 @@ impl SecretsVault {
         Ok(SecretString::new(plaintext))
     }
 
+    /// Decrypt an MCP connection credential that is about to be sent to `host`.
+    ///
+    /// Reads exactly one row, at `scope` and `owner_user_id` (no user→org fallback), and decrypts
+    /// it only if it is a `connection` row whose `allowed_destinations` names exactly `host`. The
+    /// kind check, the pin check and the decrypt are one read
+    /// ([`Self::decrypt_secret_at_checked`]): a refused row is never decrypted. A refusal is
+    /// [`OrchestratorError::PermissionDenied`] naming the binding id, never the value.
+    pub(crate) fn decrypt_mcp_credential_pinned(
+        &self,
+        scope: SecretScope,
+        owner_user_id: &str,
+        binding_id: &str,
+        host: &str,
+    ) -> Result<SecretString, OrchestratorError> {
+        let host = host.trim().trim_end_matches('.');
+        self.decrypt_secret_at_checked(scope, owner_user_id, binding_id, |meta| {
+            if meta.kind != SecretKind::Connection {
+                return Err(OrchestratorError::PermissionDenied(format!(
+                    "secret '{binding_id}' is not an MCP connection credential and is never sent as an MCP header"
+                )));
+            }
+            let pinned = !host.is_empty()
+                && meta.allowed_destinations.iter().any(|dest| {
+                    dest.trim()
+                        .trim_end_matches('.')
+                        .eq_ignore_ascii_case(host)
+                });
+            if !pinned {
+                return Err(OrchestratorError::PermissionDenied(format!(
+                    "MCP credential '{binding_id}' is not pinned to host '{host}': reconnect the connection"
+                )));
+            }
+            Ok(())
+        })
+    }
+
     pub fn has_binding(&self, binding_id: &str) -> Result<bool, OrchestratorError> {
         self.has_binding_at(SecretScope::Org, ORG_OWNER_USER_ID, binding_id)
     }

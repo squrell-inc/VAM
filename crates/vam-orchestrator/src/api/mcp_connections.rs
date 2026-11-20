@@ -342,6 +342,21 @@ fn refuse_org_oauth_block(
     Ok(())
 }
 
+/// Refuse a `secretBindingId` that is not the vault binding this connection writes for itself
+/// (`{id}/auth-header`). Applies with or without `secretValue`. The text names the id only.
+fn refuse_foreign_secret_binding_id(
+    connection_id: &str,
+    secret_binding_id: &str,
+) -> Result<(), OrchestratorError> {
+    let generated = mcp_auth_binding_id(connection_id);
+    if secret_binding_id.is_empty() || secret_binding_id == generated {
+        return Ok(());
+    }
+    Err(OrchestratorError::InvalidContract(format!(
+        "secretBindingId '{secret_binding_id}' is not this connection's own credential: a connection can only use '{generated}', the vault binding it writes"
+    )))
+}
+
 /// Org connections snapshot with the org credential only, so a shared
 /// snapshot is never taken with one member's personal token.
 fn credential_caller(scope: SecretScope, owner: &str) -> &str {
@@ -355,21 +370,24 @@ async fn snapshot(
     state: &AppState,
     scope: SecretScope,
     owner: &str,
+    connection_id: &str,
     url: &str,
     header_bindings: &[HeaderBinding],
 ) -> Result<McpSnapshot, ApiError> {
     let vault = state.vault.clone();
-    let caller = credential_caller(scope, owner).to_string();
+    let owner = credential_caller(scope, owner).to_string();
+    let connection_id = connection_id.to_string();
     let url = url.to_string();
     let header_bindings = header_bindings.to_vec();
     tokio::task::spawn_blocking(move || {
-        fetch_tools_snapshot(
-            &vault,
-            &caller,
-            &url,
-            &header_bindings,
-            DEFAULT_MCP_TIMEOUT_MS,
-        )
+        // The connection's own scope and owner, its own binding ids, pinned to this URL's host.
+        let target = crate::mcp_registry::McpCredentialTarget {
+            scope,
+            owner_user_id: &owner,
+            connection_id: &connection_id,
+            url: &url,
+        };
+        fetch_tools_snapshot(&vault, target, &header_bindings, DEFAULT_MCP_TIMEOUT_MS)
     })
     .await
     .map_err(|e| OrchestratorError::Core(format!("mcp snapshot task failed: {e}")))?
@@ -403,6 +421,10 @@ async fn connect(
     let mut req: ConnectMcpRequest = serde_json::from_str(&body)
         .map_err(|_| OrchestratorError::InvalidContract("invalid request body".into()))?;
     validate_connection_id(&req.connection_id)?;
+    // A connection only ever uses the credential row it writes itself. Any other id (a user's own
+    // secret, an OAuth token, an org row) is refused here, before anything is read, written or
+    // sent, whether or not this request carries a value.
+    refuse_foreign_secret_binding_id(&req.connection_id, &req.secret_binding_id)?;
     if let Some(timeout_ms) = req.timeout_ms {
         validate_mcp_timeout_ms(timeout_ms)?;
     }
@@ -553,21 +575,6 @@ async fn connect(
             (auth_mode, oauth)
         };
     let secret_value = req.secret_value.take();
-    if secret_value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
-    {
-        let generated = mcp_auth_binding_id(&req.connection_id);
-        if !req.secret_binding_id.is_empty() && req.secret_binding_id != generated {
-            return Err(OrchestratorError::InvalidContract(format!(
-                "secretBindingId '{}' does not match the vault binding this connect writes ('{generated}')",
-                req.secret_binding_id
-            ))
-            .into());
-        }
-    }
     let header_inputs: Vec<McpHeaderInput> = req
         .headers
         .iter()
@@ -617,7 +624,15 @@ async fn connect(
             existing.as_ref().and_then(|c| c.instructions.clone()),
         )
     } else {
-        let mut listed = snapshot(&state, scope, &owner, &req.url, &header_bindings).await?;
+        let mut listed = snapshot(
+            &state,
+            scope,
+            &owner,
+            &req.connection_id,
+            &req.url,
+            &header_bindings,
+        )
+        .await?;
         if let Some(p) = &policy {
             listed.tools.retain(|t| p.is_vetted(&t.name));
         }
@@ -2042,5 +2057,549 @@ mod tests {
                 .timeout_ms,
             180_000
         );
+    }
+
+    // ---- MCP credentials go only to their own connection's pinned host ----
+
+    struct PinWorld {
+        app: axum::Router,
+        store: std::sync::Arc<crate::workflow::SqliteWorkflowStore>,
+        vault: std::sync::Arc<crate::secrets::SecretsVault>,
+        operator: String,
+    }
+
+    fn pin_world() -> PinWorld {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        use crate::api::auth::ControlPlanePdp;
+        use crate::api::{bootstrap_api_key_if_empty, router, AppState};
+        use crate::keys::default_scopes_for_role;
+        use crate::manager::SessionManager;
+        use crate::secrets::SecretsVault;
+        use crate::users::UserRole;
+        use crate::workflow::SqliteWorkflowStore;
+
+        let store = Arc::new(SqliteWorkflowStore::in_memory().expect("store"));
+        let operator = bootstrap_api_key_if_empty(&store, Some("operator-secret".into()))
+            .expect("bootstrap")
+            .expect("secret");
+        store.create_user("ada", "ada").unwrap();
+        store
+            .create_api_key_owned(
+                "ada-key",
+                "ada",
+                "member-secret",
+                "User::\"ada\"",
+                &default_scopes_for_role(UserRole::Member),
+                "ada",
+            )
+            .unwrap();
+        let (manager, _rx) = SessionManager::new(
+            store.clone(),
+            Arc::new(vam_core::CidAllocator::default()),
+            Arc::new(|_vm_id, _cid| -> Box<dyn vam_core::Vmm> {
+                unreachable!("mcp pin test does not boot a VM")
+            }),
+        );
+        let vault = SecretsVault::for_tests(store.clone());
+        let state = AppState {
+            store: store.clone(),
+            vault: vault.clone(),
+            manager,
+            pdp: Arc::new(ControlPlanePdp::new().expect("pdp")),
+            listen_addr: "127.0.0.1:0".to_string(),
+            draining: Arc::new(AtomicBool::new(false)),
+            ready: Arc::new(AtomicBool::new(true)),
+            e2e_mock_scripts: false,
+        };
+        PinWorld {
+            app: router(state),
+            store,
+            vault,
+            operator,
+        }
+    }
+
+    /// A loopback MCP server answering for `https://{host}/mcp`.
+    fn serve_mcp(host: &str) -> std::sync::Arc<std::sync::Mutex<crate::mcp_client::mock::Seen>> {
+        let (url, seen) = crate::mcp_client::mock::spawn(crate::mcp_client::mock::standard);
+        crate::mcp_oauth_refresh::test_seam::serve(host, url::Url::parse(&url).unwrap());
+        seen
+    }
+
+    async fn pin_http(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        secret: &str,
+        body: Option<serde_json::Value>,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tower::ServiceExt;
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let key = format!("mcp-pin-{}", NEXT.fetch_add(1, Ordering::SeqCst));
+        let builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {secret}"))
+            .header("idempotency-key", key)
+            .header("content-type", "application/json");
+        let request = match body {
+            Some(body) => builder.body(Body::from(body.to_string())).unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
+        let response = app.clone().oneshot(request).await.expect("response");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+        let json =
+            serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "raw": text }));
+        (status, json)
+    }
+
+    fn no_row(store: &crate::workflow::SqliteWorkflowStore, owner: &str, id: &str) -> bool {
+        matches!(
+            store.get_mcp_connection(SecretScope::User, owner, id),
+            Err(OrchestratorError::NotFound(_))
+        )
+    }
+
+    #[tokio::test]
+    async fn a_foreign_secret_binding_id_is_refused_with_or_without_a_value_and_nothing_is_sent() {
+        use crate::secrets::SecretKind;
+        use axum::http::StatusCode;
+
+        let w = pin_world();
+        let host = "mcp.pin-foreign.example";
+        let seen = serve_mcp(host);
+        // The caller's own secret, another connection's OAuth token, and an org row.
+        w.vault
+            .put_secret_with_owner(
+                "jira/auth-header",
+                "USER-JIRA-VALUE",
+                SecretKind::Egress,
+                &["jira.example".to_string()],
+                None,
+                "ada",
+            )
+            .unwrap();
+        w.vault
+            .put_secret_with_owner(
+                "linear/oauth/access-token",
+                "USER-OAUTH-VALUE",
+                SecretKind::Connection,
+                &["mcp.linear.app".to_string()],
+                None,
+                "ada",
+            )
+            .unwrap();
+        w.vault
+            .put_secret(
+                "org/shared-token",
+                "ORG-VALUE",
+                SecretKind::Egress,
+                &[],
+                None,
+            )
+            .unwrap();
+        for foreign in [
+            "jira/auth-header",
+            "linear/oauth/access-token",
+            "org/shared-token",
+            "other/auth-header",
+            "probe/oauth/access-token",
+        ] {
+            for value in [None, Some("Bearer caller-value")] {
+                let mut body = serde_json::json!({
+                    "connectionId": "probe",
+                    "url": format!("https://{host}/mcp"),
+                    "scope": "user",
+                    "secretBindingId": foreign,
+                });
+                if let Some(value) = value {
+                    body["secretValue"] = serde_json::json!(value);
+                }
+                let (status, b) = pin_http(
+                    &w.app,
+                    "PUT",
+                    "/v1/mcp/connections",
+                    "member-secret",
+                    Some(body),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{foreign}: {b}");
+                let text = b.to_string();
+                assert!(text.contains(foreign), "{text}");
+                assert!(text.contains("probe/auth-header"), "{text}");
+                for v in ["USER-JIRA-VALUE", "USER-OAUTH-VALUE", "ORG-VALUE"] {
+                    assert!(!text.contains(v), "{text}");
+                }
+            }
+        }
+        assert!(seen.lock().unwrap().methods.is_empty());
+        assert!(no_row(&w.store, "ada", "probe"));
+        // No credential was written for the probe either.
+        assert!(!w
+            .vault
+            .has_binding_at(SecretScope::User, "ada", "probe/auth-header")
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_connection_row_pinned_to_another_host_is_not_sent_at_connect() {
+        use crate::users::UserRole;
+        use axum::http::StatusCode;
+
+        let w = pin_world();
+        let host_b = "mcp.pin-host-b.example";
+        let seen = serve_mcp(host_b);
+        crate::mcp_registry::store_mcp_credential(
+            &w.vault,
+            SecretScope::User,
+            "ada",
+            "probe",
+            "Bearer HOST-A-VALUE",
+            "mcp.pin-host-a.example",
+            None,
+            UserRole::Member,
+        )
+        .unwrap();
+        let (status, b) = pin_http(
+            &w.app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(serde_json::json!({
+                "connectionId": "probe",
+                "url": format!("https://{host_b}/mcp"),
+                "scope": "user",
+                "secretBindingId": "probe/auth-header",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{b}");
+        let text = b.to_string();
+        assert!(text.contains("not pinned to host"), "{text}");
+        assert!(text.contains("probe/auth-header"), "{text}");
+        assert!(!text.contains("HOST-A-VALUE"), "{text}");
+        assert!(seen.lock().unwrap().methods.is_empty());
+        assert!(no_row(&w.store, "ada", "probe"));
+    }
+
+    #[tokio::test]
+    async fn an_org_row_is_not_used_for_a_members_connection() {
+        use crate::users::UserRole;
+        use axum::http::StatusCode;
+
+        let w = pin_world();
+        let host = "mcp.pin-org-row.example";
+        let seen = serve_mcp(host);
+        // The org connection's own row, pinned to the right host: still not the member's.
+        crate::mcp_registry::store_mcp_credential(
+            &w.vault,
+            SecretScope::Org,
+            "",
+            "probe",
+            "Bearer ORG-ROW-VALUE",
+            host,
+            None,
+            UserRole::Operator,
+        )
+        .unwrap();
+        let (status, b) = pin_http(
+            &w.app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(serde_json::json!({
+                "connectionId": "probe",
+                "url": format!("https://{host}/mcp"),
+                "scope": "user",
+                "secretBindingId": "probe/auth-header",
+            })),
+        )
+        .await;
+        assert_ne!(status, StatusCode::OK, "{b}");
+        assert!(!b.to_string().contains("ORG-ROW-VALUE"), "{b}");
+        assert!(seen.lock().unwrap().methods.is_empty());
+        assert!(no_row(&w.store, "ada", "probe"));
+    }
+
+    #[tokio::test]
+    async fn a_non_connection_row_is_never_sent_as_an_mcp_header() {
+        use crate::secrets::SecretKind;
+        use axum::http::StatusCode;
+
+        let w = pin_world();
+        let host = "mcp.pin-kind.example";
+        let seen = serve_mcp(host);
+        // Right id, right scope, right host: but an `egress` row, not a connection credential.
+        w.vault
+            .put_secret_with_owner(
+                "probe/auth-header",
+                "EGRESS-VALUE",
+                SecretKind::Egress,
+                &[host.to_string()],
+                None,
+                "ada",
+            )
+            .unwrap();
+        let (status, b) = pin_http(
+            &w.app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(serde_json::json!({
+                "connectionId": "probe",
+                "url": format!("https://{host}/mcp"),
+                "scope": "user",
+                "secretBindingId": "probe/auth-header",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{b}");
+        let text = b.to_string();
+        assert!(text.contains("not an MCP connection credential"), "{text}");
+        assert!(!text.contains("EGRESS-VALUE"), "{text}");
+        assert!(seen.lock().unwrap().methods.is_empty());
+        assert!(no_row(&w.store, "ada", "probe"));
+    }
+
+    #[tokio::test]
+    async fn a_stored_row_naming_a_foreign_binding_is_refused_and_nothing_is_sent() {
+        use crate::mcp_registry::McpAuthMode;
+        use crate::secrets::SecretKind;
+        use axum::http::StatusCode;
+
+        let w = pin_world();
+        let host = "mcp.pin-stored.example";
+        let seen = serve_mcp(host);
+        w.vault
+            .put_secret_with_owner(
+                "jira/auth-header",
+                "USER-JIRA-VALUE",
+                SecretKind::Egress,
+                &["*".to_string()],
+                None,
+                "ada",
+            )
+            .unwrap();
+        w.store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                "probe",
+                &format!("https://{host}/mcp"),
+                "",
+                &[],
+                &[],
+                McpAuthMode::Static,
+                None,
+            )
+            .unwrap();
+        // The store now refuses a foreign id; a row written before the fix is seeded directly.
+        assert!(w
+            .store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                "probe",
+                &format!("https://{host}/mcp"),
+                "jira/auth-header",
+                &[],
+                &[],
+                McpAuthMode::Static,
+                None,
+            )
+            .is_err());
+        {
+            let c = w.store.connection.lock().unwrap();
+            c.execute(
+                "UPDATE mcp_connections SET secret_binding_id = 'jira/auth-header',
+                 header_bindings_json = '[{\"name\":\"Authorization\",\"bindingId\":\"jira/auth-header\"}]'
+                 WHERE owner_user_id = 'ada' AND connection_id = 'probe'",
+                [],
+            )
+            .unwrap();
+        }
+        let stored = w
+            .store
+            .get_mcp_connection(SecretScope::User, "ada", "probe")
+            .unwrap();
+        assert_eq!(stored.header_bindings[0].binding_id, "jira/auth-header");
+        // Refresh resolves the stored row: refused.
+        let (status, b) = pin_http(
+            &w.app,
+            "POST",
+            "/v1/mcp/connections/probe/refresh?scope=user",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{b}");
+        let text = b.to_string();
+        assert!(text.contains("jira/auth-header"), "{text}");
+        assert!(text.contains("not one of its own"), "{text}");
+        assert!(!text.contains("USER-JIRA-VALUE"), "{text}");
+        // A connect that carries the stored bindings forward: refused the same way.
+        let (status, b) = pin_http(
+            &w.app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(serde_json::json!({
+                "connectionId": "probe",
+                "url": format!("https://{host}/mcp"),
+                "scope": "user",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{b}");
+        // The per-session resolver refuses it too.
+        let err = crate::mcp_registry::resolve_mcp_connection_headers(&w.vault, "ada", &stored)
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchestratorError::PermissionDenied(_)),
+            "{err}"
+        );
+        assert!(seen.lock().unwrap().methods.is_empty());
+        // Disconnecting the row leaves the foreign vault row alone.
+        let (status, b) = pin_http(
+            &w.app,
+            "DELETE",
+            "/v1/mcp/connections/probe?scope=user",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{b}");
+        assert!(w
+            .vault
+            .has_binding_at(SecretScope::User, "ada", "jira/auth-header")
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn static_connects_with_a_value_or_headers_still_send_their_own_pinned_rows() {
+        use axum::http::StatusCode;
+
+        let w = pin_world();
+        let host = "mcp.pin-static.example";
+        let seen = serve_mcp(host);
+        // secretValue, naming the generated id explicitly.
+        let (status, b) = pin_http(
+            &w.app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(serde_json::json!({
+                "connectionId": "probe",
+                "url": format!("https://{host}/mcp"),
+                "scope": "user",
+                "secretBindingId": "probe/auth-header",
+                "secretValue": "Bearer static-value",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{b}");
+        // headers, on a second connection.
+        let (status, b) = pin_http(
+            &w.app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(serde_json::json!({
+                "connectionId": "probe-headers",
+                "url": format!("https://{host}/mcp"),
+                "scope": "user",
+                "headers": [{ "name": "X-Api-Key", "value": "header-value" }],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{b}");
+        let row = w
+            .store
+            .get_mcp_connection(SecretScope::User, "ada", "probe-headers")
+            .unwrap();
+        assert_eq!(
+            row.header_bindings[0].binding_id,
+            "probe-headers/header/x-api-key"
+        );
+        // A refresh re-reads the stored own rows.
+        let (status, b) = pin_http(
+            &w.app,
+            "POST",
+            "/v1/mcp/connections/probe/refresh?scope=user",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{b}");
+        let seen = seen.lock().unwrap();
+        assert!(seen
+            .auth
+            .iter()
+            .any(|a| a.as_deref() == Some("Bearer static-value")));
+        assert!(seen
+            .headers
+            .iter()
+            .any(|h| h.get("x-api-key").map(String::as_str) == Some("header-value")));
+    }
+
+    #[tokio::test]
+    async fn an_org_connection_uses_its_own_org_row_at_connect_and_refresh() {
+        use axum::http::StatusCode;
+
+        let w = pin_world();
+        let host = "mcp.pin-org-conn.example";
+        let seen = serve_mcp(host);
+        let (status, b) = pin_http(
+            &w.app,
+            "PUT",
+            "/v1/mcp/connections",
+            &w.operator,
+            Some(serde_json::json!({
+                "connectionId": "shared",
+                "url": format!("https://{host}/mcp"),
+                "scope": "org",
+                "secretValue": "Bearer org-connection-value",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{b}");
+        let (status, b) = pin_http(
+            &w.app,
+            "POST",
+            "/v1/mcp/connections/shared/refresh?scope=org",
+            &w.operator,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{b}");
+        let conn = w
+            .store
+            .get_mcp_connection(SecretScope::Org, "", "shared")
+            .unwrap();
+        // A member's session resolves the org row, whoever calls.
+        use secrecy::ExposeSecret as _;
+        let headers =
+            crate::mcp_registry::resolve_mcp_connection_headers(&w.vault, "ada", &conn).unwrap();
+        assert_eq!(headers[0].1.expose_secret(), "Bearer org-connection-value");
+        let seen = seen.lock().unwrap();
+        assert!(seen.auth.len() >= 2);
+        assert!(seen
+            .auth
+            .iter()
+            .all(|a| a.as_deref() == Some("Bearer org-connection-value")));
     }
 }

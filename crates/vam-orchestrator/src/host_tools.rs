@@ -2123,7 +2123,7 @@ async fn run_mcp_call_journaled(
     match outcome {
         Ok((output, attempt_secrets)) => {
             let mut secrets = attempt_secrets;
-            secrets.extend(mcp_connection_secret_values(vault, caller_user_id, conn));
+            secrets.extend(mcp_connection_secret_values(vault, conn));
             let (text, artifacts) = package_mcp_result(
                 store,
                 run_id,
@@ -2523,7 +2523,6 @@ fn redact_vendor_text(text: String, secrets: &[String]) -> String {
 /// credential is redacted even if it was not part of this attempt's headers.
 fn mcp_connection_secret_values(
     vault: Option<&SecretsVault>,
-    caller_user_id: &str,
     conn: &crate::mcp_registry::McpConnection,
 ) -> Vec<String> {
     let Some(vault) = vault else {
@@ -2553,11 +2552,25 @@ fn mcp_connection_secret_values(
                 }
             }
         }
-    } else if !conn.secret_binding_id.is_empty() {
-        if let Ok(value) =
-            crate::mcp_client::resolve_auth_header(vault, caller_user_id, &conn.secret_binding_id)
+    } else {
+        // Only what the connection may send: its own `connection` rows, at its own scope,
+        // pinned to its host. A binding that is refused there was never sent either.
+        let target = conn.credential_target();
+        for binding_id in conn
+            .header_bindings
+            .iter()
+            .map(|b| b.binding_id.as_str())
+            .chain(std::iter::once(conn.secret_binding_id.as_str()))
+            .filter(|id| !id.is_empty())
         {
-            values.push(value.expose_secret().to_string());
+            if let Ok(value) =
+                crate::mcp_registry::decrypt_mcp_connection_secret(vault, target, binding_id)
+            {
+                let value = value.expose_secret().to_string();
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+            }
         }
     }
     values
@@ -2930,9 +2943,12 @@ async fn invoke_mcp_tool_inner(
         let vault = vault.ok_or_else(|| "mcp denied: vault is not available".to_string())?;
         crate::mcp_registry::resolve_mcp_connection_headers(vault, caller_user_id, conn).map_err(
             |err| {
-                if oauth {
+                if oauth && !matches!(err, crate::error::OrchestratorError::PermissionDenied(_)) {
                     "mcp denied: credential unavailable".to_string()
                 } else {
+                    // A refused credential (not the connection's own, not a `connection` row, or
+                    // not pinned to this host) names the binding id and asks for a reconnect;
+                    // the value is never read, so it cannot be in the text.
                     format!("mcp denied: {err}")
                 }
             },
@@ -3068,14 +3084,14 @@ async fn invoke_mcp_tool_inner(
         Err(err) => {
             trace.verdict(mcp_error_is_definite(&err));
             let mut secrets = attempt_secrets.clone();
-            secrets.extend(mcp_connection_secret_values(vault, caller_user_id, conn));
+            secrets.extend(mcp_connection_secret_values(vault, conn));
             return Err(mcp_call_error(err, oauth, !read_class, &secrets));
         }
     };
     if result.is_error {
         trace.verdict(true);
         let mut secrets = attempt_secrets.clone();
-        secrets.extend(mcp_connection_secret_values(vault, caller_user_id, conn));
+        secrets.extend(mcp_connection_secret_values(vault, conn));
         let text = mcp_result_text(&result);
         if text.trim().is_empty() {
             return Err("mcp tool returned an error".into());
@@ -6978,16 +6994,20 @@ mod mcp_call_tests {
             .unwrap();
             conn
         } else {
-            vault
-                .put_secret_with_owner(
-                    "example/key",
-                    STATIC_SECRET,
-                    crate::secrets::SecretKind::Egress,
-                    &[],
-                    None,
-                    "alice",
-                )
-                .unwrap();
+            // The header row the connect writes: the connection's own id, a `connection` row
+            // pinned to the MCP host.
+            let binding_id = crate::mcp_registry::store_mcp_header_credential(
+                &vault,
+                SecretScope::User,
+                "alice",
+                "example",
+                "X-Api-Key",
+                STATIC_SECRET,
+                &crate::mcp_client::connection_host(&url).unwrap(),
+                None,
+                UserRole::Member,
+            )
+            .unwrap();
             store
                 .upsert_mcp_connection(
                     SecretScope::User,
@@ -6997,7 +7017,7 @@ mod mcp_call_tests {
                     "",
                     &[HeaderBinding {
                         name: "X-Api-Key".into(),
-                        binding_id: "example/key".into(),
+                        binding_id,
                     }],
                     &tools(),
                     McpAuthMode::Static,
@@ -7216,6 +7236,122 @@ mod mcp_call_tests {
     #[tokio::test]
     async fn mcp_error_echoing_token_is_redacted_for_oauth_connection_jsonrpc() {
         exercise_redaction(true, true).await;
+    }
+
+    // ---- an MCP header goes only to its own connection's pinned host ----
+
+    #[tokio::test]
+    async fn mcp_header_pinned_to_another_host_is_never_sent_per_session() {
+        let (url, calls, seen) = spawn_script(|_, id| result_reply(id, "created", false));
+        for oauth_mode in [false, true] {
+            let fx = fixture(&url, oauth_mode);
+            // The connection's own row, rewritten pinned to another host.
+            let binding = if oauth_mode {
+                crate::mcp_registry::mcp_oauth_access_token_binding_id("example")
+            } else {
+                "example/header/x-api-key".to_string()
+            };
+            fx.vault
+                .put_secret_with_owner(
+                    &binding,
+                    fx.secret,
+                    crate::secrets::SecretKind::Connection,
+                    &["mcp.elsewhere.example".to_string()],
+                    None,
+                    "alice",
+                )
+                .unwrap();
+            let run = call(&fx, "list_issues", json!({}), CAP).await;
+            let err = run.result.unwrap_err();
+            assert!(err.contains("not pinned to host"), "{err}");
+            assert!(err.contains(&binding), "{err}");
+            assert!(!err.contains(fx.secret), "{err}");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(seen.lock().unwrap().methods.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_foreign_or_non_connection_header_row_is_never_sent_per_session() {
+        let (url, calls, seen) = spawn_script(|_, id| result_reply(id, "created", false));
+        let fx = fixture(&url, false);
+        let host = crate::mcp_client::connection_host(&fx.conn.url).unwrap();
+        // A foreign id (the user's own egress secret, pinned to the MCP host) on a row stored
+        // before ids were checked.
+        fx.vault
+            .put_secret_with_owner(
+                "jira/auth-header",
+                "FOREIGN-VALUE",
+                crate::secrets::SecretKind::Egress,
+                std::slice::from_ref(&host),
+                None,
+                "alice",
+            )
+            .unwrap();
+        let mut foreign = fx.conn.clone();
+        foreign.header_bindings = vec![HeaderBinding {
+            name: "Authorization".into(),
+            binding_id: "jira/auth-header".into(),
+        }];
+        let run = run_mcp_call(
+            &fx.store,
+            &foreign,
+            Some(&fx.vault),
+            "list_issues",
+            &to_struct(&json!({})),
+            "alice",
+            RUN,
+            CAP,
+            connect_mock,
+            crate::mcp_oauth_refresh::refresh_access_token_unpinned_for_tests,
+        )
+        .await;
+        let err = run.result.unwrap_err();
+        assert!(err.contains("not one of its own credentials"), "{err}");
+        assert!(!err.contains("FOREIGN-VALUE"), "{err}");
+        // The connection's own id, but an `egress` row.
+        fx.vault
+            .delete_secret_at(SecretScope::User, "alice", "example/header/x-api-key")
+            .unwrap();
+        fx.vault
+            .put_secret_with_owner(
+                "example/header/x-api-key",
+                "EGRESS-VALUE",
+                crate::secrets::SecretKind::Egress,
+                &[host],
+                None,
+                "alice",
+            )
+            .unwrap();
+        let run = call(&fx, "list_issues", json!({}), CAP).await;
+        let err = run.result.unwrap_err();
+        assert!(err.contains("not an MCP connection credential"), "{err}");
+        assert!(!err.contains("EGRESS-VALUE"), "{err}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(seen.lock().unwrap().methods.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_user_connection_is_never_resolved_for_another_caller() {
+        let (url, calls, seen) = spawn_script(|_, id| result_reply(id, "created", false));
+        let fx = fixture(&url, false);
+        let run = run_mcp_call(
+            &fx.store,
+            &fx.conn,
+            Some(&fx.vault),
+            "list_issues",
+            &to_struct(&json!({})),
+            "mallory",
+            RUN,
+            CAP,
+            connect_mock,
+            crate::mcp_oauth_refresh::refresh_access_token_unpinned_for_tests,
+        )
+        .await;
+        let err = run.result.unwrap_err();
+        assert!(err.contains("belongs to another user"), "{err}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(seen.lock().unwrap().methods.is_empty());
     }
 
     #[tokio::test]
