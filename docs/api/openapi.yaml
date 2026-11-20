@@ -1266,6 +1266,16 @@ paths:
         again, and nothing is sent to the new host first. The answer is the caller's
         list entry (`state: connected`) and carries no key.
 
+        **An API key for an MCP connector** (`provider.kind: api_key` with `mcp`) takes
+        the same body, the same refusals and the same lock. The node writes the member's
+        static MCP row for the connector's id: the header is always
+        `Authorization: Bearer <key>`, sealed and pinned to the MCP host. The key is in
+        memory for the tool listing, only the connector's vetted tools are kept, its
+        risk classes and ask rules are applied, and the header row and the MCP row are
+        written in one transaction after the row is checked to be unchanged. A listing
+        that fails writes no key and keeps any earlier row and key. `PUT
+        /v1/mcp/connections` and `…/oauth/tokens` answer 400 for this connector's id.
+
         **Microsoft 365.** The app signs the member in with Microsoft and passes the tokens here
         (`secrets:write`; Idempotency-Key required). Only for a REST connector
         (`microsoft-365`); an MCP connector connects through
@@ -1312,7 +1322,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ConnectorEntry"
         "400":
-          description: Unknown body field, an empty token, an id token that cannot be read, or an MCP connector; for an API key connector, a body that is not `{ apiKey }` or a key outside the limits (a fixed text, the key is never quoted).
+          description: Unknown body field, an empty token, an id token that cannot be read, or an OAuth MCP connector (an MCP connector with an API key takes `{ apiKey }`); for an API key connector, a body that is not `{ apiKey }` or a key outside the limits (a fixed text, the key is never quoted).
           content:
             application/json:
               schema:

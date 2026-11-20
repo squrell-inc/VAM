@@ -22,7 +22,9 @@ use crate::mcp_client::McpTool;
 use crate::mcp_oauth_refresh::{
     entra_token_endpoint, RefreshFailure, RefreshFailureKind, RefreshedToken,
 };
-use crate::mcp_registry::{validate_oauth_secret_value, McpConnection, McpOauthStatus};
+use crate::mcp_registry::{
+    validate_oauth_secret_value, McpAuthMode, McpConnection, McpOauthStatus,
+};
 use crate::secrets::{SecretKind, SecretScope, SecretsVault};
 use crate::workflow::SqliteWorkflowStore;
 
@@ -394,6 +396,20 @@ pub fn gate_mcp_write(
     Ok(Some(policy))
 }
 
+/// The generic MCP connection routes (`PUT /v1/mcp/connections`, `…/oauth/tokens`) refuse the id of
+/// a connector that signs in with an API key: it has no URL, header or token the app may send, only
+/// the member's key at `PUT /v1/connectors/{id}/connection` (CN-7.7). Decided before anything is
+/// read or written.
+pub(crate) fn refuse_api_key_id(
+    store: &SqliteWorkflowStore,
+    id: &str,
+) -> Result<(), OrchestratorError> {
+    match store.connector_entry(id)? {
+        Some(e) if is_api_key(&e.template) => Err(invalid(api_key_only(id))),
+        _ => Ok(()),
+    }
+}
+
 /// Keeps the vetted tools of a vendor list.
 pub fn keep_vetted(policy: &McpPolicy, tools: Vec<McpTool>) -> Vec<McpTool> {
     tools
@@ -429,6 +445,24 @@ pub fn mcp_connection_state(
         return Some(CallerState::NeedsReconnect);
     }
     has_tokens.then_some(CallerState::Connected)
+}
+
+/// The caller's state of an MCP connector that signs in with an API key (CN-7.7), from their own
+/// static MCP row: `Connected` when the row is the connector's (its URL) in static mode and its
+/// `Authorization` header row exists (`has_header`); a row on another URL reads `NeedsReconnect`
+/// (the key was entered for another server and is never sent to this one); no row, or a row with
+/// no header, is `None` (the tile reads `connect`). It never looks at a refresh token: a key has
+/// none.
+pub fn mcp_api_key_state(
+    policy: &McpPolicy,
+    conn: Option<&McpConnection>,
+    has_header: bool,
+) -> Option<CallerState> {
+    let conn = conn?;
+    if conn.url != policy.url {
+        return Some(CallerState::NeedsReconnect);
+    }
+    (conn.auth_mode == McpAuthMode::Static && has_header).then_some(CallerState::Connected)
 }
 
 /// The stored node state of one connector.
@@ -960,13 +994,17 @@ pub fn check_api_key_value(value: &str) -> Result<(), OrchestratorError> {
 pub struct ApiKeyPlan {
     /// The company address the key is entered under (`tenant_id` of the row); "" without one.
     pub address: String,
-    /// Every filled binding host: the key is pinned to all of them.
+    /// Every filled binding host: the key is pinned to all of them. An MCP connector's is its one
+    /// MCP host.
     pub hosts: Vec<String>,
+    /// The MCP server's URL (filled) when the connector is an MCP connector: the node writes the
+    /// member's static MCP row for it. `None` for a REST connector.
+    pub mcp_url: Option<String>,
 }
 
 /// Decides a `PUT …/connection` of an API key: the plan, or the refusal. Nothing is written here.
 ///
-/// - not a REST connector that signs in with an API key: 400;
+/// - not a connector that signs in with an API key: 400;
 /// - not enabled on this node: 403 (the Phase 6 words); no company address: 409;
 /// - a body or key that does not fit the limits: 400 (a fixed text, never the key).
 ///
@@ -980,11 +1018,6 @@ pub fn plan_api_key_connection(
     let id = connector_id(template);
     if !is_api_key(template) {
         return Err(invalid(format!("`{id}` does not sign in with an API key")));
-    }
-    if template.mcp.is_some() {
-        return Err(invalid(format!(
-            "`{id}` is an MCP connector; its API key cannot be entered on this node yet"
-        )));
     }
     let node = node.filter(|n| n.enabled).ok_or_else(|| {
         OrchestratorError::PermissionDenied(format!(
@@ -1002,13 +1035,26 @@ pub fn plan_api_key_connection(
     };
     check_api_key_value(&req.api_key)?;
     let filled = resolve(template, node.tenant_subdomain.as_deref());
-    let hosts = binding_hosts(&filled);
+    // An MCP connector's key goes to its one MCP host as `Authorization: Bearer <key>`; a REST
+    // connector's to every host its bindings name.
+    let mcp_url = filled.mcp.as_ref().map(|m| m.url.clone());
+    let hosts = match &mcp_url {
+        Some(url) if !url_needs_address(url) => crate::mcp_client::connection_host(url)
+            .map(|h| vec![h])
+            .unwrap_or_default(),
+        Some(_) => Vec::new(),
+        None => binding_hosts(&filled),
+    };
     if hosts.is_empty() {
         return Err(OrchestratorError::Conflict(format!(
             "the `{id}` connector names no host to pin the key to; ask your admin (`vam connectors`)"
         )));
     }
-    Ok(ApiKeyPlan { address, hosts })
+    Ok(ApiKeyPlan {
+        address,
+        hosts,
+        mcp_url,
+    })
 }
 
 /// True when the member's key row for `id` is a `connection`-kind row pinned to exactly `hosts`
@@ -1288,6 +1334,39 @@ pub(crate) fn disconnect(
     delete_connection_secrets(vault, owner, id);
     store.resolve_connection_needs_reauth(owner, id, "dismissed");
     Ok(())
+}
+
+/// Disconnects a member from an MCP connector with an API key: the static MCP row and its header
+/// row (the key) go, in that order, with no request to the provider (CN-7.7). Not connected is a
+/// 404, as for a REST connector; a stray header row of a missing row still goes.
+pub(crate) fn disconnect_mcp_api_key(
+    store: &SqliteWorkflowStore,
+    vault: &SecretsVault,
+    owner: &str,
+    id: &str,
+) -> Result<(), OrchestratorError> {
+    match store.get_mcp_connection(SecretScope::User, owner, id) {
+        Ok(row) => {
+            crate::mcp_registry::delete_mcp_connection_secrets(vault, &row)?;
+            store.delete_mcp_connection(SecretScope::User, owner, id)?;
+            store.resolve_connection_needs_reauth(owner, id, "dismissed");
+            Ok(())
+        }
+        Err(OrchestratorError::NotFound(_)) => {
+            match vault.delete_secret_at(
+                SecretScope::User,
+                owner,
+                &crate::mcp_registry::mcp_auth_binding_id(id),
+            ) {
+                Ok(_) | Err(OrchestratorError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+            Err(OrchestratorError::NotFound(format!(
+                "connection to `{id}` (you are not connected)"
+            )))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// The caller's state from their own connection row. `Connected` only while the credential exists

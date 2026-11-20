@@ -969,7 +969,7 @@ host; the listener names the host in the log. One declared piece per scenario.
   `api-key-with-two-fields` (two fields, refused). The overlay `marketplace-community-connectors-notesdesk-update/` is the tag
   `notesdesk-connector-v1.1.0`: the connector's binding and the skill's shapes also name `eu.api.notesdesk.example`. The node
   accepts the `api_key` kind: a listing's summary shows `provider: api_key` and the field's label (`fields: [{ label }]`); the
-  key itself is entered through `PUT /v1/connectors/{id}/connection` (REST connectors; an MCP connector's is a later wave).
+  key itself is entered through `PUT /v1/connectors/{id}/connection` (REST and MCP connectors; for an MCP connector the node writes the member's static MCP row, and the generic `PUT /v1/mcp/connections` refuses the id, naming the API key).
   A header-named key (`inject: header` with a `headerName`) is not exercised yet: no fixture uses it.
 
 **The kit.** Scenarios that run the CLI use `cli` steps on a copy of a tree under `world/fixtures/connector-kit/`:

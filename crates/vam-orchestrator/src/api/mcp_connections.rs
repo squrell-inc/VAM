@@ -408,6 +408,9 @@ async fn connect(
     let mut req: ConnectMcpRequest = serde_json::from_str(&body)
         .map_err(|_| OrchestratorError::InvalidContract("invalid request body".into()))?;
     validate_connection_id(&req.connection_id)?;
+    // A connector that signs in with an API key is connected only at its connector route (CN-7.7):
+    // refused before the row is read, whatever the URL, headers or scope say.
+    connectors::refuse_api_key_id(&state.store, &req.connection_id)?;
     if let Some(timeout_ms) = req.timeout_ms {
         validate_mcp_timeout_ms(timeout_ms)?;
     }
@@ -762,6 +765,109 @@ async fn connect(
     Ok(respond(
         serde_json::json!({ "connection": connection_value(&conn, has_refresh)? }),
     ))
+}
+
+/// Connects a member to an MCP connector with the API key they entered at
+/// `PUT /v1/connectors/{id}/connection` (CN-7.7). The caller holds the member's connection lock and
+/// has decided every refusal that needs no read of the row (body, enable, address, host).
+///
+/// The key becomes `Authorization: Bearer <key>` (the connector file has no other form: `mcp`
+/// takes only a URL and tools), sealed here and pinned to the MCP host. It is NOT stored first: the
+/// tool listing gets it from memory, only the connector's vetted tools are kept, and the guarded row
+/// write stores the header row and the static row in one transaction, after it has checked that the
+/// row is still the one read under the lock. A refused listing, an unusable answer or a refused
+/// guard writes no key and leaves any earlier row and header as they were. The connector's risk
+/// classes and ask rules are applied last, exactly as an OAuth connector's connect applies them.
+pub(crate) async fn connect_api_key_mcp(
+    state: &AppState,
+    auth: &AuthContext,
+    id: &str,
+    url: &str,
+    api_key: &str,
+    idempotency: &str,
+) -> Result<McpConnection, ApiError> {
+    let scope = SecretScope::User;
+    let owner = vault_owner_user_id(scope, auth.owner_user_id()).to_string();
+    // Enabled on this node and the connector's own URL, read again now that the lock is held.
+    let policy =
+        connectors::gate_mcp_write(&state.store, id, Some(url), None)?.ok_or_else(|| {
+            OrchestratorError::InvalidContract(format!("`{id}` is not an MCP connector"))
+        })?;
+    let host = connection_host(url).map_err(OrchestratorError::from)?;
+    // The row this write replaces, read under the lock. A static row is replaced (a new key, or a
+    // server the connector's update moved); an OAuth row is a sign-in this route does not own.
+    let existing = match state.store.get_mcp_connection(scope, &owner, id) {
+        Ok(row) => Some(row),
+        Err(OrchestratorError::NotFound(_)) => None,
+        Err(e) => return Err(e.into()),
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|row| row.auth_mode != McpAuthMode::Static)
+    {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "`{id}` is a connector id and cannot take a row it did not write"
+        ))
+        .into());
+    }
+    // Always `Authorization: Bearer <key>`: a connector file's `mcp` has only a URL and tools, so
+    // it cannot ask for another header and a key is never sent in a form the publisher did not
+    // declare.
+    let authorization = format!("Bearer {api_key}");
+    let header = stage_mcp_header_credential(
+        &state.vault,
+        scope,
+        id,
+        "Authorization",
+        &authorization,
+        &host,
+        Some(idempotency),
+        auth.role(),
+    )?;
+    let header_bindings = vec![HeaderBinding {
+        name: "Authorization".into(),
+        binding_id: header.binding_id.clone(),
+    }];
+    let staged_plaintext = vec![(header.binding_id.clone(), SecretString::new(authorization))];
+    let mut listed = snapshot(
+        state,
+        scope,
+        &owner,
+        url,
+        &header_bindings,
+        staged_plaintext,
+    )
+    .await?;
+    listed.tools = connectors::keep_vetted(&policy, listed.tools);
+    assert_no_visible_name_collision(&state.store, scope, &owner, id, &listed.tools)?;
+    // The connector may have been turned off, or changed, while the server answered.
+    connectors::gate_mcp_write(&state.store, id, Some(url), None)?;
+    #[cfg(test)]
+    connectors::test_signal::pause(&format!("mcp-connect-write:{id}")).await;
+    state.store.upsert_mcp_connection_guarded(
+        scope,
+        &owner,
+        id,
+        url,
+        &header_bindings,
+        &listed.tools,
+        McpAuthMode::Static,
+        None,
+        McpAuthWrite::Replace {
+            observed: existing.as_ref(),
+        },
+        std::slice::from_ref(&header),
+    )?;
+    state.store.set_mcp_instructions(
+        scope,
+        &owner,
+        id,
+        Some(listed.instructions.as_deref().unwrap_or_default()),
+    )?;
+    state
+        .store
+        .note_mcp_connection_creator(scope, &owner, id, auth.owner_user_id())?;
+    Ok(state.store.apply_connector_policy(scope, &owner, &policy)?)
 }
 
 async fn list(
@@ -1170,6 +1276,8 @@ async fn upsert_oauth_tokens(
     let scope = resolve_secret_scope(parse_scope(query.scope.as_deref())?, auth.role());
     authorize_org_secret_write(scope, auth.role())?;
     let owner = vault_owner_user_id(scope, auth.owner_user_id()).to_string();
+    // An API key connector has no OAuth tokens to upsert (CN-7.7).
+    connectors::refuse_api_key_id(&state.store, &id)?;
     let conn = state.store.get_mcp_connection(scope, &owner, &id)?;
     let policy = connectors::gate_mcp_write(&state.store, &id, None, Some(&conn.url))?;
     if policy.is_some() {
