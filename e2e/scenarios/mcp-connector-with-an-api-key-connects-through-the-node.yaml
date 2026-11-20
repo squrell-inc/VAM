@@ -45,13 +45,12 @@ guards:
   - vam:crates/vam-spec/src/connector.rs
   - vam:crates/vam-spec/src/connector_listing.rs
 mock:
-  - when: { step: read, toolName: keyed-bugwatch__list_issues }
+  - when: { step: read, toolName: keyed_bugwatch__list_issues }
     reply: { text: Read. }
   - when: { step: read, stepStart: true }
-    reply: { toolCall: { name: keyed-bugwatch__list_issues, args: {} } }
-  - when: { step: vendor, toolName: keyed-bugwatch__export_workspace }
+    reply: { toolCall: { name: keyed_bugwatch__list_issues, args: {} } }
+  - when: { step: vendor, toolName: keyed_bugwatch__export_workspace }
     reply: { text: Exported. }
   - when: { step: vendor, stepStart: true }
-    reply: { toolCall: { name: keyed-bugwatch__export_workspace, args: {} } }
-status: pending
-expectFail: { step: when.5, class: product }
+    reply: { toolCall: { name: keyed_bugwatch__export_workspace, args: {} } }
+status: active

@@ -1074,6 +1074,39 @@ mod tests {
     }
 
     #[test]
+    fn an_api_key_mcp_connector_cannot_ask_for_a_header_or_carry_bindings() {
+        // The MCP connect always sends `Authorization: Bearer <key>`: the file has no way to ask
+        // for anything else, so no key is ever sent in a form the publisher did not mean.
+        for extra in [
+            json!({ "inject": "header" }),
+            json!({ "inject": "bearer" }),
+            json!({ "headerName": "X-Api-Key" }),
+            json!({ "inject": "header", "headerName": "X-Api-Key", "prefix": "Token " }),
+        ] {
+            let mut v = api_key_file();
+            for (k, val) in extra.as_object().unwrap() {
+                v["mcp"][k] = val.clone();
+            }
+            let e = err(v);
+            assert!(e.contains("unknown field"), "{extra}: {e}");
+        }
+        // Bindings next to `mcp`, with any `inject`, are refused: exactly one of the two.
+        for binding in [
+            json!({ "inject": "bearer" }),
+            json!({ "inject": "header", "headerName": "X-Api-Key" }),
+        ] {
+            let mut v = api_key_file();
+            let mut b = json!({ "name": "api", "placeholder": "vamsec_x_api", "value": "api_key",
+                "hosts": ["api.example.org"] });
+            for (k, val) in binding.as_object().unwrap() {
+                b[k] = val.clone();
+            }
+            v["bindings"] = json!([b]);
+            assert!(err(v).contains("exactly one"), "{binding}");
+        }
+    }
+
+    #[test]
     fn the_binding_value_follows_the_provider() {
         let rest = |provider: Value, value: &str, inject: &str| {
             let mut v = linear();

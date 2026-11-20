@@ -1181,6 +1181,38 @@ mod tests {
     }
 
     #[test]
+    fn an_api_key_mcp_file_that_asks_for_a_header_or_adds_bindings_is_refused_at_import() {
+        // The MCP connect always sends `Authorization: Bearer <key>`; a file that asks for a
+        // header, or names bindings next to its `mcp` server, never reaches the node. Import reads
+        // a listing's connector with `parse_marketplace_connector` (file rules, then the limits).
+        for extra in [
+            json!({ "inject": "header" }),
+            json!({ "headerName": "X-Api-Key" }),
+        ] {
+            let mut v = api_key_mcp();
+            for (k, val) in extra.as_object().unwrap() {
+                v["mcp"][k] = val.clone();
+            }
+            assert!(err(v).contains("unknown field"), "{extra}");
+        }
+        for inject in [
+            json!({ "inject": "bearer" }),
+            json!({ "inject": "header", "headerName": "X-Api-Key" }),
+        ] {
+            let mut v = api_key_mcp();
+            let mut b = api_key_rest()["bindings"][0].clone();
+            for (k, val) in inject.as_object().unwrap() {
+                b[k] = val.clone();
+            }
+            v["bindings"] = json!([b]);
+            assert!(
+                err(v).contains("exactly one of bindings and mcp"),
+                "{inject}"
+            );
+        }
+    }
+
+    #[test]
     fn existing_connector_summaries_do_not_gain_a_fields_key() {
         // The summary of an installed release is digested: an OAuth connector's JSON is exactly
         // what it was before `api_key` was accepted.

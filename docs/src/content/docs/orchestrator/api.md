@@ -186,6 +186,17 @@ OpenAPI file has the shapes. Proved by
 `member-enters-an-api-key-and-a-listing-skill-uses-it-without-holding-it`; the refusals and the pin by unit tests in
 `api/connectors.rs` and `connection_egress.rs`.
 
+An API key connector with an `mcp` server takes the same route and the same refusals. The node writes the member's
+static MCP row for the connector's id, with the header `Authorization: Bearer <key>` (the connector file cannot ask
+for another form) sealed and pinned to the MCP host. The key is held in memory for the tool listing, only the
+connector's vetted tools are kept and its risk classes and ask rules are applied; the header row and the MCP row
+are then written in one transaction, after the row is checked to be the one read under the member's lock. A listing
+that fails writes no key and leaves any earlier row and key alone. `PUT /v1/mcp/connections` and
+`…/oauth/tokens` refuse an API key connector's id with a 400 that says to connect it with its API key. The entry
+reads `connected` while the member's static row and its header row exist; `DELETE …/connection` removes both and
+`POST …/connection/check` answers the stored state, each with no request to the server. Proved by
+`mcp-connector-with-an-api-key-connects-through-the-node` and unit tests in `api/connectors.rs`.
+
 ## A response too big to scrub
 
 A response from a host that holds a session secret is read through a scrub buffer (8 MiB by
