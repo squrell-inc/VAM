@@ -835,6 +835,15 @@ async fn main() {
     );
     transport.log(config.listen_addr);
 
+    // A sign-in that committed its connection just before the last stop had not resumed the runs
+    // parked on it yet: resume them now, before any request, with no lock held.
+    let resumed = api::resume_connected_connector_parks(&app_state);
+    if resumed > 0 {
+        tracing::info!(
+            "resumed runs parked on {resumed} connector connection(s) connected before the restart"
+        );
+    }
+
     let server_ready = ready.clone();
     let server_handle = tokio::spawn(async move {
         if let Err(e) = api::serve_with(app_state, listener, transport).await {

@@ -22,8 +22,8 @@
 use serde_json::Value;
 
 use crate::connector::{
-    is_placeholder_client_id, parse_connector, ClientSecret, Connector, ConnectorError,
-    OAuthProfile, OrgConsent, Provider, BUILTIN_CONNECTOR_FILES,
+    is_placeholder_client_id, parse_connector, url_host, ClientKind, ClientSecret, Connector,
+    ConnectorError, Inject, OAuthProfile, OrgConsent, Provider, BUILTIN_CONNECTOR_FILES,
 };
 
 /// Ids only Squrell's built-in connectors may have (design decision D26). Every id of a file in
@@ -35,7 +35,7 @@ pub const RESERVED_CONNECTOR_IDS: [&str; 2] = ["microsoft-365", "linear"];
 pub const MAX_CONNECTOR_ID_LEN: usize = 64;
 
 /// Sign-in profiles a connector file may name, as the words in the file.
-const KNOWN_PROFILES: [&str; 4] = ["entra", "discover", "google", "slack"];
+const KNOWN_PROFILES: [&str; 5] = ["entra", "discover", "google", "slack", "oauth"];
 
 const SECRET_REFUSED: &str = "the connector asks for a client secret: a marketplace connector must use `clientSecret: none` (or `org_vault` with `client: org`)";
 
@@ -52,6 +52,14 @@ fn builtin_values() -> impl Iterator<Item = Value> {
     BUILTIN_CONNECTOR_FILES
         .iter()
         .filter_map(|(_, raw)| serde_json::from_str::<Value>(raw).ok())
+}
+
+/// True when the egress gate cannot tell `a` and `b` apart: it finds a placeholder in a request by
+/// substring (`Envelope::screen`), so a request carrying the longer one carries both and is
+/// refused. Equal placeholders overlap too. Two bindings whose placeholders overlap cannot both be
+/// admitted.
+pub fn placeholders_overlap(a: &str, b: &str) -> bool {
+    a.contains(b) || b.contains(a)
 }
 
 /// True when `id` is one of Squrell's: named in [`RESERVED_CONNECTOR_IDS`] or the id of a built-in
@@ -138,6 +146,26 @@ pub fn check_mcp_server_url(url: &str) -> Result<String, String> {
         Some(_) => return Err("mcp.url must use the default https port".into()),
         None => authority,
     };
+    check_public_dns_host("mcp.url", host)?;
+    Ok(host.to_string())
+}
+
+/// The host a connector's MCP URL names, for the capability summary: [`check_mcp_server_url`]'s host,
+/// or for a URL whose first label is `{subdomain}` that host with the template kept
+/// (`{subdomain}.bugwatch.example.org`). Empty when the URL is not one a marketplace connector may name.
+pub fn mcp_summary_host(url: &str) -> String {
+    match url.strip_prefix("https://{subdomain}") {
+        Some(rest) => check_mcp_server_url(&format!("https://{SAMPLE_LABEL}{rest}"))
+            .map(|host| format!("{{subdomain}}{}", &host[SAMPLE_LABEL.len()..]))
+            .unwrap_or_default(),
+        None => check_mcp_server_url(url).unwrap_or_default(),
+    }
+}
+
+/// A full lowercase public DNS name: at least two labels of `[a-z0-9-]` (1-63, no edge hyphen),
+/// last label not all digits, at most 253 characters, no private-network suffix. `what` names the
+/// field in the error.
+pub fn check_public_dns_host(what: &str, host: &str) -> Result<(), String> {
     let labels: Vec<&str> = host.split('.').collect();
     let dns = labels.len() >= 2
         && labels.iter().all(|l| {
@@ -152,16 +180,105 @@ pub fn check_mcp_server_url(url: &str) -> Result<String, String> {
             .last()
             .is_some_and(|l| !l.bytes().all(|b| b.is_ascii_digit()));
     if !dns || host.len() > 253 {
-        return Err(
-            "mcp.url must name a server by a full lowercase DNS name (no IP address, no bare name)"
-                .into(),
-        );
+        return Err(format!(
+            "{what} must name a server by a full lowercase DNS name (no IP address, no bare name)"
+        ));
     }
     let dotted = format!(".{host}");
     if INTERNAL_SUFFIXES.iter().any(|s| dotted.ends_with(s)) {
-        return Err(format!("mcp.url host `{host}` names a private network"));
+        return Err(format!("{what} host `{host}` names a private network"));
     }
-    Ok(host.to_string())
+    Ok(())
+}
+
+/// The label a template is filled with to check a host's DNS form: the longest company label the
+/// node accepts (63 characters), so a suffix that would make a filled host longer than a DNS name
+/// can be is refused here and no host the node fills in is ever too long.
+const SAMPLE_LABEL: &str = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+/// `host` with a leading `{subdomain}` filled by [`SAMPLE_LABEL`]; any other host unchanged.
+fn sample_fill(host: &str) -> String {
+    match host.strip_prefix("{subdomain}") {
+        Some(rest) => format!("{SAMPLE_LABEL}{rest}"),
+        None => host.to_string(),
+    }
+}
+
+/// `url` with a leading `{subdomain}` host label filled by [`SAMPLE_LABEL`].
+fn sample_fill_url(url: &str) -> String {
+    match url.strip_prefix("https://{subdomain}") {
+        Some(rest) => format!("https://{SAMPLE_LABEL}{rest}"),
+        None => url.to_string(),
+    }
+}
+
+/// Binding rules for a marketplace connector (CN-6.1): 1 to 8 bindings, each with 1 to 4 hosts that
+/// are exact public DNS names or `{subdomain}.<suffix>` (the file validator ties the suffix to
+/// `tenant`), the access token as a bearer, and the placeholder `vamsec_<connector id>_<name>`.
+fn check_marketplace_bindings(c: &Connector, id: &str) -> Result<(), ConnectorError> {
+    let Some(bs) = &c.bindings else {
+        return Ok(());
+    };
+    if bs.len() > 8 {
+        return bad("a marketplace connector may declare at most 8 bindings");
+    }
+    for (i, b) in bs.iter().enumerate() {
+        let name_ok = !b.name.is_empty()
+            && b.name.len() <= 32
+            && b.name
+                .bytes()
+                .all(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || x == b'_');
+        if !name_ok {
+            return bad(format!(
+                "binding name `{}` must be 1 to 32 characters of a-z, 0-9 or '_'",
+                b.name
+            ));
+        }
+        if b.inject != Inject::Bearer {
+            return bad(format!(
+                "binding `{}`: only `inject: bearer` is available to a marketplace connector",
+                b.name
+            ));
+        }
+        let want = format!("vamsec_{id}_{}", b.name);
+        if b.placeholder != want {
+            return bad(format!(
+                "binding `{}` placeholder `{}` must be `{want}` (`vamsec_<connector id>_<binding name>`): a connector cannot use another's placeholder",
+                b.name, b.placeholder
+            ));
+        }
+        // `vamsec_<id>_<name>` can equal a built-in placeholder (id `m365`, name `graph`), or hold
+        // one (`vamsec_m365_graph_x`), and two bindings the gate cannot tell apart are refused by
+        // the swap for both (T4): see [`placeholders_overlap`].
+        if let Some(x) = crate::connector::builtin_connectors()
+            .iter()
+            .flat_map(|c| c.bindings.iter().flatten())
+            .find(|x| placeholders_overlap(&x.placeholder, &b.placeholder))
+        {
+            return bad(format!(
+                "binding `{}` placeholder `{}` overlaps the Squrell connector's `{}`: a connector cannot take another's placeholder",
+                b.name, b.placeholder, x.placeholder
+            ));
+        }
+        // Two of its own bindings (`a` and `a_b`): the request for one would carry both.
+        if let Some(x) = bs[..i]
+            .iter()
+            .find(|x| placeholders_overlap(&x.placeholder, &b.placeholder))
+        {
+            return bad(format!(
+                "bindings `{}` and `{}`: the placeholder `{}` overlaps `{}`, and the gate could not tell them apart",
+                x.name, b.name, x.placeholder, b.placeholder
+            ));
+        }
+        if b.hosts.len() > 4 {
+            return bad(format!("binding `{}` may name at most 4 hosts", b.name));
+        }
+        for h in &b.hosts {
+            check_public_dns_host(&format!("binding `{}` host", b.name), &sample_fill(h))
+                .map_err(ConnectorError::Invalid)?;
+        }
+    }
+    Ok(())
 }
 
 fn token_ok(s: &str, max: usize) -> bool {
@@ -226,22 +343,41 @@ pub fn check_marketplace_connector(c: &Connector) -> Result<(), ConnectorError> 
             return bad("api_key connectors are not supported yet: a node has no connection flow for an API key")
         }
         Provider::Oauth2(p) => {
-            if p.profile != OAuthProfile::Discover {
+            if !matches!(p.profile, OAuthProfile::Discover | OAuthProfile::Oauth) {
                 let name = match p.profile {
                     OAuthProfile::Entra => "entra",
                     OAuthProfile::Google => "google",
                     OAuthProfile::Slack => "slack",
                     OAuthProfile::Discover => "discover",
+                    OAuthProfile::Oauth => "oauth",
                 };
                 return bad(format!(
-                    "OAuth profile `{name}` is not available to a marketplace connector yet: use `discover` with a remote MCP server"
+                    "OAuth profile `{name}` is not available to a marketplace connector yet: use `discover` with a remote MCP server, or `oauth` with REST bindings"
                 ));
+            }
+            if p.profile == OAuthProfile::Oauth {
+                if p.client != ClientKind::Org {
+                    return bad("profile `oauth` needs `client: org`: the org's admin supplies the client id at Enable");
+                }
+                if let Some(e) = &p.endpoints {
+                    for (n, u) in [
+                        ("endpoints.authorize", Some(&e.authorize)),
+                        ("endpoints.token", Some(&e.token)),
+                        ("endpoints.revoke", e.revoke.as_ref()),
+                    ] {
+                        if let Some(u) = u {
+                            let h = url_host(n, u).map_err(ConnectorError::Invalid)?;
+                            check_public_dns_host(&format!("{n} host"), &sample_fill(h))
+                                .map_err(ConnectorError::Invalid)?;
+                        }
+                    }
+                }
             }
             if p.client_secret == ClientSecret::SqurellRelay {
                 return bad(SECRET_REFUSED);
             }
             if p.org_consent != OrgConsent::None {
-                return bad("orgConsent must be `none` for profile `discover`");
+                return bad("orgConsent must be `none` for profile `discover` or `oauth`");
             }
             if let Some(cid) = &p.client_id {
                 let ok = !cid.is_empty()
@@ -261,13 +397,23 @@ pub fn check_marketplace_connector(c: &Connector) -> Result<(), ConnectorError> 
             }
         }
     }
+    let rest = matches!(&c.provider, Provider::Oauth2(p) if p.profile == OAuthProfile::Oauth);
+    if rest {
+        if c.mcp.is_some() {
+            return bad("profile `oauth` is for REST bindings: a connector with `mcp` uses profile `discover`");
+        }
+        if c.bindings.is_none() {
+            return bad("profile `oauth` needs `bindings`");
+        }
+        return check_marketplace_bindings(c, id);
+    }
     if c.bindings.is_some() {
-        return bad("a marketplace connector cannot declare bindings: it is remote MCP only");
+        return bad("a marketplace connector with `bindings` must use profile `oauth`; `discover` is remote MCP only");
     }
     let Some(mcp) = &c.mcp else {
         return bad("a marketplace connector needs an mcp server");
     };
-    check_mcp_server_url(&mcp.url).map_err(ConnectorError::Invalid)?;
+    check_mcp_server_url(&sample_fill_url(&mcp.url)).map_err(ConnectorError::Invalid)?;
     if mcp.tools.is_empty() || mcp.tools.len() > 64 {
         return bad("mcp.tools must list 1 to 64 vetted tools");
     }
@@ -554,5 +700,286 @@ mod tests {
         for (name, raw) in BUILTIN_CONNECTOR_FILES {
             assert!(parse_marketplace_connector(raw).is_err(), "{name}");
         }
+    }
+
+    fn zendesk() -> Value {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/zendesk-shaped-connector.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_company_address_rest_connector_passes_and_is_summarized() {
+        let c = parse_marketplace_connector(&zendesk().to_string()).unwrap();
+        let cs = crate::package::summarize_connector(&c).connector.unwrap();
+        assert_eq!(cs.profile, "oauth");
+        assert_eq!(cs.client.as_deref(), Some("org"));
+        assert_eq!(cs.client_secret, "none");
+        assert_eq!(cs.hosts, vec!["{subdomain}.zendesk.com"]);
+        assert_eq!(cs.bindings[0].name, "api");
+        assert_eq!(cs.bindings[0].hosts, vec!["{subdomain}.zendesk.com"]);
+        assert_eq!(cs.mcp_host, "");
+        let t = cs.tenant.unwrap();
+        assert_eq!(
+            (t.label.as_str(), t.suffix.as_str()),
+            ("Zendesk address", "zendesk.com")
+        );
+        assert_eq!(t.text, "company address: Zendesk address (…zendesk.com)");
+        assert!(cs
+            .endpoints
+            .unwrap()
+            .token
+            .starts_with("https://{subdomain}."));
+        // An MCP connector's summary JSON does not gain the REST fields.
+        let b = parse_marketplace_connector(&good().to_string()).unwrap();
+        let v = serde_json::to_value(crate::package::summarize_connector(&b).connector.unwrap())
+            .unwrap();
+        for k in ["bindings", "endpoints", "tenant"] {
+            assert!(v.get(k).is_none(), "{k}");
+        }
+        assert_eq!(v["mcpHost"], "mcp.bugwatch.example.org");
+    }
+
+    #[test]
+    fn a_host_outside_the_suffix_names_the_suffix() {
+        let mut v = zendesk();
+        v["bindings"][0]["hosts"] = json!(["{subdomain}.elsewhere.example"]);
+        assert!(err(v).contains("suffix"));
+        let mut v = zendesk();
+        v["provider"]["endpoints"]["token"] = json!("https://{subdomain}.elsewhere.example/t");
+        assert!(err(v).contains("suffix"));
+    }
+
+    #[test]
+    fn the_template_is_only_the_whole_first_label() {
+        for host in [
+            "api.{subdomain}.zendesk.com",
+            "a{subdomain}.zendesk.com",
+            "{subdomain}a.zendesk.com",
+            "{subdomain}",
+            "{subdomain}.{subdomain}.zendesk.com",
+            "*.zendesk.com",
+            "{subdomain}.com",
+        ] {
+            let mut v = zendesk();
+            v["bindings"][0]["hosts"] = json!([host]);
+            assert!(
+                parse_marketplace_connector(&v.to_string()).is_err(),
+                "{host}"
+            );
+        }
+        let mut v = zendesk();
+        v["provider"]["endpoints"]["token"] = json!("https://{subdomain}.zendesk.com/{subdomain}");
+        assert!(err(v).contains("only in its host"));
+    }
+
+    #[test]
+    fn tenant_and_template_go_together() {
+        let mut v = zendesk();
+        v.as_object_mut().unwrap().remove("tenant");
+        assert!(err(v).contains("no `tenant`"));
+        let mut v = zendesk();
+        v["provider"]["endpoints"] = json!({
+            "authorize": "https://login.zendesk.com/a", "token": "https://login.zendesk.com/t" });
+        v["bindings"][0]["hosts"] = json!(["api.zendesk.com"]);
+        assert!(err(v).contains("no host uses"));
+        let mut v = zendesk();
+        v["tenant"]["name"] = json!("tenant");
+        assert!(err(v).contains("tenant.name"));
+        let mut v = zendesk();
+        v["tenant"]["suffix"] = json!("com");
+        v["bindings"][0]["hosts"] = json!(["{subdomain}.com"]);
+        v["provider"]["endpoints"] = json!({
+            "authorize": "https://{subdomain}.com/a", "token": "https://{subdomain}.com/t" });
+        assert!(err(v).contains("first label"));
+        let mut v = zendesk();
+        v["tenant"]["suffix"] = json!("zendesk.internal");
+        v["bindings"][0]["hosts"] = json!(["{subdomain}.zendesk.internal"]);
+        v["provider"]["endpoints"] = json!({
+            "authorize": "https://{subdomain}.zendesk.internal/a",
+            "token": "https://{subdomain}.zendesk.internal/t" });
+        assert!(err(v).contains("private network"));
+    }
+
+    #[test]
+    fn oauth_needs_endpoints_an_org_client_and_no_secret() {
+        let mut v = zendesk();
+        v["provider"].as_object_mut().unwrap().remove("endpoints");
+        assert!(err(v).contains("endpoints"));
+        let mut v = zendesk();
+        v["provider"]["clientSecret"] = json!("org_vault");
+        assert!(err(v).contains("secret"));
+        let mut v = zendesk();
+        v["provider"].as_object_mut().unwrap().remove("client");
+        assert!(err(v).contains("client"));
+        let mut v = zendesk();
+        v["provider"]["client"] = json!("org");
+        v["provider"]["clientId"] = json!("abc");
+        assert!(err(v).contains("clientId"));
+        for (k, bad) in [
+            ("authorize", "http://{subdomain}.zendesk.com/a"),
+            ("token", "https://{subdomain}.zendesk.com:8443/t"),
+            ("token", "https://{subdomain}.zendesk.com/t?x=1"),
+            ("authorize", "https://user@{subdomain}.zendesk.com/a"),
+            ("token", "https://{subdomain}.zendesk.com/t#f"),
+        ] {
+            let mut v = zendesk();
+            v["provider"]["endpoints"][k] = json!(bad);
+            assert!(
+                parse_marketplace_connector(&v.to_string()).is_err(),
+                "{bad}"
+            );
+        }
+        // `endpoints` belong to profile `oauth` only.
+        let mut v = good();
+        v["provider"]["endpoints"] = json!({ "authorize": "https://a.example.org/a",
+                                              "token": "https://a.example.org/t" });
+        assert!(err(v).contains("only for profile"));
+        // `discover` with bindings is refused.
+        let mut v = zendesk();
+        v["provider"]["profile"] = json!("discover");
+        v["provider"].as_object_mut().unwrap().remove("endpoints");
+        assert!(parse_marketplace_connector(&v.to_string()).is_err());
+    }
+
+    #[test]
+    fn a_binding_placeholder_is_the_connectors_own() {
+        for ph in [
+            "vamsec_m365_graph",
+            "vamsec_zendesk_other",
+            "vamsec_zendesk_",
+            "zendesk_api",
+        ] {
+            let mut v = zendesk();
+            v["bindings"][0]["placeholder"] = json!(ph);
+            assert!(err(v).contains("placeholder"), "{ph}");
+        }
+        let mut v = zendesk();
+        v["bindings"][0]["name"] = json!("Api");
+        v["bindings"][0]["placeholder"] = json!("vamsec_zendesk_Api");
+        assert!(err(v).contains("binding name"));
+    }
+
+    #[test]
+    fn a_binding_cannot_take_a_built_in_placeholder_through_a_matching_id_and_name() {
+        // `vamsec_<id>_<name>` is exactly the built-in `vamsec_m365_graph` for id `m365`.
+        let mut v = zendesk();
+        v["urn"] = json!("urn:vam:connector:connectors.example/pub/m365");
+        v["bindings"][0]["name"] = json!("graph");
+        v["bindings"][0]["placeholder"] = json!("vamsec_m365_graph");
+        let e = err(v);
+        assert!(e.contains("Squrell connector's"), "{e}");
+    }
+
+    #[test]
+    fn a_placeholder_that_overlaps_another_under_substring_matching_is_refused() {
+        assert!(placeholders_overlap("vamsec_a_b", "vamsec_a_b_c"));
+        assert!(placeholders_overlap("vamsec_a_b_c", "vamsec_a_b"));
+        assert!(placeholders_overlap("vamsec_a_b", "vamsec_a_b"));
+        assert!(!placeholders_overlap("vamsec_a_b", "vamsec_a_c"));
+        // A built-in's placeholder inside this one (id `m365`, name `graph_x`).
+        let mut v = zendesk();
+        v["urn"] = json!("urn:vam:connector:connectors.example/pub/m365");
+        v["bindings"][0]["name"] = json!("graph_x");
+        v["bindings"][0]["placeholder"] = json!("vamsec_m365_graph_x");
+        let e = err(v);
+        assert!(e.contains("Squrell connector's"), "{e}");
+        // Two of its own bindings, `api` and `api_v2`.
+        let mut v = zendesk();
+        let mut two = v["bindings"][0].clone();
+        two["name"] = json!("api_v2");
+        two["placeholder"] = json!("vamsec_zendesk_api_v2");
+        v["bindings"].as_array_mut().unwrap().push(two);
+        assert_eq!(v["bindings"][0]["placeholder"], json!("vamsec_zendesk_api"));
+        let e = err(v);
+        assert!(e.contains("overlaps"), "{e}");
+    }
+
+    #[test]
+    fn bindings_are_bounded_and_bearer_only() {
+        let mut v = zendesk();
+        v["bindings"][0]["inject"] = json!("header");
+        assert!(err(v).contains("bearer"));
+        let mut v = zendesk();
+        v["bindings"][0]["hosts"] = json!([
+            "{subdomain}.zendesk.com",
+            "a.zendesk.com",
+            "b.zendesk.com",
+            "c.zendesk.com",
+            "d.zendesk.com"
+        ]);
+        assert!(err(v).contains("at most 4"));
+        let mut v = zendesk();
+        let one = v["bindings"][0].clone();
+        let many: Vec<Value> = (0..9)
+            .map(|i| {
+                let mut b = one.clone();
+                b["name"] = json!(format!("b{i}"));
+                b["placeholder"] = json!(format!("vamsec_zendesk_b{i}"));
+                b
+            })
+            .collect();
+        v["bindings"] = json!(many);
+        assert!(err(v).contains("at most 8"));
+        // Exact hosts next to the template are fine; an IP is not.
+        let mut v = zendesk();
+        v["bindings"][0]["hosts"] = json!(["{subdomain}.zendesk.com", "api.zendesk.com"]);
+        assert!(parse_marketplace_connector(&v.to_string()).is_ok());
+        v["bindings"][0]["hosts"] = json!(["10.0.0.1"]);
+        assert!(parse_marketplace_connector(&v.to_string()).is_err());
+    }
+
+    #[test]
+    fn a_discover_connector_may_template_its_mcp_url() {
+        let mut v = good();
+        v["tenant"] = json!({ "name": "subdomain", "suffix": "bugwatch.example.org",
+                              "label": "Bugwatch address" });
+        v["mcp"]["url"] = json!("https://{subdomain}.bugwatch.example.org/mcp");
+        assert!(parse_marketplace_connector(&v.to_string()).is_ok());
+        v["mcp"]["url"] = json!("https://{subdomain}.elsewhere.example.org/mcp");
+        assert!(err(v).contains("suffix"));
+    }
+
+    #[test]
+    fn a_templated_mcp_host_is_kept_in_the_summary() {
+        let mut v = good();
+        v["tenant"] = json!({ "name": "subdomain", "suffix": "bugwatch.example.org",
+                              "label": "Bugwatch address" });
+        v["mcp"]["url"] = json!("https://{subdomain}.bugwatch.example.org/mcp");
+        let c = parse_marketplace_connector(&v.to_string()).unwrap();
+        let cs = crate::package::summarize_connector(&c).connector.unwrap();
+        assert_eq!(cs.mcp_host, "{subdomain}.bugwatch.example.org");
+        assert_eq!(cs.hosts, vec!["{subdomain}.bugwatch.example.org"]);
+        // An exact host is unchanged.
+        let c = parse_marketplace_connector(&good().to_string()).unwrap();
+        let cs = crate::package::summarize_connector(&c).connector.unwrap();
+        assert_eq!(cs.mcp_host, "mcp.bugwatch.example.org");
+        assert_eq!(cs.hosts, vec!["mcp.bugwatch.example.org"]);
+    }
+
+    #[test]
+    fn a_suffix_that_makes_a_filled_host_longer_than_a_dns_name_is_refused() {
+        let label = "a".repeat(63);
+        let long = format!("{label}.{label}.{label}.com"); // 195 characters: 63 + 1 + 195 = 259
+        let ok = format!("{label}.{label}.com"); // 63 + 1 + 129 = 193
+        let with = |suffix: &str| {
+            let text = zendesk().to_string().replace("zendesk.com", suffix);
+            serde_json::from_str::<Value>(&text).unwrap()
+        };
+        assert!(parse_marketplace_connector(&with(&ok).to_string()).is_ok());
+        let e = err(with(&long));
+        assert!(e.contains("DNS name"), "{e}");
+    }
+
+    #[test]
+    fn the_profile_list_names_oauth() {
+        let mut v = good();
+        v["provider"]["profile"] = json!("generic");
+        let e = err(v);
+        assert!(
+            e.contains("unknown OAuth profile") && e.contains("oauth"),
+            "{e}"
+        );
     }
 }

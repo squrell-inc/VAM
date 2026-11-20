@@ -28,6 +28,7 @@ mod question;
 pub mod queue;
 pub mod rate_limit;
 pub(crate) mod reauth;
+pub use reauth::resume_connected_connector_parks;
 mod release_suggestion;
 pub(crate) mod resume_decisions;
 pub mod resume_run;

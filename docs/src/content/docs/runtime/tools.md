@@ -104,8 +104,29 @@ A connection uses one of two auth modes: `static` (the default) or `oauth`.
   `resource` for the MCP server, then hands the tokens to `vamd` with
   `PUT /v1/mcp/connections/:id/oauth/tokens`. `vamd` never opens a browser and never sees the
   authorization code. The discovery and browser steps live in the app, not in this repository.
-  The one exception is a connector whose client the org admin supplied, with a secret
-  (`clientSecret: org_vault`, below): there the node exchanges the code.
+  The one exception is a connector whose client the org admin supplied (`client: "org"`, below), with a
+  secret or without one: there the node exchanges the code.
+
+### The connector file for a company address (REST, `profile: "oauth"`)
+
+A provider that gives every company its own host (`<company>.example.com`) and publishes no discovery metadata
+is described in the connector file, not discovered. `provider.profile: "oauth"` carries fixed
+`provider.endpoints { authorize, token, revoke? }` (`https`, port 443 at most, no query, fragment or user info) and
+needs `client: "org"` with `clientSecret: "none"` (a secret with fixed endpoints is not available yet). A
+top-level `tenant { name: "subdomain", suffix, label }` names the one parameter the admin will enter at Enable:
+`{subdomain}` may stand only for the whole first label of a host, and every templated host (in `endpoints`,
+`mcp.url` and `bindings[].hosts`) is exactly `{subdomain}.<suffix>`, where the suffix has at least two labels on a
+public DNS name. A file with a template and no `tenant`, or the reverse, is refused. A marketplace connector may
+declare 1 to 8 REST `bindings` (1 to 4 hosts each, `value: access_token`, `inject: bearer`) whose placeholder is
+exactly `vamsec_<connector id>_<binding name>`; a skill's `egress[].host` may be `{subdomain}.<dns name>` and a
+listing is refused when that is not the suffix of the connector it ships. The listing's capability summary shows
+the admin the sign-in endpoints, the bindings, the company address (label and suffix) and the templated hosts.
+The member signs in through the node's code exchange (below). The node attaches the member's access token to a
+request only when the guest sent the connector's binding placeholder as the `Authorization` value, the request's
+host is one of the binding's hosts as filled with the node's company address, and the call matches an egress shape
+the calling skill tool declared in its manifest (method, path, `{subdomain}` filled from the connector, never from
+the skill); the token is read after those checks and never enters the guest. A placeholder anywhere else, on another
+company's host or outside the shape is refused.
 
 ### The admin's client: the node exchanges the code
 
@@ -129,6 +150,23 @@ provider accepts the code, the member's connection (the connector and the node's
 are the node's), the refresh token and the access token are one transaction, which first checks that the admin's
 client, the enable and the connector's server are still what the code was exchanged for. The tools are listed
 next, and the member's connector entry is the answer.
+
+The node exchanges for every connector with `client: "org"`, with a secret or without one. A client with no secret
+(`clientSecret: "none"`) sends none: the form has no `client_secret` and no Authorization header. A REST connector
+(`profile: "oauth"`, a company address) is the same and also never sends the RFC 8707 `resource` (a type, not a
+check: its code and refresh forms have no such field). The code goes only to the token endpoint pinned at Enable
+(filled with the company address, never one a request names), and only while the connector file still names that
+endpoint for the node's address (a 409 before any request otherwise). Its connection is a `connector_connections`
+row (the address it was made under, the token endpoint, no account label), the refresh token pinned to the token
+host and the access token pinned to every host of the connector's bindings, written in one transaction that
+re-checks the client, the enable, the address and the hosts. A provider that issues no refresh token is a 502 and
+nothing is stored. The refresh goes to the node client's token endpoint with the admin's client id (and the file's
+`scope` when it lists scopes); a connection made under another address or endpoint than the node's is never
+refreshed (`needs_reconnect`, no request), a refresh token is read only from a row pinned to the token host, and a
+replaced or cleared client marks every member's connection `needs_reconnect`. Disconnect deletes the rows and
+revokes only when the file declares `endpoints.revoke` (RFC 7009, no secret). The app's own tokens are refused for
+such a connector: `PUT /v1/connectors/{id}/connection` answers 400 (use the code exchange) before it reads the
+body.
 
 The local checks (body, redirect URI, code and verifier syntax, the connector, the enable, the saved client and
 secret) run before the request and write nothing; the enable is checked again once the member's credential gate is
@@ -165,8 +203,8 @@ same client. Turning the connector off and on again with no secret saved in betw
 provider refused the secret that is still saved), so those members stay parked; the node keeps a marker on the
 client for a secret saved while the connector was off, and only the enable that follows such a save clears it. No code, verifier,
 secret or token is in any answer or error. For such a connector the app-path routes are closed:
-`PUT /v1/mcp/connections/:id/oauth/tokens` answers 400 (use the code exchange), a connect that names another
-token endpoint or client id is refused, and a `clientSecret` is refused for any connector-backed row. A refresh
+`PUT /v1/mcp/connections/:id/oauth/tokens` answers 400 (use the code exchange), a connect with an `oauth` block
+(naming any token endpoint or client id) is refused, and a `clientSecret` is refused for any connector-backed row. A refresh
 and the revoke on disconnect use the node's endpoints, client id and the org secret, read at that moment (a
 replaced secret is used by the next refresh); the revoke authenticates the way the provider's
 `revocation_endpoint_auth_methods_supported` says (the same choice as for the token endpoint), with

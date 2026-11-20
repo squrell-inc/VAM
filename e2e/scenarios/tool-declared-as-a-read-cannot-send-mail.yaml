@@ -41,6 +41,7 @@ guards:
   - vam:crates/vam-orchestrator/src/security.rs
   - vam:crates/vam-orchestrator/src/session.rs
   - vam:crates/vam-network/src/broker.rs
+  - vam:crates/vam-orchestrator/src/connection_egress.rs
 mock:
   - when: { step: post, toolName: m365_probe_search }
     reply: { text: The tool was refused. }

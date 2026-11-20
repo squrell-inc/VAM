@@ -561,6 +561,8 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   form (raw, base64 and base64url padded or not at three alignments, hex, percent-encoded,
   JSON-escaped) and for any run of 12 or more of its bytes. A hit is `product` and names the form
   and the place only, never the bytes.
+  With no run in the scenario it searches the node's connector, MCP connection and secret listings instead
+  (`/v1/connectors`, `/v1/mcp/connections`, `/v1/secrets`); it fails as `scenario` when none of them answers.
 - `expect: { thread: { role, contains, maxBytes } }`: the matched message's text is also at most
   `maxBytes` bytes. The observation lists the sizes seen.
 - `flood: { as: <org alias>, path: /v1/node, count: 300 }` sends `count` GETs with that identity's
@@ -801,11 +803,11 @@ broker started). Tag `notifications`; a scenario that waits for the wall clock a
 
 ## Connectors (`crates/vam-e2e/src/connectors.rs`)
 
-Connector scenarios use four runner-hosted loopback listeners (Microsoft login, Microsoft Graph, Linear and the
-filebox service; std-only HTTP, started once per run when a scenario `given`s a `mock-provider` piece). Tag `connectors`. Token values are made by the runner, kept in memory,
+Connector scenarios use runner-hosted loopback listeners (Microsoft login, Microsoft Graph, Linear, the
+filebox service and one per company of the ticketdesk service; std-only HTTP, started once per run when a scenario `given`s a `mock-provider` piece). Tag `connectors`. Token values are made by the runner, kept in memory,
 added to the scrub list and never printed or logged; a listing that holds one fails the `connectors` expect.
 
-- World piece `kind: mock-provider`, `provider: microsoft-login | microsoft-graph | linear-server | filebox`. `microsoft-login` serves
+- World piece `kind: mock-provider`, `provider: microsoft-login | microsoft-graph | linear-server | filebox | ticketdesk`. `microsoft-login` serves
   `POST /{tenant}/oauth2/v2.0/token` for `refresh_token` grants it was told about, logs form field **names** (and the
   values of `client_id`, `grant_type`, `scope` only), and answers `invalid_grant` once revoked. `linear-server` is a
   streamable-HTTP MCP server at `/mcp` (`list_issues`, `get_issue`, `save_issue`, `save_comment` and the unvetted
@@ -883,6 +885,50 @@ and **single-use rotating refresh tokens** (a spent one answers `invalid_grant`)
 - Fixture `marketplace-community-connectors` also lists `filebox-connector` (connector `filebox`: `discover`, `client:
   org`, `clientSecret: org_vault`, `search_files` and `read_file`, MCP `https://mcp.filebox.example/mcp`) and
   `org-secret-without-org-client` (`org_vault` without `client: org`, refused).
+
+### Company address (ticketdesk, `mock-ticketdesk-server`)
+
+For a connector the admin points at the company's own instance of a service (`profile: oauth`, fixed `endpoints`, one
+`tenant` parameter `{subdomain}` entered at Enable, `client: org`, `clientSecret: none`, REST bindings). `mock-provider`
+with `provider: ticketdesk` is a fictional Zendesk-like service at `https://<company>.ticketdesk.example` (the scenarios use
+`acme` and `globex`). Each company has its own loopback listener and all share one provider state: an `oauth:` or `rest:`
+seam key maps one https origin to one `http://127.0.0.1:<port>` with no path, and the request reaches the mock with a
+loopback `Host`, so the listener is what names the company (`host=<company>` in the log).
+
+- OAuth endpoints are fixed, there is no metadata. `GET /oauth/authorizations/new` mints a code for a client id starting
+  `e2e-ticketdesk-client`, the redirect URI and the S256 challenge (302; the runner plays the browser); a code belongs to
+  the company that minted it. `POST /oauth/tokens` is a public client: a request with a `client_secret` is refused
+  (401 `invalid_client`), codes are single-use and checked with verifier and redirect URI, refresh tokens are single-use
+  and rotate (a spent one answers `invalid_grant`).
+- The REST API (`GET /api/v2/search.json`, `GET /api/v2/tickets/{id}.json`, `POST /api/v2/tickets.json`) answers 401 unless
+  the bearer is the current access token **of that company**.
+- It logs field names, the values of `client_id`, `grant_type` and `redirect_uri`, `host=<company>`,
+  `client-secret=none|present`, `resource=none|present`, `refresh=fresh|reused|unknown`, `method=<verb>` and
+  `bearer=current|stale|placeholder|unknown|none`; never a value. `mock-requests` judges the union of fields over the
+  requests it keeps, so assert one company with `with: "host=acme"` and `count`.
+- `mock-provider: { piece, shortTokens: true }`: access tokens issued from now on live 60 s (`expires_in: 60`), inside the
+  node's 120 s swap window, so every call refreshes first. Only the ticketdesk piece takes it.
+- The client secret a test sends (`clientSecret: { piece: mock-ticketdesk-server }`, any `which`), and every token the
+  provider issues, are in the scrub list under the piece's alias; `expect: { secret-absent: { secret: <alias> } }` judges
+  them all. One ticketdesk piece per scenario.
+- Seam: `oauth:https://acme.ticketdesk.example` and `…globex…` are on (`PASS_OAUTH_SEAM`; the node already accepts any
+  https origin). `rest:https://<company>.ticketdesk.example` (the egress gate answers the company's host from the same
+  listener) is on (`PASS_REST_SEAM`, `connectors.rs`, since CN-6.4): vamd accepts the key and the gate dials the listener for that host.
+- `connector-node` takes `tenant: { subdomain }`, sent as written in `PUT /v1/connectors/{id}/node` (so the scenario tests
+  what the node refuses). A node that accepted a `tenant` is sent `tenant: null` at cleanup with the client.
+- `connector-connect` with a ticketdesk `piece` plays the app for a `client: org` connector with no secret: it reads
+  `node.client.clientId` and `node.client.authorizeEndpoint` from the caller's `GET /v1/connectors` entry, makes a PKCE
+  pair, asks the company's listener (named by the authorize host) for a code and posts `{ code, codeVerifier,
+  redirectUri }` to `POST /v1/connectors/{id}/connection/oauth/code`. `via: tokens` plays an app that holds the tokens:
+  `PUT /v1/connectors/{id}/connection` with `{ accessToken, refreshToken }` (the node must refuse it and name the
+  exchange). The connection is removed at cleanup with `DELETE /v1/connectors/{id}/connection`.
+- Fixture `marketplace-community-connectors` also lists `ticketdesk-connector` (connector `ticketdesk`: `profile: oauth`,
+  `endpoints` on `https://{subdomain}.ticketdesk.example`, `tenant { subdomain, ticketdesk.example, "Ticketdesk address" }`,
+  binding `api` / `vamsec_ticketdesk_api`; skill `ticketdesk-tickets` in python3 with `ticket_search` (GET, prefixes
+  `/api/v2/search.json` and `/api/v2/tickets/`) and `ticket_create` (POST, exact `/api/v2/tickets.json`, asks first),
+  both on `{subdomain}.ticketdesk.example`, which reads its host from `.vam/connector.json` next to its manifest; the
+  assistant `ticketdesk-assistant`), and two listings that are refused: `company-address-outside-its-suffix` (a binding on
+  `{subdomain}.elsewhere.example`) and `rest-connector-with-a-foreign-placeholder` (placeholder `vamsec_m365_graph`).
 
 ### Skills that call Microsoft Graph as the member
 

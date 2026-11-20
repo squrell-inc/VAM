@@ -411,6 +411,9 @@ struct Port52Session {
     /// The call the PEP last authorized; the egress gate attaches a connection token only
     /// inside its declared shape (CN-2.3).
     call_window: Arc<vam_network::CallWindow>,
+    /// The calls whose intent check refreshed the member's token, so the swap of the same call
+    /// does not refresh again (CN-6.4). Keyed by the call id; shared with the egress gate.
+    intent_refreshes: Arc<crate::connection_egress::IntentRefreshes>,
     skills_dir: std::path::PathBuf,
     registry: Arc<crate::host_tools::HostToolRegistry>,
     checkpoint_session: String,
@@ -468,13 +471,19 @@ impl Port52Dispatch for Port52Session {
                     .map(|l| l.lifecycle_generation as u64)
                     .unwrap_or(1);
                 // A skill that needs a connector: refused or parked before the policy decides.
-                let gate = crate::connector_park::precheck(
+                // An earlier mark for this call id (an approval wait, then the intent again) no
+                // longer stands; the check below marks it again if it refreshes.
+                self.intent_refreshes.clear(&call_id);
+                let (gate, refreshed) = crate::connector_park::precheck(
                     &self.store,
                     &self.vault,
                     &self.checkpoint_session,
                     &tool_name,
                 )
                 .await;
+                if refreshed {
+                    self.intent_refreshes.mark(&call_id);
+                }
                 let resp = self
                     .sec_ctx
                     .handle_tool_intent_request_gated(&self.store, req, gate);
@@ -713,6 +722,9 @@ pub async fn spawn_session_brokers(
     let call_window_52 = call_window.clone();
     let call_window_53 = call_window.clone();
     let call_window_54 = call_window;
+    let intent_refreshes = Arc::new(crate::connection_egress::IntentRefreshes::new());
+    let intent_refreshes_52 = intent_refreshes.clone();
+    let intent_refreshes_54 = intent_refreshes;
     let session_id_clone_52 = session_id.clone();
     let store_clone_52 = store.clone();
     let sec_ctx_clone_52 = sec_ctx.clone();
@@ -753,12 +765,14 @@ pub async fn spawn_session_brokers(
             let layout_inner = layout_52.clone();
             let committer_inner = committer.clone();
             let call_window_inner = call_window_52.clone();
+            let intent_refreshes_inner = intent_refreshes_52.clone();
             tokio::spawn(async move {
                 let mut session = Port52Session {
                     sec_ctx: sec_ctx_inner,
                     store: store_inner,
                     vault: vault_inner,
                     call_window: call_window_inner,
+                    intent_refreshes: intent_refreshes_inner,
                     skills_dir: skills_dir_inner,
                     registry: registry_inner,
                     checkpoint_session,
@@ -1084,13 +1098,16 @@ pub async fn spawn_session_brokers(
             resolved_allowed_ips: vec![],
         };
         let policy_container = Arc::new(vam_network::ActivePolicyContainer::new(initial_snap));
-        let connection_source = Arc::new(crate::connection_egress::SessionConnectionSource::new(
-            call_window_54,
-            store_clone_54.clone(),
-            vault_clone_54.clone(),
-            session_id_clone_54.clone(),
-            session_owner_54.clone(),
-        ));
+        let connection_source = Arc::new(
+            crate::connection_egress::SessionConnectionSource::new(
+                call_window_54,
+                store_clone_54.clone(),
+                vault_clone_54.clone(),
+                session_id_clone_54.clone(),
+                session_owner_54.clone(),
+            )
+            .with_intent_refreshes(intent_refreshes_54),
+        );
         let secret_provider = Arc::new(
             crate::secrets::VaultSecretProvider::new(vault_clone_54)
                 .with_caller(session_owner_54)
@@ -1135,6 +1152,13 @@ pub async fn spawn_session_brokers(
         #[cfg(feature = "process-guest")]
         if let Some(base) = crate::process_mode::graph_endpoint() {
             gate = gate.with_upstream_redirect("graph.microsoft.com", base.as_str());
+        }
+        // TEST ONLY (process-guest builds): each company host a connector binding reaches is
+        // answered by that company's loopback listener (`rest:<origin>` seam keys, CN-6.4). The
+        // host still passes the egress authorizer and the connection envelope.
+        #[cfg(feature = "process-guest")]
+        for (host, base) in crate::process_mode::rest_endpoints() {
+            gate = gate.with_upstream_redirect(&host, base.as_str());
         }
         if let Some(hook) = test_override {
             gate = gate.with_resolver(hook.resolver);

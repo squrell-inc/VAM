@@ -101,6 +101,7 @@ pub mod session_targets;
 pub mod session_tokens;
 pub mod signing;
 pub mod skill_cards;
+pub mod skill_connector_file;
 pub mod skill_package_admit;
 pub mod skill_package_resolve;
 pub mod skill_packages;

@@ -79,6 +79,53 @@
       ],
       "ref": "org-secret-without-org-client-v1.0.0",
       "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "ticketdesk-connector",
+      "displayName": "Ticketdesk",
+      "description": "Tickets in the company's own Ticketdesk, through its REST API: a connector, a skill and an assistant.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/ticketdesk-connector/connectors/ticketdesk"
+        },
+        {
+          "kind": "skill",
+          "path": "listings/ticketdesk-connector/skills/ticketdesk-tickets"
+        },
+        {
+          "kind": "agent",
+          "path": "listings/ticketdesk-connector/agents/ticketdesk-assistant"
+        }
+      ],
+      "ref": "ticketdesk-connector-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "company-address-outside-its-suffix",
+      "displayName": "Stray",
+      "description": "A connector whose binding host is outside its company-address suffix.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/company-address-outside-its-suffix/connectors/stray"
+        }
+      ],
+      "ref": "company-address-outside-its-suffix-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "rest-connector-with-a-foreign-placeholder",
+      "displayName": "Lookalike",
+      "description": "A connector whose binding placeholder is another connector's.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/rest-connector-with-a-foreign-placeholder/connectors/lookalike"
+        }
+      ],
+      "ref": "rest-connector-with-a-foreign-placeholder-v1.0.0",
+      "requiresNode": ">=0.1.0"
     }
   ]
 }

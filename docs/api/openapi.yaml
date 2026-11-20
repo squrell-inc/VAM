@@ -1130,6 +1130,24 @@ paths:
         enabled (409). An unknown id is 404. A member gets 403 and nothing
         changes. The body is validated before anything is written.
 
+        **Company address (`tenant`).** A connector that declares `tenant`
+        (a service every company reaches at its own address) is enabled with
+        `tenant: { subdomain }`, entered once. The address is trimmed, lowercased
+        and must be one DNS label: 1 to 63 letters, digits or hyphens, no
+        leading or trailing hyphen, no `xn--` prefix (400, the value is never
+        quoted). Enabling without a stored or given address is 409 and names the
+        company address; `tenant` on a connector that declares none is 400.
+        Omitting `tenant` keeps the stored address, so a disable and a
+        re-enable need none; `tenant: null` clears it, only with
+        `enabled: false` (400 otherwise). Changing an address that has a saved
+        client needs `client` in the same body (409 otherwise): the client was
+        registered in the old instance. A disabled connector that has an address
+        but no saved client takes a new address without one; enabling it then needs
+        a client (see below). The node fills `{subdomain}` in every endpoint, MCP URL and
+        binding host, so no entry holds a template once an address is set; a
+        connector with fixed endpoints (`profile: oauth`) makes no request at
+        Enable.
+
         **Admin-supplied client (`provider.client: org`).** The body may carry
         `client: { clientId, clientSecret? }`. It is accepted only for such a
         connector (400 otherwise); enabling one with no client stored or given
@@ -1223,7 +1241,9 @@ paths:
         The app signs the member in with Microsoft and passes the tokens here
         (`secrets:write`; Idempotency-Key required). Only for a REST connector
         (`microsoft-365`); an MCP connector connects through
-        `/v1/mcp/connections`. Refused, and nothing written, unless the node
+        `/v1/mcp/connections`, and a REST connector with fixed endpoints and the admin's
+        client (`profile: oauth`) only through `POST …/connection/oauth/code` (400, the body
+        is not read, nothing written). Refused, and nothing written, unless the node
         enabled the connector (403) with an admin consent recorded (409), and
         the id token's `tid` claim is the consent tenant (409; the claim is
         read, its signature is not checked in this phase). The access and
@@ -1286,6 +1306,12 @@ paths:
         Removes the caller's own token rows and connection row (`secrets:write`;
         Idempotency-Key required). Allowed while the connector is disabled. 404
         when the caller is not connected. The answer is the caller's list entry.
+        For a connector with `profile: oauth` whose file declares a revocation endpoint,
+        the node revokes the refresh token there (RFC 7009, as the client that issued the
+        grant). When it did not or could not (the admin replaced or cleared the client since,
+        or the issuing client is not known, so no credentials are sent; or the request
+        failed), the rows are deleted all the same and the answer carries
+        `providerGrantMayRemain: true`.
       parameters:
         - name: id
           in: path
@@ -1295,7 +1321,7 @@ paths:
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
       responses:
         "200":
-          description: "Disconnected. The caller's list entry (state `connect`)."
+          description: "Disconnected. The caller's list entry (state `connect`), with `providerGrantMayRemain: true` when the provider's grant may still be active."
           content:
             application/json:
               schema:
@@ -1321,25 +1347,39 @@ paths:
 
   /v1/connectors/{id}/connection/oauth/code:
     post:
-      summary: Exchange an authorization code on the node (admin-supplied client with a secret)
+      summary: Exchange an authorization code on the node (admin-supplied client)
       description: |
-        For an MCP connector with `provider.client: org` and `clientSecret: org_vault`
-        (`secrets:write`; Idempotency-Key required). The app runs the browser sign-in with
+        For every connector with `provider.client: org`, MCP or REST, with a secret or
+        without one (`secrets:write`; Idempotency-Key required). A connector with the
+        publisher's own client keeps the app's exchange (400 here). A client with no secret
+        (`clientSecret: none`) sends none, and a REST connector (`profile: oauth`, a
+        company-address connector) never gets the RFC 8707 `resource` nor an Authorization
+        header. For a REST connector the node writes a `connector_connections` row (the
+        company address it was made under, the filled token endpoint), the refresh token
+        pinned to the token host and the access token pinned to every filled binding host,
+        in one transaction that first re-checks the client, the enable, the address and the
+        filled hosts; it refuses (409, nothing sent) when the client was pinned to another
+        endpoint than the connector file names now, and (502, nothing stored) when the
+        provider issues no refresh token. The app runs the browser sign-in with
         PKCE against `node.client.authorizeEndpoint` and the admin's client id, then posts
         what it got. The body names no endpoint and no client; any other field is a 400.
         `redirectUri` must be the app's own: `squrell://oauth` or
         `http://127.0.0.1:<port>/<path>` with an explicit port other than 80 (a loopback URI
         with no port, or with the default port 80, is a 400). `codeVerifier` is 43-128 RFC 7636 characters.
         `vamd` posts `grant_type=authorization_code`, `code`, `code_verifier`,
-        `redirect_uri`, `client_id`, the RFC 8707 `resource` and the org's `client_secret`
-        to the token endpoint pinned at Enable (DNS-pinned public address, no redirects),
+        `redirect_uri`, `client_id`, for an MCP connector the RFC 8707 `resource`, and the
+        org's `client_secret` when the org keeps one, to the token endpoint pinned at Enable
+        (DNS-pinned public address, no redirects),
         then writes the caller's connection (the node's client id and endpoints), stores
         the refresh token and the access token in one transaction, and lists the vetted
-        tools. The connection is committed with its tools pending (`needsReconnect`, no
-        notification) and is `connected` only once they are adopted, so a request dropped
-        between the two (the app went away, the node stopped) leaves a connection that
-        `POST /v1/mcp/connections/{id}/refresh?scope=user` finishes (the connection is
-        user-scoped; without `scope` an org admin addresses the org scope and gets a 404). The secret goes in the body (`client_secret_post`) or as HTTP Basic
+        tools. For an MCP connector the connection is committed with its tools pending
+        (`needsReconnect`, no notification) and is `connected` only once they are adopted, so a
+        request dropped between the two (the app went away, the node stopped) leaves a connection
+        that `POST /v1/mcp/connections/{id}/refresh?scope=user` finishes (the connection is
+        user-scoped; without `scope` an org admin addresses the org scope and gets a 404). A REST
+        connector has no tools to adopt: its connection is committed `connected` directly, and the
+        runs parked on it resume once the lock is released, whether or not this request is still
+        there. The secret goes in the body (`client_secret_post`) or as HTTP Basic
         (`client_secret_basic`), whichever Enable pinned from the provider's metadata.
         The local checks (body, redirect URI, code and verifier syntax, the connector, its
         enable, the saved client and secret) run before the request and write nothing. Once
@@ -1382,7 +1422,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ConnectorEntry"
         "400":
-          description: An unknown body field, a redirect URI that is not the app's, a malformed code or verifier, a connector with no node exchange (it does not keep a secret), or the provider refused the code (spent, expired, wrong verifier).
+          description: An unknown body field, a redirect URI that is not the app's, a malformed code or verifier, a connector whose client is the publisher's own (it has no node exchange), or the provider refused the code (spent, expired, wrong verifier).
           content:
             application/json:
               schema:
@@ -1408,8 +1448,8 @@ paths:
             A request with an `Idempotency-Key` whose exchange was already sent (not retryable):
             the code is not sent again and nothing is written; read the connection state
             (`GET /v1/connectors`) and sign in again, with a new key, if it is not connected.
-            After the sign-in is stored: the connection changed while its tools were being read (a
-            later sign-in or a disconnect of the same connection). This sign-in was saved and then
+            After the sign-in is stored (an MCP connector): the connection changed while its tools were
+            being read (a later sign-in or a disconnect of the same connection). This sign-in was saved and then
             replaced or removed; the code is spent. Read the connection's state again
             (`GET /v1/connectors`) and do not repeat this request with the same code.
           content:
@@ -1421,9 +1461,9 @@ paths:
             The provider could not be reached (nothing was written; retryable); or it answered with no
             refresh token (nothing was written; not retryable: the provider must issue a refresh token,
             offline access, for the admin's client before the member signs in again); or the provider accepted the code but the connection could not be saved (nothing was replaced;
-            the code cannot be used again, so sign in again); or the sign-in was stored but the
-            connector's tools could not be read (the connection is `needsReconnect` and stays so, with
-            its notification open and parked runs parked, until
+            the code cannot be used again, so sign in again); or, for an MCP connector, the sign-in was
+            stored but the connector's tools could not be read (the connection is `needsReconnect` and
+            stays so, with its notification open and parked runs parked, until
             `POST /v1/mcp/connections/{id}/refresh?scope=user` lists them).
           content:
             application/json:
@@ -3839,7 +3879,7 @@ paths:
 
         The app opens the browser and runs the sign-in in every flow; vamd never opens
         one. vamd does not see the authorization code either, except for a connector with
-        an admin-supplied client and secret (`clientSecret: org_vault`): the app hands it
+        an admin-supplied client (`client: org`, with a secret or without): the app hands it
         the code, verifier and redirect URI (`POST
         /v1/connectors/{id}/connection/oauth/code`), vamd exchanges the code, and this
         route answers 400 for that connector. A `clientSecret` is refused (400) for any
@@ -7087,6 +7127,17 @@ components:
             tenantId:
               type: string
               description: Microsoft tenant GUID the admin consented for.
+        tenant:
+          type: [object, "null"]
+          description: |
+            The company address, for a connector that declares `tenant`. Omitted keeps the stored
+            address; `null` removes it (only with `enabled: false`).
+          additionalProperties: false
+          required: [subdomain]
+          properties:
+            subdomain:
+              type: string
+              description: One DNS label, 1-63 of letters, digits and hyphens (case is folded).
         client:
           type: [object, "null"]
           description: |
@@ -7132,6 +7183,9 @@ components:
         label:
           type: string
           description: "The tile text; for a connected REST connector, the account (`preferred_username`)."
+        providerGrantMayRemain:
+          type: boolean
+          description: "Only on the answer to a REST disconnect, and only when true (the rows were deleted but the provider's grant may still be active: it was not revoked)."
         node:
           type: object
           required: [enabled, configured]
@@ -7151,6 +7205,16 @@ components:
             updatedAt:
               type: integer
               description: Only for callers with `users:admin`.
+            tenant:
+              type: object
+              description: "The company address of a connector that declares `tenant` (members see it once the connector is enabled)."
+              properties:
+                subdomain: { type: string }
+                label: { type: string }
+                hosts:
+                  type: array
+                  items: { type: string }
+                  description: Every host the connector reaches at this address.
             client:
               type: object
               description: "A connector with `provider.client: org` whose client is stored (members see it once the connector is enabled). Never holds the secret."

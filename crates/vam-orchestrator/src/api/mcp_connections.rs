@@ -22,14 +22,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mcp_registry::{
     apply_oauth_token_metadata, assert_no_visible_name_collision,
-    decide_pinned_snapshot_with_instructions, delete_replaced_auth_mode_bindings,
-    fetch_tools_snapshot, flagged_vendor_text, mcp_auth_binding_id, mcp_capabilities,
-    mcp_oauth_refresh_token_binding_id, merge_header_bindings, normalize_connect_headers,
-    parse_side_effect_class, resolve_connection_auth, sanitize_oauth_last_refresh_error,
-    sanitized_oauth_metadata, store_mcp_header_credential, store_mcp_oauth_tokens,
-    suggested_read_only_tools, validate_connection_id, validate_mcp_timeout_ms, HeaderBinding,
-    McpAuthMode, McpConnection, McpHeaderInput, McpOauthMetadata, McpOauthRegistrationMethod,
-    McpOauthStatus, McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision,
+    decide_pinned_snapshot_with_instructions, fetch_tools_snapshot, flagged_vendor_text,
+    mcp_auth_binding_id, mcp_capabilities, mcp_oauth_refresh_token_binding_id,
+    merge_header_bindings, normalize_connect_headers, parse_side_effect_class,
+    resolve_connection_auth, sanitize_oauth_last_refresh_error, sanitized_oauth_metadata,
+    store_mcp_header_credential, store_mcp_oauth_tokens, suggested_read_only_tools,
+    validate_connection_id, validate_mcp_timeout_ms, HeaderBinding, McpAuthMode, McpAuthWrite,
+    McpConnection, McpHeaderInput, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
+    McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision,
 };
 use crate::secrets::{
     authorize_org_secret_write, resolve_secret_scope, vault_owner_user_id, SecretScope,
@@ -127,7 +127,7 @@ pub struct UpsertMcpOauthTokensRequest {
 
 /// OAuth identity fields accepted on connect. Token material is rejected / out of scope
 /// for this endpoint (see token upsert).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectMcpOauthRequest {
     pub resource: String,
@@ -291,33 +291,55 @@ fn parse_connect_oauth(req: ConnectMcpOauthRequest) -> Result<McpOauthMetadata, 
     })
 }
 
-/// The `oauth` block of a connect to a connector that uses the admin's client (CN-5.3, O3): the
-/// token endpoint and client id must be the node's (a block naming others is refused), and the
-/// authorization server, revocation endpoint, resource and registration method are the node's and
-/// the connector's whatever the request says.
-fn pin_org_oauth(
+/// A connect to a connector that uses the admin's client (CN-5.3, CN-6.3, O3, O5 widened). Every
+/// `client: org` connector connects by the node's code exchange, with a secret or without one, so an
+/// `oauth` block on this route is refused (400, nothing written): the app never names a token
+/// endpoint or a client id for such a connector, and never holds its tokens. A connect with no
+/// `oauth` block (a reconnect of the row's own settings, ask rules) goes on, and needs the admin's
+/// client to be saved.
+/// The refusals the connect makes for a connector whose client is the admin's, run for a request
+/// that would replace a stale row (no existing row to inherit a mode or OAuth block from): the
+/// connector's OAuth client, the OAuth block, the auth mode. They are the checks further down this
+/// handler, made before the stale row and its tokens are purged, not after.
+fn refuse_replacement(state: &AppState, req: &ConnectMcpRequest) -> Result<(), OrchestratorError> {
+    let Some(org) = state.store.org_connector(&req.connection_id)? else {
+        return Ok(());
+    };
+    let requested_mode = match req.auth_mode.as_deref() {
+        None => None,
+        Some(raw) => Some(McpAuthMode::parse(raw)?),
+    };
+    let requested_oauth = match req.oauth.clone() {
+        None => None,
+        Some(oauth) => Some(parse_connect_oauth(oauth)?),
+    };
+    refuse_org_oauth_block(&req.connection_id, &org, &requested_oauth)?;
+    let (auth_mode, _) = resolve_connection_auth(None, requested_mode, requested_oauth)?;
+    if auth_mode != McpAuthMode::Oauth {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "`{}` signs in with the OAuth client your admin saved: connect it with authMode oauth",
+            req.connection_id
+        )));
+    }
+    Ok(())
+}
+
+fn refuse_org_oauth_block(
     id: &str,
     org: &crate::connector_client::OrgConnector,
-    oauth: Option<McpOauthMetadata>,
-) -> Result<Option<McpOauthMetadata>, OrchestratorError> {
-    let Some(node) = org.client.as_ref() else {
+    oauth: &Option<McpOauthMetadata>,
+) -> Result<(), OrchestratorError> {
+    if org.client.is_none() {
         return Err(OrchestratorError::Conflict(format!(
             "`{id}` has no OAuth client saved by your admin yet"
         )));
-    };
-    let Some(mut oauth) = oauth else {
-        return Ok(None);
-    };
-    if oauth.token_endpoint != node.token_endpoint || oauth.client_id != node.client_id {
+    }
+    if oauth.is_some() {
         return Err(OrchestratorError::InvalidContract(format!(
-            "`{id}` uses the OAuth client and token endpoint your admin saved; a connection that names another is refused"
+            "`{id}` connects through the node's code exchange: use POST /v1/connectors/{id}/connection/oauth/code"
         )));
     }
-    oauth.authorization_server = node.issuer.clone();
-    oauth.revocation_endpoint = node.revocation_endpoint.clone();
-    oauth.resource = org.mcp_url.clone();
-    oauth.registration_method = McpOauthRegistrationMethod::Manual;
-    Ok(Some(oauth))
+    Ok(())
 }
 
 /// Org connections snapshot with the org credential only, so a shared
@@ -388,13 +410,16 @@ async fn connect(
     authorize_org_secret_write(scope, auth.role())?;
     let owner = vault_owner_user_id(scope, auth.owner_user_id()).to_string();
     let host = connection_host(&req.url).map_err(OrchestratorError::from)?;
-    let existing = match state
+    let mut existing = match state
         .store
         .get_mcp_connection(scope, &owner, &req.connection_id)
     {
         Ok(existing) if connectors::is_stale_installed_row(&state.store, &existing, &req.url)? => {
             // Only a connect the connector would accept (enabled, its own URL) replaces the row.
             connectors::gate_mcp_write(&state.store, &req.connection_id, Some(&req.url), None)?;
+            // What the connect refuses once this row is gone, decided now: a request that is
+            // going to be refused leaves the row and its grant as they are.
+            refuse_replacement(&state, &req)?;
             // The connector an update changed names another server than this row's, and the row
             // was marked needs_reauth when the update landed: it is a connection to a server the
             // connector no longer names. Disconnect it (tokens revoked and removed) so the member
@@ -469,12 +494,11 @@ async fn connect(
         Some(_) => state.store.org_connector(&req.connection_id)?,
         None => None,
     };
-    let requested_oauth = match &org {
-        Some(org) => pin_org_oauth(&req.connection_id, org, requested_oauth)?,
-        None => requested_oauth,
-    };
+    if let Some(org) = &org {
+        refuse_org_oauth_block(&req.connection_id, org, &requested_oauth)?;
+    }
     let (auth_mode, oauth) =
-        resolve_connection_auth(existing.as_ref(), requested_mode, requested_oauth)?;
+        resolve_connection_auth(existing.as_ref(), requested_mode, requested_oauth.clone())?;
     if org.is_some() && auth_mode != McpAuthMode::Oauth {
         return Err(OrchestratorError::InvalidContract(format!(
             "`{}` signs in with the OAuth client your admin saved: connect it with authMode oauth",
@@ -482,6 +506,8 @@ async fn connect(
         ))
         .into());
     }
+    #[cfg(test)]
+    connectors::test_signal::fire(&format!("mcp-connect-read:{}", req.connection_id));
     // Hold the refresh gate for an existing OAuth connection so an in-flight
     // token refresh cannot write bindings back after a mode switch or before
     // this update finishes.
@@ -495,6 +521,37 @@ async fn connect(
         ),
         _ => None,
     };
+    // The row was read before the gate was free. A sign-in or refresh that committed meanwhile
+    // wrote a newer status and expiry: the OAuth metadata this write carries forward is read again
+    // now, under the gate, so the upsert does not put the older values back. A row that is gone, or
+    // moved to another server or auth mode, is no longer the one this request was made for: nothing
+    // is written.
+    let (auth_mode, oauth) =
+        if let Some(prior) = existing.as_ref().filter(|_| credential_guard.is_some()) {
+            let changed = || {
+                OrchestratorError::Conflict(format!(
+                "the connection `{}` changed while this request waited: read it again and retry",
+                req.connection_id
+            ))
+            };
+            let fresh = match state
+                .store
+                .get_mcp_connection(scope, &owner, &req.connection_id)
+            {
+                Ok(fresh) => fresh,
+                Err(OrchestratorError::NotFound(_)) => return Err(changed().into()),
+                Err(err) => return Err(err.into()),
+            };
+            if fresh.url != prior.url || fresh.auth_mode != prior.auth_mode {
+                return Err(changed().into());
+            }
+            let resolved =
+                resolve_connection_auth(Some(&fresh), requested_mode, requested_oauth.clone())?;
+            existing = Some(fresh);
+            resolved
+        } else {
+            (auth_mode, oauth)
+        };
     let secret_value = req.secret_value.take();
     if secret_value
         .as_deref()
@@ -588,25 +645,34 @@ async fn connect(
         }
     };
     assert_no_visible_name_collision(&state.store, scope, &owner, &req.connection_id, &tools)?;
-    if let Some(prior) = existing.as_ref() {
-        if prior.auth_mode != auth_mode {
-            let retained: Vec<String> = stored_bindings
-                .iter()
-                .map(|binding| binding.binding_id.clone())
-                .collect();
-            delete_replaced_auth_mode_bindings(&state.vault, prior, auth_mode, &retained)?;
+    // A mode change's previous-mode credentials are deleted by the guarded write below, in the
+    // transaction that checks the sign-in state: a refused write leaves them.
+    // A settings-only write (an OAuth row, no OAuth block, no mode change) leaves the sign-in
+    // columns as stored: an admin's save can mark the row for reconnect without the member's
+    // credential gate, and this write must not put back the state it read. A write that changes
+    // the sign-in is refused if the stored sign-in state moved since it was read.
+    let auth_write = match existing.as_ref() {
+        Some(prior)
+            if prior.auth_mode == McpAuthMode::Oauth
+                && auth_mode == McpAuthMode::Oauth
+                && requested_oauth.is_none() =>
+        {
+            McpAuthWrite::Keep
         }
-    }
-    state.store.upsert_mcp_connection(
+        observed => McpAuthWrite::Replace { observed },
+    };
+    #[cfg(test)]
+    connectors::test_signal::pause(&format!("mcp-connect-write:{}", req.connection_id)).await;
+    state.store.upsert_mcp_connection_guarded(
         scope,
         &owner,
         &req.connection_id,
         &req.url,
-        "",
         &header_bindings,
         &tools,
         auth_mode,
         oauth.as_ref(),
+        auth_write,
     )?;
     if instructions.is_some() {
         state.store.set_mcp_instructions(
@@ -1087,19 +1153,16 @@ async fn upsert_oauth_tokens(
     let policy = connectors::gate_mcp_write(&state.store, &id, None, Some(&conn.url))?;
     if policy.is_some() {
         // A connector's client secret is the org's (or the publisher's) and never comes from the
-        // app (O1, O5), and a connector whose secret the node keeps connects by the node's code
-        // exchange: tokens the app got are refused. Nothing is written.
+        // app (O1, O5), and a connector that uses the admin's client (with a secret or without)
+        // connects by the node's code exchange: tokens the app got are refused. Nothing is
+        // written.
         if req.client_secret.is_some() {
             return Err(OrchestratorError::InvalidContract(
                 "a connector's client secret is not accepted from the app".into(),
             )
             .into());
         }
-        if state
-            .store
-            .org_connector(&id)?
-            .is_some_and(|org| org.keeps_secret)
-        {
+        if state.store.org_connector(&id)?.is_some() {
             return Err(OrchestratorError::InvalidContract(format!(
                 "`{id}` connects through the node's code exchange: use POST /v1/connectors/{id}/connection/oauth/code"
             ))
