@@ -1267,6 +1267,7 @@ async fn handle_create_session(
                     &store,
                     &overlay_root,
                     &skill_urns,
+                    seed_dir_for_materialize.as_deref(),
                 )?;
             }
         }
@@ -1422,18 +1423,11 @@ async fn handle_create_session(
             // What each skill tool declared it may reach through a connection, as of this boot.
             // The skills' cards, checked once for this session (a run reads only these).
             crate::skill_cards::seed_session(&session_id_catalog, &skills_dir);
-            // A templated shape host is filled with the node's company address here (CN-6.4); with
-            // the connectors unreadable nothing is filled, and every templated shape is dropped.
+            // A templated shape host stays templated in the session's record: it is filled with the
+            // node's company address when each call's window opens (`connection_egress::record_intent`,
+            // CN-6.4), so a run that waits for the member to connect, or for the admin to enter the
+            // address, and then resumes in this session is judged against the address as it is then.
             let shapes = crate::connection_egress::parse_skill_shapes(&skills_dir);
-            let shapes = match (
-                store_catalog.connector_entries(),
-                store_catalog.node_connectors(),
-            ) {
-                (Ok(entries), Ok(nodes)) => {
-                    crate::connection_egress::fill_skill_shapes(shapes, &entries, &nodes)
-                }
-                _ => crate::connection_egress::fill_skill_shapes(shapes, &[], &[]),
-            };
             store_catalog.record_tool_egress(&session_id_catalog, &shapes)?;
             // Guest tool name -> permission target, kept for the life of the
             // session and stamped on approvals (AX-5.3b).

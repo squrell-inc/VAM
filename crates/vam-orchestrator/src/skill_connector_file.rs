@@ -124,16 +124,62 @@ fn clear_hint_dir(dir: &Path) -> Result<(), OrchestratorError> {
     }
 }
 
+/// The seed tree's own copy of skill `name` (`seed/skills/<name>`): a real directory whose parent is
+/// the seed's `skills` directory. `None` when the seed has no such skill.
+fn seed_skill_dir(seed: Option<&Path>, name: &str) -> Result<Option<PathBuf>, OrchestratorError> {
+    let Some(seed) = seed else {
+        return Ok(None);
+    };
+    skill_dir(&seed.join("skills"), name)
+}
+
+/// Copies a seed skill into the session's staged tree: regular files and directories only (a
+/// symlink in the seed is not followed or copied).
+fn copy_seed_skill(from: &Path, to: &Path) -> Result<(), OrchestratorError> {
+    std::fs::create_dir_all(to).map_err(OrchestratorError::Io)?;
+    for entry in std::fs::read_dir(from).map_err(OrchestratorError::Io)? {
+        let entry = entry.map_err(OrchestratorError::Io)?;
+        let kind = entry.file_type().map_err(OrchestratorError::Io)?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_seed_skill(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &target).map_err(OrchestratorError::Io)?;
+        }
+    }
+    Ok(())
+}
+
 /// Writes the file for one skill from the connectors and node rows given. Returns whether a
 /// file was written.
+///
+/// A skill the catalog staged is written in place. A skill only the seed tree supplies is not staged;
+/// when its manifest needs a connector this node can tell the host of, the seed's copy is copied
+/// into the staged tree first (the catalog overlay wins per skill name on materialization, so the
+/// copy replaces the seed's) and the file is written there. The shared seed tree is never written.
 fn write_one(
     root: &Path,
     name: &str,
     entries: &[ConnectorEntry],
     nodes: &[NodeConnector],
+    seed: Option<&Path>,
 ) -> Result<bool, OrchestratorError> {
-    let Some(dir) = skill_dir(root, name)? else {
-        return Ok(false);
+    let dir = match skill_dir(root, name)? {
+        Some(dir) => dir,
+        None => {
+            let Some(seed_dir) = seed_skill_dir(seed, name)? else {
+                return Ok(false);
+            };
+            let Some(urn) = requires_connector(&seed_dir) else {
+                return Ok(false);
+            };
+            if hint_for(&urn, entries, nodes).is_none() {
+                return Ok(false);
+            }
+            let staged = root.join(plain_name(name)?);
+            copy_seed_skill(&seed_dir, &staged)?;
+            staged
+        }
     };
     let Some(urn) = requires_connector(&dir) else {
         return Ok(false);
@@ -164,6 +210,7 @@ pub fn write_connector_files(
     store: &SqliteWorkflowStore,
     catalog_root: &Path,
     skill_urns: &[String],
+    seed_dir: Option<&Path>,
 ) -> Result<usize, OrchestratorError> {
     let mut names: Vec<String> = Vec::new();
     for urn in skill_urns {
@@ -175,7 +222,7 @@ pub fn write_connector_files(
     }
     let entries = store.connector_entries()?;
     let nodes = store.node_connectors()?;
-    write_names(catalog_root, &names, &entries, &nodes)
+    write_names(catalog_root, &names, &entries, &nodes, seed_dir)
 }
 
 fn write_names(
@@ -183,10 +230,11 @@ fn write_names(
     names: &[String],
     entries: &[ConnectorEntry],
     nodes: &[NodeConnector],
+    seed: Option<&Path>,
 ) -> Result<usize, OrchestratorError> {
     let mut written = 0;
     for name in names {
-        if write_one(root, name, entries, nodes)? {
+        if write_one(root, name, entries, nodes, seed)? {
             written += 1;
         }
     }
@@ -256,7 +304,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let d = skill(root.path(), "zd-tickets", Some(ZURN));
         let store = world(Some(node(true, Some("acme"))));
-        let n = write_connector_files(&store, root.path(), &[urn("zd-tickets")]).unwrap();
+        let n = write_connector_files(&store, root.path(), &[urn("zd-tickets")], None).unwrap();
         assert_eq!(n, 1);
         let h = hint(&d);
         assert_eq!(
@@ -279,7 +327,8 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let d = skill(root.path(), "zd-tickets", Some(ZURN));
             let store = world(n);
-            let written = write_connector_files(&store, root.path(), &[urn("zd-tickets")]).unwrap();
+            let written =
+                write_connector_files(&store, root.path(), &[urn("zd-tickets")], None).unwrap();
             assert_eq!(written, 0);
             assert!(!d.join(".vam").exists());
         }
@@ -304,7 +353,7 @@ mod tests {
         let store = world(Some(node(true, Some("acme"))));
         let names = [urn("plain"), urn("other"), urn("graph")];
         assert_eq!(
-            write_connector_files(&store, root.path(), &names).unwrap(),
+            write_connector_files(&store, root.path(), &names, None).unwrap(),
             0
         );
         // A skill that does not require a connector keeps what it has.
@@ -324,7 +373,7 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), d.join(".vam")).unwrap();
         std::fs::write(outside.path().join("keep.txt"), "keep").unwrap();
         let store = world(Some(node(true, Some("acme"))));
-        write_connector_files(&store, root.path(), &[urn("zd-tickets")]).unwrap();
+        write_connector_files(&store, root.path(), &[urn("zd-tickets")], None).unwrap();
         assert!(outside.path().join("keep.txt").exists());
         assert!(!outside.path().join("connector.json").exists());
         assert!(std::fs::symlink_metadata(d.join(".vam"))
@@ -336,12 +385,12 @@ mod tests {
         store
             .put_node_connector(&node(true, Some("globex")))
             .unwrap();
-        write_connector_files(&store, root.path(), &[urn("zd-tickets")]).unwrap();
+        write_connector_files(&store, root.path(), &[urn("zd-tickets")], None).unwrap();
         assert_eq!(hint(&d)["hosts"]["api"], "globex.zendesk.com");
         store
             .put_node_connector(&node(false, Some("globex")))
             .unwrap();
-        write_connector_files(&store, root.path(), &[urn("zd-tickets")]).unwrap();
+        write_connector_files(&store, root.path(), &[urn("zd-tickets")], None).unwrap();
         assert!(!d.join(".vam").exists());
     }
 
@@ -354,7 +403,7 @@ mod tests {
             store.node_connectors().unwrap(),
         );
         for bad in ["..", ".", "", "../x", "a/b", "/etc", "/", "a\\b"] {
-            let e = write_names(root.path(), &[bad.to_string()], &entries, &nodes);
+            let e = write_names(root.path(), &[bad.to_string()], &entries, &nodes, None);
             assert!(
                 matches!(e, Err(OrchestratorError::InvalidContract(_))),
                 "{bad:?}: {e:?}"
@@ -365,9 +414,10 @@ mod tests {
             &store,
             root.path(),
             &["urn:vam:skill:connectors.example/pub/..".to_string()],
+            None,
         );
         assert!(e.is_err());
-        let e = write_connector_files(&store, root.path(), &["not-a-urn".to_string()]);
+        let e = write_connector_files(&store, root.path(), &["not-a-urn".to_string()], None);
         assert!(e.is_err());
     }
 
@@ -378,7 +428,7 @@ mod tests {
         std::fs::write(outside.path().join("manifest.json"), manifest(Some(ZURN))).unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join("zd-tickets")).unwrap();
         let store = world(Some(node(true, Some("acme"))));
-        let e = write_connector_files(&store, root.path(), &[urn("zd-tickets")]);
+        let e = write_connector_files(&store, root.path(), &[urn("zd-tickets")], None);
         assert!(
             matches!(e, Err(OrchestratorError::InvalidContract(_))),
             "{e:?}"
@@ -387,11 +437,53 @@ mod tests {
     }
 
     #[test]
+    fn a_seed_skill_that_needs_the_connector_is_staged_with_its_hint_and_the_seed_is_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let seed = tempfile::tempdir().unwrap();
+        let seeded = skill(&seed.path().join("skills"), "zd-tickets", Some(ZURN));
+        std::fs::write(seeded.join("execute.js"), "// tool").unwrap();
+        // A symlink the seed skill holds is not followed or copied.
+        std::os::unix::fs::symlink("/etc/passwd", seeded.join("passwd")).unwrap();
+        let store = world(Some(node(true, Some("acme"))));
+        let n = write_connector_files(&store, root.path(), &[urn("zd-tickets")], Some(seed.path()))
+            .unwrap();
+        assert_eq!(n, 1);
+        let staged = root.path().join("zd-tickets");
+        let body = std::fs::read_to_string(staged.join(HINT_DIR).join(HINT_FILE)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["connector"], "zendesk");
+        assert_eq!(v["hosts"]["api"], "acme.zendesk.com");
+        assert!(staged.join("manifest.json").is_file() && staged.join("execute.js").is_file());
+        assert!(!staged.join("passwd").exists());
+        assert!(
+            !seeded.join(HINT_DIR).exists(),
+            "the shared seed tree is never written"
+        );
+        // Not enabled with an address, or not needing a connector: nothing is staged.
+        for (n, requires) in [
+            (node(true, None), Some(ZURN)),
+            (node(false, Some("acme")), Some(ZURN)),
+            (node(true, Some("acme")), None),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let seed = tempfile::tempdir().unwrap();
+            skill(&seed.path().join("skills"), "zd-tickets", requires);
+            let store = world(Some(n));
+            assert_eq!(
+                write_connector_files(&store, root.path(), &[urn("zd-tickets")], Some(seed.path()))
+                    .unwrap(),
+                0
+            );
+            assert!(!root.path().join("zd-tickets").exists());
+        }
+    }
+
+    #[test]
     fn a_skill_not_staged_here_is_skipped() {
         let root = tempfile::tempdir().unwrap();
         let store = world(Some(node(true, Some("acme"))));
         assert_eq!(
-            write_connector_files(&store, root.path(), &[urn("seeded-elsewhere")]).unwrap(),
+            write_connector_files(&store, root.path(), &[urn("seeded-elsewhere")], None).unwrap(),
             0
         );
     }

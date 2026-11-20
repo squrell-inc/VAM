@@ -327,7 +327,14 @@ pub fn record_intent(
     if response.disposition != Disposition::Authorized as i32 {
         return;
     }
-    let row = store.tool_egress(session_id, tool_name).ok().flatten();
+    // The declared shapes are filled with the node's company address now, not as of the boot: an
+    // address entered, changed or cleared after the session booted (a run parked for the member to
+    // connect and resumed in place) is the one the call is checked against.
+    let row = store
+        .tool_egress(session_id, tool_name)
+        .ok()
+        .flatten()
+        .map(|row| fill_row_now(store, row));
     let ttl = response
         .resource_envelope
         .as_ref()
@@ -344,6 +351,24 @@ pub fn record_intent(
         )
         .with_generation(generation),
     );
+}
+
+/// [`fill_skill_shapes`] for one tool's row, against the node's connectors as they are now. A row
+/// with no templated host is returned as it is, with no read of the node's state.
+fn fill_row_now(store: &SqliteWorkflowStore, row: ToolEgressRow) -> ToolEgressRow {
+    if !row.shapes.iter().any(|s| s.host.contains(['{', '}'])) {
+        return row;
+    }
+    let filled = match (store.connector_entries(), store.node_connectors()) {
+        (Ok(entries), Ok(nodes)) => fill_skill_shapes(vec![row], &entries, &nodes),
+        _ => fill_skill_shapes(vec![row], &[], &[]),
+    };
+    filled.into_iter().next().unwrap_or_else(|| ToolEgressRow {
+        tool: String::new(),
+        requires_connector: None,
+        shapes: Vec::new(),
+        effect_class: None,
+    })
 }
 
 // ---- refresh before swap -----------------------------------------------------------------------
@@ -366,12 +391,17 @@ pub(crate) async fn ensure_fresh(
     id: &str,
     horizon_secs: i64,
 ) -> Freshness {
-    ensure_fresh_for_call(store, vault, cfg, refresher, owner, id, horizon_secs, false).await
+    ensure_fresh_for_call(store, vault, cfg, refresher, owner, id, horizon_secs, None).await
 }
 
-/// [`ensure_fresh`] for the swap of a call whose intent check already refreshed
-/// (`intent_refreshed`, see [`IntentRefreshes`]): that refresh is not repeated while the token it
-/// made has at least 20 s left (`connectors::needs_refresh`).
+/// [`ensure_fresh`] for the swap of one tool call: `call` is the broker's record of the calls that
+/// were refreshed for (`IntentRefreshes`) and this call's id.
+///
+/// A token the intent check (or an earlier request of the same call) refreshed is not refreshed again
+/// while it has at least 20 s left (`connectors::needs_refresh`). The record is read again under the
+/// connection lock, and a refresh made here is recorded for the call before the lock is released, so a
+/// request of the same call that was waiting for the lock sees it and does not spend a second
+/// single-use refresh token.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ensure_fresh_for_call(
     store: &Arc<SqliteWorkflowStore>,
@@ -381,8 +411,13 @@ pub(crate) async fn ensure_fresh_for_call(
     owner: &str,
     id: &str,
     horizon_secs: i64,
-    intent_refreshed: bool,
+    call: Option<(&Arc<IntentRefreshes>, &str)>,
 ) -> Freshness {
+    let marked = |call: &Option<(Arc<IntentRefreshes>, String)>| {
+        call.as_ref().is_some_and(|(m, c)| m.is_marked(c))
+    };
+    let call: Option<(Arc<IntentRefreshes>, String)> =
+        call.map(|(m, c)| (m.clone(), c.to_string()));
     // Cheap look first: a token that is not near expiry takes no lock.
     match store.connector_connection(owner, id) {
         Ok(Some(c))
@@ -390,7 +425,7 @@ pub(crate) async fn ensure_fresh_for_call(
                 &c,
                 crate::connectors::now_secs(),
                 horizon_secs,
-                intent_refreshed,
+                marked(&call),
             ) =>
         {
             return Freshness::Fresh;
@@ -404,7 +439,7 @@ pub(crate) async fn ensure_fresh_for_call(
     let (owner, id) = (owner.to_string(), id.to_string());
     tokio::task::spawn_blocking(move || {
         let _guard = guard;
-        crate::connectors::refresh_if_due(
+        let fresh = crate::connectors::refresh_if_due(
             &store,
             &vault,
             &cfg,
@@ -412,9 +447,15 @@ pub(crate) async fn ensure_fresh_for_call(
             &id,
             crate::connectors::now_secs(),
             horizon_secs,
-            intent_refreshed,
+            marked(&call),
             refresher.as_ref(),
-        )
+        );
+        if fresh == Freshness::Refreshed {
+            if let Some((marks, call_id)) = &call {
+                marks.mark(call_id);
+            }
+        }
+        fresh
     })
     .await
     .unwrap_or(Freshness::Unavailable)
@@ -468,7 +509,14 @@ impl IntentRefreshes {
 
 /// Attaches the session owner's connection token, for a request the envelope admitted.
 pub struct SessionConnectionSource {
-    envelope: Envelope,
+    /// The window of the active call (shared with the broker that opens it).
+    window: Arc<CallWindow>,
+    /// The binding table and the envelope built from it. Built at session boot; for a source made
+    /// with [`Self::new`] it is rebuilt from the node's connectors when a request carries a
+    /// placeholder and they changed (see [`Self::refresh_bindings`]).
+    envelope: Mutex<(Arc<Envelope>, Vec<BindingSpec>)>,
+    /// Whether the table follows the node's connectors (false: a table fixed by a test).
+    live_bindings: bool,
     store: Arc<SqliteWorkflowStore>,
     vault: Arc<SecretsVault>,
     session_id: String,
@@ -499,7 +547,9 @@ impl SessionConnectionSource {
         owner: String,
     ) -> Self {
         let bindings = resolved_bindings(&store);
-        Self::with_bindings(bindings, window, store, vault, session_id, owner)
+        let mut source = Self::with_bindings(bindings, window, store, vault, session_id, owner);
+        source.live_bindings = true;
+        source
     }
 
     pub fn with_bindings(
@@ -511,7 +561,12 @@ impl SessionConnectionSource {
         owner: String,
     ) -> Self {
         Self {
-            envelope: Envelope::new(bindings, window),
+            envelope: Mutex::new((
+                Arc::new(Envelope::new(bindings.clone(), window.clone())),
+                bindings,
+            )),
+            window,
+            live_bindings: false,
             store,
             vault,
             session_id,
@@ -535,6 +590,30 @@ impl SessionConnectionSource {
         self.cfg = cfg;
         self.refresher = refresher;
         self
+    }
+
+    fn envelope(&self) -> Arc<Envelope> {
+        self.envelope
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .0
+            .clone()
+    }
+
+    /// Rebuilds the binding table from the node's connectors as they are now, when it differs from
+    /// the one this session booted with. A company address entered, a connector enabled or
+    /// installed after the boot (a parked run resumed in place, not in a new session) is then the one
+    /// a request is judged against. Called only for a request that carries a placeholder.
+    fn refresh_bindings(&self) {
+        if !self.live_bindings {
+            return;
+        }
+        let fresh = resolved_bindings(&self.store);
+        let mut guard = self.envelope.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.1 != fresh {
+            guard.0 = Arc::new(Envelope::new(fresh.clone(), self.window.clone()));
+            guard.1 = fresh;
+        }
     }
 
     /// A write the journal does not allow: the guest is told why, nothing is attached or sent.
@@ -580,9 +659,12 @@ impl SessionConnectionSource {
         // one the grant names exactly: a connector that only shares an id is another connector.
         let entry = self
             .store
-            .connector_entries()
+            .connector_entry(vam_spec::connector_listing::connector_id_of_urn(
+                &grant.connector,
+            ))
             .ok()
-            .and_then(|all| all.into_iter().find(|e| e.def.urn == grant.connector))
+            .flatten()
+            .filter(|e| e.def.urn == grant.connector)
             .ok_or_else(|| Self::refuse(tool, "unknown connector"))?;
         let def = entry.def;
         let name = def.display_name.clone();
@@ -606,37 +688,42 @@ impl SessionConnectionSource {
         if binding.hosts.iter().all(|h| *h != grant.host) {
             return Err(Self::refuse(tool, "host is not one of the binding's hosts"));
         }
-        let node = self
-            .store
-            .node_connector(&id)
-            .map_err(|_| not_enabled(&name))?
-            .filter(|n| n.enabled)
-            .ok_or_else(|| not_enabled(&name))?;
-        let conn = self
-            .store
-            .connector_connection(&self.owner, &id)
-            .map_err(|_| not_connected(&name))?
-            .filter(|c| c.status == ConnectionStatus::Connected)
-            .ok_or_else(|| not_connected(&name))?;
-        let has_refresh = self
-            .vault
-            .has_binding_at(
-                SecretScope::User,
-                &self.owner,
-                &refresh_token_binding_id(&id),
-            )
-            .unwrap_or(false);
-        let endpoint = self
-            .store
-            .node_client(&id)
-            .ok()
-            .flatten()
-            .map(|c| c.token_endpoint);
-        if rest_connection_state(&conn, Some(&node), has_refresh, endpoint.as_deref())
-            != CallerState::Connected
-        {
-            return Err(not_connected(&name));
-        }
+        // The node's enable and the member's connection, read from the node's state now.
+        let live_state = || -> Result<(), ConnectionRefusal> {
+            let node = self
+                .store
+                .node_connector(&id)
+                .map_err(|_| not_enabled(&name))?
+                .filter(|n| n.enabled)
+                .ok_or_else(|| not_enabled(&name))?;
+            let conn = self
+                .store
+                .connector_connection(&self.owner, &id)
+                .map_err(|_| not_connected(&name))?
+                .filter(|c| c.status == ConnectionStatus::Connected)
+                .ok_or_else(|| not_connected(&name))?;
+            let has_refresh = self
+                .vault
+                .has_binding_at(
+                    SecretScope::User,
+                    &self.owner,
+                    &refresh_token_binding_id(&id),
+                )
+                .unwrap_or(false);
+            let endpoint = self
+                .store
+                .node_client(&id)
+                .ok()
+                .flatten()
+                .map(|c| c.token_endpoint);
+            if rest_connection_state(&conn, Some(&node), has_refresh, endpoint.as_deref())
+                != CallerState::Connected
+            {
+                return Err(not_connected(&name));
+            }
+            Ok(())
+        };
+        live_state()?;
         // Refresh before swap: only now that the envelope, the destination, the binding's host
         // and the connection's state have all passed.
         match ensure_fresh_for_call(
@@ -647,7 +734,7 @@ impl SessionConnectionSource {
             &self.owner,
             &id,
             SWAP_REFRESH_WINDOW_SECS,
-            self.intent_refreshes.is_marked(&grant.call_id),
+            Some((&self.intent_refreshes, grant.call_id.as_str())),
         )
         .await
         {
@@ -674,19 +761,33 @@ impl SessionConnectionSource {
                 ));
             }
         }
+        // The refresh may have waited seconds on the provider: an admin may have turned the connector
+        // off, or the member's grant may have been invalidated, meanwhile. Decided again, with the
+        // same refusals, before the token is read.
+        live_state()?;
         let row = access_token_binding_id(&id);
         // Only the member's own connection-kind row, pinned to this host. An egress or org row
-        // that happens to carry this id is never used.
-        let meta = self
-            .vault
-            .get_metadata_at(SecretScope::User, &self.owner, &row)
-            .map_err(|_| not_connected(&name))?;
-        if meta.kind != SecretKind::Connection || !meta.allowed_destinations.contains(&grant.host) {
-            return Err(not_connected(&name));
-        }
+        // that happens to carry this id is never used. The pin and the token come from ONE read of
+        // the row: a reconnect that rewrites it between two reads cannot pair one row's pin with
+        // another's token.
         let token = self
             .vault
-            .decrypt_secret_at(SecretScope::User, &self.owner, &row)
+            .decrypt_secret_at_checked(
+                SecretScope::User,
+                &self.owner,
+                &row,
+                |meta: &crate::secrets::HostSecretMetadata| {
+                    if meta.kind == SecretKind::Connection
+                        && meta.allowed_destinations.contains(&grant.host)
+                    {
+                        Ok(())
+                    } else {
+                        Err(OrchestratorError::PermissionDenied(
+                            "the access token is not pinned to this host".into(),
+                        ))
+                    }
+                },
+            )
             .map_err(|_| not_connected(&name))?;
         Ok((token, binding.placeholder.clone(), id))
     }
@@ -712,7 +813,17 @@ impl ConnectionTokenSource for SessionConnectionSource {
         &self,
         request: &ConnectionRequest<'_>,
     ) -> Result<Option<ConnectionGrant>, ConnectionRefusal> {
-        self.envelope.screen(request)
+        match self.envelope().screen(request) {
+            // No placeholder: nothing to decide, and no read of the node's state.
+            Ok(None) => Ok(None),
+            decided => {
+                if !self.live_bindings {
+                    return decided;
+                }
+                self.refresh_bindings();
+                self.envelope().screen(request)
+            }
+        }
     }
 
     async fn attach(
@@ -721,10 +832,10 @@ impl ConnectionTokenSource for SessionConnectionSource {
         headers: &mut HashMap<String, String>,
     ) -> Result<(), ConnectionRefusal> {
         // The call the grant was made for must still be the active one.
-        self.envelope.recheck(grant)?;
+        self.envelope().recheck(grant)?;
         let (token, placeholder, id) = self.token_for(grant).await?;
         // A refresh can take seconds: the call must still be the active one.
-        self.envelope.recheck(grant)?;
+        self.envelope().recheck(grant)?;
         vam_network::connection::set_bearer(headers, token.expose_secret());
         self.audit(&access_token_binding_id(&id), "connection");
         let mut kept = self.attached.lock().unwrap_or_else(|e| e.into_inner());
@@ -746,7 +857,7 @@ impl ConnectionTokenSource for SessionConnectionSource {
         }
         // The caller decided the grant from the active call: the window is checked again here so
         // a stale grant reserves nothing.
-        self.envelope.recheck(grant)?;
+        self.envelope().recheck(grant)?;
         match crate::effect_path::reserve_write(
             &self.store,
             &self.session_id,
@@ -768,7 +879,7 @@ impl ConnectionTokenSource for SessionConnectionSource {
     }
 
     fn binds_host(&self, host: &str) -> bool {
-        self.envelope.binds_host(host)
+        self.envelope().binds_host(host)
     }
 }
 
@@ -851,6 +962,7 @@ mod tests {
                 updated_at: 1,
                 last_check_at: None,
                 last_error: None,
+                client_id: None,
             })
             .unwrap();
         put_row(
@@ -1998,16 +2110,32 @@ mod installed_tests {
         let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
         let vault = SecretsVault::for_tests(store.clone());
         install_company_address_rows(&store);
-        save(&store, &vault, address);
+        enable_and_connect(&store, &vault, address, expires_at);
+        World {
+            store,
+            vault,
+            window: Arc::new(CallWindow::new()),
+        }
+    }
+
+    /// The admin enables `zendesk` for `address` with its client, and the member signs in.
+    fn enable_and_connect(
+        store: &SqliteWorkflowStore,
+        vault: &SecretsVault,
+        address: &str,
+        expires_at: Option<i64>,
+    ) {
+        save(store, vault, address);
         let host = format!("{address}.zendesk.com");
         store
             .commit_rest_connection(
-                &vault,
+                vault,
                 &RestCommit {
                     owner: OWNER,
                     connector_id: ZID,
                     address,
                     token_endpoint: &format!("https://{host}/oauth/tokens"),
+                    client_id: "zc1",
                     token_host: &host,
                     access_hosts: std::slice::from_ref(&host),
                     scopes: &["read".to_string()],
@@ -2019,11 +2147,6 @@ mod installed_tests {
                 &|_| Ok(()),
             )
             .unwrap();
-        World {
-            store,
-            vault,
-            window: Arc::new(CallWindow::new()),
-        }
     }
 
     fn source(w: &World) -> SessionConnectionSource {
@@ -2593,7 +2716,7 @@ mod installed_tests {
         let wb = World {
             store: w.store.clone(),
             vault: w.vault.clone(),
-            window: b.envelope.window().clone(),
+            window: b.window.clone(),
         };
         open_call(&wb, "call-b");
         let gb = ask(&b, ZPH, "GET", SEARCH).unwrap().expect("grant");
@@ -2603,6 +2726,176 @@ mod installed_tests {
             assert_ne!(r, format!("Bearer {ACCESS}"));
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn authorized() -> ToolIntentResponse {
+        ToolIntentResponse {
+            disposition: Disposition::Authorized as i32,
+            approval_request_id: None,
+            error: None,
+            capability_token: None,
+            resource_envelope: Some(vam_spec::v1::ResourceEnvelope {
+                max_wall_time_ms: 10_000,
+                ..Default::default()
+            }),
+            replayed: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_booted_before_the_address_is_judged_against_the_address_at_the_call() {
+        // The session booted with no company address (its record holds the shape still templated, its
+        // binding table has no host). The run parked for the member to connect; the admin entered the
+        // address and the member signed in; the run resumed in the same session.
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        install_company_address_rows(&store);
+        store
+            .record_tool_egress(SESSION, &[templated_row("ticket_search")])
+            .unwrap();
+        let window = Arc::new(CallWindow::new());
+        let s = SessionConnectionSource::new(
+            window.clone(),
+            store.clone(),
+            vault.clone(),
+            SESSION.into(),
+            OWNER.into(),
+        );
+        assert!(!s.binds_host("acme.zendesk.com"), "no host at the boot");
+        enable_and_connect(&store, &vault, "acme", None);
+        record_intent(
+            &window,
+            &store,
+            SESSION,
+            "ticket_search",
+            "call-1",
+            1,
+            &authorized(),
+        );
+        let grant = ask(
+            &s,
+            ZPH,
+            "GET",
+            "https://acme.zendesk.com/api/v2/search.json?query=printer",
+        )
+        .unwrap()
+        .expect("the resumed call is admitted");
+        let mut headers = HashMap::from([("Authorization".to_string(), ZPH.to_string())]);
+        s.attach(&grant, &mut headers).await.unwrap();
+        assert_eq!(headers["Authorization"], format!("Bearer {ACCESS}"));
+        assert!(s.binds_host("acme.zendesk.com"));
+        // The envelope still decides: another company's host and a path outside the shape are refused.
+        for url in [
+            "https://globex.zendesk.com/api/v2/search.json",
+            "https://acme.zendesk.com/api/v2/users.json",
+        ] {
+            assert!(ask(&s, ZPH, "GET", url).is_err(), "{url}");
+        }
+        // The shape record is the boot's, never rewritten: a literal `{subdomain}` stays out of the window.
+        let call = window.current().unwrap();
+        assert!(call.shapes.iter().all(|sh| !sh.host.contains('{')));
+        // And if the address is cleared again, the next call is judged without it.
+        store.put_node_connector(&node("acme", false)).unwrap();
+        record_intent(
+            &window,
+            &store,
+            SESSION,
+            "ticket_search",
+            "call-2",
+            1,
+            &authorized(),
+        );
+        assert!(window.current().unwrap().shapes.len() <= 1);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_made_at_the_swap_is_recorded_for_the_call_so_its_next_request_does_not_refresh(
+    ) {
+        // A token with 90 s left is inside the swap's 120 s window and outside the intent's 60 s
+        // horizon: the swap refreshes. The provider's tokens live a minute, which is inside the
+        // window again; the call's next request must not spend a second refresh token.
+        let w = world("acme", Some(now_secs() + 90));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let marks = Arc::new(IntentRefreshes::new());
+        let s = source(&w)
+            .with_refresh(crate::connectors::config(), minute_refresher(&calls, 60))
+            .with_intent_refreshes(marks.clone());
+        open_call(&w, "call-1");
+        let g = ask(&s, ZPH, "GET", SEARCH).unwrap().expect("grant");
+        assert_eq!(
+            attach(&s, &g).await.unwrap(),
+            "Bearer ACCESS-minute-0-0123456789abcdef"
+        );
+        assert!(marks.is_marked("call-1"), "the swap's refresh is recorded");
+        let g = ask(&s, ZPH, "GET", SEARCH).unwrap().expect("grant");
+        assert_eq!(
+            attach(&s, &g).await.unwrap(),
+            "Bearer ACCESS-minute-0-0123456789abcdef"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one refresh for one call");
+        // Another call is its own.
+        assert!(!marks.is_marked("call-2"));
+    }
+
+    #[tokio::test]
+    async fn two_requests_of_one_call_waiting_on_the_lock_make_one_refresh() {
+        let w = world("acme", Some(now_secs() + 90));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let marks = Arc::new(IntentRefreshes::new());
+        let s = source(&w)
+            .with_refresh(crate::connectors::config(), minute_refresher(&calls, 60))
+            .with_intent_refreshes(marks);
+        open_call(&w, "call-1");
+        let a = ask(&s, ZPH, "GET", SEARCH).unwrap().expect("grant");
+        let b = ask(&s, ZPH, "GET", SEARCH).unwrap().expect("grant");
+        let (ra, rb) = tokio::join!(attach(&s, &a), attach(&s, &b));
+        for r in [ra.unwrap(), rb.unwrap()] {
+            assert_eq!(r, "Bearer ACCESS-minute-0-0123456789abcdef");
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the second waited for the lock, saw the first's mark and sent nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connector_disabled_or_a_grant_invalidated_during_the_swap_refresh_attaches_nothing()
+    {
+        for what in ["disabled", "invalidated"] {
+            let w = world("acme", Some(now_secs() + 10));
+            let store = w.store.clone();
+            let refresher: RestRefresher =
+                Arc::new(move |_: &RestRefreshTarget<'_>, _: &SecretString| {
+                    if what == "disabled" {
+                        store.put_node_connector(&node("acme", false)).unwrap();
+                    } else {
+                        let mut row = store.connector_connection(OWNER, ZID).unwrap().unwrap();
+                        row.status = ConnectionStatus::NeedsReconnect;
+                        store.put_connector_connection(&row).unwrap();
+                    }
+                    Ok(RefreshedToken {
+                        access_token: "ACCESS-fresh-0123456789abcdef".into(),
+                        expires_in: Some(3600),
+                        refresh_token: None,
+                    })
+                });
+            let s = source(&w).with_refresh(crate::connectors::config(), refresher);
+            open_call(&w, "call-1");
+            let g = ask(&s, ZPH, "GET", SEARCH).unwrap().expect("grant");
+            let e = attach(&s, &g).await.unwrap_err();
+            // Refused, and no token in the answer: the result of that refresh is dropped (the state it
+            // was decided on moved) or the live check after it refuses.
+            assert!(
+                e.text.contains("not enabled")
+                    || e.text.contains("not connected")
+                    || e.text.contains("temporarily unavailable")
+                    || e.text.contains("needs reconnecting"),
+                "{what}: {}",
+                e.text
+            );
+            assert!(!e.text.contains("ACCESS"), "{what}: {}", e.text);
+        }
     }
 
     #[test]

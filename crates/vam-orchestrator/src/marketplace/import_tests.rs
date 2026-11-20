@@ -1387,3 +1387,44 @@ fn a_skill_host_outside_its_connectors_suffix_is_refused() {
     assert!(e.to_string().contains("suffix"), "{e:?}");
     assert!(w.store.connector_entry("ticketdesk").unwrap().is_none());
 }
+
+// ---- placeholders are unique across installed connectors (release review of #112) ---------------
+
+/// The company-address fixture as a connector with id `id` and one binding named `binding`.
+fn placeholder_connector(id: &str, binding: &str) -> vam_spec::connector::Connector {
+    let raw = include_str!("../../../vam-spec/tests/fixtures/zendesk-shaped-connector.json");
+    let mut json: serde_json::Value = serde_json::from_str(raw).unwrap();
+    json["urn"] = format!("urn:vam:connector:connectors.community.example/community/{id}").into();
+    json["bindings"][0]["name"] = binding.into();
+    json["bindings"][0]["placeholder"] = format!("vamsec_{id}_{binding}").into();
+    serde_json::from_value(json).unwrap()
+}
+
+#[test]
+fn two_marketplace_connectors_cannot_share_a_binding_placeholder() {
+    let store = SqliteWorkflowStore::in_memory().unwrap();
+    // `vamsec_` + id + `_` + name: `zen` with `desk_api` and `zen_desk` with `api` are one string.
+    crate::connector_client::test_support::install_company_address_variant(&store, |j| {
+        j["urn"] = "urn:vam:connector:connectors.community.example/community/zen".into();
+        j["bindings"][0]["name"] = "desk_api".into();
+        j["bindings"][0]["placeholder"] = "vamsec_zen_desk_api".into();
+    });
+    let first = placeholder_connector("zen", "desk_api");
+    let second = placeholder_connector("zen_desk", "api");
+    assert_eq!(
+        first.bindings.as_ref().unwrap()[0].placeholder,
+        second.bindings.as_ref().unwrap()[0].placeholder
+    );
+    let conn = store.connection.lock().unwrap();
+    // The second, a different connector, is refused at install ...
+    let e = admit_connector_id(&conn, &second.urn, &second).unwrap_err();
+    assert!(
+        matches!(e, E::Conflict(_)) && e.to_string().contains("placeholder"),
+        "{e:?}"
+    );
+    // ... the installed connector's own update is not another connector ...
+    admit_connector_id(&conn, &first.urn, &first).unwrap();
+    // ... and one whose placeholder is its own and unique is admitted.
+    let third = placeholder_connector("zen_other", "api");
+    admit_connector_id(&conn, &third.urn, &third).unwrap();
+}

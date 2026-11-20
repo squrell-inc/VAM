@@ -322,11 +322,41 @@ pub(crate) fn exchange_and_connect_rest(
     store: &SqliteWorkflowStore,
     c: &CodeConnect<'_>,
     vault: &SecretsVault,
-    _gate: tokio::sync::OwnedMutexGuard<()>,
+    gate: tokio::sync::OwnedMutexGuard<()>,
+    after_commit: impl FnOnce(),
+) -> Result<crate::connectors::ConnectorConnection, ApiError> {
+    let connected = connect_rest_locked(store, c, vault);
+    // The lock is released before anything follows from the commit: a resumed intent takes it to
+    // check the token's expiry (`api::reauth::resume_key`).
+    drop(gate);
+    if connected.is_ok() {
+        after_commit();
+    }
+    connected
+}
+
+/// [`exchange_and_connect_rest`] while the caller holds the connection's lock.
+fn connect_rest_locked(
+    store: &SqliteWorkflowStore,
+    c: &CodeConnect<'_>,
+    vault: &SecretsVault,
 ) -> Result<crate::connectors::ConnectorConnection, ApiError> {
     use crate::connectors::{binding_hosts, RestCommit};
     let id = c.connector_id;
-    if c.org.keeps_secret {
+    // The route read the connector and its client before it waited for this member's lock. Read
+    // again now that the lock is held: the code goes only to the endpoint of the client the sign-in
+    // began with, and only while that client and the connector are still what the route saw. An
+    // admin's save that landed during the wait means nothing is sent.
+    let org = store.org_connector(id)?.ok_or_else(|| superseded(id))?;
+    let same_client = org.client.as_ref().is_some_and(|n| {
+        n.revision == c.client.revision
+            && n.client_id == c.client.client_id
+            && n.token_endpoint == c.client.token_endpoint
+    });
+    if !same_client {
+        return Err(superseded(id).into());
+    }
+    if org.keeps_secret {
         // An `oauth` client is public by the connector file's own rule; never send a secret for it.
         return Err(OrchestratorError::Conflict(format!(
             "`{id}` is a REST connector whose client is public: it keeps no client secret"
@@ -342,22 +372,31 @@ pub(crate) fn exchange_and_connect_rest(
         .node_connector(id)?
         .filter(|n| n.enabled)
         .ok_or_else(not_enabled)?;
-    let Some(address) = node.tenant_subdomain.clone() else {
-        return Err(OrchestratorError::PermissionDenied(format!(
-            "the `{id}` connector needs a company address; ask your admin (`vam connectors`)"
-        ))
-        .into());
-    };
-    // The endpoint a code is sent to is the node client's, and only while it is the endpoint the
-    // connector file names now for the node's address. Decided before anything is sent.
-    if c.org.filled_token_endpoint.as_deref() != Some(c.client.token_endpoint.as_str())
-        || c.org.tenant_subdomain.as_deref() != Some(address.as_str())
-    {
-        return Err(endpoint_moved(id).into());
-    }
     let entry = store
         .connector_entry(id)?
         .ok_or_else(|| OrchestratorError::NotFound(format!("connector `{id}`")))?;
+    // The company address is required only of a connector that declares a `tenant`; one with a fixed
+    // endpoint and no tenant exchanges with none (the row's address is then empty).
+    let address = match (
+        entry.template.tenant.is_some(),
+        node.tenant_subdomain.clone(),
+    ) {
+        (true, None) => {
+            return Err(OrchestratorError::PermissionDenied(format!(
+                "the `{id}` connector needs a company address; ask your admin (`vam connectors`)"
+            ))
+            .into());
+        }
+        (true, Some(a)) => a,
+        (false, _) => String::new(),
+    };
+    // The endpoint a code is sent to is the node client's, and only while it is the endpoint the
+    // connector file names now for the node's address. Decided before anything is sent.
+    if org.filled_token_endpoint.as_deref() != Some(c.client.token_endpoint.as_str())
+        || crate::connectors::address_key(org.tenant_subdomain.as_deref()) != address
+    {
+        return Err(endpoint_moved(id).into());
+    }
     let access_hosts = binding_hosts(&entry.def);
     let Some(token_host) = c.client.token_host() else {
         return Err(endpoint_moved(id).into());
@@ -390,6 +429,7 @@ pub(crate) fn exchange_and_connect_rest(
         connector_id: id,
         address: &address,
         token_endpoint: &c.client.token_endpoint,
+        client_id: &c.client.client_id,
         token_host: &token_host,
         access_hosts: &access_hosts,
         scopes: &c.org.scopes,
@@ -412,7 +452,9 @@ pub(crate) fn exchange_and_connect_rest(
         });
         let node_now = crate::connectors::node_connector_in(tx, id)?;
         let enabled = node_now.as_ref().is_some_and(|n| n.enabled);
-        let same_address = node_now.and_then(|n| n.tenant_subdomain).as_deref() == Some(&*address);
+        let same_address =
+            crate::connectors::address_key(node_now.and_then(|n| n.tenant_subdomain).as_deref())
+                == address;
         let same_file = crate::connectors::entry_in(tx, id)?.is_some_and(|e| {
             let endpoint = match &e.def.provider {
                 vam_spec::connector::Provider::Oauth2(o) => {

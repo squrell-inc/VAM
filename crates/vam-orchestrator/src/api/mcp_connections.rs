@@ -127,7 +127,7 @@ pub struct UpsertMcpOauthTokensRequest {
 
 /// OAuth identity fields accepted on connect. Token material is rejected / out of scope
 /// for this endpoint (see token upsert).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectMcpOauthRequest {
     pub resource: String,
@@ -297,6 +297,33 @@ fn parse_connect_oauth(req: ConnectMcpOauthRequest) -> Result<McpOauthMetadata, 
 /// endpoint or a client id for such a connector, and never holds its tokens. A connect with no
 /// `oauth` block (a reconnect of the row's own settings, ask rules) goes on, and needs the admin's
 /// client to be saved.
+/// The refusals the connect makes for a connector whose client is the admin's, run for a request
+/// that would replace a stale row (no existing row to inherit a mode or OAuth block from): the
+/// connector's OAuth client, the OAuth block, the auth mode. They are the checks further down this
+/// handler, made before the stale row and its tokens are purged, not after.
+fn refuse_replacement(state: &AppState, req: &ConnectMcpRequest) -> Result<(), OrchestratorError> {
+    let Some(org) = state.store.org_connector(&req.connection_id)? else {
+        return Ok(());
+    };
+    let requested_mode = match req.auth_mode.as_deref() {
+        None => None,
+        Some(raw) => Some(McpAuthMode::parse(raw)?),
+    };
+    let requested_oauth = match req.oauth.clone() {
+        None => None,
+        Some(oauth) => Some(parse_connect_oauth(oauth)?),
+    };
+    refuse_org_oauth_block(&req.connection_id, &org, &requested_oauth)?;
+    let (auth_mode, _) = resolve_connection_auth(None, requested_mode, requested_oauth)?;
+    if auth_mode != McpAuthMode::Oauth {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "`{}` signs in with the OAuth client your admin saved: connect it with authMode oauth",
+            req.connection_id
+        )));
+    }
+    Ok(())
+}
+
 fn refuse_org_oauth_block(
     id: &str,
     org: &crate::connector_client::OrgConnector,
@@ -383,13 +410,16 @@ async fn connect(
     authorize_org_secret_write(scope, auth.role())?;
     let owner = vault_owner_user_id(scope, auth.owner_user_id()).to_string();
     let host = connection_host(&req.url).map_err(OrchestratorError::from)?;
-    let existing = match state
+    let mut existing = match state
         .store
         .get_mcp_connection(scope, &owner, &req.connection_id)
     {
         Ok(existing) if connectors::is_stale_installed_row(&state.store, &existing, &req.url)? => {
             // Only a connect the connector would accept (enabled, its own URL) replaces the row.
             connectors::gate_mcp_write(&state.store, &req.connection_id, Some(&req.url), None)?;
+            // What the connect refuses once this row is gone, decided now: a request that is
+            // going to be refused leaves the row and its grant as they are.
+            refuse_replacement(&state, &req)?;
             // The connector an update changed names another server than this row's, and the row
             // was marked needs_reauth when the update landed: it is a connection to a server the
             // connector no longer names. Disconnect it (tokens revoked and removed) so the member
@@ -468,7 +498,7 @@ async fn connect(
         refuse_org_oauth_block(&req.connection_id, org, &requested_oauth)?;
     }
     let (auth_mode, oauth) =
-        resolve_connection_auth(existing.as_ref(), requested_mode, requested_oauth)?;
+        resolve_connection_auth(existing.as_ref(), requested_mode, requested_oauth.clone())?;
     if org.is_some() && auth_mode != McpAuthMode::Oauth {
         return Err(OrchestratorError::InvalidContract(format!(
             "`{}` signs in with the OAuth client your admin saved: connect it with authMode oauth",
@@ -489,6 +519,37 @@ async fn connect(
         ),
         _ => None,
     };
+    // The row was read before the gate was free. A sign-in or refresh that committed meanwhile
+    // wrote a newer status and expiry: the OAuth metadata this write carries forward is read again
+    // now, under the gate, so the upsert does not put the older values back. A row that is gone, or
+    // moved to another server or auth mode, is no longer the one this request was made for: nothing
+    // is written.
+    let (auth_mode, oauth) =
+        if let Some(prior) = existing.as_ref().filter(|_| credential_guard.is_some()) {
+            let changed = || {
+                OrchestratorError::Conflict(format!(
+                "the connection `{}` changed while this request waited: read it again and retry",
+                req.connection_id
+            ))
+            };
+            let fresh = match state
+                .store
+                .get_mcp_connection(scope, &owner, &req.connection_id)
+            {
+                Ok(fresh) => fresh,
+                Err(OrchestratorError::NotFound(_)) => return Err(changed().into()),
+                Err(err) => return Err(err.into()),
+            };
+            if fresh.url != prior.url || fresh.auth_mode != prior.auth_mode {
+                return Err(changed().into());
+            }
+            let resolved =
+                resolve_connection_auth(Some(&fresh), requested_mode, requested_oauth.clone())?;
+            existing = Some(fresh);
+            resolved
+        } else {
+            (auth_mode, oauth)
+        };
     let secret_value = req.secret_value.take();
     if secret_value
         .as_deref()

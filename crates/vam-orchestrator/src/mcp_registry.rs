@@ -1939,7 +1939,21 @@ pub fn seed_mcp_skills(
         // A connector's row is offered only while the node has it enabled, and only with the
         // vetted tools at the definition's classes, whatever an older row carries.
         if let Some(policy) = store.mcp_policy(&conn.connection_id)? {
-            if policy.url == conn.url {
+            if policy.url != conn.url {
+                // A row on another server than the connector names now. For a connector a
+                // marketplace installed, or one with a company address, that is a connection made
+                // before its address or URL moved: it is not the connector's connection any more,
+                // so it is not offered (it would otherwise skip the enable check, the vetted-tool
+                // filter and the ask rules below). A row a member added by hand under a built-in
+                // connector's id before the connector existed keeps working (Phase 1, open
+                // question 6).
+                let owned = store
+                    .connector_entry(&conn.connection_id)?
+                    .is_some_and(|e| e.installed.is_some() || e.template.tenant.is_some());
+                if owned {
+                    continue;
+                }
+            } else {
                 if crate::connectors::row_is_gated_off(store, &conn)? {
                     continue;
                 }

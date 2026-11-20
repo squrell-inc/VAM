@@ -193,7 +193,12 @@ impl ConnectorEndpoints {
                     if let Some(origin) = other.strip_prefix("rest:") {
                         if is_https_origin(origin) {
                             let base = loopback_http(v)?;
-                            if base.port().is_none() || !matches!(base.path(), "" | "/") {
+                            // The egress gate dials a literal loopback address (it resolves no name
+                            // for a redirect): `localhost` would be dropped there without a word.
+                            if base.port().is_none()
+                                || !matches!(base.path(), "" | "/")
+                                || base.host_str() == Some("localhost")
+                            {
                                 return Err(Refusal::ConnectorEndpoints(format!(
                                     "{v:?}: a rest key must map to http://127.0.0.1:<port> with no path"
                                 )));
@@ -910,6 +915,7 @@ mod tests {
             r#"{"rest:https://acme.ticketdesk.example":"http://10.0.0.5:1"}"#,
             r#"{"rest:https://acme.ticketdesk.example":"http://127.0.0.1:1/x"}"#,
             r#"{"rest:https://acme.ticketdesk.example":"http://127.0.0.1"}"#,
+            r#"{"rest:https://acme.ticketdesk.example":"http://localhost:41011"}"#,
             r#"{"rest:":"http://127.0.0.1:1"}"#,
         ] {
             assert!(
