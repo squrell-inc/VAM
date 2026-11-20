@@ -177,7 +177,8 @@ admin"); one with a company address the node has not got is a 409. The node make
 In one transaction it writes the member's connection row and the vault row `connector/<id>/api-key`
 (`connection` kind, pinned to every host of the connector's bindings with the company address filled in), then
 continues the runs this member has parked on the connector. No route returns the key: the answer is the
-member's connector entry. `DELETE …/connection` removes both rows and `POST …/connection/check` answers the
+member's connector entry. `DELETE …/connection` removes both rows (the vault rows first: if one cannot be deleted the request fails, the
+connection row stays and the member retries) and `POST …/connection/check` answers the
 stored state, each with no provider call; the code exchange refuses an API key connector. Entering a key
 again replaces it. The connection reads `connected` only while the key row is pinned to the connector's
 current binding hosts and the address is the node's; a listing update that adds a host leaves the key where it
@@ -193,7 +194,7 @@ connector's vetted tools are kept and its risk classes and ask rules are applied
 are then written in one transaction, after the row is checked to be the one read under the member's lock. A listing
 that fails writes no key and leaves any earlier row and key alone. `PUT /v1/mcp/connections` and
 `…/oauth/tokens` refuse an API key connector's id with a 400 that says to connect it with its API key. The entry
-reads `connected` while the member's static row and its header row exist; `DELETE …/connection` removes both and
+reads `connected` while the member's static row and its header row exist, and `needsReconnect` for an OAuth sign-in left at the connector's URL from before it moved to `api_key`: entering the key replaces that row, and its OAuth tokens are deleted in the same transaction (a failed listing keeps the sign-in as it was). A row on another server, or one this connector did not make, is a 409 that says to disconnect it first. `DELETE …/connection` removes both rows, header first, and
 `POST …/connection/check` answers the stored state, each with no request to the server. Proved by
 `mcp-connector-with-an-api-key-connects-through-the-node` and unit tests in `api/connectors.rs`.
 
