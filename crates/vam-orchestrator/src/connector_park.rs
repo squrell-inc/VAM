@@ -36,6 +36,13 @@ pub enum ConnectorGate {
     },
 }
 
+/// What a parked call tells the member: "Connect <name> to continue", or "Reconnect <name> to
+/// continue" when they were connected and are not now. The same words for every sign-in kind.
+pub(crate) fn park_message(reconnect: bool, name: &str) -> String {
+    let verb = if reconnect { "Reconnect" } else { "Connect" };
+    format!("{verb} {name} to continue")
+}
+
 /// The park key: scope, owner and `connector:<id>` (an MCP id has no colon, so no collision).
 pub fn park_key(owner: &str, connector_id: &str) -> String {
     crate::hitl::reauth_key(
@@ -78,6 +85,8 @@ struct Needed {
     owner: String,
     id: String,
     name: String,
+    /// The connector as the node uses it now (the company address filled in).
+    def: Box<vam_spec::connector::Connector>,
 }
 
 enum Lookup {
@@ -128,12 +137,33 @@ fn lookup(store: &SqliteWorkflowStore, session_id: &str, owner: &str, tool: &str
         owner: owner.to_string(),
         id,
         name,
+        def: Box::new(def),
     })
+}
+
+/// Whether the member's connection row lets the call through. An OAuth connection: its status (the
+/// refresh and the swap decide the rest). An API key connection (CN-7.6): its status, its key row
+/// pinned to exactly the connector's filled hosts, and the node's address, the same state the tile
+/// shows. Nothing is refreshed and no provider is asked either way.
+fn is_connected(
+    store: &SqliteWorkflowStore,
+    n: &Needed,
+    c: &connectors::ConnectorConnection,
+) -> bool {
+    if c.status != ConnectionStatus::Connected {
+        return false;
+    }
+    if !connectors::is_api_key(&n.def) {
+        return true;
+    }
+    let node = store.node_connector(&n.id).ok().flatten();
+    connectors::rest_state_for(store, &n.def, &n.owner, c, node.as_ref(), || false, None)
+        == connectors::CallerState::Connected
 }
 
 fn state_of(store: &SqliteWorkflowStore, n: &Needed) -> ConnectorGate {
     match store.connector_connection(&n.owner, &n.id) {
-        Ok(Some(c)) if c.status == ConnectionStatus::Connected => ConnectorGate::Clear,
+        Ok(Some(c)) if is_connected(store, n, &c) => ConnectorGate::Clear,
         Ok(Some(_)) => ConnectorGate::Park {
             connector_id: n.id.clone(),
             name: n.name.clone(),
@@ -276,8 +306,7 @@ impl crate::security::SessionSecurityContext {
                 name,
                 reconnect,
             } => {
-                let verb = if reconnect { "Reconnect" } else { "Connect" };
-                let message = format!("{verb} {name} to continue");
+                let message = park_message(reconnect, &name);
                 let Ok(owner) = store.session_owner_user_id(&self.session_id) else {
                     return Some(refuse(message));
                 };
@@ -894,5 +923,171 @@ mod tests {
         for t in ["token", "http", "Bearer"] {
             assert!(!title.contains(t) && !body.contains(t), "{t}");
         }
+    }
+
+    // ---- an API key connector (CN-7.6) -----------------------------------------------------------
+
+    const NURN: &str = "urn:vam:connector:connectors.community.example/community/notesdesk";
+    const NT: &str = "note_search";
+    const NKEY: &str = "ndk_live_0123456789abcdef";
+
+    /// An installed, enabled `notesdesk` and a tool that requires it.
+    fn notesdesk_world() -> (Arc<SqliteWorkflowStore>, Arc<SecretsVault>) {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        crate::connector_client::test_support::install_api_key_rows(&store);
+        store
+            .record_tool_egress(
+                S,
+                &[ToolEgressRow {
+                    tool: NT.into(),
+                    requires_connector: Some(NURN.into()),
+                    shapes: vec![],
+                    effect_class: None,
+                }],
+            )
+            .unwrap();
+        store
+            .put_node_connector(&NodeConnector {
+                tenant_subdomain: None,
+                connector_id: "notesdesk".into(),
+                enabled: true,
+                consent_tenant_id: None,
+                consent_recorded_at: None,
+                consent_recorded_by: None,
+                updated_at: 1,
+                updated_by: "olga".into(),
+            })
+            .unwrap();
+        (store, vault)
+    }
+
+    fn enter_key(store: &SqliteWorkflowStore, vault: &SecretsVault, owner: &str, hosts: &[&str]) {
+        let hosts: Vec<String> = hosts.iter().map(|h| h.to_string()).collect();
+        store
+            .commit_api_key_connection(
+                vault,
+                &connectors::ApiKeyCommit {
+                    owner,
+                    connector_id: "notesdesk",
+                    address: "",
+                    hosts: &hosts,
+                    api_key: NKEY,
+                    now: 1,
+                },
+                &|_| Ok(()),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn the_park_words_are_connect_or_reconnect_name_to_continue() {
+        assert_eq!(
+            park_message(false, "Notesdesk"),
+            "Connect Notesdesk to continue"
+        );
+        assert_eq!(
+            park_message(true, "Notesdesk"),
+            "Reconnect Notesdesk to continue"
+        );
+        let (store, vault) = notesdesk_world();
+        // Not connected: the gate parks on the connector, and its name makes the words above.
+        let ConnectorGate::Park {
+            connector_id,
+            name,
+            reconnect,
+        } = gate_for(&store, S, ME, NT)
+        else {
+            panic!("parked");
+        };
+        assert_eq!((connector_id.as_str(), reconnect), ("notesdesk", false));
+        assert_eq!(
+            park_message(reconnect, &name),
+            "Connect Notesdesk to continue"
+        );
+        // Connected with the key: clear. Another member's state is their own.
+        enter_key(&store, &vault, ME, &["api.notesdesk.example"]);
+        assert_eq!(gate_for(&store, S, ME, NT), ConnectorGate::Clear);
+        assert!(matches!(
+            gate_for(&store, S, OTHER, NT),
+            ConnectorGate::Park {
+                reconnect: false,
+                ..
+            }
+        ));
+        // A key whose pin is not the connector's hosts now asks to Reconnect.
+        enter_key(&store, &vault, ME, &["old.notesdesk.example"]);
+        let ConnectorGate::Park {
+            name, reconnect, ..
+        } = gate_for(&store, S, ME, NT)
+        else {
+            panic!("parked");
+        };
+        assert!(reconnect);
+        assert_eq!(
+            park_message(reconnect, &name),
+            "Reconnect Notesdesk to continue"
+        );
+        // A key row that is gone does too; the connection row alone is not enough.
+        vault
+            .delete_secret_at(
+                crate::secrets::SecretScope::User,
+                ME,
+                &connectors::api_key_binding_id("notesdesk"),
+            )
+            .unwrap();
+        assert!(matches!(
+            gate_for(&store, S, ME, NT),
+            ConnectorGate::Park {
+                reconnect: true,
+                ..
+            }
+        ));
+        // A disabled connector is refused with no park.
+        store
+            .put_node_connector(&NodeConnector {
+                tenant_subdomain: None,
+                connector_id: "notesdesk".into(),
+                enabled: false,
+                consent_tenant_id: None,
+                consent_recorded_at: None,
+                consent_recorded_by: None,
+                updated_at: 2,
+                updated_by: "olga".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            gate_for(&store, S, ME, NT),
+            ConnectorGate::Refuse(t) if t.contains("ask your admin")
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_intent_never_calls_a_refresher_for_an_api_key() {
+        let (store, vault) = notesdesk_world();
+        enter_key(&store, &vault, ME, &["api.notesdesk.example"]);
+        // Even a row that looks long expired is not refreshed: a key has nothing to renew.
+        let mut row = store
+            .connector_connection(ME, "notesdesk")
+            .unwrap()
+            .unwrap();
+        row.expires_at = Some(1);
+        store.put_connector_connection(&row).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let r = refresher(&calls, ok);
+        let (g, refreshed) = precheck_with_outcome(&store, &vault, &cfg(), &r, S, ME, NT).await;
+        assert_eq!(g, ConnectorGate::Clear);
+        assert!(!refreshed);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // Not connected: parked, with no refresher call either.
+        let (g, _) = precheck_with_outcome(&store, &vault, &cfg(), &r, S, OTHER, NT).await;
+        assert!(matches!(
+            g,
+            ConnectorGate::Park {
+                reconnect: false,
+                ..
+            }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

@@ -67,5 +67,7 @@ mock:
     reply: { toolCall: { name: note_search, args: { host: eu.api.notesdesk.example, query: printer } } }
   - when: { step: eu, stepStart: true }
     reply: { toolCall: { name: load_skill, args: { skill: notesdesk-notes } } }
+  - when: { step: eu, afterTool: note_search }
+    reply: { text: Found the note in the EU region. }
 status: pending
-expectFail: { step: when.5, class: product }
+expectFail: { step: then.1, class: product }

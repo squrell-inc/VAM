@@ -85,5 +85,6 @@ mock:
     reply: { toolCall: { name: note_search, args: { query: printer } } }
   - when: { step: parked, stepStart: true }
     reply: { toolCall: { name: load_skill, args: { skill: notesdesk-notes } } }
-status: pending
-expectFail: { step: when.5, class: product }
+  - when: { step: parked, afterTool: note_search }
+    reply: { text: Found the note. }
+status: active
