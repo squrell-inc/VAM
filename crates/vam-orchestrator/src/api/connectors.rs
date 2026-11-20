@@ -5285,4 +5285,50 @@ mod tests {
         );
         assert_eq!(stored.timeout_ms, 90_000);
     }
+
+    #[tokio::test]
+    async fn a_check_whose_request_goes_away_keeps_the_members_lock_until_the_refresh_returns() {
+        let (app, _state, p) = fixed_endpoint_node("fixedcheck.example", false).await;
+        p.reply(200, tokens_reply());
+        let (s, b) = zendesk_exchange(&app, "squrell://oauth", "zk-ck").await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // The provider holds the refresh answer; the member's request is dropped meanwhile.
+        let (arrived, release) = p.hold_next();
+        p.reply(200, tokens_reply());
+        let check = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/connectors/zendesk/connection/check",
+                    "member-secret",
+                    None,
+                )
+                .await
+            })
+        };
+        tokio::task::spawn_blocking(move || arrived.recv().unwrap())
+            .await
+            .unwrap();
+        check.abort();
+        let _ = check.await;
+        // The refresh is still running on its worker: a sign-in must not get the lock under it.
+        let early = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            crate::connectors::lock_connection("ada", "zendesk"),
+        )
+        .await;
+        assert!(
+            early.is_err(),
+            "the lock was released while the refresh was in flight"
+        );
+        release.send(()).unwrap();
+        let late = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::connectors::lock_connection("ada", "zendesk"),
+        )
+        .await;
+        assert!(late.is_ok(), "the lock is free once the refresh returned");
+    }
 }

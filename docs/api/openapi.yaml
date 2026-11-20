@@ -7185,7 +7185,7 @@ components:
           description: "The tile text; for a connected REST connector, the account (`preferred_username`)."
         providerGrantMayRemain:
           type: boolean
-          description: Only on the answer to a REST disconnect, and only when true: the rows were deleted but the provider's grant may still be active (it was not revoked).
+          description: "Only on the answer to a REST disconnect, and only when true (the rows were deleted but the provider's grant may still be active: it was not revoked)."
         node:
           type: object
           required: [enabled, configured]
