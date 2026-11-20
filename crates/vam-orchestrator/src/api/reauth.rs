@@ -80,6 +80,18 @@ pub(crate) fn resume_key(state: &AppState, key: &str) {
     resume_records(state, resolve_key(&state.store, key));
 }
 
+/// At startup, before any request: resumes the runs parked on a REST connector connection that
+/// is `Connected` now. A sign-in commits its connection, releases the member's lock and then
+/// resumes the parks; a process that stopped between the commit and the resume left them parked
+/// with no path back. Runs with no lock held. Returns how many park keys were resumed.
+pub fn resume_connected_connector_parks(state: &AppState) -> usize {
+    let keys = crate::connector_park::connected_park_keys(&state.store);
+    for key in &keys {
+        resume_key(state, key);
+    }
+    keys.len()
+}
+
 fn resume_records(state: &AppState, records: Vec<crate::error::ApprovalRecord>) {
     for record in records {
         if let Err(e) = state.store.update_run_state(&record.run_id, "RUNNING") {

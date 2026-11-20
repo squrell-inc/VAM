@@ -1973,6 +1973,24 @@ impl SqliteWorkflowStore {
         Ok(rows)
     }
 
+    /// The distinct connection keys (`reauth:<scope>:<owner>:<id>`) that undecided, published
+    /// reauth parks wait on.
+    pub fn pending_reauth_keys(&self) -> Result<Vec<String>, OrchestratorError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let mut stmt = connection.prepare(
+            "SELECT DISTINCT locked_reason FROM approvals
+             WHERE kind = 'reauth' AND decision IS NULL AND published = 1
+             ORDER BY locked_reason",
+        )?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// A stop of this run already rejected (or cancelled) one of its approvals.
     pub fn has_stop_rejection(&self, run_id: &str) -> bool {
         let Ok(connection) = self.connection.lock() else {
