@@ -2876,7 +2876,9 @@ impl SqliteWorkflowStore {
     /// unchanged (a settings-only write); [`McpAuthWrite::Replace`] writes them, and when it names
     /// the row the request observed, refuses (409) if the stored auth mode or OAuth metadata no
     /// longer equal what was observed (another writer, such as an admin's client save marking the
-    /// row for reconnect, changed it since).
+    /// row for reconnect, changed it since); naming no row, it refuses if a row now exists. A
+    /// `Replace` that changes the auth mode deletes the previous mode's credentials (see
+    /// [`replaced_auth_mode_binding_ids`]) in the same transaction, after the check.
     #[allow(clippy::too_many_arguments)] // same flat shape as `upsert_mcp_connection`
     pub fn upsert_mcp_connection_guarded(
         &self,
@@ -2897,10 +2899,7 @@ impl SqliteWorkflowStore {
                 .lock()
                 .map_err(|_| OrchestratorError::StorageUnavailable)?;
             let tx = connection.transaction()?;
-            if let McpAuthWrite::Replace {
-                observed: Some(observed),
-            } = auth
-            {
+            if let McpAuthWrite::Replace { observed } = auth {
                 let stored: Option<(String, String)> = tx
                     .query_row(
                         "SELECT auth_mode, oauth_metadata_json FROM mcp_connections
@@ -2909,9 +2908,12 @@ impl SqliteWorkflowStore {
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .optional()?;
-                let same = match stored {
-                    None => false,
-                    Some((mode, json)) => {
+                // A new connection (nothing observed) must still be absent: a row another
+                // connect created meanwhile is not overwritten.
+                let same = match (stored, observed) {
+                    (None, None) => true,
+                    (None, Some(_)) | (Some(_), None) => false,
+                    (Some((mode, json)), Some(observed)) => {
                         let mode = McpAuthMode::parse(&mode)?;
                         mode == observed.auth_mode
                             && parse_oauth_metadata_json(&json, mode)? == observed.oauth
@@ -2921,6 +2923,21 @@ impl SqliteWorkflowStore {
                     return Err(OrchestratorError::Conflict(format!(
                         "the connection `{connection_id}` changed while this request waited: read it again and retry"
                     )));
+                }
+                // A mode change drops the previous mode's credentials in this transaction, after
+                // the check: a refused write leaves the row and its credentials as they were. The
+                // bindings this write points at are the new mode's, and are kept.
+                if let Some(prior) = observed.filter(|p| p.auth_mode != auth_mode) {
+                    let kept: Vec<String> = header_bindings
+                        .iter()
+                        .map(|b| b.binding_id.clone())
+                        .collect();
+                    delete_bindings_in(
+                        &tx,
+                        scope,
+                        owner_user_id,
+                        &replaced_auth_mode_binding_ids(prior, auth_mode, &kept),
+                    )?;
                 }
             }
             write_mcp_connection_row(
@@ -5007,6 +5024,142 @@ forbid (
             )
             .unwrap();
         assert_eq!(done.oauth.unwrap().client_id, "client-456");
+    }
+
+    #[test]
+    fn a_guarded_new_connection_is_refused_when_another_connect_created_the_row() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        let url = "https://mcp.example.com/mcp";
+        let guarded = |mode: McpAuthMode, oauth: Option<&McpOauthMetadata>| {
+            store.upsert_mcp_connection_guarded(
+                SecretScope::User,
+                "ada",
+                "fresh",
+                url,
+                &[],
+                &[],
+                mode,
+                oauth,
+                McpAuthWrite::Replace { observed: None },
+            )
+        };
+        // Uncontended, a new connection is created.
+        let created = guarded(McpAuthMode::Oauth, Some(&sample_oauth_meta())).unwrap();
+        assert_eq!(created.auth_mode, McpAuthMode::Oauth);
+        // A static connect that observed no row, continuing after that sign-in, is refused and
+        // leaves the OAuth row.
+        let err = guarded(McpAuthMode::Static, None).unwrap_err();
+        assert!(matches!(err, OrchestratorError::Conflict(_)), "{err:?}");
+        let row = store
+            .get_mcp_connection(SecretScope::User, "ada", "fresh")
+            .unwrap();
+        assert_eq!(row.auth_mode, McpAuthMode::Oauth);
+        assert_eq!(row.oauth, Some(sample_oauth_meta()));
+    }
+
+    #[test]
+    fn a_refused_mode_change_keeps_the_previous_credentials_and_an_accepted_one_drops_them() {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        let url = "https://mcp.example.com/mcp";
+        let observed = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "alice",
+                "acme",
+                url,
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&sample_oauth_meta()),
+            )
+            .unwrap();
+        store_mcp_oauth_tokens(
+            &vault,
+            &observed,
+            &McpOauthTokenWrite {
+                access_token: "guard-access".into(),
+                refresh_token: "guard-refresh".into(),
+                client_secret: Some("guard-secret".into()),
+            },
+            None,
+            UserRole::Member,
+        )
+        .unwrap();
+        let tokens = [
+            mcp_oauth_access_token_binding_id("acme"),
+            mcp_oauth_refresh_token_binding_id("acme"),
+            mcp_oauth_client_secret_binding_id("acme"),
+        ];
+        let present = |binding: &str| {
+            vault
+                .get_metadata_at(SecretScope::User, "alice", binding)
+                .is_ok()
+        };
+        // An older writer puts back other OAuth metadata while the static connect waits.
+        let mut older = sample_oauth_meta();
+        older.client_id = "client-older".into();
+        let moved = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "alice",
+                "acme",
+                url,
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&older),
+            )
+            .unwrap();
+        let header = store_mcp_header_credential(
+            &vault,
+            SecretScope::User,
+            "alice",
+            "acme",
+            "Authorization",
+            "Bearer static",
+            "mcp.example.com",
+            None,
+            UserRole::Member,
+        )
+        .unwrap();
+        let headers = [HeaderBinding {
+            name: "Authorization".into(),
+            binding_id: header.clone(),
+        }];
+        let to_static = |seen: &McpConnection| {
+            store.upsert_mcp_connection_guarded(
+                SecretScope::User,
+                "alice",
+                "acme",
+                url,
+                &headers,
+                &[],
+                McpAuthMode::Static,
+                None,
+                McpAuthWrite::Replace {
+                    observed: Some(seen),
+                },
+            )
+        };
+        let err = to_static(&observed).unwrap_err();
+        assert!(matches!(err, OrchestratorError::Conflict(_)), "{err:?}");
+        let row = store
+            .get_mcp_connection(SecretScope::User, "alice", "acme")
+            .unwrap();
+        assert_eq!(row.auth_mode, McpAuthMode::Oauth);
+        for binding in &tokens {
+            assert!(present(binding), "a refused write kept {binding}");
+        }
+        // Against the current row the switch lands and drops the OAuth credentials only.
+        let switched = to_static(&moved).unwrap();
+        assert_eq!(switched.auth_mode, McpAuthMode::Static);
+        for binding in &tokens {
+            assert!(!present(binding), "{binding}");
+        }
+        assert!(present(&header), "the new mode's header is kept");
     }
 
     #[test]

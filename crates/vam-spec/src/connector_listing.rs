@@ -54,6 +54,14 @@ fn builtin_values() -> impl Iterator<Item = Value> {
         .filter_map(|(_, raw)| serde_json::from_str::<Value>(raw).ok())
 }
 
+/// True when the egress gate cannot tell `a` and `b` apart: it finds a placeholder in a request by
+/// substring (`Envelope::screen`), so a request carrying the longer one carries both and is
+/// refused. Equal placeholders overlap too. Two bindings whose placeholders overlap cannot both be
+/// admitted.
+pub fn placeholders_overlap(a: &str, b: &str) -> bool {
+    a.contains(b) || b.contains(a)
+}
+
 /// True when `id` is one of Squrell's: named in [`RESERVED_CONNECTOR_IDS`] or the id of a built-in
 /// connector file.
 pub fn is_reserved_connector_id(id: &str) -> bool {
@@ -214,7 +222,7 @@ fn check_marketplace_bindings(c: &Connector, id: &str) -> Result<(), ConnectorEr
     if bs.len() > 8 {
         return bad("a marketplace connector may declare at most 8 bindings");
     }
-    for b in bs {
+    for (i, b) in bs.iter().enumerate() {
         let name_ok = !b.name.is_empty()
             && b.name.len() <= 32
             && b.name
@@ -239,16 +247,27 @@ fn check_marketplace_bindings(c: &Connector, id: &str) -> Result<(), ConnectorEr
                 b.name, b.placeholder
             ));
         }
-        // `vamsec_<id>_<name>` can equal a built-in placeholder (id `m365`, name `graph`), and two
-        // bindings with one placeholder are refused by the swap for both (T4).
-        if crate::connector::builtin_connectors()
+        // `vamsec_<id>_<name>` can equal a built-in placeholder (id `m365`, name `graph`), or hold
+        // one (`vamsec_m365_graph_x`), and two bindings the gate cannot tell apart are refused by
+        // the swap for both (T4): see [`placeholders_overlap`].
+        if let Some(x) = crate::connector::builtin_connectors()
             .iter()
             .flat_map(|c| c.bindings.iter().flatten())
-            .any(|x| x.placeholder == b.placeholder)
+            .find(|x| placeholders_overlap(&x.placeholder, &b.placeholder))
         {
             return bad(format!(
-                "binding `{}` placeholder `{}` is a Squrell connector's: a connector cannot take another's placeholder",
-                b.name, b.placeholder
+                "binding `{}` placeholder `{}` overlaps the Squrell connector's `{}`: a connector cannot take another's placeholder",
+                b.name, b.placeholder, x.placeholder
+            ));
+        }
+        // Two of its own bindings (`a` and `a_b`): the request for one would carry both.
+        if let Some(x) = bs[..i]
+            .iter()
+            .find(|x| placeholders_overlap(&x.placeholder, &b.placeholder))
+        {
+            return bad(format!(
+                "bindings `{}` and `{}`: the placeholder `{}` overlaps `{}`, and the gate could not tell them apart",
+                x.name, b.name, x.placeholder, b.placeholder
             ));
         }
         if b.hosts.len() > 4 {
@@ -851,6 +870,30 @@ mod tests {
         v["bindings"][0]["placeholder"] = json!("vamsec_m365_graph");
         let e = err(v);
         assert!(e.contains("Squrell connector's"), "{e}");
+    }
+
+    #[test]
+    fn a_placeholder_that_overlaps_another_under_substring_matching_is_refused() {
+        assert!(placeholders_overlap("vamsec_a_b", "vamsec_a_b_c"));
+        assert!(placeholders_overlap("vamsec_a_b_c", "vamsec_a_b"));
+        assert!(placeholders_overlap("vamsec_a_b", "vamsec_a_b"));
+        assert!(!placeholders_overlap("vamsec_a_b", "vamsec_a_c"));
+        // A built-in's placeholder inside this one (id `m365`, name `graph_x`).
+        let mut v = zendesk();
+        v["urn"] = json!("urn:vam:connector:connectors.example/pub/m365");
+        v["bindings"][0]["name"] = json!("graph_x");
+        v["bindings"][0]["placeholder"] = json!("vamsec_m365_graph_x");
+        let e = err(v);
+        assert!(e.contains("Squrell connector's"), "{e}");
+        // Two of its own bindings, `api` and `api_v2`.
+        let mut v = zendesk();
+        let mut two = v["bindings"][0].clone();
+        two["name"] = json!("api_v2");
+        two["placeholder"] = json!("vamsec_zendesk_api_v2");
+        v["bindings"].as_array_mut().unwrap().push(two);
+        assert_eq!(v["bindings"][0]["placeholder"], json!("vamsec_zendesk_api"));
+        let e = err(v);
+        assert!(e.contains("overlaps"), "{e}");
     }
 
     #[test]

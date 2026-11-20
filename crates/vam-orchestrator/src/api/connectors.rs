@@ -51,19 +51,16 @@ async fn list_connectors(
     ensure_ready(&state, false)?;
     state.pdp.authorize(&auth, "ListConnectors", "node:read")?;
     let cfg = connectors::config();
-    // The node rows and the clients in one read, so an entry never pairs a node row with a client
-    // from another save.
-    let (nodes, clients) = state.store.node_connectors_and_clients()?;
+    // The definitions, the node rows and the clients in one snapshot, so an entry never pairs a
+    // release with the enablement of another save, nor a node row with a client from another.
+    let (entries, nodes, clients) = state.store.connector_listing()?;
     let admin = auth.has_users_admin();
-    let list: Vec<Value> = state
-        .store
-        .connector_entries()?
+    let list: Vec<Value> = entries
         .iter()
         .map(|e| {
             let id = e.id();
             let node = nodes.iter().find(|n| n.connector_id == id);
-            // The entries were read after the node rows: an address saved in between filled them
-            // with another company. Every host shown is filled from the row this entry shows.
+            // Every host shown is filled from the row this entry shows.
             let e = &connectors::entry_for_node(e, node);
             let def = &e.def;
             let client = clients.iter().find(|c| c.connector_id == id);
@@ -567,7 +564,7 @@ async fn exchange_code(
         // committed and the lock is released (a resumed intent takes it), whether or not this
         // request is still there to see it.
         #[cfg(test)]
-        connectors::test_signal::fire(&format!("exchange-read-client:{owner}:{id}"));
+        connectors::test_signal::fire(&format!("exchange-read-client:{owner}:{id}:{idempotency}"));
         let gate = connectors::lock_connection(&owner, &id).await;
         let owner2 = owner.clone();
         let resume_state = state.clone();
@@ -4957,10 +4954,14 @@ mod tests {
         // The member's connection is busy (a refresh, another sign-in): the exchange passes the
         // route's checks and waits for the lock.
         let held = crate::connectors::lock_connection("ada", "zendesk").await;
-        let read = crate::connectors::test_signal::arm("exchange-read-client:ada:zendesk");
+        // Scoped to this request's key: other Zendesk exchanges as `ada` run in parallel.
+        let read =
+            crate::connectors::test_signal::arm("exchange-read-client:ada:zendesk:zk-lock-wait");
         let waiting = {
             let app = app.clone();
-            tokio::spawn(async move { zendesk_exchange(&app, "squrell://oauth", "zk-w").await })
+            tokio::spawn(
+                async move { zendesk_exchange(&app, "squrell://oauth", "zk-lock-wait").await },
+            )
         };
         // The exchange has read the old client and is about to wait for the lock.
         tokio::task::spawn_blocking(move || read.recv_timeout(std::time::Duration::from_secs(10)))

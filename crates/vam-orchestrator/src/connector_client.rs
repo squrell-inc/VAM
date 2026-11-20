@@ -769,10 +769,21 @@ impl SqliteWorkflowStore {
         ))
     }
 
-    /// Every node row and every client, in one read (the listing's snapshot).
-    pub(crate) fn node_connectors_and_clients(
+    /// Every connector definition, every node row and every client, under one hold of the store's
+    /// connection (the listing's snapshot): a marketplace update that installs a new release and
+    /// disables the connector commits wholly before or wholly after it, so the listing never shows
+    /// the new release with the old `enabled: true`.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn connector_listing(
         &self,
-    ) -> Result<(Vec<crate::connectors::NodeConnector>, Vec<NodeClient>), OrchestratorError> {
+    ) -> Result<
+        (
+            Vec<crate::connectors::ConnectorEntry>,
+            Vec<crate::connectors::NodeConnector>,
+            Vec<NodeClient>,
+        ),
+        OrchestratorError,
+    > {
         let c = self
             .connection
             .lock()
@@ -784,7 +795,15 @@ impl SqliteWorkflowStore {
         let clients = stmt
             .query_map([], row_to_client)?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok((nodes, clients))
+        drop(stmt);
+        #[cfg(test)]
+        LISTING_PAUSE.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f()
+            }
+        });
+        let entries = crate::connectors::entries_in(&c)?;
+        Ok((entries, nodes, clients))
     }
 
     pub fn node_clients(&self) -> Result<Vec<NodeClient>, OrchestratorError> {
@@ -1638,6 +1657,93 @@ mod tests {
         assert!(!is_connector_org_row(SecretScope::User, &id));
         assert!(!is_connector_org_row(SecretScope::Org, "openai/api-key"));
         assert!(!is_connector_org_row(SecretScope::Org, "connectors/x"));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test builds run this between the node rows and the definitions of
+    /// [`SqliteWorkflowStore::connector_listing`], to let a concurrent write try to land there.
+    static LISTING_PAUSE: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::test_support::install_filebox_rows;
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn the_listing_never_pairs_a_new_release_with_the_old_enablement() {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        install_filebox_rows(&store, "snap");
+        store
+            .put_node_connector(&crate::connectors::NodeConnector {
+                connector_id: "filebox".into(),
+                enabled: true,
+                consent_tenant_id: None,
+                consent_recorded_at: None,
+                consent_recorded_by: None,
+                tenant_subdomain: None,
+                updated_at: 1,
+                updated_by: "olga".into(),
+            })
+            .unwrap();
+        let writer: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        let (s2, w2) = (store.clone(), writer.clone());
+        LISTING_PAUSE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                let s3 = s2.clone();
+                // A marketplace update: the new release and the disable in one transaction.
+                *w2.lock().unwrap() = Some(std::thread::spawn(move || {
+                    let mut c = s3.connection.lock().unwrap();
+                    let tx = c.transaction().unwrap();
+                    let (urn, bytes): (String, Vec<u8>) = tx
+                        .query_row("SELECT urn, spec_bytes FROM connector_releases", [], |r| {
+                            Ok((r.get(0)?, r.get(1)?))
+                        })
+                        .unwrap();
+                    let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    json["version"] = "1.1.0".into();
+                    tx.execute(
+                        "INSERT INTO connector_releases (urn, major, minor, patch, digest, spec_bytes,
+                             created_at, updated_at, owner_user_id)
+                         VALUES (?1, 1, 1, 0, 'd2', ?2, 2, 2, 'system')",
+                        params![urn, json.to_string().as_bytes()],
+                    )
+                    .unwrap();
+                    tx.execute(
+                        "UPDATE catalog_origins SET minor = 1 WHERE urn = ?1",
+                        params![urn],
+                    )
+                    .unwrap();
+                    tx.execute(
+                        "UPDATE node_enabled_connectors SET enabled = 0 WHERE connector_id = 'filebox'",
+                        [],
+                    )
+                    .unwrap();
+                    tx.commit().unwrap();
+                }));
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }));
+        });
+        let (entries, nodes, _) = store.connector_listing().unwrap();
+        LISTING_PAUSE.with(|h| *h.borrow_mut() = None);
+        let handle = writer.lock().unwrap().take();
+        handle.unwrap().join().unwrap();
+        let e = entries.iter().find(|e| e.id() == "filebox").unwrap();
+        let n = nodes.iter().find(|n| n.connector_id == "filebox").unwrap();
+        assert_eq!(
+            (e.def.version.as_str(), n.enabled),
+            ("1.0.0", true),
+            "the listing read one store state"
+        );
+        // After the update, a new listing shows the new release, disabled.
+        let (entries, nodes, _) = store.connector_listing().unwrap();
+        let e = entries.iter().find(|e| e.id() == "filebox").unwrap();
+        let n = nodes.iter().find(|n| n.connector_id == "filebox").unwrap();
+        assert_eq!((e.def.version.as_str(), n.enabled), ("1.1.0", false));
     }
 }
 

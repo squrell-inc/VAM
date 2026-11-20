@@ -800,6 +800,72 @@ mod tests {
     }
 
     #[test]
+    fn a_park_past_its_deadline_is_not_resumed_at_startup() {
+        let (store, vault) = fx();
+        node(&store, true, true);
+        connect(
+            &store,
+            &vault,
+            ME,
+            ConnectionStatus::Connected,
+            connectors::now_secs() + 3600,
+        );
+        // The deadline passed while the node was stopped: the expiry sweep has not run yet.
+        park(&store, "req-late", &park_key(ME, "microsoft-365"));
+        let set_deadline = |request: &str, at: i64| {
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE approvals SET expires_at = ?2 WHERE request_id = ?1",
+                    rusqlite::params![request, at],
+                )
+                .unwrap();
+        };
+        set_deadline("req-late", connectors::now_secs() - 5);
+        assert!(connected_park_keys(&store).is_empty());
+        assert!(crate::api::reauth::resolve_key(&store, &park_key(ME, "microsoft-365")).is_empty());
+        // The decision itself refuses a reconnect past the deadline, however it was selected.
+        let late = store.decide_approval_with_surface(
+            &vam_spec::v1::ResourceId {
+                urn: "req-late".into(),
+            },
+            &vam_spec::v1::ResourceId { urn: "t".into() },
+            crate::hitl::DECISION_RECONNECTED,
+            "system",
+            "",
+            None,
+            None,
+            None,
+            None,
+            "system",
+        );
+        assert!(
+            matches!(late, Err(crate::error::OrchestratorError::Conflict(_))),
+            "{late:?}"
+        );
+        let undecided: Option<String> = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT decision FROM approvals WHERE request_id = 'req-late'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(undecided, None, "left for the expiry sweep");
+        // An unexpired park on the same connection is still recovered.
+        park(&store, "req-live", &park_key(ME, "microsoft-365"));
+        set_deadline("req-live", connectors::now_secs() + 600);
+        assert_eq!(connected_park_keys(&store), [park_key(ME, "microsoft-365")]);
+        let decided = crate::api::reauth::resolve_key(&store, &park_key(ME, "microsoft-365"));
+        assert_eq!(decided.len(), 1);
+        assert_eq!(decided[0].request_id, "req-live");
+    }
+
+    #[test]
     fn a_connect_resolves_only_that_owners_parks() {
         use crate::api::reauth::resolve_key;
         let (store, _) = fx();

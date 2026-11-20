@@ -36,7 +36,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
-use vam_spec::connector_listing::{connector_id_of_urn, is_reserved_connector_id};
+use vam_spec::connector_listing::{
+    connector_id_of_urn, is_reserved_connector_id, placeholders_overlap,
+};
 use vam_spec::marketplace::{urn_domain, NodeRequirement};
 use vam_spec::package::{check_dir, ArtifactKind, CheckedPackage, CheckedSpec};
 use vam_spec::v1::{AgentSpec, Digest, PlaybookSpec, ResourceRef, SkillManifest, Version};
@@ -328,30 +330,60 @@ fn prepare(
             )));
         }
     }
+    check_listing_connector_ids(&out, &listing.id)?;
     Ok(out)
 }
 
-/// No two connectors of one listing declare the same binding placeholder. Each is compared with
-/// the installed connectors at write time (`admit_connector_id`), but the whole listing is planned
+/// No two connectors of one listing have the same id (the last segment of the URN): an id names one
+/// connector on the node. Each is compared with the installed connectors at write time
+/// (`admit_connector_id`), but neither of two new ones from one listing is installed yet.
+fn check_listing_connector_ids(
+    prepared: &[Prepared],
+    listing: &str,
+) -> Result<(), OrchestratorError> {
+    let mut ids: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for p in prepared {
+        if !matches!(p.checked.spec, CheckedSpec::Connector(_)) {
+            continue;
+        }
+        let urn = p.checked.urn.as_str();
+        if let Some(first) = ids.insert(connector_id_of_urn(urn), urn) {
+            return Err(invalid(format!(
+                "listing `{listing}`: the connectors {first} and {urn} have the same id `{}`: an id names one connector",
+                connector_id_of_urn(urn)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// No two connectors of one listing declare binding placeholders the egress gate cannot tell apart
+/// (the same one, or one inside the other: [`placeholders_overlap`]). Each is compared with the
+/// installed connectors at write time (`admit_connector_id`), but the whole listing is planned
 /// before any of it is inserted, so two of its own connectors would pass that check together.
 fn check_listing_placeholders(
     prepared: &[Prepared],
     listing: &str,
 ) -> Result<(), OrchestratorError> {
-    let mut seen: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    let mut seen: Vec<(&str, &str)> = Vec::new();
     for p in prepared {
         let CheckedSpec::Connector(def) = &p.checked.spec else {
             continue;
         };
         for b in def.bindings.iter().flatten() {
-            if let Some(first) = seen.insert(b.placeholder.as_str(), def.urn.as_str()) {
-                if first != def.urn {
-                    return Err(invalid(format!(
-                        "listing `{listing}`: the connectors {first} and {} both declare the binding placeholder `{}`: a placeholder must name one binding",
-                        def.urn, b.placeholder
-                    )));
-                }
+            // A connector's own bindings are compared by the file check.
+            if let Some((ph, first)) = seen
+                .iter()
+                .find(|(ph, urn)| *urn != def.urn && placeholders_overlap(ph, &b.placeholder))
+            {
+                return Err(invalid(format!(
+                    "listing `{listing}`: the connectors {first} and {} declare the binding placeholders `{ph}` and `{}`, which the gate cannot tell apart: a placeholder must name one binding",
+                    def.urn, b.placeholder
+                )));
             }
+        }
+        for b in def.bindings.iter().flatten() {
+            seen.push((b.placeholder.as_str(), def.urn.as_str()));
         }
     }
     Ok(())
@@ -941,10 +973,13 @@ fn admit_connector_id(
                 continue;
             }
             for b in other.def.bindings.iter().flatten() {
-                if ours.contains(&b.placeholder.as_str()) {
+                if let Some(mine) = ours
+                    .iter()
+                    .find(|p| placeholders_overlap(p, &b.placeholder))
+                {
                     return Err(conflict(format!(
-                        "connector `{urn}`: its binding placeholder `{}` is also the installed connector {}'s: a placeholder must name one binding",
-                        b.placeholder, other.def.urn
+                        "connector `{urn}`: its binding placeholder `{mine}` overlaps the installed connector {}'s `{}`, and the gate cannot tell them apart: a placeholder must name one binding",
+                        other.def.urn, b.placeholder
                     )));
                 }
             }

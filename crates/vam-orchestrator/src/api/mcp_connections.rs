@@ -22,15 +22,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mcp_registry::{
     apply_oauth_token_metadata, assert_no_visible_name_collision,
-    decide_pinned_snapshot_with_instructions, delete_replaced_auth_mode_bindings,
-    fetch_tools_snapshot, flagged_vendor_text, mcp_auth_binding_id, mcp_capabilities,
-    mcp_oauth_refresh_token_binding_id, merge_header_bindings, normalize_connect_headers,
-    parse_side_effect_class, resolve_connection_auth, sanitize_oauth_last_refresh_error,
-    sanitized_oauth_metadata, store_mcp_header_credential, store_mcp_oauth_tokens,
-    suggested_read_only_tools, validate_connection_id, validate_mcp_timeout_ms, HeaderBinding,
-    McpAuthMode, McpAuthWrite, McpConnection, McpHeaderInput, McpOauthMetadata,
-    McpOauthRegistrationMethod, McpOauthStatus, McpOauthTokenWrite, McpSnapshot,
-    PinnedSnapshotDecision,
+    decide_pinned_snapshot_with_instructions, fetch_tools_snapshot, flagged_vendor_text,
+    mcp_auth_binding_id, mcp_capabilities, mcp_oauth_refresh_token_binding_id,
+    merge_header_bindings, normalize_connect_headers, parse_side_effect_class,
+    resolve_connection_auth, sanitize_oauth_last_refresh_error, sanitized_oauth_metadata,
+    store_mcp_header_credential, store_mcp_oauth_tokens, suggested_read_only_tools,
+    validate_connection_id, validate_mcp_timeout_ms, HeaderBinding, McpAuthMode, McpAuthWrite,
+    McpConnection, McpHeaderInput, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
+    McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision,
 };
 use crate::secrets::{
     authorize_org_secret_write, resolve_secret_scope, vault_owner_user_id, SecretScope,
@@ -646,15 +645,8 @@ async fn connect(
         }
     };
     assert_no_visible_name_collision(&state.store, scope, &owner, &req.connection_id, &tools)?;
-    if let Some(prior) = existing.as_ref() {
-        if prior.auth_mode != auth_mode {
-            let retained: Vec<String> = stored_bindings
-                .iter()
-                .map(|binding| binding.binding_id.clone())
-                .collect();
-            delete_replaced_auth_mode_bindings(&state.vault, prior, auth_mode, &retained)?;
-        }
-    }
+    // A mode change's previous-mode credentials are deleted by the guarded write below, in the
+    // transaction that checks the sign-in state: a refused write leaves them.
     // A settings-only write (an OAuth row, no OAuth block, no mode change) leaves the sign-in
     // columns as stored: an admin's save can mark the row for reconnect without the member's
     // credential gate, and this write must not put back the state it read. A write that changes

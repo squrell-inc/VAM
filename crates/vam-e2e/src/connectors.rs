@@ -1821,9 +1821,13 @@ impl Engine {
         for id in std::mem::take(&mut self.ctx.conn.nodes) {
             let path = format!("/v1/connectors/{}/node", seg(&id));
             let (client, tenant) = (client_nodes.contains(&id), tenant_nodes.contains(&id));
-            let answer = self
-                .api
-                .put_as(None, &path, &node_reset_body(client, tenant));
+            let full = node_reset_body(client, tenant);
+            let mut answer = self.api.put_as(None, &path, &full);
+            if answer.is_err() {
+                // The request may never have reached the node: send the complete reset again
+                // before falling back to one that would leave the client in place.
+                answer = self.api.put_as(None, &path, &full);
+            }
             if answer.as_ref().is_ok_and(|r| r.ok()) {
                 continue;
             }
@@ -1856,7 +1860,7 @@ impl Engine {
             Ok(r) => format!(
                 "{} {}",
                 r.status,
-                self.scrub(&r.body.chars().take(200).collect::<String>())
+                scrubbed_start(&r.body, |t| self.scrub(t))
             ),
             Err(_) => "no answer".to_string(),
         }
@@ -2530,9 +2534,26 @@ impl Engine {
     }
 }
 
+/// The first 200 characters of `body` with every secret scrubbed: the whole body is scrubbed first,
+/// so a secret that crosses the cut is replaced, never shown as a prefix.
+fn scrubbed_start(body: &str, scrub: impl Fn(&str) -> String) -> String {
+    scrub(body).chars().take(200).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cleanup_failure_scrubs_a_secret_that_crosses_the_cut() {
+        let secret = "tok-0123456789abcdef0123";
+        let body = format!("{}{secret}", "x".repeat(190));
+        let scrub = |t: &str| t.replace(secret, "<secret>");
+        let shown = scrubbed_start(&body, scrub);
+        assert!(!shown.contains("tok-01234"), "{shown}");
+        assert!(shown.ends_with("<secret>"), "{shown}");
+        assert!(shown.chars().count() <= 200);
+    }
 
     #[test]
     fn cleanup_clears_a_company_address_with_or_without_a_client() {
