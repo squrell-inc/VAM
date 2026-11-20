@@ -74,6 +74,18 @@ pub struct TestRoute {
     pub body: Value,
 }
 
+/// The body the mock answers a request no route matches with.
+pub const NOT_FOUND_BODY: &str = r#"{"error":"not found"}"#;
+
+/// An answer of the mock: a status and a JSON body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockAnswer {
+    /// The HTTP status.
+    pub status: u16,
+    /// The JSON body as text.
+    pub body: String,
+}
+
 /// What a case expects of a tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -214,34 +226,56 @@ impl ConnectorTestFile {
         Ok(())
     }
 
-    /// The route that answers a request, or `None` (the mock answers 404). `host` is compared
-    /// without case; the query and fragment of `target` are ignored; an exact route beats a prefix
-    /// route and the longest prefix beats a shorter one. A host the file does not declare matches
-    /// nothing.
+    /// The route that answers a request, or `None` (the mock answers 404). `host` and `method` are
+    /// compared without case; the query and fragment of `target` are ignored; the request's segments
+    /// are percent-decoded once each, as the node's gate reads them (`/v1/%6Eotes` is `/v1/notes`; an
+    /// encoded slash, a double encoding or a dot segment matches nothing); an exact route beats a
+    /// prefix route and the longest prefix beats a shorter one. A host the file does not declare
+    /// matches nothing.
     pub fn route_for(&self, host: &str, method: &str, target: &str) -> Option<&TestRoute> {
         if !self.serves(host) {
             return None;
         }
         let path = target.split(['?', '#']).next().unwrap_or_default();
-        let want = segments(path)?;
+        let want = request_segments(path)?;
         let mut best: Option<(usize, &TestRoute)> = None;
-        for r in self.routes.iter().filter(|r| r.method == method) {
+        for r in self
+            .routes
+            .iter()
+            .filter(|r| r.method.eq_ignore_ascii_case(method))
+        {
             if let Some(exact) = &r.path {
-                if segments(exact).as_deref() == Some(want.as_slice()) {
+                if segments(exact).is_some_and(|have| same_segments(&have, &want)) {
                     return Some(r);
                 }
             } else if let Some(prefix) = &r.prefix {
                 let Some(have) = segments(prefix) else {
                     continue;
                 };
-                let admits =
-                    have.len() <= want.len() && have.iter().zip(&want).all(|(a, b)| a == b);
+                let admits = have.len() <= want.len()
+                    && have.iter().zip(&want).all(|(a, b)| *a == b.as_str());
                 if admits && best.is_none_or(|(n, _)| have.len() > n) {
                     best = Some((have.len(), r));
                 }
             }
         }
         best.map(|(_, r)| r)
+    }
+
+    /// What the mock answers a request with: the matching route's status and body (compact JSON,
+    /// `null` when the route has none), or 404 `{"error":"not found"}` when no route matches or the
+    /// host is not one of the file's.
+    pub fn answer_for(&self, host: &str, method: &str, target: &str) -> MockAnswer {
+        match self.route_for(host, method, target) {
+            Some(r) => MockAnswer {
+                status: r.status,
+                body: r.body.to_string(),
+            },
+            None => MockAnswer {
+                status: 404,
+                body: NOT_FOUND_BODY.to_string(),
+            },
+        }
     }
 
     /// Whether `host` is one of the file's hosts (without case).
@@ -269,6 +303,48 @@ fn segments(path: &str) -> Option<Vec<&str>> {
         return None;
     }
     Some(parts)
+}
+
+/// The segments of a request path as the gate reads them: split as [`segments`] does, then
+/// percent-decoded once each. `None` when a segment is a dot segment, decodes to a slash, a
+/// backslash, a `%` (a double encoding) or a control character, or is not valid UTF-8.
+fn request_segments(path: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    for part in segments(path)? {
+        let decoded = percent_decode_once(part)?;
+        if decoded == "."
+            || decoded == ".."
+            || decoded.contains(['/', '\\', '%'])
+            || decoded.chars().any(char::is_control)
+        {
+            return None;
+        }
+        out.push(decoded);
+    }
+    Some(out)
+}
+
+fn same_segments(declared: &[&str], request: &[String]) -> bool {
+    declared.len() == request.len() && declared.iter().zip(request).all(|(a, b)| *a == b.as_str())
+}
+
+fn percent_decode_once(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = b.get(i + 1..i + 3)?;
+            let hi = (hex[0] as char).to_digit(16)?;
+            let lo = (hex[1] as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 fn valid_route_path(p: &str) -> bool {
@@ -378,6 +454,60 @@ mod tests {
             200
         );
         assert!(f.routes[0].body.is_null());
+    }
+
+    #[test]
+    fn the_matcher_reads_a_request_as_the_gate_does() {
+        let f = good();
+        let hit = |m: &str, p: &str| f.route_for("api.notesdesk.example", m, p).map(|r| r.status);
+        // one percent-decode per segment, so an encoded letter is the letter
+        assert_eq!(hit("GET", "/v1/%6Eotes"), Some(200));
+        assert_eq!(hit("GET", "/v1/notes/AAMk%3D"), Some(200));
+        assert_eq!(hit("GET", "/v1/notes/export"), Some(403));
+        assert_eq!(hit("GET", "/v1/notes/%65xport"), Some(403));
+        // an encoded slash, a double encoding, an encoded dot segment, a bad escape: nothing
+        assert_eq!(hit("GET", "/v1%2Fnotes"), None);
+        assert_eq!(hit("GET", "/v1/notes%252F"), None);
+        assert_eq!(hit("GET", "/v1/%2e%2e/v1/notes"), None);
+        assert_eq!(hit("GET", "/v1/notes/%zz"), None);
+        assert_eq!(hit("GET", "/v1/notes/%ff"), None);
+        assert_eq!(hit("GET", "/v1//notes"), None);
+        // the method is compared without case
+        assert_eq!(hit("get", "/v1/notes"), Some(200));
+        assert_eq!(hit("post", "/v1/notes"), Some(201));
+        // the root is no route unless a route says `/`
+        assert_eq!(hit("GET", "/"), None);
+    }
+
+    #[test]
+    fn a_route_on_the_root_prefix_answers_every_path() {
+        let f = ConnectorTestFile::parse(
+            r#"{"hosts":["a.example"],"routes":[{"method":"GET","prefix":"/","status":200}]}"#,
+        )
+        .unwrap();
+        for p in ["/", "/x", "/x/y/z"] {
+            assert_eq!(
+                f.route_for("a.example", "GET", p).unwrap().status,
+                200,
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_answer_is_the_route_or_a_404() {
+        let f = good();
+        let hit = f.answer_for("api.notesdesk.example", "POST", "/v1/notes");
+        assert_eq!(hit.status, 201);
+        assert_eq!(hit.body, r#"{"id":2}"#);
+        for (h, m, p) in [
+            ("api.notesdesk.example", "DELETE", "/v1/notes"),
+            ("api.elsewhere.example", "GET", "/v1/notes"),
+            ("api.notesdesk.example", "GET", "/v2"),
+        ] {
+            let miss = f.answer_for(h, m, p);
+            assert_eq!((miss.status, miss.body.as_str()), (404, NOT_FOUND_BODY));
+        }
     }
 
     fn refused(edit: impl Fn(&str) -> String) -> String {
