@@ -1,0 +1,16 @@
+piece: mock-ticketdesk-server
+kind: mock-provider
+# A runner-hosted loopback stand-in for a Zendesk-like service (fictional "Ticketdesk"), one instance per
+# company at `https://<company>.ticketdesk.example` (the scenarios use `acme` and `globex`; each company has
+# its own loopback listener and all share one provider state). Fixed OAuth endpoints and no metadata:
+# `GET /oauth/authorizations/new` mints a code for a client id starting `e2e-ticketdesk-client`, the redirect
+# URI and an S256 challenge (302; the runner plays the browser); `POST /oauth/tokens` is a public client (a
+# request with a `client_secret` is refused), checks single-use codes with verifier and redirect URI, and
+# issues access tokens and single-use rotating refresh tokens. A REST API (`GET /api/v2/search.json`,
+# `GET /api/v2/tickets/{id}.json`, `POST /api/v2/tickets.json`) needs the current bearer for that company.
+# It logs field names, `host=<company>`, `grant_type`, `client_id`, `redirect_uri`, `client-secret=none|present`,
+# `resource=none|present`, `refresh=fresh|reused|unknown`, `method=` and `bearer=current|stale|placeholder|
+# unknown|none`, never a value. Controls: `mock-provider: { piece, shortTokens }` (new access tokens live 60 s).
+# Seam keys: `oauth:https://<company>.ticketdesk.example` (on) and `rest:https://<company>.ticketdesk.example`
+# (held out until the node accepts it).
+provider: ticketdesk

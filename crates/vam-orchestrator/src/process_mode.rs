@@ -29,7 +29,9 @@ pub const ENV_GUEST_BIN: &str = "VAMD_PROCESS_GUEST_BIN";
 /// `VAMD_PROCESS_GUEST_BIN`, and a default `vamd` refuses it like every `VAMD_PROCESS_*`.
 /// CN-5.2 adds `"oauth:<https origin>": "http://127.0.0.1:P"` (an authorization server's origin: the
 /// discovery fetch, the code exchange and the refresh keep their path) and answers the
-/// `/.well-known/` metadata of an `mcp:` server from that server's mock.
+/// `/.well-known/` metadata of an `mcp:` server from that server's mock. CN-6.4 adds
+/// `"rest:<https origin>": "http://127.0.0.1:P"`: the egress gate dials that loopback server for a
+/// company host a connector binding reaches (one key per company).
 pub const ENV_CONNECTOR_ENDPOINTS: &str = "VAMD_PROCESS_CONNECTOR_ENDPOINTS";
 /// Test-only seam for marketplaces (CN-4.4): maps the https URL of a marketplace to a local bare
 /// repository, so the runner's `file://` repos stand in for GitHub. A JSON object
@@ -112,6 +114,10 @@ pub struct ConnectorEndpoints {
     /// metadata names (`"oauth:<https origin>": "<loopback http origin>"`): the discovery fetch,
     /// the code exchange and the refresh. The path and query are kept.
     pub oauth_origins: std::collections::BTreeMap<String, url::Url>,
+    /// Stands in for one https origin a skill's request reaches through a connector binding
+    /// (`"rest:<https origin>": "<loopback http origin>"`, CN-6.4): the egress gate dials the
+    /// loopback server for that host. Not used by `map` (vamd's own fetches).
+    pub rest_origins: std::collections::BTreeMap<String, url::Url>,
 }
 
 /// `https://<host>` with no port, path, query or user info (the form of an `oauth:` key).
@@ -180,6 +186,24 @@ impl ConnectorEndpoints {
                                 )));
                             }
                             out.oauth_origins
+                                .insert(origin.trim_end_matches('/').to_string(), base);
+                            continue;
+                        }
+                    }
+                    if let Some(origin) = other.strip_prefix("rest:") {
+                        if is_https_origin(origin) {
+                            let base = loopback_http(v)?;
+                            // The egress gate dials a literal loopback address (it resolves no name
+                            // for a redirect): `localhost` would be dropped there without a word.
+                            if base.port().is_none()
+                                || !matches!(base.path(), "" | "/")
+                                || base.host_str() == Some("localhost")
+                            {
+                                return Err(Refusal::ConnectorEndpoints(format!(
+                                    "{v:?}: a rest key must map to http://127.0.0.1:<port> with no path"
+                                )));
+                            }
+                            out.rest_origins
                                 .insert(origin.trim_end_matches('/').to_string(), base);
                             continue;
                         }
@@ -442,6 +466,24 @@ pub fn map_marketplace_url(url: &str) -> Option<String> {
 /// The loopback server that answers `graph.microsoft.com` in a node started with the seam.
 pub fn graph_endpoint() -> Option<url::Url> {
     ACTIVE.get()?.connector_endpoints.microsoft_graph.clone()
+}
+
+/// The loopback servers that answer company hosts a connector binding reaches, as `(host,
+/// loopback origin)`, in a node started with the seam (CN-6.4). Empty on every other node.
+pub fn rest_endpoints() -> Vec<(String, url::Url)> {
+    ACTIVE
+        .get()
+        .map(|m| {
+            m.connector_endpoints
+                .rest_origins
+                .iter()
+                .filter_map(|(origin, base)| {
+                    let host = url::Url::parse(origin).ok()?.host_str()?.to_string();
+                    Some((host, base.clone()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn is_active() -> bool {
@@ -831,6 +873,50 @@ mod tests {
             r#"{"oauth:https://auth.filebox.example":"http://10.0.0.5:1"}"#,
             r#"{"oauth:https://auth.filebox.example":"http://127.0.0.1:1/x"}"#,
             r#"{"oauth:":"http://127.0.0.1:1"}"#,
+        ] {
+            assert!(
+                matches!(
+                    Env::ok()
+                        .set(ENV_CONNECTOR_ENDPOINTS, bad)
+                        .go()
+                        .unwrap_err(),
+                    Refusal::ConnectorEndpoints(_)
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rest_key_maps_one_company_origin_for_the_gate_and_nothing_for_vamds_own_fetches() {
+        let seam = r#"{
+            "rest:https://acme.ticketdesk.example":"http://127.0.0.1:41011",
+            "rest:https://globex.ticketdesk.example":"http://127.0.0.1:41012"
+        }"#;
+        let m = Env::ok()
+            .set(ENV_CONNECTOR_ENDPOINTS, seam)
+            .go()
+            .unwrap()
+            .unwrap();
+        let e = &m.connector_endpoints;
+        assert_eq!(e.rest_origins.len(), 2);
+        assert_eq!(
+            e.rest_origins["https://acme.ticketdesk.example"].as_str(),
+            "http://127.0.0.1:41011/"
+        );
+        // vamd's own outbound fetches (discovery, exchange, refresh) never use a rest key.
+        assert!(e
+            .map("https://acme.ticketdesk.example/api/v2/search.json")
+            .is_none());
+        for bad in [
+            r#"{"rest:http://acme.ticketdesk.example":"http://127.0.0.1:1"}"#,
+            r#"{"rest:https://acme.ticketdesk.example/x":"http://127.0.0.1:1"}"#,
+            r#"{"rest:https://acme.ticketdesk.example:8443":"http://127.0.0.1:1"}"#,
+            r#"{"rest:https://acme.ticketdesk.example":"http://10.0.0.5:1"}"#,
+            r#"{"rest:https://acme.ticketdesk.example":"http://127.0.0.1:1/x"}"#,
+            r#"{"rest:https://acme.ticketdesk.example":"http://127.0.0.1"}"#,
+            r#"{"rest:https://acme.ticketdesk.example":"http://localhost:41011"}"#,
+            r#"{"rest:":"http://127.0.0.1:1"}"#,
         ] {
             assert!(
                 matches!(

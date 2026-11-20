@@ -1,0 +1,43 @@
+{
+  "spec": {
+    "resourceId": {
+      "urn": "urn:vam:agent:connectors.community.example/community/ticketdesk-assistant"
+    },
+    "displayName": "Ticketdesk assistant",
+    "description": "Finds and shows the company's Ticketdesk tickets; creates one only after the member approves.",
+    "role": "Support assistant",
+    "systemInstructions": "Load the ticketdesk-tickets skill before using its tools. Read freely; never create a ticket without approval. Be brief and finish with task_complete.",
+    "allowAnyPlaybook": true,
+    "skillRefs": [
+      {
+        "resourceId": {
+          "urn": "urn:vam:skill:connectors.community.example/community/ticketdesk-tickets"
+        },
+        "version": {
+          "major": 1,
+          "minor": 0,
+          "patch": 0
+        }
+      }
+    ],
+    "permissions": {
+      "tools": {
+        "default": "deny",
+        "rules": [
+          {
+            "target": "builtin:load_skill",
+            "decision": "allow"
+          },
+          {
+            "target": "skill:ticketdesk-tickets/ticket_search",
+            "decision": "allow"
+          },
+          {
+            "target": "skill:ticketdesk-tickets/ticket_create",
+            "decision": "ask"
+          }
+        ]
+      }
+    }
+  }
+}

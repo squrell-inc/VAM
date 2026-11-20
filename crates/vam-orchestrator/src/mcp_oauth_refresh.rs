@@ -120,6 +120,10 @@ pub(crate) enum RefreshProfile<'a> {
     /// Microsoft Entra (`entra` connector profile): no `resource` (the audience is in the
     /// scopes), no `client_secret` (a public client), and the definition's `scope`.
     Entra { scope: &'a str },
+    /// A REST connector with fixed endpoints and an admin-supplied public client (`oauth`
+    /// profile, CN-6.3): no `resource`, no `client_secret` (it has none), and the definition's
+    /// `scope` only when the file lists scopes.
+    Oauth { scope: Option<&'a str> },
 }
 
 /// Where a refresh goes and how it is shaped.
@@ -168,6 +172,12 @@ fn refresh_form<'a>(
         }
         // No `resource`, and a public client has no secret to send.
         RefreshProfile::Entra { scope } => form.push(("scope", scope)),
+        // Same for a fixed-endpoint public client: never `resource`, never a secret.
+        RefreshProfile::Oauth { scope } => {
+            if let Some(scope) = scope {
+                form.push(("scope", scope));
+            }
+        }
     }
     form
 }
@@ -212,6 +222,27 @@ pub(crate) fn refresh_access_token_entra(
             token_endpoint: &endpoint,
             client_id,
             profile: RefreshProfile::Entra { scope },
+            auth_method: TokenAuthMethod::default(),
+        },
+        refresh_token,
+        None,
+    )
+}
+
+/// One refresh for a connector whose profile is `oauth`, at the token endpoint the node pinned at
+/// Enable (the caller passes the node client's endpoint, never a member row's or a request's) with
+/// the admin's client id: no `resource`, no client secret, `scope` only when the file lists scopes.
+pub(crate) fn refresh_access_token_oauth(
+    token_endpoint: &str,
+    client_id: &str,
+    scope: Option<&str>,
+    refresh_token: &SecretString,
+) -> Result<RefreshedToken, RefreshFailure> {
+    refresh_target(
+        &RefreshTarget {
+            token_endpoint,
+            client_id,
+            profile: RefreshProfile::Oauth { scope },
             auth_method: TokenAuthMethod::default(),
         },
         refresh_token,
@@ -507,13 +538,24 @@ fn post_token_form(
     })
 }
 
-/// One authorization-code exchange at a connector's pinned token endpoint (CN-5.3, D29).
+/// How a code exchange is shaped, as [`RefreshProfile`] is for a refresh: a type, so no code path can
+/// add a `resource` to the request of an `oauth` connector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodeProfile<'a> {
+    /// An MCP connector: the connector's MCP URL is the RFC 8707 `resource`; the client secret is sent
+    /// when the org keeps one.
+    Mcp { resource: &'a str },
+    /// A REST connector with fixed endpoints (`oauth` profile, CN-6.3): a public client. No
+    /// `resource`, no client secret, no Authorization header.
+    Oauth,
+}
+
+/// One authorization-code exchange at a connector's pinned token endpoint (CN-5.3, CN-6.3, D29).
 pub(crate) struct CodeGrant<'a> {
     /// The endpoint the node pinned at Enable. Never a request's value.
     pub(crate) token_endpoint: &'a str,
     pub(crate) client_id: &'a str,
-    /// The connector's MCP URL (RFC 8707 `resource`).
-    pub(crate) resource: &'a str,
+    pub(crate) profile: CodeProfile<'a>,
     pub(crate) code: &'a str,
     pub(crate) code_verifier: &'a str,
     pub(crate) redirect_uri: &'a str,
@@ -522,45 +564,59 @@ pub(crate) struct CodeGrant<'a> {
 }
 
 /// The form of a code exchange. Pure, so the shape is unit-testable without a server.
-fn code_form<'a>(grant: &CodeGrant<'a>, client_secret: &'a str) -> Vec<(&'a str, &'a str)> {
+///
+/// `client_secret` is only ever used for [`CodeProfile::Mcp`]: an `oauth` connector's client is
+/// public, so whatever a caller passes, its form has no secret and no `resource`.
+fn code_form<'a>(grant: &CodeGrant<'a>, client_secret: Option<&'a str>) -> Vec<(&'a str, &'a str)> {
     let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", grant.code),
         ("client_id", grant.client_id),
     ];
-    // The org's client is confidential: the secret is in the body for client_secret_post, and in
-    // the Authorization header (not here) for client_secret_basic.
-    if grant.auth_method == TokenAuthMethod::ClientSecretPost {
-        form.push(("client_secret", client_secret));
+    // A confidential org client: the secret is in the body for client_secret_post, and in the
+    // Authorization header (not here) for client_secret_basic. A client with no secret sends none.
+    if let (CodeProfile::Mcp { .. }, Some(secret), TokenAuthMethod::ClientSecretPost) =
+        (grant.profile, client_secret, grant.auth_method)
+    {
+        form.push(("client_secret", secret));
     }
     form.extend([
         ("code_verifier", grant.code_verifier),
         ("redirect_uri", grant.redirect_uri),
-        ("resource", grant.resource),
     ]);
+    if let CodeProfile::Mcp { resource } = grant.profile {
+        form.push(("resource", resource));
+    }
     form
 }
 
-/// Exchange an authorization code with the org's client secret. The secret leaves the node only
-/// here, in the body of one POST to the pinned public address of `grant.token_endpoint` (HTTPS, the
-/// host's DNS answer pinned, no redirects, no proxy). The caller has already checked that this host is
-/// the one the secret is pinned to. A failure is a fixed or allowlisted reason (`invalid_client`,
-/// `invalid_grant`, ...): never the endpoint, the code, the verifier or a token.
+/// Exchange an authorization code at the pinned token endpoint, with the org's client secret when
+/// the org keeps one (`None`: a public client, nothing secret is sent). The secret leaves the node
+/// only here, in the body of one POST to the pinned public address of `grant.token_endpoint` (HTTPS,
+/// the host's DNS answer pinned, no redirects, no proxy). The caller has already checked that this
+/// host is the one the secret is pinned to. A failure is a fixed or allowlisted reason
+/// (`invalid_client`, `invalid_grant`, ...): never the endpoint, the code, the verifier or a token.
 pub(crate) fn exchange_authorization_code(
     grant: &CodeGrant<'_>,
-    client_secret: &SecretString,
+    client_secret: Option<&SecretString>,
 ) -> Result<RefreshedToken, RefreshFailure> {
-    validate_oauth_secret_value(client_secret.expose_secret())
-        .map_err(|_| RefreshFailure::needs_reauth("invalid OAuth client secret"))?;
+    // An `oauth` connector has no secret to send: it is dropped here, not trusted to the caller.
+    let client_secret = client_secret.filter(|_| matches!(grant.profile, CodeProfile::Mcp { .. }));
+    if let Some(secret) = client_secret {
+        validate_oauth_secret_value(secret.expose_secret())
+            .map_err(|_| RefreshFailure::needs_reauth("invalid OAuth client secret"))?;
+    }
     for value in [grant.code, grant.code_verifier] {
         validate_oauth_secret_value(value)
             .map_err(|_| RefreshFailure::needs_reauth("invalid OAuth authorization code"))?;
     }
     let (client, endpoint) = pinned_token_client(grant.token_endpoint)?;
-    let secret = client_secret.expose_secret().as_str();
+    let secret = client_secret.map(|s| s.expose_secret().as_str());
     let form = code_form(grant, secret);
-    let basic = (grant.auth_method == TokenAuthMethod::ClientSecretBasic)
-        .then_some((grant.client_id, secret));
+    let basic = match (secret, grant.auth_method) {
+        (Some(secret), TokenAuthMethod::ClientSecretBasic) => Some((grant.client_id, secret)),
+        _ => None,
+    };
     post_token_form(&client, &endpoint, &form, basic)
 }
 
@@ -790,6 +846,31 @@ pub(crate) fn prepare_oauth_refresh_revoke(
         auth_method: TokenAuthMethod::default(),
         connection_id: conn.connection_id.clone(),
     })
+}
+
+/// RFC 7009 revocation of a REST connector's refresh token at the revocation endpoint the node
+/// pinned at Enable (the file's `endpoints.revoke`, kept only on the token endpoint's host). The
+/// client is public: no secret, no Authorization header. Best effort, one request; the caller
+/// deletes the rows whatever this returns.
+pub(crate) fn revoke_oauth_connector_refresh_token(
+    revocation_endpoint: &str,
+    client_id: &str,
+    refresh_token: &SecretString,
+) -> RevokeAttempt {
+    let oauth = McpOauthMetadata {
+        resource: String::new(),
+        authorization_server: String::new(),
+        token_endpoint: String::new(),
+        revocation_endpoint: Some(revocation_endpoint.to_string()),
+        client_id: client_id.to_string(),
+        registration_method: crate::mcp_registry::McpOauthRegistrationMethod::Manual,
+        scopes: Vec::new(),
+        expires_at: None,
+        status: crate::mcp_registry::McpOauthStatus::Connected,
+        last_refresh_at: None,
+        last_refresh_error: None,
+    };
+    dispatch_revoke(&oauth, refresh_token, None, TokenAuthMethod::default())
 }
 
 fn dispatch_revoke(
@@ -1879,7 +1960,9 @@ mod org_client_tests {
         CodeGrant {
             token_endpoint: endpoint,
             client_id: "c-1",
-            resource: "https://mcp.example/mcp",
+            profile: CodeProfile::Mcp {
+                resource: "https://mcp.example/mcp",
+            },
             code: "CODE-1",
             code_verifier: "VERIFIER-abcdefghijklmnopqrstuvwxyz0123456789-ABCDE",
             redirect_uri: "squrell://oauth",
@@ -1918,7 +2001,7 @@ mod org_client_tests {
         let mut g = grant("https://auth.basic-code.example/token");
         g.auth_method = TokenAuthMethod::ClientSecretBasic;
         let secret = SecretString::new(BASIC_SECRET.into());
-        exchange_authorization_code(&g, &secret).ok().unwrap();
+        exchange_authorization_code(&g, Some(&secret)).ok().unwrap();
         let request = worker.join().unwrap();
         assert_eq!(header_of(&request, "authorization"), Some(basic_header()));
         let form = form_of(&request);
@@ -1985,12 +2068,177 @@ mod org_client_tests {
             r#"{"access_token":"A3","token_type":"bearer","refresh_token":"R3"}"#,
         );
         test_seam::serve("auth.post-code.example", base);
-        exchange_authorization_code(&grant("https://auth.post-code.example/token"), &secret)
-            .ok()
-            .unwrap();
+        exchange_authorization_code(
+            &grant("https://auth.post-code.example/token"),
+            Some(&secret),
+        )
+        .ok()
+        .unwrap();
         let request = worker.join().unwrap();
         assert_eq!(header_of(&request, "authorization"), None);
         assert_eq!(form_of(&request)["client_secret"], BASIC_SECRET);
+    }
+
+    fn code_grant<'a>(profile: CodeProfile<'a>, method: TokenAuthMethod) -> CodeGrant<'a> {
+        CodeGrant {
+            token_endpoint: "https://as.example/token",
+            client_id: "c",
+            profile,
+            code: "CODE",
+            code_verifier: "V",
+            redirect_uri: "squrell://oauth",
+            auth_method: method,
+        }
+    }
+
+    #[test]
+    fn a_code_form_has_resource_only_for_mcp_and_a_secret_only_when_the_org_keeps_one() {
+        let mcp = CodeProfile::Mcp {
+            resource: "https://mcp.example/mcp",
+        };
+        // Filebox (a secret, client_secret_post): byte-identical to what shipped in Phase 5.
+        assert_eq!(
+            code_form(
+                &code_grant(mcp, TokenAuthMethod::ClientSecretPost),
+                Some("cs")
+            ),
+            vec![
+                ("grant_type", "authorization_code"),
+                ("code", "CODE"),
+                ("client_id", "c"),
+                ("client_secret", "cs"),
+                ("code_verifier", "V"),
+                ("redirect_uri", "squrell://oauth"),
+                ("resource", "https://mcp.example/mcp"),
+            ]
+        );
+        // client_secret_basic: the secret is the Authorization header's, never in the body.
+        let basic = code_form(
+            &code_grant(mcp, TokenAuthMethod::ClientSecretBasic),
+            Some("cs"),
+        );
+        assert!(
+            basic.iter().all(|(k, _)| *k != "client_secret"),
+            "{basic:?}"
+        );
+        // A secret-less MCP client sends no secret and keeps its resource.
+        let public = code_form(&code_grant(mcp, TokenAuthMethod::ClientSecretPost), None);
+        assert!(
+            public.iter().all(|(k, _)| *k != "client_secret"),
+            "{public:?}"
+        );
+        assert!(public.contains(&("resource", "https://mcp.example/mcp")));
+        // An `oauth` connector: no secret and no resource, whatever the caller hands in.
+        for secret in [None, Some("cs")] {
+            for method in [
+                TokenAuthMethod::ClientSecretPost,
+                TokenAuthMethod::ClientSecretBasic,
+            ] {
+                assert_eq!(
+                    code_form(&code_grant(CodeProfile::Oauth, method), secret),
+                    vec![
+                        ("grant_type", "authorization_code"),
+                        ("code", "CODE"),
+                        ("client_id", "c"),
+                        ("code_verifier", "V"),
+                        ("redirect_uri", "squrell://oauth"),
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_oauth_refresh_form_has_no_secret_no_resource_and_a_scope_only_when_listed() {
+        let target = |scope| RefreshTarget {
+            token_endpoint: "https://acme.example/oauth/tokens",
+            client_id: "zc1",
+            profile: RefreshProfile::Oauth { scope },
+            auth_method: TokenAuthMethod::default(),
+        };
+        let with: Vec<_> = refresh_form(&target(Some("read write")), "rt", Some("cs"));
+        assert_eq!(
+            with,
+            vec![
+                ("grant_type", "refresh_token"),
+                ("refresh_token", "rt"),
+                ("client_id", "zc1"),
+                ("scope", "read write"),
+            ]
+        );
+        let without: Vec<_> = refresh_form(&target(None), "rt", Some("cs"));
+        assert_eq!(without.len(), 3, "{without:?}");
+    }
+
+    #[test]
+    fn an_oauth_code_exchange_and_refresh_on_the_wire_send_no_secret_resource_or_authorization() {
+        let (base, worker) = serve_once(
+            "200 OK",
+            r#"{"access_token":"A1","token_type":"Bearer","expires_in":3600,"refresh_token":"R1"}"#,
+        );
+        test_seam::serve("acme.oauth-wire.example", base);
+        let secret = SecretString::new("MUST-NOT-TRAVEL-0000".into());
+        let grant = CodeGrant {
+            token_endpoint: "https://acme.oauth-wire.example/oauth/tokens",
+            ..code_grant(CodeProfile::Oauth, TokenAuthMethod::ClientSecretPost)
+        };
+        // Even handed a secret by mistake, the exchange of an `oauth` connector sends none.
+        exchange_authorization_code(&grant, Some(&secret))
+            .ok()
+            .unwrap();
+        let request = worker.join().unwrap();
+        assert_eq!(header_of(&request, "authorization"), None, "{request}");
+        assert!(!request.contains("MUST-NOT-TRAVEL"), "{request}");
+        let form = form_of(&request);
+        for key in ["client_secret", "resource", "scope"] {
+            assert!(!form.contains_key(key), "{key} in {form:?}");
+        }
+        assert_eq!(form["grant_type"], "authorization_code");
+        assert_eq!(form["client_id"], "c");
+        assert_eq!(form["code_verifier"], "V");
+        assert_eq!(form["redirect_uri"], "squrell://oauth");
+
+        // The same with the client-secret-basic method: the secret handed over by mistake must not
+        // become an `Authorization` header either (the Post method has none to check).
+        let (base, worker) = serve_once(
+            "200 OK",
+            r#"{"access_token":"A1","token_type":"Bearer","expires_in":3600,"refresh_token":"R1"}"#,
+        );
+        test_seam::serve("acme.oauth-wire-basic.example", base);
+        let grant = CodeGrant {
+            token_endpoint: "https://acme.oauth-wire-basic.example/oauth/tokens",
+            ..code_grant(CodeProfile::Oauth, TokenAuthMethod::ClientSecretBasic)
+        };
+        exchange_authorization_code(&grant, Some(&secret))
+            .ok()
+            .unwrap();
+        let request = worker.join().unwrap();
+        assert_eq!(header_of(&request, "authorization"), None, "{request}");
+        assert!(!request.contains("MUST-NOT-TRAVEL"), "{request}");
+        assert!(!form_of(&request).contains_key("client_secret"));
+
+        let (base, worker) = serve_once(
+            "200 OK",
+            r#"{"access_token":"A2","token_type":"Bearer","refresh_token":"R2"}"#,
+        );
+        test_seam::serve("acme.oauth-wire-refresh.example", base);
+        let token = refresh_access_token_oauth(
+            "https://acme.oauth-wire-refresh.example/oauth/tokens",
+            "zc1",
+            Some("read"),
+            &SecretString::new("R1".into()),
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(token.refresh_token.as_deref(), Some("R2"));
+        let request = worker.join().unwrap();
+        assert_eq!(header_of(&request, "authorization"), None, "{request}");
+        let form = form_of(&request);
+        assert!(!form.contains_key("client_secret") && !form.contains_key("resource"));
+        assert_eq!(form["grant_type"], "refresh_token");
+        assert_eq!(form["refresh_token"], "R1");
+        assert_eq!(form["client_id"], "zc1");
+        assert_eq!(form["scope"], "read");
     }
 
     #[test]
@@ -2001,10 +2249,12 @@ mod org_client_tests {
         );
         test_seam::serve("auth.code-form.example", base);
         let secret = SecretString::new(SECRET.into());
-        let tokens =
-            exchange_authorization_code(&grant("https://auth.code-form.example/token"), &secret)
-                .ok()
-                .unwrap();
+        let tokens = exchange_authorization_code(
+            &grant("https://auth.code-form.example/token"),
+            Some(&secret),
+        )
+        .ok()
+        .unwrap();
         assert_eq!(tokens.access_token, "A1");
         assert_eq!(tokens.refresh_token.as_deref(), Some("R1"));
         assert_eq!(tokens.expires_in, Some(3600));
@@ -2063,10 +2313,12 @@ mod org_client_tests {
             let host = format!("auth.code-refused-{}.example", reason.len());
             test_seam::serve(&host, base);
             let secret = SecretString::new(SECRET.into());
-            let failure =
-                exchange_authorization_code(&grant(&format!("https://{host}/token")), &secret)
-                    .err()
-                    .unwrap();
+            let failure = exchange_authorization_code(
+                &grant(&format!("https://{host}/token")),
+                Some(&secret),
+            )
+            .err()
+            .unwrap();
             worker.join().unwrap();
             assert_eq!(failure.kind, kind, "{status}");
             assert_eq!(failure.reason, reason);
@@ -2088,7 +2340,7 @@ mod org_client_tests {
             "https://user:pw@auth.never-mapped.example/token",
             "not a url",
         ] {
-            let failure = exchange_authorization_code(&grant(endpoint), &secret)
+            let failure = exchange_authorization_code(&grant(endpoint), Some(&secret))
                 .err()
                 .unwrap();
             assert!(
@@ -2104,7 +2356,7 @@ mod org_client_tests {
         let bad_secret = SecretString::new("line\nbreak".into());
         let failure = exchange_authorization_code(
             &grant("https://auth.never-mapped.example/token"),
-            &bad_secret,
+            Some(&bad_secret),
         )
         .err()
         .unwrap();

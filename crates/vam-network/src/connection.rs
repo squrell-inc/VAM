@@ -384,6 +384,17 @@ fn fit(mut s: String) -> String {
     s
 }
 
+/// The prefix every installed connector's placeholder starts with (`vamsec_<connector id>_<name>`,
+/// enforced at import).
+pub const PLACEHOLDER_PREFIX: &str = "vamsec_";
+
+/// Whether the request carries text that may be a connector placeholder (the prefix anywhere a
+/// placeholder is looked for). As cheap as matching one more placeholder; used to tell a request
+/// that may name a connector installed after the binding table was built from one that carries none.
+pub fn may_carry_placeholder(req: &ConnectionRequest<'_>) -> bool {
+    carries(req, PLACEHOLDER_PREFIX)
+}
+
 fn carries(req: &ConnectionRequest<'_>, placeholder: &str) -> bool {
     req.url.contains(placeholder)
         || req.headers.values().any(|v| v.contains(placeholder))
@@ -703,6 +714,31 @@ mod tests {
         )
         .unwrap()
         .is_some());
+    }
+
+    #[test]
+    fn only_a_request_carrying_the_placeholder_prefix_may_name_an_unknown_connector() {
+        let req = |h: &HashMap<String, String>, url: &'static str, body: &'static [u8]| {
+            may_carry_placeholder(&ConnectionRequest {
+                method: "GET",
+                url,
+                headers: h,
+                body,
+            })
+        };
+        let plain = headers("Bearer real-token");
+        assert!(!req(&plain, "https://api.example.com/x", b"{}"));
+        assert!(req(
+            &headers("Bearer vamsec_new_api"),
+            "https://api.example.com/x",
+            b""
+        ));
+        assert!(req(
+            &plain,
+            "https://api.example.com/x?t=vamsec_new_api",
+            b""
+        ));
+        assert!(req(&plain, "https://api.example.com/x", b"vamsec_new_api"));
     }
 
     #[test]

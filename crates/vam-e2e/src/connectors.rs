@@ -59,6 +59,19 @@ const FILEBOX_CLIENT_PREFIX: &str = "e2e-filebox-client";
 /// The redirect URI the runner uses when it plays the app.
 const APP_REDIRECT_URI: &str = "squrell://oauth";
 
+/// The two companies the ticketdesk provider serves; each has its own loopback listener, because an
+/// `oauth:` or `rest:` key maps one https origin to one `http://127.0.0.1:<port>` with no path and the
+/// request reaches the mock with the loopback `Host`.
+const TICKETDESK_COMPANIES: [&str; 2] = ["acme", "globex"];
+/// The suffix of every ticketdesk company address in the `marketplace-community-connectors` fixture.
+const TICKETDESK_SUFFIX: &str = "ticketdesk.example";
+/// The client ids the ticketdesk provider has registered start with this.
+const TICKETDESK_CLIENT_PREFIX: &str = "e2e-ticketdesk-client";
+/// Add the `rest:<https origin>` keys to the seam: the egress gate answers
+/// `<company>.ticketdesk.example` from the company's listener. On since CN-6.4 (a default vamd, and
+/// one from before it, refuse the whole variable on an unknown key).
+pub const PASS_REST_SEAM: bool = true;
+
 /// The MCP URL of the `bugwatch` connector in the `marketplace-community-connectors` fixture.
 pub const COMMUNITY_MCP_URL: &str = "https://mcp.bugwatch.example/mcp";
 
@@ -104,6 +117,15 @@ pub struct ConnectorNode {
     /// An org-supplied OAuth client: `{ clientId, clientSecret: { piece, which } }`. The secret's
     /// value comes from the filebox mock and is never printed.
     pub client: Option<NodeClient>,
+    /// A company address: `{ subdomain }`, sent as `tenant: { subdomain }` in the body.
+    pub tenant: Option<TenantStep>,
+}
+
+/// `tenant: { subdomain }` of `connector-node`: the text is sent as written (the node judges it).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantStep {
+    pub subdomain: String,
 }
 
 /// `client: { clientId, clientSecret }` of `connector-node`: sent as `client: { clientId,
@@ -245,6 +267,10 @@ pub struct MockProviderStep {
     /// messages of a real mailbox's size (152-character ids, a named sender, a 255-character
     /// preview), newest first, at most `$top`. Unset: the two short fixture messages.
     pub mailbox: Option<usize>,
+    /// Ticketdesk only: access tokens issued from now on live 60 s (`expires_in: 60`), inside the
+    /// node's swap window, so every call refreshes first.
+    #[serde(default)]
+    pub short_tokens: bool,
 }
 
 /// `connectors: { id, as, fields, absent }`: one connector of `GET /v1/connectors` for a caller.
@@ -312,6 +338,30 @@ struct State {
     mailbox: Option<usize>,
     /// Filebox: the provider's own state.
     fb: Filebox,
+    /// Ticketdesk: the provider's own state.
+    td: Ticketdesk,
+}
+
+/// What the ticketdesk provider remembers (one state for every company). Values are kept here and
+/// never logged.
+#[derive(Default)]
+struct Ticketdesk {
+    /// A value the provider never held (what a test sends as a client secret).
+    wrong: String,
+    /// Codes minted and not redeemed: code -> (client_id, redirect, challenge, company).
+    codes: BTreeMap<String, (String, String, String, String)>,
+    /// The access token each company's API accepts now.
+    access: BTreeMap<String, String>,
+    /// Access tokens that were valid once.
+    stale: BTreeSet<String>,
+    /// Refresh tokens issued and not yet spent: token -> company.
+    live: BTreeMap<String, String>,
+    /// Refresh tokens spent once.
+    spent: BTreeSet<String>,
+    /// New access tokens live 60 s.
+    short: bool,
+    /// Every token issued, in order, for the runner's scrub list.
+    issued: Vec<String>,
 }
 
 /// What the filebox provider remembers. Values are kept here and never logged.
@@ -345,14 +395,18 @@ enum Kind {
     Linear,
     Graph,
     Filebox,
+    Ticketdesk,
 }
 
-/// The four providers.
+/// The providers.
 pub struct Mocks {
     login: Arc<Mutex<State>>,
     linear: Arc<Mutex<State>>,
     graph: Arc<Mutex<State>>,
     filebox: Arc<Mutex<State>>,
+    ticketdesk: Arc<Mutex<State>>,
+    /// `(company, listener)` for each of `TICKETDESK_COMPANIES`.
+    ticketdesk_addrs: Vec<(String, SocketAddr)>,
     login_addr: SocketAddr,
     linear_addr: SocketAddr,
     graph_addr: SocketAddr,
@@ -377,7 +431,17 @@ impl Mocks {
         let l3 = TcpListener::bind("127.0.0.1:0")?;
         let l4 = TcpListener::bind("127.0.0.1:0")?;
         let filebox = Arc::new(Mutex::new(State::default()));
+        let ticketdesk = Arc::new(Mutex::new(State::default()));
+        let mut td_listeners = Vec::new();
+        for c in TICKETDESK_COMPANIES {
+            td_listeners.push((c.to_string(), TcpListener::bind("127.0.0.1:0")?));
+        }
         let m = Mocks {
+            ticketdesk_addrs: td_listeners
+                .iter()
+                .map(|(c, l)| Ok((c.clone(), l.local_addr()?)))
+                .collect::<std::io::Result<Vec<_>>>()?,
+            ticketdesk: ticketdesk.clone(),
             filebox_addr: l4.local_addr()?,
             filebox: filebox.clone(),
             login_addr: l1.local_addr()?,
@@ -391,6 +455,9 @@ impl Mocks {
         serve(l2, linear, Kind::Linear);
         serve(l4, filebox, Kind::Filebox);
         serve_graph(l3, graph, login);
+        for (company, l) in td_listeners {
+            serve_ticketdesk(l, ticketdesk.clone(), company);
+        }
         Ok(Arc::new(m))
     }
 
@@ -412,8 +479,28 @@ impl Mocks {
         if PASS_OAUTH_SEAM {
             m[format!("oauth:{FILEBOX_AUTH_ORIGIN}")] =
                 json!(format!("http://{}", self.filebox_addr));
+            // Discovery-free providers: the fixed endpoints of a company address (CN-6.2, CN-6.3).
+            for (company, addr) in &self.ticketdesk_addrs {
+                m[format!("oauth:https://{company}.{TICKETDESK_SUFFIX}")] =
+                    json!(format!("http://{addr}"));
+            }
+        }
+        if PASS_REST_SEAM {
+            for (company, addr) in &self.ticketdesk_addrs {
+                m[format!("rest:https://{company}.{TICKETDESK_SUFFIX}")] =
+                    json!(format!("http://{addr}"));
+            }
         }
         m.to_string()
+    }
+
+    /// The listener of a ticketdesk company (`acme` when the name is unknown).
+    fn ticketdesk_addr(&self, company: &str) -> SocketAddr {
+        self.ticketdesk_addrs
+            .iter()
+            .find(|(c, _)| c == company)
+            .map(|(_, a)| *a)
+            .unwrap_or(self.ticketdesk_addrs[0].1)
     }
 
     fn state(&self, k: Kind) -> &Arc<Mutex<State>> {
@@ -422,6 +509,7 @@ impl Mocks {
             Kind::Linear => &self.linear,
             Kind::Graph => &self.graph,
             Kind::Filebox => &self.filebox,
+            Kind::Ticketdesk => &self.ticketdesk,
         }
     }
 
@@ -431,6 +519,7 @@ impl Mocks {
             Kind::Linear => self.linear_addr,
             Kind::Graph => self.graph_addr,
             Kind::Filebox => self.filebox_addr,
+            Kind::Ticketdesk => self.ticketdesk_addr("acme"),
         }
     }
 }
@@ -500,7 +589,7 @@ fn graph(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, login: &Arc<Mutex<
         .get("authorization")
         .map(|v| v.strip_prefix("Bearer ").unwrap_or(v).to_string());
     let tag = {
-        let l = login.lock().unwrap();
+        let l = login.lock().unwrap_or_else(|e| e.into_inner());
         match sent.as_deref() {
             None => "none",
             Some(t) if t.starts_with("vamsec_") => "placeholder",
@@ -512,17 +601,26 @@ fn graph(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, login: &Arc<Mutex<
     let mut fields = BTreeSet::new();
     fields.insert(format!("method={}", req.method));
     fields.insert(format!("bearer={tag}"));
-    state.lock().unwrap().log.push(Logged {
-        path: path.clone(),
-        method: req.method.clone(),
-        fields,
-    });
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .log
+        .push(Logged {
+            path: path.clone(),
+            method: req.method.clone(),
+            fields,
+        });
     if tag != "current" {
         return respond(out, 401, "application/json", r#"{"error":"unauthorized"}"#);
     }
     let query = req.path.split_once('?').map(|x| x.1).unwrap_or_default();
     if req.method == "GET" && path == "/v1.0/me/messages" && query.contains("$search=") {
-        if let Some(l) = state.lock().unwrap().log.last_mut() {
+        if let Some(l) = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .log
+            .last_mut()
+        {
             l.fields.insert("search".into());
         }
     }
@@ -599,7 +697,7 @@ fn graph(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, login: &Arc<Mutex<
         ("POST", "/v1.0/me/sendMail") => {
             // Held: the request is already logged (Graph "got it"); the answer waits.
             for _ in 0..1200 {
-                if !state.lock().unwrap().hold {
+                if !state.lock().unwrap_or_else(|e| e.into_inner()).hold {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -668,6 +766,7 @@ fn handle(stream: TcpStream, state: &Arc<Mutex<State>>, kind: Kind) -> std::io::
         Kind::Linear => linear(out, req, state),
         Kind::Filebox => filebox(out, req, state),
         Kind::Graph => unreachable!("served by serve_graph"),
+        Kind::Ticketdesk => unreachable!("served by serve_ticketdesk"),
     }
     Ok(())
 }
@@ -719,7 +818,7 @@ fn login(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
         fields.insert(k);
     }
     let (ok, new_access) = {
-        let mut st = state.lock().unwrap();
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
         st.log.push(Logged {
             path: req.path.clone(),
             method: req.method.clone(),
@@ -762,7 +861,7 @@ fn linear(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string);
     let (authed, mut fields) = {
-        let st = state.lock().unwrap();
+        let st = state.lock().unwrap_or_else(|e| e.into_inner());
         let authed = !st.revoked && !st.bearer.is_empty() && sent.as_deref() == Some(&st.bearer);
         (authed, BTreeSet::new())
     };
@@ -780,11 +879,15 @@ fn linear(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
             rpc["params"]["name"].as_str().unwrap_or_default()
         ));
     }
-    state.lock().unwrap().log.push(Logged {
-        path: req.path.clone(),
-        method: req.method.clone(),
-        fields,
-    });
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .log
+        .push(Logged {
+            path: req.path.clone(),
+            method: req.method.clone(),
+            fields,
+        });
     if !authed {
         return respond(out, 401, "application/json", r#"{"error":"unauthorized"}"#);
     }
@@ -837,7 +940,7 @@ fn log_filebox(
     path: &str,
     fields: BTreeSet<String>,
 ) -> usize {
-    let mut st = state.lock().unwrap();
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
     st.log.push(Logged {
         path: path.to_string(),
         method: req.method.clone(),
@@ -921,10 +1024,15 @@ fn filebox_authorize(mut out: TcpStream, req: Req, state: &Arc<Mutex<State>>, qu
         return respond(out, 400, "text/plain", "invalid_request");
     }
     let code = rand_token();
-    state.lock().unwrap().fb.codes.insert(
-        code.clone(),
-        (get("client_id"), get("redirect_uri"), get("code_challenge")),
-    );
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .fb
+        .codes
+        .insert(
+            code.clone(),
+            (get("client_id"), get("redirect_uri"), get("code_challenge")),
+        );
     let sep = if get("redirect_uri").contains('?') {
         '&'
     } else {
@@ -953,7 +1061,7 @@ fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     };
     // What the request arrived with, for the log. The grant is decided on what is current when it
     // is consumed, after a hold.
-    let secret_label = label_of(&state.lock().unwrap());
+    let secret_label = label_of(&state.lock().unwrap_or_else(|e| e.into_inner()));
     let mut fields: BTreeSet<String> = form.keys().cloned().collect();
     for k in FILEBOX_LOGGED_VALUES {
         if let Some(v) = form.get(*k) {
@@ -965,7 +1073,11 @@ fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     // A held refresh waits, logged, until released (at most 30 s: a stuck scenario still ends).
     if grant == "refresh_token" {
         let start = std::time::Instant::now();
-        while state.lock().unwrap().fb.hold_token
+        while state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fb
+            .hold_token
             && start.elapsed() < std::time::Duration::from_secs(30)
         {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -973,7 +1085,7 @@ fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     }
     let mut note = None;
     let result: Result<Value, (u16, &str)> = {
-        let mut st = state.lock().unwrap();
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
         if label_of(&st) != "current" || !client_id.starts_with(FILEBOX_CLIENT_PREFIX) {
             Err((401, "invalid_client"))
         } else if st.revoked && grant == "refresh_token" {
@@ -1014,7 +1126,12 @@ fn filebox_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
         }
     };
     if let Some(n) = note {
-        if let Some(l) = state.lock().unwrap().log.get_mut(idx) {
+        if let Some(l) = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .log
+            .get_mut(idx)
+        {
             l.fields.insert(n.to_string());
         }
     }
@@ -1042,7 +1159,7 @@ fn filebox_mcp(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     fields.insert(format!("method={method}"));
     let mut expired = false;
     let authed = {
-        let st = state.lock().unwrap();
+        let st = state.lock().unwrap_or_else(|e| e.into_inner());
         let authed =
             !st.revoked && !st.fb.access.is_empty() && sent.as_deref() == Some(&st.fb.access);
         match &sent {
@@ -1076,7 +1193,11 @@ fn filebox_mcp(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
         // in flight on the same expired token at once.
         if expired {
             let start = std::time::Instant::now();
-            while state.lock().unwrap().fb.hold_token
+            while state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .fb
+                .hold_token
                 && start.elapsed() < std::time::Duration::from_secs(30)
             {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1102,6 +1223,258 @@ fn filebox_mcp(out: TcpStream, req: Req, state: &Arc<Mutex<State>>) {
     };
     let body = json!({ "jsonrpc": "2.0", "id": id, "result": result });
     respond(out, 200, "application/json", &body.to_string());
+}
+
+fn serve_ticketdesk(listener: TcpListener, state: Arc<Mutex<State>>, company: String) {
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let (state, company) = (state.clone(), company.clone());
+            std::thread::spawn(move || {
+                let Ok(req) = read_req(&stream) else { return };
+                let Ok(out) = stream.try_clone() else { return };
+                ticketdesk(out, req, &state, &company);
+            });
+        }
+    });
+}
+
+/// Logs a ticketdesk request: `host=<company>` and the given fields; returns the log index.
+fn log_ticketdesk(
+    state: &Arc<Mutex<State>>,
+    req: &Req,
+    path: &str,
+    company: &str,
+    mut fields: BTreeSet<String>,
+) -> usize {
+    fields.insert(format!("host={company}"));
+    log_filebox(state, req, path, fields)
+}
+
+fn ticketdesk_issue(st: &mut State, company: &str) -> Value {
+    let (access, refresh) = (rand_token(), rand_token());
+    if let Some(old) = st.td.access.insert(company.to_string(), access.clone()) {
+        st.td.stale.insert(old);
+    }
+    st.td.live.insert(refresh.clone(), company.to_string());
+    st.td.issued.push(access.clone());
+    st.td.issued.push(refresh.clone());
+    let ttl = if st.td.short { 60 } else { 3600 };
+    json!({ "token_type": "Bearer", "access_token": access, "refresh_token": refresh, "expires_in": ttl })
+}
+
+/// A Zendesk-like service at `<company>.ticketdesk.example`: fixed OAuth endpoints (no metadata), a
+/// public client at the token endpoint and a REST API that needs the current bearer for that company.
+fn ticketdesk(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, company: &str) {
+    let (path, query) = req.path.split_once('?').unwrap_or((req.path.as_str(), ""));
+    let (path, query) = (path.to_string(), query.to_string());
+    match (req.method.as_str(), path.as_str()) {
+        ("GET", "/oauth/authorizations/new") => {
+            ticketdesk_authorize(out, req, state, company, &query)
+        }
+        ("POST", "/oauth/tokens") => ticketdesk_token(out, req, state, company),
+        ("GET", "/api/v2/search.json") => {
+            let body = json!({ "results": [{ "id": 101, "subject": "Printer on fire", "status": "open" }], "count": 1 });
+            ticketdesk_api(out, req, state, company, &path, 200, body)
+        }
+        ("GET", p) if p.starts_with("/api/v2/tickets/") && p.ends_with(".json") => {
+            let id = p["/api/v2/tickets/".len()..p.len() - ".json".len()].to_string();
+            let body =
+                json!({ "ticket": { "id": id, "subject": "Printer on fire", "status": "open" } });
+            ticketdesk_api(out, req, state, company, &path, 200, body)
+        }
+        ("POST", "/api/v2/tickets.json") => {
+            let body = json!({ "ticket": { "id": 102, "subject": "Created by the agent", "status": "new" } });
+            ticketdesk_api(out, req, state, company, &path, 201, body)
+        }
+        _ => {
+            // An unmatched request is logged too (method, host and path), so a scenario that says
+            // the provider saw no request at all (`path: "*", count: 0`) also catches discovery
+            // probes such as `/.well-known/oauth-authorization-server`.
+            let mut fields = BTreeSet::new();
+            fields.insert(format!("method={}", req.method));
+            log_ticketdesk(state, &req, &path, company, fields);
+            respond(out, 404, "text/plain", "not found")
+        }
+    }
+}
+
+/// The browser's half: a code for a registered client id, the redirect URI and the S256 challenge,
+/// in the `Location` of a 302, bound to this company.
+fn ticketdesk_authorize(
+    mut out: TcpStream,
+    req: Req,
+    state: &Arc<Mutex<State>>,
+    company: &str,
+    query: &str,
+) {
+    let q = form_pairs(query);
+    let get = |k: &str| q.get(k).cloned().unwrap_or_default();
+    let mut fields: BTreeSet<String> = q.keys().cloned().collect();
+    for k in ["client_id", "code_challenge_method", "redirect_uri"] {
+        fields.insert(format!("{k}={}", get(k)));
+    }
+    log_ticketdesk(state, &req, "/oauth/authorizations/new", company, fields);
+    let ok = get("response_type") == "code"
+        && get("client_id").starts_with(TICKETDESK_CLIENT_PREFIX)
+        && get("code_challenge_method") == "S256"
+        && !get("code_challenge").is_empty()
+        && !get("redirect_uri").is_empty();
+    if !ok {
+        return respond(out, 400, "text/plain", "invalid_request");
+    }
+    let code = rand_token();
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .td
+        .codes
+        .insert(
+            code.clone(),
+            (
+                get("client_id"),
+                get("redirect_uri"),
+                get("code_challenge"),
+                company.to_string(),
+            ),
+        );
+    let sep = if get("redirect_uri").contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    let _ = write!(
+        out,
+        "HTTP/1.1 302 Found\r\nLocation: {}{sep}code={code}&state={}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        get("redirect_uri"),
+        get("state")
+    );
+}
+
+/// A public client: no `client_secret` (a request that has one is refused), single-use codes
+/// checked with verifier and redirect URI, single-use rotating refresh tokens. Logs field names, a
+/// few non-secret values, `client-secret=none|present`, `resource=none|present` and, for a refresh,
+/// `refresh=fresh|reused|unknown`; never a value.
+fn ticketdesk_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, company: &str) {
+    let form = form_pairs(&req.body);
+    let grant = form.get("grant_type").cloned().unwrap_or_default();
+    let client_id = form.get("client_id").cloned().unwrap_or_default();
+    let mut fields: BTreeSet<String> = form.keys().cloned().collect();
+    for k in ["client_id", "grant_type", "redirect_uri"] {
+        if let Some(v) = form.get(k) {
+            fields.insert(format!("{k}={v}"));
+        }
+    }
+    let has = |k: &str, yes: &'static str, no: &'static str| {
+        if form.contains_key(k) {
+            yes
+        } else {
+            no
+        }
+    };
+    fields.insert(format!(
+        "client-secret={}",
+        has("client_secret", "present", "none")
+    ));
+    fields.insert(format!("resource={}", has("resource", "present", "none")));
+    let idx = log_ticketdesk(state, &req, "/oauth/tokens", company, fields);
+    let mut note = None;
+    let result: Result<Value, (u16, &str)> = {
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        if form.contains_key("client_secret") || !client_id.starts_with(TICKETDESK_CLIENT_PREFIX) {
+            Err((401, "invalid_client"))
+        } else if st.revoked && grant == "refresh_token" {
+            note = Some("refresh=revoked");
+            Err((400, "invalid_grant"))
+        } else if grant == "authorization_code" {
+            let code = form.get("code").map(String::as_str).unwrap_or_default();
+            match st.td.codes.remove(code) {
+                Some((cid, redirect, challenge, owner))
+                    if cid == client_id
+                        && owner == company
+                        && form.get("redirect_uri") == Some(&redirect)
+                        && sha256_b64url(
+                            form.get("code_verifier")
+                                .map(String::as_str)
+                                .unwrap_or_default(),
+                        ) == challenge =>
+                {
+                    Ok(ticketdesk_issue(&mut st, company))
+                }
+                _ => Err((400, "invalid_grant")),
+            }
+        } else if grant == "refresh_token" {
+            let rt = form.get("refresh_token").cloned().unwrap_or_default();
+            if st.td.live.get(&rt).is_some_and(|c| c == company) {
+                st.td.live.remove(&rt);
+                st.td.spent.insert(rt);
+                note = Some("refresh=fresh");
+                Ok(ticketdesk_issue(&mut st, company))
+            } else if st.td.spent.contains(&rt) {
+                note = Some("refresh=reused");
+                Err((400, "invalid_grant"))
+            } else {
+                note = Some("refresh=unknown");
+                Err((400, "invalid_grant"))
+            }
+        } else {
+            Err((400, "unsupported_grant_type"))
+        }
+    };
+    if let Some(n) = note {
+        if let Some(l) = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .log
+            .get_mut(idx)
+        {
+            l.fields.insert(n.to_string());
+        }
+    }
+    match result {
+        Ok(v) => respond(out, 200, "application/json", &v.to_string()),
+        Err((status, err)) => respond(
+            out,
+            status,
+            "application/json",
+            &json!({ "error": err }).to_string(),
+        ),
+    }
+}
+
+/// The REST API: 401 unless the bearer is the current access token of this company. Logs
+/// `method=` and `bearer=current|stale|placeholder|unknown|none`, never a value.
+fn ticketdesk_api(
+    out: TcpStream,
+    req: Req,
+    state: &Arc<Mutex<State>>,
+    company: &str,
+    path: &str,
+    status: u16,
+    body: Value,
+) {
+    let sent = req
+        .headers
+        .get("authorization")
+        .map(|v| v.strip_prefix("Bearer ").unwrap_or(v).to_string());
+    let (label, authed) = {
+        let st = state.lock().unwrap_or_else(|e| e.into_inner());
+        match &sent {
+            None => ("none", false),
+            Some(t) if t.starts_with("vamsec_") => ("placeholder", false),
+            Some(t) if !st.revoked && st.td.access.get(company) == Some(t) => ("current", true),
+            Some(t) if st.td.stale.contains(t) => ("stale", false),
+            Some(_) => ("unknown", false),
+        }
+    };
+    let mut fields = BTreeSet::new();
+    fields.insert(format!("method={}", req.method));
+    fields.insert(format!("bearer={label}"));
+    log_ticketdesk(state, &req, path, company, fields);
+    if !authed {
+        return respond(out, 401, "application/json", r#"{"error":"unauthorized"}"#);
+    }
+    respond(out, status, "application/json", &body.to_string());
 }
 
 /// `*` matches every path; a leading or trailing `*` matches a suffix or a prefix.
@@ -1179,10 +1552,30 @@ pub struct ConnState {
     filebox_synced: usize,
     /// Connector ids a `connector-node` step gave a client; cleared at cleanup.
     client_nodes: std::collections::BTreeSet<String>,
+    /// Connector ids a `connector-node` step gave a company address (accepted); cleared at cleanup.
+    tenant_nodes: std::collections::BTreeSet<String>,
+    /// Alias of the ticketdesk `mock-provider` piece of this scenario.
+    ticketdesk_alias: Option<String>,
+    /// How many of the ticketdesk provider's issued tokens the scrub list already holds.
+    ticketdesk_synced: usize,
 }
 
 fn product(want: impl Into<String>, got: impl Into<String>) -> Fail {
     Fail::new(Class::Product, want, got)
+}
+
+/// The cleanup body that puts a touched connector back to "not enabled, no consent": `client:
+/// null` for a connector whose client the scenario saved, and `tenant: null` for one whose
+/// company address it saved, each on its own (the API keeps either when it is omitted).
+fn node_reset_body(client: bool, tenant: bool) -> Value {
+    let mut body = json!({ "enabled": false, "consent": null });
+    if client {
+        body["client"] = Value::Null;
+    }
+    if tenant {
+        body["tenant"] = Value::Null;
+    }
+    body
 }
 
 fn b64url(bytes: &[u8]) -> String {
@@ -1220,6 +1613,7 @@ impl Engine {
             Some(0) => Ok(Kind::Login),
             Some(2) => Ok(Kind::Graph),
             Some(3) => Ok(Kind::Filebox),
+            Some(4) => Ok(Kind::Ticketdesk),
             Some(_) => Ok(Kind::Linear),
             None => Err(Fail::new(
                 Class::Scenario,
@@ -1252,7 +1646,22 @@ impl Engine {
                 format!("`{alias}` is a second one"),
             ));
         }
+        if wp.provider.as_deref() == Some("ticketdesk")
+            && self
+                .ctx
+                .conn
+                .ticketdesk_alias
+                .as_deref()
+                .is_some_and(|first| first != alias)
+        {
+            return Err(Fail::new(
+                Class::Scenario,
+                "one ticketdesk mock-provider piece per scenario",
+                format!("`{alias}` is a second one"),
+            ));
+        }
         let kind = match wp.provider.as_deref() {
+            Some("ticketdesk") => Kind::Ticketdesk,
             Some("microsoft-login") => Kind::Login,
             Some("linear-server") => Kind::Linear,
             Some("microsoft-graph") => Kind::Graph,
@@ -1267,7 +1676,7 @@ impl Engine {
         };
         let bearer = rand_token();
         {
-            let mut st = mocks.state(kind).lock().unwrap();
+            let mut st = mocks.state(kind).lock().unwrap_or_else(|e| e.into_inner());
             *st = State::default();
             if kind == Kind::Linear {
                 st.bearer = bearer.clone();
@@ -1276,13 +1685,30 @@ impl Engine {
                 st.fb.secret = rand_token();
                 st.fb.wrong = rand_token();
             }
+            if kind == Kind::Ticketdesk {
+                st.td.wrong = rand_token();
+            }
+        }
+        if kind == Kind::Ticketdesk {
+            // The value a test sends as a client secret (the provider has none) and, later, every
+            // token it issues: `secret-absent: { secret: <alias> }` judges them all.
+            let wrong = mocks
+                .state(kind)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .td
+                .wrong
+                .clone();
+            self.ctx.secrets.insert(alias.to_string(), Secret(wrong));
+            self.ctx.conn.ticketdesk_alias = Some(alias.to_string());
+            self.ctx.conn.ticketdesk_synced = 0;
         }
         if kind == Kind::Filebox {
             // The client secret the provider holds, a value it never held, and later the rotated
             // one and every token it issues: all are in the scrub list, and `secret-absent:
             // { secret: <alias> }` judges them all (the companions are `<alias>#...`).
             let (secret, wrong) = {
-                let st = mocks.state(kind).lock().unwrap();
+                let st = mocks.state(kind).lock().unwrap_or_else(|e| e.into_inner());
                 (st.fb.secret.clone(), st.fb.wrong.clone())
             };
             self.ctx.secrets.insert(alias.to_string(), Secret(secret));
@@ -1303,6 +1729,7 @@ impl Engine {
                 Kind::Linear => 1,
                 Kind::Graph => 2,
                 Kind::Filebox => 3,
+                Kind::Ticketdesk => 4,
             },
         );
         Ok(())
@@ -1311,6 +1738,28 @@ impl Engine {
     pub(super) fn mock_provider(&mut self, m: &MockProviderStep) -> Result<(), Fail> {
         let kind = self.provider_of(&m.piece)?;
         let mocks = self.mocks()?;
+        if m.short_tokens {
+            if kind != Kind::Ticketdesk
+                || m.expire
+                || m.hold_token.is_some()
+                || m.rotate_secret
+                || m.revoke
+                || m.hold.is_some()
+            {
+                return Err(Fail::new(
+                    Class::Scenario,
+                    "`shortTokens` alone on a ticketdesk mock-provider piece",
+                    format!("piece `{}`", m.piece),
+                ));
+            }
+            mocks
+                .state(kind)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .td
+                .short = true;
+            return Ok(());
+        }
         let filebox_only = m.expire || m.hold_token.is_some() || m.rotate_secret;
         if filebox_only && kind != Kind::Filebox {
             return Err(Fail::new(
@@ -1330,7 +1779,7 @@ impl Engine {
                 ),
             ));
         }
-        let mut st = mocks.state(kind).lock().unwrap();
+        let mut st = mocks.state(kind).lock().unwrap_or_else(|e| e.into_inner());
         if filebox_only {
             if m.expire {
                 let cur = std::mem::take(&mut st.fb.access);
@@ -1426,34 +1875,53 @@ impl Engine {
         // Node state outlives a scenario on one vamd: put every touched connector back to
         // "not enabled, no consent" so the next scenario starts clean.
         let client_nodes = std::mem::take(&mut self.ctx.conn.client_nodes);
+        let tenant_nodes = std::mem::take(&mut self.ctx.conn.tenant_nodes);
         for id in std::mem::take(&mut self.ctx.conn.nodes) {
             let path = format!("/v1/connectors/{}/node", seg(&id));
-            if client_nodes.contains(&id) {
-                // An org client (and its vault secret) outlives a scenario on one vamd: clear it too.
-                let body = json!({ "enabled": false, "consent": null, "client": null });
-                let answer = self.api.put_as(None, &path, &body);
-                if answer.as_ref().is_ok_and(|r| r.ok()) {
-                    continue;
-                }
+            let (client, tenant) = (client_nodes.contains(&id), tenant_nodes.contains(&id));
+            let full = node_reset_body(client, tenant);
+            let mut answer = self.api.put_as(None, &path, &full);
+            if answer.is_err() {
+                // The request may never have reached the node: send the complete reset again
+                // before falling back to one that would leave the client in place.
+                answer = self.api.put_as(None, &path, &full);
+            }
+            if answer.as_ref().is_ok_and(|r| r.ok()) {
+                continue;
+            }
+            let why = self.reset_failure(&answer);
+            if client {
                 // The client (and its vault secret) stays on this vamd: say so, as the marketplace
                 // cleanup does, so a later scenario that finds it is not a mystery.
-                let why = match &answer {
-                    Ok(r) => format!(
-                        "{} {}",
-                        r.status,
-                        self.scrub(&r.body.chars().take(200).collect::<String>())
-                    ),
-                    Err(_) => "no answer".to_string(),
-                };
                 eprintln!(
                     "vam-e2e: connector cleanup: the client of `{id}` could not be cleared ({why})"
                 );
             }
-            let _ = self
+            // Retry without the client, keeping the address reset: the API keeps an address
+            // when `tenant` is omitted, so the next scenario would start with this one's.
+            let answer = self
                 .api
-                .put_as(None, &path, &json!({ "enabled": false, "consent": null }));
+                .put_as(None, &path, &node_reset_body(false, tenant));
+            if tenant && !answer.as_ref().is_ok_and(|r| r.ok()) {
+                let why = self.reset_failure(&answer);
+                eprintln!(
+                    "vam-e2e: connector cleanup: the company address of `{id}` could not be cleared ({why})"
+                );
+            }
         }
         self.ctx.conn = ConnState::default();
+    }
+
+    /// The status and scrubbed start of a failed cleanup answer.
+    fn reset_failure(&self, answer: &Result<crate::api::Reply, crate::api::ConnError>) -> String {
+        match answer {
+            Ok(r) => format!(
+                "{} {}",
+                r.status,
+                scrubbed_start(&r.body, |t| self.scrub(t))
+            ),
+            Err(_) => "no answer".to_string(),
+        }
     }
 
     /// A refusal must be 400, 403 or 409: a 404 or 405 is a missing route.
@@ -1506,6 +1974,9 @@ impl Engine {
             }
             body["client"] = client;
         }
+        if let Some(t) = &n.tenant {
+            body["tenant"] = json!({ "subdomain": t.subdomain });
+        }
         let path = format!("/v1/connectors/{}/node", seg(&n.id));
         self.ctx.conn.nodes.insert(n.id.clone());
         let r = self
@@ -1516,20 +1987,36 @@ impl Engine {
         if n.client.is_some() && r.ok() {
             self.ctx.conn.client_nodes.insert(n.id.clone());
         }
+        if n.tenant.is_some() && r.ok() {
+            self.ctx.conn.tenant_nodes.insert(n.id.clone());
+        }
         self.judge_with(&format!("PUT {path}"), n.refused, n.contains.as_deref(), &r)
     }
 
     /// The value of a filebox client secret a `connector-node` step names.
     fn client_secret_value(&mut self, s: &SecretRef) -> Result<String, Fail> {
-        if self.provider_of(&s.piece)? != Kind::Filebox {
+        let kind = self.provider_of(&s.piece)?;
+        if kind == Kind::Ticketdesk {
+            // The provider has no secret: whatever is sent is a value it never held.
+            let mocks = self.mocks()?;
+            let st = mocks
+                .state(Kind::Ticketdesk)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            return Ok(st.td.wrong.clone());
+        }
+        if kind != Kind::Filebox {
             return Err(Fail::new(
                 Class::Scenario,
-                "a filebox mock-provider piece for `clientSecret.piece`",
+                "a filebox or ticketdesk mock-provider piece for `clientSecret.piece`",
                 format!("piece `{}`", s.piece),
             ));
         }
         let mocks = self.mocks()?;
-        let st = mocks.state(Kind::Filebox).lock().unwrap();
+        let st = mocks
+            .state(Kind::Filebox)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         match s.which {
             SecretWhich::Current => Ok(st.fb.secret.clone()),
             SecretWhich::Rotated if st.fb.old.is_empty() => Err(Fail::new(
@@ -1545,13 +2032,41 @@ impl Engine {
     /// Puts the tokens the filebox provider issued since the last call into the scrub list, as
     /// companions of its piece (`<alias>#t<n>`).
     pub(super) fn sync_filebox(&mut self) {
+        if let (Some(alias), Some(mocks)) = (
+            self.ctx.conn.ticketdesk_alias.clone(),
+            self.connector_mocks.clone(),
+        ) {
+            let issued: Vec<String> = mocks
+                .ticketdesk
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .td
+                .issued
+                .clone();
+            for (n, t) in issued
+                .iter()
+                .enumerate()
+                .skip(self.ctx.conn.ticketdesk_synced)
+            {
+                self.ctx
+                    .secrets
+                    .insert(format!("{alias}#t{n}"), Secret(t.clone()));
+            }
+            self.ctx.conn.ticketdesk_synced = issued.len();
+        }
         let (Some(alias), Some(mocks)) = (
             self.ctx.conn.filebox_alias.clone(),
             self.connector_mocks.clone(),
         ) else {
             return;
         };
-        let issued: Vec<String> = mocks.filebox.lock().unwrap().fb.issued.clone();
+        let issued: Vec<String> = mocks
+            .filebox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fb
+            .issued
+            .clone();
         for (n, t) in issued.iter().enumerate().skip(self.ctx.conn.filebox_synced) {
             self.ctx
                 .secrets
@@ -1566,6 +2081,7 @@ impl Engine {
         &mut self,
         c: &ConnectorConnect,
         key: Option<String>,
+        ticketdesk: bool,
     ) -> Result<(), Fail> {
         let mocks = self.mocks()?;
         let r = self
@@ -1597,7 +2113,32 @@ impl Engine {
         let client_id = text("node.client.clientId")?;
         let authorize = text("node.client.authorizeEndpoint")?;
         let token_endpoint = text("node.client.tokenEndpoint")?;
-        let mcp_url = text("mcp.url")?;
+        // A REST connector (ticketdesk) has no MCP server.
+        let mcp_url = if ticketdesk {
+            String::new()
+        } else {
+            text("mcp.url")?
+        };
+        if c.via == Some(Via::Tokens) && ticketdesk {
+            // An app that holds the tokens itself: the REST connection route, which an
+            // admin-supplied client's connector must refuse (the node exchanges the code).
+            let (access, refresh) = (rand_token(), rand_token());
+            self.remember(&c.id, &access);
+            self.remember(&c.id, &refresh);
+            let ep = format!("/v1/connectors/{}/connection", seg(&c.id));
+            let r = self
+                .api
+                .put_as(
+                    key.as_deref(),
+                    &ep,
+                    &json!({ "accessToken": access, "refreshToken": refresh }),
+                )
+                .map_err(conn)?;
+            if r.ok() {
+                self.ctx.conn.rest.push((c.id.clone(), key.clone()));
+            }
+            return self.judge_with(&format!("PUT {ep}"), c.refused, c.contains.as_deref(), &r);
+        }
         if c.via == Some(Via::Tokens) {
             return self.connect_org_tokens(
                 c,
@@ -1635,7 +2176,18 @@ impl Engine {
             pct(&client_id),
             pct(&redirect)
         );
-        let code = browser_get_code(mocks.filebox_addr, &q).map_err(|e| {
+        // The runner plays the browser at the provider's listener: a company's own for ticketdesk.
+        let browser_at = if ticketdesk {
+            let host = authorize
+                .split_once("://")
+                .map(|x| x.1)
+                .and_then(|r| r.split('/').next())
+                .unwrap_or_default();
+            mocks.ticketdesk_addr(host.split('.').next().unwrap_or_default())
+        } else {
+            mocks.filebox_addr
+        };
+        let code = browser_get_code(browser_at, &q).map_err(|e| {
             Fail::new(
                 Class::Harness,
                 "the filebox authorize endpoint gives a code",
@@ -1655,7 +2207,11 @@ impl Engine {
             )
             .map_err(conn)?;
         if r.ok() {
-            self.ctx.conn.mcp.push((c.id.clone(), key.clone()));
+            if ticketdesk {
+                self.ctx.conn.rest.push((c.id.clone(), key.clone()));
+            } else {
+                self.ctx.conn.mcp.push((c.id.clone(), key.clone()));
+            }
         }
         self.sync_filebox();
         self.judge_with(&format!("POST {ep}"), c.refused, c.contains.as_deref(), &r)
@@ -1781,8 +2337,8 @@ impl Engine {
         if c.id == "microsoft-365" {
             return self.connect_rest(c, key, kind);
         }
-        if kind == Some(Kind::Filebox) {
-            return self.connect_org_client(c, key);
+        if matches!(kind, Some(Kind::Filebox | Kind::Ticketdesk)) {
+            return self.connect_org_client(c, key, kind == Some(Kind::Ticketdesk));
         }
         let mocks = self.mocks()?;
         let url = match (&c.url, kind) {
@@ -1884,7 +2440,7 @@ impl Engine {
             .insert(format!("{}#refresh", c.id), Secret(refresh.clone()));
         if kind == Some(Kind::Login) {
             let mocks = self.mocks()?;
-            let mut st = mocks.login.lock().unwrap();
+            let mut st = mocks.login.lock().unwrap_or_else(|e| e.into_inner());
             st.refresh.insert(refresh.clone());
             // The graph mock compares bearers with these: a token that expires at once is
             // `stale` from the start, otherwise it is the one in force.
@@ -2036,9 +2592,45 @@ impl Engine {
     }
 }
 
+/// The first 200 characters of `body` with every secret scrubbed: the whole body is scrubbed first,
+/// so a secret that crosses the cut is replaced, never shown as a prefix.
+fn scrubbed_start(body: &str, scrub: impl Fn(&str) -> String) -> String {
+    scrub(body).chars().take(200).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cleanup_failure_scrubs_a_secret_that_crosses_the_cut() {
+        let secret = "tok-0123456789abcdef0123";
+        let body = format!("{}{secret}", "x".repeat(190));
+        let scrub = |t: &str| t.replace(secret, "<secret>");
+        let shown = scrubbed_start(&body, scrub);
+        assert!(!shown.contains("tok-01234"), "{shown}");
+        assert!(shown.ends_with("<secret>"), "{shown}");
+        assert!(shown.chars().count() <= 200);
+    }
+
+    #[test]
+    fn cleanup_clears_a_company_address_with_or_without_a_client() {
+        // An address saved without a client is still cleared.
+        let b = node_reset_body(false, true);
+        assert!(b.get("tenant").is_some_and(Value::is_null), "{b}");
+        assert!(b.get("client").is_none(), "{b}");
+        let b = node_reset_body(true, true);
+        assert!(
+            b["tenant"].is_null() && b.get("client").is_some_and(Value::is_null),
+            "{b}"
+        );
+        let b = node_reset_body(true, false);
+        assert!(b.get("tenant").is_none(), "{b}");
+        assert_eq!(
+            node_reset_body(false, false),
+            json!({ "enabled": false, "consent": null })
+        );
+    }
 
     fn post(addr: SocketAddr, path: &str, extra: &str, body: &str) -> String {
         let mut s = TcpStream::connect(addr).unwrap();
@@ -2333,6 +2925,95 @@ mod tests {
         let asm = get("/.well-known/oauth-authorization-server");
         assert!(asm.contains("code_challenge_methods_supported") && asm.contains("S256"));
         assert!(!asm.contains("registration_endpoint"));
+    }
+
+    fn get(addr: SocketAddr, path: &str, extra: &str) -> String {
+        let mut s = TcpStream::connect(addr).unwrap();
+        write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n{extra}\r\n").unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn ticketdesk_is_a_public_client_per_company_with_rotating_refresh_tokens() {
+        let m = Mocks::start().unwrap();
+        *m.ticketdesk.lock().unwrap() = State::default();
+        let (acme, globex) = (m.ticketdesk_addr("acme"), m.ticketdesk_addr("globex"));
+        assert_ne!(acme, globex);
+        let q = format!(
+            "/oauth/authorizations/new?response_type=code&client_id=e2e-ticketdesk-client&redirect_uri=squrell%3A%2F%2Foauth&code_challenge={}&code_challenge_method=S256&state=x",
+            sha256_b64url("v")
+        );
+        let form = |code: &str, extra: &str| {
+            format!("grant_type=authorization_code&client_id=e2e-ticketdesk-client&code={code}&code_verifier=v&redirect_uri=squrell%3A%2F%2Foauth{extra}")
+        };
+        // A code is bound to the company that minted it.
+        let code = browser_get_code(acme, &q).unwrap();
+        assert!(post(globex, "/oauth/tokens", "", &form(&code, "")).contains("invalid_grant"));
+        let code = browser_get_code(acme, &q).unwrap();
+        // A public client: a secret is refused, and does not spend the code.
+        assert!(
+            post(acme, "/oauth/tokens", "", &form(&code, "&client_secret=x"))
+                .contains("invalid_client")
+        );
+        let ok = post(acme, "/oauth/tokens", "", &form(&code, ""));
+        assert!(ok.contains("refresh_token"), "{ok}");
+        let (access, refresh) = {
+            let st = m.ticketdesk.lock().unwrap();
+            (st.td.issued[0].clone(), st.td.issued[1].clone())
+        };
+        let auth = format!("Authorization: Bearer {access}\r\n");
+        assert!(get(acme, "/api/v2/search.json?query=a", &auth).contains("Printer on fire"));
+        // Another company's instance does not accept this company's token.
+        assert!(get(globex, "/api/v2/search.json", &auth).starts_with("HTTP/1.1 401"));
+        assert!(get(
+            acme,
+            "/api/v2/search.json",
+            "Authorization: vamsec_ticketdesk_api\r\n"
+        )
+        .starts_with("HTTP/1.1 401"));
+        // Rotation: the refresh token is spent once and the old access token goes stale.
+        let r = format!(
+            "grant_type=refresh_token&client_id=e2e-ticketdesk-client&refresh_token={refresh}"
+        );
+        assert!(post(acme, "/oauth/tokens", "", &r).contains("refresh_token"));
+        assert!(post(acme, "/oauth/tokens", "", &r).contains("invalid_grant"));
+        assert!(get(acme, "/api/v2/search.json", &auth).starts_with("HTTP/1.1 401"));
+        let st = m.ticketdesk.lock().unwrap();
+        let fields = |bearer: &str| {
+            st.log.iter().any(|l| {
+                l.fields.contains(&format!("bearer={bearer}")) && l.fields.contains("host=acme")
+            })
+        };
+        assert!(fields("current") && fields("placeholder") && fields("stale"));
+        assert!(st.log.iter().any(|l| l.fields.contains("refresh=reused")));
+        assert!(st
+            .log
+            .iter()
+            .any(|l| l.fields.contains("client-secret=present")));
+        assert!(!st
+            .log
+            .iter()
+            .flat_map(|l| l.fields.iter())
+            .any(|f| f.contains(&access) || f.contains(&refresh)));
+    }
+
+    #[test]
+    fn ticketdesk_logs_a_request_it_does_not_serve() {
+        let m = Mocks::start().unwrap();
+        *m.ticketdesk.lock().unwrap() = State::default();
+        let acme = m.ticketdesk_addr("acme");
+        let r = get(acme, "/.well-known/oauth-authorization-server", "");
+        assert!(r.starts_with("HTTP/1.1 404"), "{r}");
+        let st = m.ticketdesk.lock().unwrap();
+        assert!(
+            st.log
+                .iter()
+                .any(|l| l.path == "/.well-known/oauth-authorization-server"
+                    && l.fields.contains("host=acme")),
+            "a discovery probe is on the record"
+        );
     }
 
     #[test]

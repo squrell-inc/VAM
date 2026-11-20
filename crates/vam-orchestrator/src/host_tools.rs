@@ -3398,7 +3398,7 @@ fn exchange_and_store_mcp_tokens(
             org_metadata = crate::mcp_registry::McpOauthMetadata {
                 authorization_server: node.issuer.clone(),
                 revocation_endpoint: node.revocation_endpoint.clone(),
-                resource: org.mcp_url.clone(),
+                resource: org.mcp_url.clone().unwrap_or_default(),
                 ..metadata.clone()
             };
             (&org_metadata, client_secret)
@@ -10932,6 +10932,7 @@ mod org_client_refresh_tests {
             reauth,
         };
         let node = crate::connectors::NodeConnector {
+            tenant_subdomain: None,
             connector_id: "filebox".into(),
             enabled: true,
             consent_tenant_id: None,
@@ -11097,6 +11098,7 @@ mod org_client_refresh_tests {
                     reauth: true,
                 };
                 let node = crate::connectors::NodeConnector {
+                    tenant_subdomain: None,
                     connector_id: "filebox".into(),
                     enabled: true,
                     consent_tenant_id: None,

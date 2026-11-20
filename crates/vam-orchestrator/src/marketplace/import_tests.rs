@@ -876,6 +876,7 @@ fn connectors_world(edit: impl FnOnce(&mut TestRepo)) -> Option<(World, String)>
 
 fn node_row(id: &str, enabled: bool) -> crate::connectors::NodeConnector {
     crate::connectors::NodeConnector {
+        tenant_subdomain: None,
         connector_id: id.into(),
         enabled,
         consent_tenant_id: None,
@@ -1305,4 +1306,281 @@ fn an_update_that_flips_the_client_or_adds_a_secret_needs_enable_again() {
     });
     assert_eq!(out.capabilities_changed, [BUGWATCH]);
     assert!(!w.store.connector_enabled("bugwatch").unwrap());
+}
+
+// ---- REST listings with a company address (CN-6.1) ----------------------------------------------
+
+const TICKETDESK_TAGS: [&str; 3] = [
+    "ticketdesk-connector-v1.0.0",
+    "company-address-outside-its-suffix-v1.0.0",
+    "rest-connector-with-a-foreign-placeholder-v1.0.0",
+];
+const TICKETDESK_SKILL: &str =
+    "listings/ticketdesk-connector/skills/ticketdesk-tickets/manifest.json";
+const TICKETDESK: &str = "urn:vam:connector:connectors.community.example/community/ticketdesk";
+
+fn ticketdesk_world(edit: impl FnOnce(&mut TestRepo)) -> Option<(World, String)> {
+    let w = world(
+        "marketplace-community-connectors",
+        &TICKETDESK_TAGS,
+        CONNECTOR_URL,
+        edit,
+    )?;
+    let row = add_blocking(
+        &w.store,
+        &w.cfg,
+        CONNECTOR_URL,
+        "connectors.community.example",
+        "admin",
+    )
+    .unwrap();
+    Some((w, row.id))
+}
+
+#[test]
+fn a_rest_listing_with_a_company_address_installs_not_enabled() {
+    let Some((w, id)) = ticketdesk_world(|_| {}) else {
+        return;
+    };
+    let out = w
+        .install(&id, "ticketdesk-connector", Mode::Install)
+        .unwrap();
+    assert_eq!(out.artifacts.len(), 3);
+    let e = w.store.connector_entry("ticketdesk").unwrap().unwrap();
+    assert_eq!(e.def.urn, TICKETDESK);
+    assert_eq!(e.trust_word(), "unverified");
+    assert!(e.def.mcp.is_none() && e.def.tenant.is_some());
+    assert!(!w.store.connector_enabled("ticketdesk").unwrap());
+}
+
+#[test]
+fn a_listing_whose_host_or_placeholder_is_not_the_connectors_own_is_refused() {
+    let Some((w, id)) = ticketdesk_world(|_| {}) else {
+        return;
+    };
+    for (listing, why) in [
+        ("company-address-outside-its-suffix", "suffix"),
+        ("rest-connector-with-a-foreign-placeholder", "placeholder"),
+    ] {
+        let e = w.install(&id, listing, Mode::Install).unwrap_err();
+        assert!(e.to_string().contains(why), "{listing}: {e:?}");
+    }
+    assert_eq!(w.count("connector_releases", "%"), 0);
+}
+
+#[test]
+fn a_skill_host_outside_its_connectors_suffix_is_refused() {
+    let Some((w, id)) = ticketdesk_world(|repo| {
+        let path = repo.work_dir().join(TICKETDESK_SKILL);
+        let text = std::fs::read_to_string(path).unwrap().replace(
+            "{subdomain}.ticketdesk.example",
+            "{subdomain}.elsewhere.example",
+        );
+        repo.write(&[(TICKETDESK_SKILL, &text)]);
+        repo.tag("ticketdesk-connector-v1.0.0");
+    }) else {
+        return;
+    };
+    let e = w
+        .install(&id, "ticketdesk-connector", Mode::Install)
+        .unwrap_err();
+    assert!(e.to_string().contains("suffix"), "{e:?}");
+    assert!(w.store.connector_entry("ticketdesk").unwrap().is_none());
+}
+
+// ---- placeholders are unique across installed connectors (release review of #112) ---------------
+
+/// The company-address fixture as a connector with id `id` and one binding named `binding`.
+fn placeholder_connector(id: &str, binding: &str) -> vam_spec::connector::Connector {
+    let raw = include_str!("../../../vam-spec/tests/fixtures/zendesk-shaped-connector.json");
+    let mut json: serde_json::Value = serde_json::from_str(raw).unwrap();
+    json["urn"] = format!("urn:vam:connector:connectors.community.example/community/{id}").into();
+    json["bindings"][0]["name"] = binding.into();
+    json["bindings"][0]["placeholder"] = format!("vamsec_{id}_{binding}").into();
+    serde_json::from_value(json).unwrap()
+}
+
+#[test]
+fn two_marketplace_connectors_cannot_share_a_binding_placeholder() {
+    let store = SqliteWorkflowStore::in_memory().unwrap();
+    // `vamsec_` + id + `_` + name: `zen` with `desk_api` and `zen_desk` with `api` are one string.
+    crate::connector_client::test_support::install_company_address_variant(&store, |j| {
+        j["urn"] = "urn:vam:connector:connectors.community.example/community/zen".into();
+        j["bindings"][0]["name"] = "desk_api".into();
+        j["bindings"][0]["placeholder"] = "vamsec_zen_desk_api".into();
+    });
+    let first = placeholder_connector("zen", "desk_api");
+    let second = placeholder_connector("zen_desk", "api");
+    assert_eq!(
+        first.bindings.as_ref().unwrap()[0].placeholder,
+        second.bindings.as_ref().unwrap()[0].placeholder
+    );
+    let conn = store.connection.lock().unwrap();
+    // The second, a different connector, is refused at install ...
+    let e = admit_connector_id(&conn, &second.urn, &second).unwrap_err();
+    assert!(
+        matches!(e, E::Conflict(_)) && e.to_string().contains("placeholder"),
+        "{e:?}"
+    );
+    // ... the installed connector's own update is not another connector ...
+    admit_connector_id(&conn, &first.urn, &first).unwrap();
+    // ... and one whose placeholder is its own and unique is admitted.
+    let third = placeholder_connector("zen_other", "api");
+    admit_connector_id(&conn, &third.urn, &third).unwrap();
+}
+
+// ---- one listing's own connectors and an update's fixed endpoints (release review of #112) ------
+
+fn prepared_connector(def: vam_spec::connector::Connector) -> Prepared {
+    Prepared {
+        kind: ArtifactKind::Connector,
+        path: format!("connectors/{}", def.urn),
+        checked: vam_spec::package::CheckedPackage {
+            kind: ArtifactKind::Connector,
+            urn: def.urn.clone(),
+            version: String::new(),
+            summary: vam_spec::package::summarize_connector(&def),
+            spec: vam_spec::package::CheckedSpec::Connector(Box::new(def)),
+            warnings: Vec::new(),
+        },
+        skill: None,
+    }
+}
+
+#[test]
+fn a_listing_whose_own_connectors_share_a_binding_placeholder_is_refused() {
+    // `zen` with `desk_api` and `zen_desk` with `api` are one placeholder, in one listing: neither is
+    // installed yet, so the installed-connector check alone would admit both.
+    let both = [
+        prepared_connector(placeholder_connector("zen", "desk_api")),
+        prepared_connector(placeholder_connector("zen_desk", "api")),
+    ];
+    let e = check_listing_placeholders(&both, "two-connectors").unwrap_err();
+    assert!(
+        matches!(e, E::InvalidContract(_)) && e.to_string().contains("vamsec_zen_desk_api"),
+        "{e:?}"
+    );
+    // Distinct placeholders in one listing are fine.
+    let fine = [
+        prepared_connector(placeholder_connector("zen", "desk_api")),
+        prepared_connector(placeholder_connector("zen_other", "api")),
+    ];
+    check_listing_placeholders(&fine, "two-connectors").unwrap();
+}
+
+#[test]
+fn placeholders_the_gate_cannot_tell_apart_are_refused_in_a_listing_and_against_installed() {
+    // `vamsec_zen_desk` is inside `vamsec_zen_desk_api`: a request carrying the second carries both,
+    // and the gate refuses it (it finds placeholders by substring).
+    let both = [
+        prepared_connector(placeholder_connector("zen", "desk")),
+        prepared_connector(placeholder_connector("zen_desk", "api")),
+    ];
+    let e = check_listing_placeholders(&both, "two-connectors").unwrap_err();
+    assert!(
+        matches!(e, E::InvalidContract(_)) && e.to_string().contains("vamsec_zen_desk"),
+        "{e:?}"
+    );
+    // Either order.
+    let both = [
+        prepared_connector(placeholder_connector("zen_desk", "api")),
+        prepared_connector(placeholder_connector("zen", "desk")),
+    ];
+    assert!(check_listing_placeholders(&both, "two-connectors").is_err());
+
+    // Installed `zen` with `desk`: the longer `zen_desk` + `api` is refused, and the shorter one
+    // against an installed longer one too.
+    let store = SqliteWorkflowStore::in_memory().unwrap();
+    crate::connector_client::test_support::install_company_address_variant(&store, |j| {
+        j["urn"] = "urn:vam:connector:connectors.community.example/community/zen".into();
+        j["bindings"][0]["name"] = "desk".into();
+        j["bindings"][0]["placeholder"] = "vamsec_zen_desk".into();
+    });
+    let conn = store.connection.lock().unwrap();
+    let longer = placeholder_connector("zen_desk", "api");
+    let e = admit_connector_id(&conn, &longer.urn, &longer).unwrap_err();
+    assert!(
+        matches!(e, E::Conflict(_)) && e.to_string().contains("placeholder"),
+        "{e:?}"
+    );
+    // A placeholder that only shares a prefix is told apart.
+    let apart = placeholder_connector("zen_other", "api");
+    admit_connector_id(&conn, &apart.urn, &apart).unwrap();
+    drop(conn);
+    let store = SqliteWorkflowStore::in_memory().unwrap();
+    crate::connector_client::test_support::install_company_address_variant(&store, |j| {
+        j["urn"] = "urn:vam:connector:connectors.community.example/community/zen_desk".into();
+        j["bindings"][0]["name"] = "api".into();
+        j["bindings"][0]["placeholder"] = "vamsec_zen_desk_api".into();
+    });
+    let conn = store.connection.lock().unwrap();
+    let shorter = placeholder_connector("zen", "desk");
+    let e = admit_connector_id(&conn, &shorter.urn, &shorter).unwrap_err();
+    assert!(matches!(e, E::Conflict(_)), "{e:?}");
+}
+
+#[test]
+fn a_listing_whose_connectors_share_an_id_is_refused_before_any_write() {
+    // Two URNs, one id: the second would replace the first's node row, client and connections.
+    let mut other = placeholder_connector("zen", "desk_api");
+    other.urn = "urn:vam:connector:connectors.community.example/elsewhere/zen".into();
+    let both = [
+        prepared_connector(placeholder_connector("zen", "desk_api")),
+        prepared_connector(other),
+    ];
+    let e = check_listing_connector_ids(&both, "two-connectors").unwrap_err();
+    assert!(
+        matches!(e, E::InvalidContract(_)) && e.to_string().contains("`zen`"),
+        "{e:?}"
+    );
+    let fine = [
+        prepared_connector(placeholder_connector("zen", "desk_api")),
+        prepared_connector(placeholder_connector("zen_other", "api")),
+    ];
+    check_listing_connector_ids(&fine, "two-connectors").unwrap();
+}
+
+#[test]
+fn an_update_that_moves_the_fixed_endpoints_clears_the_saved_client() {
+    let store = SqliteWorkflowStore::in_memory().unwrap();
+    crate::connector_client::test_support::install_company_address_rows(&store);
+    let mut node = node_row("zendesk", true);
+    node.tenant_subdomain = Some("acme".into());
+    store.put_node_connector(&node).unwrap();
+    let save_client = |store: &SqliteWorkflowStore| {
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO node_connector_clients (connector_id, client_id, issuer,
+                     authorize_endpoint, token_endpoint, secret_set, updated_at, updated_by)
+                 VALUES ('zendesk', 'zc1', 'https://acme.zendesk.com',
+                     'https://acme.zendesk.com/oauth/authorizations/new',
+                     'https://acme.zendesk.com/oauth/tokens', 0, 1, 'olga')",
+                [],
+            )
+            .unwrap();
+    };
+    let installed = store.connector_entry("zendesk").unwrap().unwrap();
+    let urn = installed.template.urn.clone();
+    let reset = |store: &SqliteWorkflowStore, new: &vam_spec::connector::Connector| {
+        let conn = store.connection.lock().unwrap();
+        reset_connector(&conn, &urn, "", Some(new), true, true, "admin", 2).unwrap();
+    };
+    // An update whose endpoints are the same keeps the client (only the enable is reset).
+    save_client(&store);
+    reset(&store, &installed.template);
+    assert!(store.node_client("zendesk").unwrap().is_some());
+    // An update that moves the token endpoint: the client was pinned to the old one.
+    let mut moved = installed.template.clone();
+    if let vam_spec::connector::Provider::Oauth2(o) = &mut moved.provider {
+        o.endpoints.as_mut().unwrap().token =
+            "https://{subdomain}.zendesk.com/oauth/tokens-v2".into();
+    }
+    reset(&store, &moved);
+    assert!(
+        store.node_client("zendesk").unwrap().is_none(),
+        "the client pinned to the old endpoint is kept"
+    );
 }

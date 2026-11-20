@@ -1515,7 +1515,7 @@ impl SqliteWorkflowStore {
             .query_row(
                 "SELECT run_id, step_id, attempt_id, checkpoint_digest, continuation_generation,
                         decision, decision_revision, session_id, tool_name, args_digest,
-                        amendable_schema_json, published
+                        amendable_schema_json, published, expires_at
                  FROM approvals WHERE request_id = ?1",
                 [&request_id.urn],
                 |row| {
@@ -1532,6 +1532,7 @@ impl SqliteWorkflowStore {
                         row.get::<_, String>(9)?,
                         row.get::<_, String>(10)?,
                         row.get::<_, i64>(11)?,
+                        row.get::<_, Option<i64>>(12)?,
                     ))
                 },
             )
@@ -1561,6 +1562,16 @@ impl SqliteWorkflowStore {
             return Err(OrchestratorError::ApprovalAlreadyDecided(
                 request_id.urn.clone(),
             ));
+        }
+        // A reconnect resumes the run: never past the park's deadline, even before the expiry
+        // sweep has marked it (a node that was stopped when it passed recovers parks at start).
+        if decision == crate::hitl::DECISION_RECONNECTED
+            && record.12.is_some_and(|at| at <= unix_timestamp())
+        {
+            return Err(OrchestratorError::Conflict(format!(
+                "approval '{}' passed its deadline; it is not resumed",
+                request_id.urn
+            )));
         }
         if let Some(expected) = expected_revision {
             if expected != record.6 {
@@ -1965,10 +1976,32 @@ impl SqliteWorkflowStore {
         let mut stmt = connection.prepare(
             "SELECT request_id, owner_user_id FROM approvals
              WHERE kind = 'reauth' AND decision IS NULL AND published = 1 AND locked_reason = ?1
+               AND (expires_at IS NULL OR expires_at > ?2)
              ORDER BY created_at, request_id",
         )?;
         let rows = stmt
-            .query_map([connection_key], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map(params![connection_key, unix_timestamp()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The distinct connection keys (`reauth:<scope>:<owner>:<id>`) that undecided, published
+    /// reauth parks wait on.
+    pub fn pending_reauth_keys(&self) -> Result<Vec<String>, OrchestratorError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        let mut stmt = connection.prepare(
+            "SELECT DISTINCT locked_reason FROM approvals
+             WHERE kind = 'reauth' AND decision IS NULL AND published = 1
+               AND (expires_at IS NULL OR expires_at > ?1)
+             ORDER BY locked_reason",
+        )?;
+        let rows = stmt
+            .query_map([unix_timestamp()], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }

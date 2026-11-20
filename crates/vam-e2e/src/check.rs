@@ -135,12 +135,14 @@ pub fn check(root: &Path) -> Vec<CheckError> {
             PieceKind::MockProvider => {
                 if !matches!(
                     w.provider.as_deref(),
-                    Some("microsoft-login" | "microsoft-graph" | "linear-server" | "filebox")
+                    Some(
+                        "microsoft-login" | "microsoft-graph" | "linear-server" | "filebox" | "ticketdesk"
+                    )
                 ) {
                     errors.push(CheckError::new(
                         &p,
                         "piece-body",
-                        "a mock-provider piece needs `provider: microsoft-login`, `microsoft-graph`, `linear-server` or `filebox`",
+                        "a mock-provider piece needs `provider: microsoft-login`, `microsoft-graph`, `linear-server`, `filebox` or `ticketdesk`",
                     ));
                 }
             }
@@ -333,7 +335,10 @@ fn check_scenario(
     let mut org_aliases = BTreeSet::new();
     let mut secret_aliases = BTreeSet::new();
     let mut mock_aliases = BTreeSet::new();
+    // Pieces that hold a client secret value and tokens of their own (filebox, ticketdesk).
     let mut filebox_aliases = BTreeSet::new();
+    let mut seen_filebox = false;
+    let mut seen_ticketdesk = false;
     let mut mkt_aliases = BTreeSet::new();
     let mut kinds: std::collections::BTreeMap<String, PieceKind> = Default::default();
     for g in &s.given {
@@ -365,7 +370,7 @@ fn check_scenario(
                 .piece(piece)
                 .is_some_and(|w| w.provider.as_deref() == Some("filebox"))
             {
-                if !filebox_aliases.is_empty() {
+                if seen_filebox {
                     errors.push(CheckError::new(
                         p,
                         "given",
@@ -374,7 +379,26 @@ fn check_scenario(
                         ),
                     ));
                 }
+                seen_filebox = true;
                 filebox_aliases.insert(alias.to_string());
+            }
+            if cat
+                .piece(piece)
+                .is_some_and(|w| w.provider.as_deref() == Some("ticketdesk"))
+            {
+                if seen_ticketdesk {
+                    errors.push(CheckError::new(
+                        p,
+                        "given",
+                        format!(
+                            "`{alias}` is a second ticketdesk mock-provider piece: its listeners hold one provider state"
+                        ),
+                    ));
+                }
+                seen_ticketdesk = true;
+                // Its alias names the client secret a test sends and every token it issues.
+                filebox_aliases.insert(alias.to_string());
+                secret_aliases.insert(alias.to_string());
             }
             // A connection to Microsoft 365 made with the login mock holds tokens the runner made.
             if cat

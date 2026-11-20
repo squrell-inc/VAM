@@ -218,6 +218,37 @@ The token is a claim. The agent's Cedar policy still allows or denies the call.
 
 ---
 
+## Skills that need a connector
+
+A skill that acts as the member in a service the org's admin connected (Microsoft 365, a marketplace connector) names the connector in the manifest and declares, per tool, what the tool may reach:
+
+```json
+"requiresConnector": "urn:vam:connector:connectors.community.example/community/ticketdesk",
+"tools": [{
+  "name": "ticket_search",
+  "egress": [{
+    "binding": "api",
+    "host": "{subdomain}.ticketdesk.example",
+    "methods": ["GET"],
+    "pathPrefixes": ["/api/v2/search.json"]
+  }]
+}]
+```
+
+The tool sends the connector's **placeholder** (`vamsec_<connector id>_<binding>`, for example `vamsec_ticketdesk_api`) as the `Authorization` value through the guest's egress proxy and never holds a token. The node attaches the member's access token only when the request carries that connector's placeholder, goes to one of the connector's binding hosts, and fits the tool's declared shape (method and path); any other request is refused with the declared shape in the message.
+
+**A company host.** For a connector that asks the admin for a company address, the host in `egress[].host` may be written `{subdomain}.<suffix>`, where `<suffix>` is the connector's own. The node fills it with the address the admin entered when the session boots. A templated host with another suffix, or on a tool that names no connector, is dropped.
+
+**Learning the host.** For a skill that requires an enabled connector with an address, the node writes `.vam/connector.json` next to the skill's `manifest.json` before the skills drive is built (no guest change; the skills drive is read-only to the tool):
+
+```json
+{ "connector": "ticketdesk", "hosts": { "api": "acme.ticketdesk.example" } }
+```
+
+`hosts` maps each binding name to its first filled host. The file names no token and no secret, and it is only a hint: the swap checks the host and the shape again on every request. A tool reads it from its own directory (`.vam/connector.json` beside the script). A skill without `requiresConnector`, or whose connector is disabled or has no address, gets no file, and a `.vam` directory a package shipped in that place is replaced. Because the file holds the node's address, the skills digest of such a skill differs from node to node.
+
+---
+
 ## Registering a Skill with `vam` CLI
 
 Publish a skill directory as the owner's **one draft** (recommended):
