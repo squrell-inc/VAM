@@ -479,7 +479,7 @@ fn full_size_message(i: usize) -> Value {
             .chars()
             .take(255)
             .collect::<String>(),
-        "isRead": i % 3 == 0,
+        "isRead": i.is_multiple_of(3),
     })
 }
 
