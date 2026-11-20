@@ -28,8 +28,9 @@ use crate::mcp_registry::{
     parse_side_effect_class, resolve_connection_auth, sanitize_oauth_last_refresh_error,
     sanitized_oauth_metadata, store_mcp_header_credential, store_mcp_oauth_tokens,
     suggested_read_only_tools, validate_connection_id, validate_mcp_timeout_ms, HeaderBinding,
-    McpAuthMode, McpConnection, McpHeaderInput, McpOauthMetadata, McpOauthRegistrationMethod,
-    McpOauthStatus, McpOauthTokenWrite, McpSnapshot, PinnedSnapshotDecision,
+    McpAuthMode, McpAuthWrite, McpConnection, McpHeaderInput, McpOauthMetadata,
+    McpOauthRegistrationMethod, McpOauthStatus, McpOauthTokenWrite, McpSnapshot,
+    PinnedSnapshotDecision,
 };
 use crate::secrets::{
     authorize_org_secret_write, resolve_secret_scope, vault_owner_user_id, SecretScope,
@@ -506,6 +507,8 @@ async fn connect(
         ))
         .into());
     }
+    #[cfg(test)]
+    connectors::test_signal::fire(&format!("mcp-connect-read:{}", req.connection_id));
     // Hold the refresh gate for an existing OAuth connection so an in-flight
     // token refresh cannot write bindings back after a mode switch or before
     // this update finishes.
@@ -652,16 +655,32 @@ async fn connect(
             delete_replaced_auth_mode_bindings(&state.vault, prior, auth_mode, &retained)?;
         }
     }
-    state.store.upsert_mcp_connection(
+    // A settings-only write (an OAuth row, no OAuth block, no mode change) leaves the sign-in
+    // columns as stored: an admin's save can mark the row for reconnect without the member's
+    // credential gate, and this write must not put back the state it read. A write that changes
+    // the sign-in is refused if the stored sign-in state moved since it was read.
+    let auth_write = match existing.as_ref() {
+        Some(prior)
+            if prior.auth_mode == McpAuthMode::Oauth
+                && auth_mode == McpAuthMode::Oauth
+                && requested_oauth.is_none() =>
+        {
+            McpAuthWrite::Keep
+        }
+        observed => McpAuthWrite::Replace { observed },
+    };
+    #[cfg(test)]
+    connectors::test_signal::pause(&format!("mcp-connect-write:{}", req.connection_id)).await;
+    state.store.upsert_mcp_connection_guarded(
         scope,
         &owner,
         &req.connection_id,
         &req.url,
-        "",
         &header_bindings,
         &tools,
         auth_mode,
         oauth.as_ref(),
+        auth_write,
     )?;
     if instructions.is_some() {
         state.store.set_mcp_instructions(

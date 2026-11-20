@@ -60,9 +60,12 @@ async fn list_connectors(
         .connector_entries()?
         .iter()
         .map(|e| {
-            let def = &e.def;
             let id = e.id();
             let node = nodes.iter().find(|n| n.connector_id == id);
+            // The entries were read after the node rows: an address saved in between filled them
+            // with another company. Every host shown is filled from the row this entry shows.
+            let e = &connectors::entry_for_node(e, node);
+            let def = &e.def;
             let client = clients.iter().find(|c| c.connector_id == id);
             let (mine, account) = caller_connection_state(&state, &auth, &id, node, client);
             let mut entry = connectors::list_entry(def, &cfg, node, mine, admin);
@@ -418,8 +421,9 @@ async fn delete_connection(
         connectors::RestRevokePlan::Nothing
     };
     connectors::disconnect(&state.store, &state.vault, &owner, &id)?;
-    // The answer says when the provider's grant may remain: not revoked (another client issued it,
-    // or its pins no longer match) or the revocation did not go through.
+    // The answer says when the provider's grant may remain: not revoked (another or an unknown
+    // client issued it, the admin cleared the client, or its pins no longer match) or the
+    // revocation did not go through.
     let mut may_remain = matches!(plan, connectors::RestRevokePlan::Skipped);
     if let connectors::RestRevokePlan::Send(r) = plan {
         let sent = tokio::task::spawn_blocking(move || {
@@ -562,6 +566,8 @@ async fn exchange_code(
         // worker also resumes the runs parked on this member's connection once the connection is
         // committed and the lock is released (a resumed intent takes it), whether or not this
         // request is still there to see it.
+        #[cfg(test)]
+        connectors::test_signal::fire(&format!("exchange-read-client:{owner}:{id}"));
         let gate = connectors::lock_connection(&owner, &id).await;
         let owner2 = owner.clone();
         let resume_state = state.clone();
@@ -4951,11 +4957,16 @@ mod tests {
         // The member's connection is busy (a refresh, another sign-in): the exchange passes the
         // route's checks and waits for the lock.
         let held = crate::connectors::lock_connection("ada", "zendesk").await;
+        let read = crate::connectors::test_signal::arm("exchange-read-client:ada:zendesk");
         let waiting = {
             let app = app.clone();
             tokio::spawn(async move { zendesk_exchange(&app, "squrell://oauth", "zk-w").await })
         };
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // The exchange has read the old client and is about to wait for the lock.
+        tokio::task::spawn_blocking(move || read.recv_timeout(std::time::Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("the exchange read the client before the admin's save");
         // Meanwhile the admin saves another client for the same address.
         let (s, b) = put_zendesk(
             &app,
@@ -5252,6 +5263,7 @@ mod tests {
         let gate = crate::host_tools::lock_mcp_credentials(&state.store, &conn)
             .await
             .unwrap();
+        let read = crate::connectors::test_signal::arm("mcp-connect-read:settings-race");
         let waiting = {
             let app = app.clone();
             tokio::spawn(async move {
@@ -5269,7 +5281,11 @@ mod tests {
                 .await
             })
         };
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // The settings write has read the row with the old expiry and waits for the gate.
+        tokio::task::spawn_blocking(move || read.recv_timeout(std::time::Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("the settings write read the row before the sign-in committed");
         upsert(&oauth(999_999));
         drop(gate);
         let (s, b) = waiting.await.unwrap();
@@ -5282,6 +5298,85 @@ mod tests {
             stored.oauth.unwrap().expires_at,
             Some(999_999),
             "the write carried the sign-in's expiry forward, not the one it read before waiting"
+        );
+        assert_eq!(stored.timeout_ms, 90_000);
+    }
+
+    #[tokio::test]
+    async fn a_settings_write_keeps_a_reconnect_mark_made_after_it_read_the_row() {
+        use crate::mcp_registry::{
+            McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
+        };
+        let (app, state) = app_world_with_state();
+        let oauth = |status: McpOauthStatus| McpOauthMetadata {
+            resource: "https://mcp.settings-mark.example/mcp".into(),
+            authorization_server: "https://auth.settings-mark.example".into(),
+            token_endpoint: "https://auth.settings-mark.example/token".into(),
+            revocation_endpoint: None,
+            client_id: "c-1".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: Some(100),
+            status,
+            last_refresh_at: None,
+            last_refresh_error: None,
+        };
+        let upsert = |meta: &McpOauthMetadata| {
+            state
+                .store
+                .upsert_mcp_connection(
+                    crate::secrets::SecretScope::User,
+                    "ada",
+                    "settings-mark",
+                    "https://mcp.settings-mark.example/mcp",
+                    "",
+                    &[],
+                    &[],
+                    McpAuthMode::Oauth,
+                    Some(meta),
+                )
+                .unwrap()
+        };
+        upsert(&oauth(McpOauthStatus::Connected));
+        // The settings write stops just before its write, after its last read of the row.
+        let (arrived, release) =
+            crate::connectors::test_signal::arm_pause("mcp-connect-write:settings-mark");
+        let waiting = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                call(
+                    &app,
+                    "PUT",
+                    "/v1/mcp/connections",
+                    "member-secret",
+                    Some(serde_json::json!({
+                        "connectionId": "settings-mark",
+                        "url": "https://mcp.settings-mark.example/mcp",
+                        "timeoutMs": 90000
+                    })),
+                )
+                .await
+            })
+        };
+        tokio::task::spawn_blocking(move || {
+            arrived.recv_timeout(std::time::Duration::from_secs(10))
+        })
+        .await
+        .unwrap()
+        .expect("the settings write reached its write");
+        // An admin's client save marks the member's row for reconnect (without the member's gate).
+        upsert(&oauth(McpOauthStatus::NeedsReauth));
+        release.send(()).unwrap();
+        let (s, b) = waiting.await.unwrap();
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let stored = state
+            .store
+            .get_mcp_connection(crate::secrets::SecretScope::User, "ada", "settings-mark")
+            .unwrap();
+        assert_eq!(
+            stored.oauth.unwrap().status,
+            McpOauthStatus::NeedsReauth,
+            "the settings write put back the connected state it read"
         );
         assert_eq!(stored.timeout_ms, 90_000);
     }
@@ -5308,9 +5403,13 @@ mod tests {
                 .await
             })
         };
-        tokio::task::spawn_blocking(move || arrived.recv().unwrap())
-            .await
-            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            arrived
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the check sent a refresh to the provider")
+        })
+        .await
+        .unwrap();
         check.abort();
         let _ = check.await;
         // The refresh is still running on its worker: a sign-in must not get the lock under it.

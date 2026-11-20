@@ -45,6 +45,35 @@ pub fn park_key(owner: &str, connector_id: &str) -> String {
     )
 }
 
+/// The owner and connector id of a [`park_key`], if `key` is one.
+pub fn parse_park_key(key: &str) -> Option<(String, String)> {
+    let prefix = crate::hitl::reauth_key(SecretScope::User, "", "");
+    // `<prefix>` is `reauth:user::`: the owner and id go between and after its last colon.
+    let rest = key.strip_prefix(prefix.strip_suffix(':')?)?;
+    let (owner, id) = rest.rsplit_once(":connector:")?;
+    (park_key(owner, id) == key).then(|| (owner.to_string(), id.to_string()))
+}
+
+/// The REST connector park keys whose connection is `Connected` now: parks a sign-in already
+/// answered, whose resume did not run (the process stopped after the connection committed and
+/// before the post-lock resume). [`ConnectorGate::Clear`] is what the gate decides for such a
+/// connection, so resuming these parks is what the sign-in would have done.
+pub fn connected_park_keys(store: &SqliteWorkflowStore) -> Vec<String> {
+    let Ok(keys) = store.pending_reauth_keys() else {
+        return Vec::new();
+    };
+    keys.into_iter()
+        .filter(|key| {
+            parse_park_key(key).is_some_and(|(owner, id)| {
+                matches!(
+                    store.connector_connection(&owner, &id),
+                    Ok(Some(c)) if c.status == ConnectionStatus::Connected
+                )
+            })
+        })
+        .collect()
+}
+
 struct Needed {
     owner: String,
     id: String,
@@ -714,6 +743,60 @@ mod tests {
         )
         .await;
         assert_eq!(done.unwrap(), ConnectorGate::Clear);
+    }
+
+    fn park(store: &SqliteWorkflowStore, request: &str, key: &str) {
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO approvals (request_id, run_id, step_id, attempt_id, checkpoint_digest,
+                     continuation_generation, published, locked_reason, kind)
+                 VALUES (?1, 'run-1', 's', 'a', 'd', 0, 1, ?2, 'reauth')",
+                rusqlite::params![request, key],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_park_whose_rest_connection_committed_before_a_restart_is_found_at_startup() {
+        let (store, vault) = fx();
+        node(&store, true, true);
+        assert_eq!(
+            parse_park_key(&park_key(ME, "microsoft-365")),
+            Some((ME.to_string(), "microsoft-365".to_string()))
+        );
+        assert_eq!(parse_park_key("reauth:user:me:linear"), None);
+        // ME's sign-in committed, then the process stopped before the resume: ME's park waits on a
+        // connected connection. OTHER's connection needs a reconnect: still parked. An MCP park is
+        // not this pass's.
+        connect(
+            &store,
+            &vault,
+            ME,
+            ConnectionStatus::Connected,
+            connectors::now_secs() + 3600,
+        );
+        park(&store, "req-me", &park_key(ME, "microsoft-365"));
+        connect(
+            &store,
+            &vault,
+            OTHER,
+            ConnectionStatus::NeedsReconnect,
+            connectors::now_secs() + 3600,
+        );
+        park(&store, "req-other", &park_key(OTHER, "microsoft-365"));
+        park(
+            &store,
+            "req-mcp",
+            &crate::hitl::reauth_key(SecretScope::User, ME, "linear"),
+        );
+        assert_eq!(connected_park_keys(&store), [park_key(ME, "microsoft-365")]);
+        // Resolving it decides ME's park only (the startup pass then resumes the run).
+        let decided = crate::api::reauth::resolve_key(&store, &park_key(ME, "microsoft-365"));
+        assert_eq!(decided.len(), 1);
+        assert!(connected_park_keys(&store).is_empty());
     }
 
     #[test]

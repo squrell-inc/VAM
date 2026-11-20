@@ -1308,8 +1308,8 @@ paths:
         when the caller is not connected. The answer is the caller's list entry.
         For a connector with `profile: oauth` whose file declares a revocation endpoint,
         the node revokes the refresh token there (RFC 7009, as the client that issued the
-        grant). When it did not or could not (the admin replaced the client since, so the
-        issuing client is not the node's now and no credentials are sent; or the request
+        grant). When it did not or could not (the admin replaced or cleared the client since,
+        or the issuing client is not known, so no credentials are sent; or the request
         failed), the rows are deleted all the same and the answer carries
         `providerGrantMayRemain: true`.
       parameters:

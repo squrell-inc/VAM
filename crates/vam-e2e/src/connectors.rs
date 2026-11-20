@@ -1517,6 +1517,20 @@ fn product(want: impl Into<String>, got: impl Into<String>) -> Fail {
     Fail::new(Class::Product, want, got)
 }
 
+/// The cleanup body that puts a touched connector back to "not enabled, no consent": `client:
+/// null` for a connector whose client the scenario saved, and `tenant: null` for one whose
+/// company address it saved, each on its own (the API keeps either when it is omitted).
+fn node_reset_body(client: bool, tenant: bool) -> Value {
+    let mut body = json!({ "enabled": false, "consent": null });
+    if client {
+        body["client"] = Value::Null;
+    }
+    if tenant {
+        body["tenant"] = Value::Null;
+    }
+    body
+}
+
 fn b64url(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -1806,36 +1820,46 @@ impl Engine {
         let tenant_nodes = std::mem::take(&mut self.ctx.conn.tenant_nodes);
         for id in std::mem::take(&mut self.ctx.conn.nodes) {
             let path = format!("/v1/connectors/{}/node", seg(&id));
-            if client_nodes.contains(&id) {
-                // An org client (and its vault secret) outlives a scenario on one vamd: clear it too.
-                let mut body = json!({ "enabled": false, "consent": null, "client": null });
-                if tenant_nodes.contains(&id) {
-                    // A company address is kept on disable: clear it too.
-                    body["tenant"] = Value::Null;
-                }
-                let answer = self.api.put_as(None, &path, &body);
-                if answer.as_ref().is_ok_and(|r| r.ok()) {
-                    continue;
-                }
+            let (client, tenant) = (client_nodes.contains(&id), tenant_nodes.contains(&id));
+            let answer = self
+                .api
+                .put_as(None, &path, &node_reset_body(client, tenant));
+            if answer.as_ref().is_ok_and(|r| r.ok()) {
+                continue;
+            }
+            let why = self.reset_failure(&answer);
+            if client {
                 // The client (and its vault secret) stays on this vamd: say so, as the marketplace
                 // cleanup does, so a later scenario that finds it is not a mystery.
-                let why = match &answer {
-                    Ok(r) => format!(
-                        "{} {}",
-                        r.status,
-                        self.scrub(&r.body.chars().take(200).collect::<String>())
-                    ),
-                    Err(_) => "no answer".to_string(),
-                };
                 eprintln!(
                     "vam-e2e: connector cleanup: the client of `{id}` could not be cleared ({why})"
                 );
             }
-            let _ = self
+            // Retry without the client, keeping the address reset: the API keeps an address
+            // when `tenant` is omitted, so the next scenario would start with this one's.
+            let answer = self
                 .api
-                .put_as(None, &path, &json!({ "enabled": false, "consent": null }));
+                .put_as(None, &path, &node_reset_body(false, tenant));
+            if tenant && !answer.as_ref().is_ok_and(|r| r.ok()) {
+                let why = self.reset_failure(&answer);
+                eprintln!(
+                    "vam-e2e: connector cleanup: the company address of `{id}` could not be cleared ({why})"
+                );
+            }
         }
         self.ctx.conn = ConnState::default();
+    }
+
+    /// The status and scrubbed start of a failed cleanup answer.
+    fn reset_failure(&self, answer: &Result<crate::api::Reply, crate::api::ConnError>) -> String {
+        match answer {
+            Ok(r) => format!(
+                "{} {}",
+                r.status,
+                self.scrub(&r.body.chars().take(200).collect::<String>())
+            ),
+            Err(_) => "no answer".to_string(),
+        }
     }
 
     /// A refusal must be 400, 403 or 409: a 404 or 405 is a missing route.
@@ -2509,6 +2533,25 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_clears_a_company_address_with_or_without_a_client() {
+        // An address saved without a client is still cleared.
+        let b = node_reset_body(false, true);
+        assert!(b.get("tenant").is_some_and(Value::is_null), "{b}");
+        assert!(b.get("client").is_none(), "{b}");
+        let b = node_reset_body(true, true);
+        assert!(
+            b["tenant"].is_null() && b.get("client").is_some_and(Value::is_null),
+            "{b}"
+        );
+        let b = node_reset_body(true, false);
+        assert!(b.get("tenant").is_none(), "{b}");
+        assert_eq!(
+            node_reset_body(false, false),
+            json!({ "enabled": false, "consent": null })
+        );
+    }
 
     fn post(addr: SocketAddr, path: &str, extra: &str, body: &str) -> String {
         let mut s = TcpStream::connect(addr).unwrap();

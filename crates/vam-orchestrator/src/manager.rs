@@ -1097,6 +1097,24 @@ pub async fn run_manager_loop(
     }
 }
 
+/// Writes the connector files of the session's skills into the staged catalog tree
+/// ([`crate::skill_connector_file::write_connector_files`]); on an error the session is settled
+/// `Failed` before the error is returned, as the other pre-boot failures are, so the row does not
+/// stay `Creating` until reconciliation.
+fn stage_connector_files(
+    store: &SqliteWorkflowStore,
+    session_id: &str,
+    catalog_root: &std::path::Path,
+    skill_urns: &[String],
+    seed_dir: Option<&std::path::Path>,
+) -> Result<usize, OrchestratorError> {
+    crate::skill_connector_file::write_connector_files(store, catalog_root, skill_urns, seed_dir)
+        .inspect_err(|err| {
+            eprintln!("[orchestrator] session {session_id}: connector files not staged: {err}");
+            let _ = store.update_observed_state(session_id, crate::session::ObservedState::Failed);
+        })
+}
+
 #[allow(clippy::too_many_arguments)] // flat parameter list is the established call shape; a params struct would change callers
 async fn handle_create_session(
     store: Arc<SqliteWorkflowStore>,
@@ -1263,8 +1281,9 @@ async fn handle_create_session(
                     .iter()
                     .filter_map(|r| r.resource_id.as_ref().map(|id| id.urn.clone()))
                     .collect();
-                crate::skill_connector_file::write_connector_files(
+                stage_connector_files(
                     &store,
+                    &session_id,
                     &overlay_root,
                     &skill_urns,
                     seed_dir_for_materialize.as_deref(),
@@ -2522,6 +2541,28 @@ mod tests {
         let fresh = bind_host_listeners(&uds).await.unwrap();
         assert!(sockets(&uds).iter().all(|p| p.exists()));
         drop(fresh);
+    }
+
+    #[test]
+    fn a_session_whose_connector_files_cannot_be_staged_is_settled_failed() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        store
+            .create_session("sess-cf", None, "vm-cf", "ws-cf", "default")
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        // A skill ref that is not a skill URN: staging refuses it.
+        let err = stage_connector_files(
+            &store,
+            "sess-cf",
+            root.path(),
+            &["not-a-skill-urn".to_string()],
+            None,
+        );
+        assert!(err.is_err());
+        assert_eq!(
+            store.load_session("sess-cf").unwrap().observed_state,
+            crate::session::ObservedState::Failed
+        );
     }
 
     #[test]

@@ -608,8 +608,11 @@ impl SessionConnectionSource {
         if !self.live_bindings {
             return;
         }
-        let fresh = resolved_bindings(&self.store);
+        // The store is read under the envelope lock: two overlapping requests then publish their
+        // tables in the order they read them, so a table older than the installed one is never
+        // put back.
         let mut guard = self.envelope.lock().unwrap_or_else(|e| e.into_inner());
+        let fresh = resolved_bindings(&self.store);
         if guard.1 != fresh {
             guard.0 = Arc::new(Envelope::new(fresh.clone(), self.window.clone()));
             guard.1 = fresh;
@@ -814,8 +817,15 @@ impl ConnectionTokenSource for SessionConnectionSource {
         request: &ConnectionRequest<'_>,
     ) -> Result<Option<ConnectionGrant>, ConnectionRefusal> {
         match self.envelope().screen(request) {
-            // No placeholder: nothing to decide, and no read of the node's state.
-            Ok(None) => Ok(None),
+            // No placeholder of the table, and nothing that looks like one: nothing to decide, and
+            // no read of the node's state. A request carrying text with the placeholder prefix may
+            // name a connector installed after this table was built: the table is reloaded first.
+            Ok(None)
+                if !self.live_bindings
+                    || !vam_network::connection::may_carry_placeholder(request) =>
+            {
+                Ok(None)
+            }
             decided => {
                 if !self.live_bindings {
                     return decided;
@@ -2795,7 +2805,12 @@ mod installed_tests {
         let call = window.current().unwrap();
         assert!(call.shapes.iter().all(|sh| !sh.host.contains('{')));
         // And if the address is cleared again, the next call is judged without it.
-        store.put_node_connector(&node("acme", false)).unwrap();
+        store
+            .put_node_connector(&NodeConnector {
+                tenant_subdomain: None,
+                ..node("acme", false)
+            })
+            .unwrap();
         record_intent(
             &window,
             &store,
@@ -2805,7 +2820,85 @@ mod installed_tests {
             1,
             &authorized(),
         );
-        assert!(window.current().unwrap().shapes.len() <= 1);
+        let shapes = &window.current().unwrap().shapes;
+        assert!(shapes.is_empty(), "no shape without an address: {shapes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_request_for_a_connector_installed_after_the_session_booted_reloads_the_table() {
+        // The session booted before the connector was installed: its table has no placeholder for
+        // it. The admin installs and enables it, the member connects, and the call's request carries
+        // the new placeholder: the table is reloaded and the request gets the member's token.
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        store
+            .record_tool_egress(SESSION, &[templated_row("ticket_search")])
+            .unwrap();
+        let window = Arc::new(CallWindow::new());
+        let s = SessionConnectionSource::new(
+            window.clone(),
+            store.clone(),
+            vault.clone(),
+            SESSION.into(),
+            OWNER.into(),
+        );
+        assert!(
+            !s.binds_host("acme.zendesk.com"),
+            "nothing installed at the boot"
+        );
+        install_company_address_rows(&store);
+        enable_and_connect(&store, &vault, "acme", None);
+        record_intent(
+            &window,
+            &store,
+            SESSION,
+            "ticket_search",
+            "call-1",
+            1,
+            &authorized(),
+        );
+        let grant = ask(
+            &s,
+            ZPH,
+            "GET",
+            "https://acme.zendesk.com/api/v2/search.json?query=printer",
+        )
+        .unwrap()
+        .expect("the new connector's placeholder is judged, not passed through bare");
+        let mut headers = HashMap::from([("Authorization".to_string(), ZPH.to_string())]);
+        s.attach(&grant, &mut headers).await.unwrap();
+        assert_eq!(headers["Authorization"], format!("Bearer {ACCESS}"));
+    }
+
+    #[test]
+    fn a_binding_table_read_before_a_newer_one_was_installed_is_not_put_back() {
+        // A request that read the node's connectors before Enable must not publish its table after
+        // a newer request installed the filled one: the table is read under the envelope lock.
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        install_company_address_rows(&store);
+        let s = SessionConnectionSource::new(
+            Arc::new(CallWindow::new()),
+            store.clone(),
+            vault.clone(),
+            SESSION.into(),
+            OWNER.into(),
+        );
+        assert!(!s.binds_host("acme.zendesk.com"), "no host at the boot");
+        std::thread::scope(|scope| {
+            // Another request holds the lock (it is installing its table).
+            let held = s.envelope.lock().unwrap();
+            let late = scope.spawn(|| s.refresh_bindings());
+            // This request is now waiting for the lock; meanwhile the admin enables `acme`.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            save(&store, &vault, "acme");
+            drop(held);
+            late.join().unwrap();
+        });
+        assert!(
+            s.binds_host("acme.zendesk.com"),
+            "the waiting request installed the table it read before the lock"
+        );
     }
 
     #[tokio::test]

@@ -3558,7 +3558,7 @@ impl Engine {
         for key in &readers {
             for path in ["/v1/connectors", "/v1/mcp/connections", "/v1/secrets"] {
                 let r = self.api.get_as(key.as_deref(), path).map_err(conn)?;
-                if !r.ok() {
+                if !listing_must_be_read(r.status, key.is_none(), path, what)? {
                     continue;
                 }
                 answered += 1;
@@ -3723,6 +3723,34 @@ impl Engine {
     }
 }
 
+/// Whether a no-run `secret-absent` inspects one listing answer. A 2xx is inspected. A
+/// scenario identity's 401 or 403 is skipped (a member may lack `secrets:write`, and a listing
+/// it may not read shows it nothing). Any other answer, and any refusal to the bootstrap key,
+/// fails with the status: a listing that should have been read and was not proves nothing.
+fn listing_must_be_read(
+    status: u16,
+    bootstrap: bool,
+    path: &str,
+    what: &str,
+) -> Result<bool, Fail> {
+    if (200..300).contains(&status) {
+        return Ok(true);
+    }
+    if !bootstrap && (status == 401 || status == 403) {
+        return Ok(false);
+    }
+    let who = if bootstrap {
+        "the bootstrap key"
+    } else {
+        "a scenario identity"
+    };
+    Err(Fail::new(
+        Class::Product,
+        what.to_string(),
+        format!("GET {path} as {who} answered {status}, so it could not be searched"),
+    ))
+}
+
 /// The failure of a no-run `secret-absent` that read none of the node's listings.
 fn no_listing_answered(answered: usize, what: &str) -> Result<(), Fail> {
     if answered == 0 {
@@ -3772,6 +3800,21 @@ mod tests {
         let e = no_listing_answered(0, "no form of secret `x`").unwrap_err();
         assert_eq!(e.class, Class::Scenario);
         assert!(no_listing_answered(1, "w").is_ok());
+    }
+
+    #[test]
+    fn a_failed_required_listing_fails_the_secret_search_with_its_status() {
+        // A member's 500 on the connector listing is not a skip, even when other listings read clean.
+        let e = listing_must_be_read(500, false, "/v1/connectors", "w").unwrap_err();
+        assert_eq!(e.class, Class::Product);
+        assert!(e.observed.contains("500"), "{}", e.observed);
+        assert!(e.observed.contains("/v1/connectors"), "{}", e.observed);
+        // The bootstrap key is never expected to be refused.
+        assert!(listing_must_be_read(403, true, "/v1/secrets", "w").is_err());
+        // A member without the scope for a listing is an expected denial: skipped.
+        assert!(!listing_must_be_read(403, false, "/v1/secrets", "w").unwrap());
+        assert!(listing_must_be_read(200, false, "/v1/connectors", "w").unwrap());
+        assert!(listing_must_be_read(200, true, "/v1/secrets", "w").unwrap());
     }
 
     struct NoVamd;

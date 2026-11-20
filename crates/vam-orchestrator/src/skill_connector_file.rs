@@ -40,7 +40,10 @@ fn refuse(what: impl Into<String>) -> OrchestratorError {
 }
 
 /// The connector's id and `binding -> first filled host`, when `urn` names a connector that is
-/// enabled on this node with an address and has at least one binding host.
+/// enabled on this node with an address and has at least one binding host. The hosts are filled
+/// from the published template with the address of the same node row that decided eligibility,
+/// never from a definition another read resolved (an address changed between the two reads would
+/// otherwise point the skill at one company while the broker admits another).
 fn hint_for(
     urn: &str,
     entries: &[ConnectorEntry],
@@ -54,8 +57,8 @@ fn hint_for(
     if !node.enabled || node.tenant_subdomain.is_none() {
         return None;
     }
-    let hosts: BTreeMap<String, String> = entry
-        .def
+    let def = crate::connectors::resolve(&entry.template, node.tenant_subdomain.as_deref());
+    let hosts: BTreeMap<String, String> = def
         .bindings
         .iter()
         .flatten()
@@ -315,6 +318,18 @@ mod tests {
         for forbidden in ["token", "vault", "secret", "connector/", "{subdomain}"] {
             assert!(!text.contains(forbidden), "{forbidden} in {text}");
         }
+    }
+
+    #[test]
+    fn the_hint_takes_its_hosts_from_the_node_row_that_made_the_skill_eligible() {
+        // The connector entries were read when the address was `acme`; the node row, read after an
+        // admin changed it, says `globex`. The hint must name the row's company.
+        let store = world(Some(node(true, Some("acme"))));
+        let entries = store.connector_entries().unwrap();
+        let nodes = vec![node(true, Some("globex"))];
+        let (id, hosts) = hint_for(ZURN, &entries, &nodes).unwrap();
+        assert_eq!(id, "zendesk");
+        assert_eq!(hosts["api"], "globex.zendesk.com");
     }
 
     #[test]

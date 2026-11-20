@@ -272,6 +272,20 @@ pub fn entries_in(c: &Connection) -> Result<Vec<ConnectorEntry>, OrchestratorErr
     Ok(out)
 }
 
+/// `e` with its definition filled from the published template and `node`'s company address: a
+/// response that shows `node` renders its hosts, endpoints, bindings and capabilities from the same
+/// row, never from a definition another read resolved.
+pub fn entry_for_node(e: &ConnectorEntry, node: Option<&NodeConnector>) -> ConnectorEntry {
+    ConnectorEntry {
+        def: resolve(
+            &e.template,
+            node.and_then(|n| n.tenant_subdomain.as_deref()),
+        ),
+        template: e.template.clone(),
+        installed: e.installed.clone(),
+    }
+}
+
 /// The connector as the node uses it: `{subdomain}` filled with the node's company address. The
 /// only way code reads a templated definition. With no address the endpoints and bindings are
 /// gone and the MCP URL is still templated (see [`url_needs_address`]).
@@ -1610,11 +1624,37 @@ fn refresh_connection(
         }
         Ok(())
     };
+    // A rotated refresh token is the credential live at the provider once the provider answered:
+    // the one it replaced is spent. It is kept whenever the grant it renews is still valid: the
+    // member's row not marked or replaced since (an admin's save that invalidated the grant marks
+    // it) and the same issuing client at the same token endpoint. A save that kept that client
+    // (a resave advances the revision) or a disable meanwhile does not drop it; the access token
+    // and the Connected result still need `still_current`.
+    let grant_kept = |tx: &rusqlite::Connection| -> Result<(), OrchestratorError> {
+        let Prepared::Oauth {
+            token_endpoint,
+            client_id,
+            ..
+        } = &prepared
+        else {
+            return still_current(tx);
+        };
+        let moved = || OrchestratorError::Conflict(REFRESH_SUPERSEDED.into());
+        let row_now = connector_connection_in(tx, owner, id)?.ok_or_else(moved)?;
+        let same_issuer = crate::connector_client::client_in(tx, id)?
+            .is_some_and(|n| n.client_id == *client_id && n.token_endpoint == *token_endpoint);
+        if same_grant(&row_now, &read) && same_issuer {
+            Ok(())
+        } else {
+            Err(moved())
+        }
+    };
     // One write, tried twice (a busy database is the usual failure); `Ok(false)`: not written
     // because the state moved.
     let apply = |rotated_refresh: Option<&str>,
                  access_token: Option<&str>,
-                 row: Option<&ConnectorConnection>|
+                 row: Option<&ConnectorConnection>,
+                 guard: &dyn Fn(&rusqlite::Connection) -> Result<(), OrchestratorError>|
      -> Result<bool, OrchestratorError> {
         let commit = RefreshCommit {
             owner,
@@ -1625,9 +1665,9 @@ fn refresh_connection(
             access_token,
             row,
         };
-        let mut done = store.commit_rest_refresh(vault, &commit, &still_current);
+        let mut done = store.commit_rest_refresh(vault, &commit, guard);
         if matches!(&done, Err(e) if !matches!(e, OrchestratorError::Conflict(_))) {
-            done = store.commit_rest_refresh(vault, &commit, &still_current);
+            done = store.commit_rest_refresh(vault, &commit, guard);
         }
         match done {
             Ok(()) => Ok(true),
@@ -1665,11 +1705,16 @@ fn refresh_connection(
             // never beside another token's expiry. If the second write fails the new access token is
             // never used: the stored row stays due, and the next refresh sends the rotated token.
             if let Some(rotated) = token.refresh_token.as_deref() {
-                if !apply(Some(rotated), None, None)? {
+                if !apply(Some(rotated), None, None, &grant_kept)? {
                     return superseded();
                 }
             }
-            if apply(None, Some(token.access_token.as_str()), Some(&conn))? {
+            if apply(
+                None,
+                Some(token.access_token.as_str()),
+                Some(&conn),
+                &still_current,
+            )? {
                 Ok(CheckOutcome::Connected(conn))
             } else {
                 superseded()
@@ -1681,7 +1726,7 @@ fn refresh_connection(
             conn.last_check_at = Some(now);
             conn.last_error = Some(failure.reason.clone());
             conn.updated_at = now;
-            if !apply(None, None, Some(&conn))? {
+            if !apply(None, None, Some(&conn), &still_current)? {
                 return superseded();
             }
             if was != ConnectionStatus::NeedsReconnect {
@@ -1693,11 +1738,77 @@ fn refresh_connection(
             conn.last_check_at = Some(now);
             conn.last_error = Some(failure.reason.clone());
             conn.updated_at = now;
-            if apply(None, None, Some(&conn))? {
+            if apply(None, None, Some(&conn), &still_current)? {
                 Ok(CheckOutcome::Unavailable(failure.reason))
             } else {
                 superseded()
             }
+        }
+    }
+}
+
+/// Named one-shot signals a handler fires at a point a test must wait for (for example "the
+/// exchange has read the client and is about to wait for the member's lock"). Test builds only:
+/// an unarmed signal is a no-op.
+#[cfg(test)]
+pub(crate) mod test_signal {
+    use std::collections::HashMap;
+    use std::sync::{mpsc, Mutex, OnceLock};
+
+    fn slots() -> &'static Mutex<HashMap<String, mpsc::Sender<()>>> {
+        static SLOTS: OnceLock<Mutex<HashMap<String, mpsc::Sender<()>>>> = OnceLock::new();
+        SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Arms `name`; the receiver gets one message when a handler fires it.
+    pub(crate) fn arm(name: &str) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        slots()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), tx);
+        rx
+    }
+
+    type Pause = (mpsc::Sender<()>, tokio::sync::oneshot::Receiver<()>);
+
+    fn pauses() -> &'static Mutex<HashMap<String, Pause>> {
+        static PAUSES: OnceLock<Mutex<HashMap<String, Pause>>> = OnceLock::new();
+        PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Arms a pause at `name`: the first receiver gets a message when a handler reaches it, and
+    /// the handler waits there until the sender is used (or dropped).
+    pub(crate) fn arm_pause(name: &str) -> (mpsc::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+        let (arrived_tx, arrived_rx) = mpsc::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        pauses()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), (arrived_tx, release_rx));
+        (arrived_rx, release_tx)
+    }
+
+    /// Waits at `name` if a test armed a pause there; otherwise returns at once.
+    pub(crate) async fn pause(name: &str) {
+        let armed = pauses()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        if let Some((arrived, release)) = armed {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
+
+    /// Fires `name` once, if a test armed it.
+    pub(crate) fn fire(name: &str) {
+        let tx = slots()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        if let Some(tx) = tx {
+            let _ = tx.send(());
         }
     }
 }
@@ -2194,8 +2305,9 @@ pub(crate) enum RestRevokePlan {
     Nothing,
     /// The file declares a revocation endpoint but the refresh token is not sent: the grant was
     /// issued to another client than the node has now (revocation must authenticate as the client
-    /// that issued it, RFC 7009 section 2.1), or its pin or endpoint no longer match. The rows go;
-    /// the provider's grant may remain, and the answer says so.
+    /// that issued it, RFC 7009 section 2.1), the issuing client is not known (a row with no
+    /// `client_id`) or the admin cleared the client, or its pin or endpoint no longer match. The
+    /// rows go; the provider's grant may remain, and the answer says so.
     Skipped,
     /// Send the revocation.
     Send(RestRevoke),
@@ -2205,8 +2317,9 @@ pub(crate) enum RestRevokePlan {
 /// declares `endpoints.revoke` (kept by the node only on the token endpoint's host), the grant was
 /// made at the node client's token endpoint **by the node client's own client id**, and the refresh
 /// token's row is pinned to that host (RFC 7009, public client, no secret). A grant whose issuing
-/// client is not the node's now is [`RestRevokePlan::Skipped`]: no credentials are sent. A row from
-/// before the issuing client was kept (`client_id` NULL) is revoked as the node's client, as before.
+/// client is not the node's now is [`RestRevokePlan::Skipped`]: no credentials are sent. So is a
+/// grant whose issuing client is unknown (`client_id` NULL) or whose client the admin cleared, when
+/// the connector declares a revocation endpoint: the grant exists and nothing can revoke it.
 /// Nothing is sent here.
 pub(crate) fn prepare_rest_revoke(
     store: &SqliteWorkflowStore,
@@ -2214,21 +2327,26 @@ pub(crate) fn prepare_rest_revoke(
     owner: &str,
     id: &str,
 ) -> RestRevokePlan {
-    let Some(client) = store.node_client(id).ok().flatten() else {
+    let Some(conn) = store.connector_connection(owner, id).ok().flatten() else {
         return RestRevokePlan::Nothing;
+    };
+    let Some(client) = store.node_client(id).ok().flatten() else {
+        // The admin cleared the client: the member's grant remains at a provider that could
+        // revoke it, but no client is left to authenticate as.
+        return if declares_revocation(store, id) {
+            RestRevokePlan::Skipped
+        } else {
+            RestRevokePlan::Nothing
+        };
     };
     let Some(revocation_endpoint) = client.revocation_endpoint.clone() else {
         return RestRevokePlan::Nothing;
     };
-    let Some(conn) = store.connector_connection(owner, id).ok().flatten() else {
-        return RestRevokePlan::Nothing;
+    let Some(issued_to) = conn.client_id.clone() else {
+        // Which client issued the grant is not known: it is not revoked as the node's client.
+        return RestRevokePlan::Skipped;
     };
-    if conn.token_endpoint != client.token_endpoint
-        || conn
-            .client_id
-            .as_deref()
-            .is_some_and(|issued| issued != client.client_id)
-    {
+    if conn.token_endpoint != client.token_endpoint || issued_to != client.client_id {
         return RestRevokePlan::Skipped;
     }
     let Some(token_host) = client.token_host() else {
@@ -2255,9 +2373,21 @@ pub(crate) fn prepare_rest_revoke(
     };
     RestRevokePlan::Send(RestRevoke {
         revocation_endpoint,
-        client_id: conn.client_id.unwrap_or(client.client_id),
+        client_id: issued_to,
         refresh_token,
     })
+}
+
+/// Whether the connector's file, as published, declares a revocation endpoint.
+fn declares_revocation(store: &SqliteWorkflowStore, id: &str) -> bool {
+    store
+        .connector_entry(id)
+        .ok()
+        .flatten()
+        .is_some_and(|e| match &e.template.provider {
+            Provider::Oauth2(o) => o.endpoints.as_ref().is_some_and(|e| e.revoke.is_some()),
+            _ => false,
+        })
 }
 
 /// Upserts the node row on a connection the caller already holds (inside a transaction, or not).
@@ -3442,6 +3572,43 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_shows_the_hosts_of_the_node_row_it_shows_not_of_a_later_read() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        crate::connector_client::test_support::install_company_address_rows(&store);
+        let row = |sub: &str| NodeConnector {
+            connector_id: "zendesk".into(),
+            enabled: true,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            tenant_subdomain: Some(sub.into()),
+            updated_at: 1,
+            updated_by: "a".into(),
+        };
+        // GET read the node row at `acme`; an admin saved `globex` before it read the entries.
+        let shown_row = row("acme");
+        store.put_node_connector(&row("globex")).unwrap();
+        let later = store.connector_entry("zendesk").unwrap().unwrap();
+        let e = entry_for_node(&later, Some(&shown_row));
+        let mut entry = list_entry(
+            &e.def,
+            &ConnectorConfig::default(),
+            Some(&shown_row),
+            None,
+            true,
+        );
+        annotate_source(&mut entry, &e, true);
+        let text = entry.to_string();
+        assert_eq!(entry["node"]["tenant"]["subdomain"], "acme");
+        assert!(text.contains("acme.zendesk.com"), "{text}");
+        assert!(
+            !text.contains("globex"),
+            "a host of another read is shown: {text}"
+        );
+        assert_eq!(e.template, later.template);
+    }
+
+    #[test]
     fn the_resolver_fills_what_the_store_reads_and_the_entry_shows() {
         let store = SqliteWorkflowStore::in_memory().unwrap();
         crate::connector_client::test_support::install_company_address_rows(&store);
@@ -4047,14 +4214,61 @@ mod oauth_rest_tests {
             ),
             "no credentials go out under another client's id; the provider's grant may remain"
         );
-        // A row from before the issuing client was kept (NULL) is revoked as the node's client.
+        // A row with no issuing client (NULL) is not revoked as the node's client either.
         let mut legacy = store.connector_connection("ada", ID).unwrap().unwrap();
         legacy.client_id = None;
         store.put_connector_connection(&legacy).unwrap();
-        let RestRevokePlan::Send(r) = prepare_rest_revoke(&store, &vault, "ada", ID) else {
-            panic!("a legacy row is revoked as before");
+        assert!(
+            matches!(
+                prepare_rest_revoke(&store, &vault, "ada", ID),
+                RestRevokePlan::Skipped
+            ),
+            "an unknown issuing client is not the node's client"
+        );
+    }
+
+    #[test]
+    fn a_grant_whose_client_the_admin_cleared_may_remain_when_the_file_declares_a_revocation() {
+        let clear = |store: &SqliteWorkflowStore| {
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .execute("DELETE FROM node_connector_clients", [])
+                .unwrap();
         };
-        assert_eq!(r.client_id, "zc2");
+        // The file declares a revocation endpoint.
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        crate::connector_client::test_support::install_company_address_variant(&store, |j| {
+            j["provider"]["endpoints"]["revoke"] =
+                serde_json::json!("https://{subdomain}.zendesk.com/oauth/revoke");
+        });
+        save_with(&store, &vault, "acme", "zc1", true);
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        clear(&store);
+        assert!(
+            matches!(
+                prepare_rest_revoke(&store, &vault, "ada", ID),
+                RestRevokePlan::Skipped
+            ),
+            "the grant remains and nothing can revoke it: the answer says so"
+        );
+        // No grant: nothing to say.
+        store.delete_connector_connection("ada", ID).unwrap();
+        assert!(matches!(
+            prepare_rest_revoke(&store, &vault, "ada", ID),
+            RestRevokePlan::Nothing
+        ));
+        // A file with no revocation endpoint: nothing could have revoked it either way.
+        let (store, vault) = world("acme");
+        save(&store, &vault, "acme", "zc1");
+        commit(&store, &vault, "ada", "acme", &acme_hosts());
+        clear(&store);
+        assert!(matches!(
+            prepare_rest_revoke(&store, &vault, "ada", ID),
+            RestRevokePlan::Nothing
+        ));
     }
 
     #[test]
@@ -4144,6 +4358,57 @@ mod oauth_rest_tests {
                 read(&vault, "ada", access_token_binding_id(ID)),
                 "ACCESS-0000000000000000",
                 "{answer}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rotated_refresh_token_is_kept_when_the_admin_resaves_the_same_client_or_disables_meanwhile(
+    ) {
+        let disable = |store: &SqliteWorkflowStore| {
+            let mut n = store.node_connector(ID).unwrap().unwrap();
+            n.enabled = false;
+            store.put_node_connector(&n).unwrap();
+        };
+        for meanwhile in ["same client resaved", "disabled"] {
+            let (store, vault) = world("acme");
+            commit(&store, &vault, "ada", "acme", &acme_hosts());
+            let out = check_connection(&store, &vault, &config(), "ada", ID, 20, |_, _| {
+                if meanwhile == "disabled" {
+                    disable(&store);
+                } else {
+                    save(&store, &vault, "acme", "zc1");
+                }
+                rotated_zc2(
+                    &RestRefreshTarget::Oauth {
+                        token_endpoint: "",
+                        client_id: "",
+                        scope: None,
+                    },
+                    &SecretString::new(String::new()),
+                )
+            })
+            .unwrap();
+            // The access token and the Connected result are not published under a moved state...
+            assert!(
+                matches!(out, CheckOutcome::Unavailable(_)),
+                "{meanwhile}: {out:?}"
+            );
+            assert_eq!(
+                read(&vault, "ada", access_token_binding_id(ID)),
+                "ACCESS-0000000000000000",
+                "{meanwhile}"
+            );
+            // ...but the provider spent the old refresh token: the rotated one is what is kept.
+            assert_eq!(
+                read(&vault, "ada", refresh_token_binding_id(ID)),
+                "REFRESH-2222222222222222",
+                "{meanwhile}"
+            );
+            assert_eq!(
+                dests(&vault, "ada", refresh_token_binding_id(ID)),
+                vec!["acme.zendesk.com".to_string()],
+                "{meanwhile}"
             );
         }
     }
