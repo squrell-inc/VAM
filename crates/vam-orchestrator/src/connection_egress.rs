@@ -608,8 +608,11 @@ impl SessionConnectionSource {
         if !self.live_bindings {
             return;
         }
-        let fresh = resolved_bindings(&self.store);
+        // The store is read under the envelope lock: two overlapping requests then publish their
+        // tables in the order they read them, so a table older than the installed one is never
+        // put back.
         let mut guard = self.envelope.lock().unwrap_or_else(|e| e.into_inner());
+        let fresh = resolved_bindings(&self.store);
         if guard.1 != fresh {
             guard.0 = Arc::new(Envelope::new(fresh.clone(), self.window.clone()));
             guard.1 = fresh;
@@ -2795,7 +2798,12 @@ mod installed_tests {
         let call = window.current().unwrap();
         assert!(call.shapes.iter().all(|sh| !sh.host.contains('{')));
         // And if the address is cleared again, the next call is judged without it.
-        store.put_node_connector(&node("acme", false)).unwrap();
+        store
+            .put_node_connector(&NodeConnector {
+                tenant_subdomain: None,
+                ..node("acme", false)
+            })
+            .unwrap();
         record_intent(
             &window,
             &store,
@@ -2805,7 +2813,39 @@ mod installed_tests {
             1,
             &authorized(),
         );
-        assert!(window.current().unwrap().shapes.len() <= 1);
+        let shapes = &window.current().unwrap().shapes;
+        assert!(shapes.is_empty(), "no shape without an address: {shapes:?}");
+    }
+
+    #[test]
+    fn a_binding_table_read_before_a_newer_one_was_installed_is_not_put_back() {
+        // A request that read the node's connectors before Enable must not publish its table after
+        // a newer request installed the filled one: the table is read under the envelope lock.
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        install_company_address_rows(&store);
+        let s = SessionConnectionSource::new(
+            Arc::new(CallWindow::new()),
+            store.clone(),
+            vault.clone(),
+            SESSION.into(),
+            OWNER.into(),
+        );
+        assert!(!s.binds_host("acme.zendesk.com"), "no host at the boot");
+        std::thread::scope(|scope| {
+            // Another request holds the lock (it is installing its table).
+            let held = s.envelope.lock().unwrap();
+            let late = scope.spawn(|| s.refresh_bindings());
+            // This request is now waiting for the lock; meanwhile the admin enables `acme`.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            save(&store, &vault, "acme");
+            drop(held);
+            late.join().unwrap();
+        });
+        assert!(
+            s.binds_host("acme.zendesk.com"),
+            "the waiting request installed the table it read before the lock"
+        );
     }
 
     #[tokio::test]
