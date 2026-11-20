@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: connectors
-current_phase: 7 (developer kit and API keys) breakdown 2026-11-20, awaiting approval; 6 released to main 2026-11-20 (VAM #112, f016617; the app release Squrell-App #15 held for the owner), Zendesk tag and real-instance run with the team; 5 released to main 2026-11-19 (VAM #52, 4f24c41; Squrell-App #12, bb4ee15), CN-5.7 a later manual check; 4 build done 2026-11-09, real-tenant wave 9 and lane B wait for the owner; 1–3 released, checklists out
+current_phase: 7 (developer kit and API keys) breakdown approved 2026-11-20 (parent orchestrator), wave 0 in progress; 6 released to main 2026-11-20 (VAM #112, f016617; the app release Squrell-App #15 held for the owner), Zendesk tag and real-instance run with the team; 5 released to main 2026-11-19 (VAM #52, 4f24c41; Squrell-App #12, bb4ee15), CN-5.7 a later manual check; 4 build done 2026-11-09, real-tenant wave 9 and lane B wait for the owner; 1–3 released, checklists out
 design_docs:
   - design/connectors.md
   - docs/src/content/docs/runtime/tools.md
@@ -3277,11 +3277,16 @@ release.
 **Goal:** a third-party developer builds, checks and tests a connector without
 a Squrell release; API-token systems can be connected.
 **Depends on:** Phase 6.
-**Status:** breakdown 2026-11-20; awaiting parent-orchestrator approval.
+**Status:** breakdown approved 2026-11-20 (parent orchestrator, under the owner's delegation); wave 0 in progress.
 **Plan:** drafted 2026-11-20 by the phase-breakdown agent (below).
 **Scope:** `vam connector init`, `validate`, `test` (mock provider world
-piece, also used by marketplace CI); the `api_key` connection flow (admin- or
-member-entered key, `connection` row, host-side inject only).
+piece, also used by marketplace CI); the `api_key` connection flow
+(member-entered key, `connection` row, host-side inject only).
+**Scope narrowed (parent orchestrator, owner's delegation, 2026-11-20):** the
+key is entered by the member only. A key the admin enters for everyone is an
+org-held connection, which stays under "Explicitly later"; `connection.holder`
+stays `user` and each member's calls run as their own account (locked
+decision 2).
 **Exit:** a connector built from nothing passes `validate` and `test` and
 installs from a test marketplace.
 **Rubric:** cost 3 (a CLI kit that runs the egress gate's rules offline, a new
@@ -3297,7 +3302,7 @@ credential kind on the swap, three repos).
 - [ ] CN-7.8 the VAM app: an API key at Connect, no client at Enable, the summary's "API key"
 - [ ] CN-7.9 vam-marketplace CI runs `vam connector validate` and `test` (team)
 
-#### Phase 7 breakdown (phase-breakdown agent, 2026-11-20; awaiting approval)
+#### Phase 7 breakdown (phase-breakdown agent, 2026-11-20; approved by the parent orchestrator 2026-11-20)
 
 Written against `docs/cn-7-breakdown`, cut from `feat/connectors` at f016617
 (equal to `main`, which carries the Phase 6 release). vam-marketplace and the
@@ -3690,7 +3695,7 @@ the VM path unchanged).
 | 2 | CN-7.3, CN-7.4 | — (1–2 move to the `test` step) | vam | Sonnet medium: import rules move to `vam-spec` (same words), plus a new import refusal | 120 min | 1 | `CI: scenarios=connector-built-from-nothing-passes-validate-and-test-and-installs,connector-kit-names-what-the-node-would-refuse,listing-from-an-added-marketplace-installs-as-unverified-within-its-limits,rest-listing-with-a-company-address-installs-and-shows-its-hosts,community-connector-appears-unverified-and-connects,admin-installs-the-squrell-listing-at-its-tag tests=workspace lane=no release-build=no` | no | [ ] | |
 | 3 | CN-7.5 | first, second | vam | **Sonnet high**: moves the egress gate's screening code (verbatim) and runs untrusted tool code locally behind it. Orchestrator reads the moved-code diff | 180 min | 2 | `CI: scenarios=connector-built-from-nothing-passes-validate-and-test-and-installs,connector-kit-names-what-the-node-would-refuse,skill-reads-microsoft-graph-as-the-member-without-holding-a-token,tool-declared-as-a-read-cannot-send-mail,skill-from-the-listing-reaches-only-the-company-host-inside-its-shape,guest-cannot-use-an-mcp-token-placeholder tests=workspace lane=yes release-build=no` | **yes** (the gate's code) | [ ] | |
 | 4 | CN-7.6 (+ the folded `entry_for` and openapi items) | third, fourth | vam | **Sonnet high**: a new credential attached to guest requests by the swap (A1, A2). Orchestrator reads `token_for`, the pin check and the connect transaction | 180 min | 3 | `CI: scenarios=member-enters-an-api-key-and-a-listing-skill-uses-it-without-holding-it,api-key-stays-pinned-to-the-hosts-it-was-entered-for,skill-from-the-listing-reaches-only-the-company-host-inside-its-shape,company-address-token-is-refreshed-at-the-filled-endpoint-before-the-call,skill-needing-microsoft-365-asks-the-member-to-connect-first,revoked-microsoft-connection-parks-the-call-and-tells-the-member tests=workspace lane=no release-build=no` | no | [ ] | |
-| 5 | CN-7.7 | fifth | vam | Sonnet medium: reuses CN-7.1's staged write and the Phase 5 MCP path | 120 min | 4 | `CI: scenarios=mcp-connector-with-an-api-key-connects-through-the-node,community-connector-appears-unverified-and-connects,connector-id-cannot-be-taken-by-a-hand-added-server,admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node lane=no release-build=no` | no | [ ] | |
+| 5 | CN-7.7 | fifth | vam | **Sonnet high** (orchestrator): reuses CN-7.1's staged write and the Phase 5 MCP path | 120 min | 4 | `CI: scenarios=mcp-connector-with-an-api-key-connects-through-the-node,community-connector-appears-unverified-and-connects,connector-id-cannot-be-taken-by-a-hand-added-server,admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node lane=no release-build=no` | no | [ ] | |
 | 6 | CN-7.8 | — (unit) | **The VAM app** (`squrell-inc/Squrell-App`, base `feature/connectors`; open question 14) | Sonnet medium: a member form that handles a secret | 120 min | 4 (5 for the MCP tile) | none (app unit only) | no | [ ] | |
 | 7 | CN-7.9 | — (marketplace CI) | **vam-marketplace** (+ vam close block) | Sonnet low (the session supports the team) | 60 min + the team's time | 5; the Phase 7 release on `main` for the pin | marketplace: its own CI; vam: none | no | [ ] | |
 
@@ -3700,7 +3705,38 @@ steps); 2 after wave 3; 4 after wave 4; 5 after wave 5; flat in 6–7 (stated so
 they are not flagged). Waves 6 and 7 are coordinated separately (Squrell-App;
 vam-marketplace).
 
-**Phase rubric.** `Decide: SLICE — proof 3 (the exit: a third-party connector built from nothing; API-token systems connect), cost 3 (a CLI kit that runs the gate's rules offline, a new credential on the swap, three repos) → slice: member-entered key, one field, bearer inject, REST and MCP; init/validate/test offline with a declared mock. Backlog: admin-entered (org-held) keys, header and query inject, several fields (Basic auth), a key check at connect, Salesforce instance_url (CN-6.8)`
+**Phase rubric.** `Decide: SLICE — proof 3 (the exit: a third-party connector built from nothing; API-token systems connect), cost 3 (a CLI kit that runs the gate's rules offline, a new credential on the swap, three repos) → slice: member-entered key, one field, bearer inject, REST and MCP; init/validate/test offline with a declared mock. Backlog: admin-entered (org-held) keys, header and query inject, several fields (Basic auth), a key check at connect, Salesforce instance_url (CN-6.8)` (orchestrator, 2026-11-20: named-header inject moved into the slice, wave 4)
+
+##### Decisions on the open questions (parent orchestrator, 2026-11-20)
+
+All 14 defaults are approved, except question 3, which is widened:
+
+- **Q1 Who enters the key:** member only (scope narrowed, see Status).
+- **Q3 How the key is attached:** **bearer, plus a named header.** Wave 4 adds
+  `inject: header` with a required `headerName`; the value is the key with an
+  optional fixed `prefix`. Validate and import refuse hop-by-hop and sensitive
+  names (`Host`, `Cookie`, `Proxy-*`, `Connection`, `Content-Length`,
+  `Transfer-Encoding`). The named header touches the envelope's placeholder
+  rule (`vam-network/src/connection.rs` 409-442); if it grows wave 4 by more
+  than about 30%, the orchestrator is asked before it is built. `query` stays
+  refused.
+- **Q4 Checking the key at connect:** no provider call.
+- **Q14 The app wave (W6):** waits for Squrell-App #15 to merge; W7's
+  marketplace CI pin follows the Phase 7 release.
+- **Models:** W3 (the gate's screening code moves out of `vam-network`, a
+  security boundary) runs on Sonnet high with `lane=yes`; before merge the
+  orchestrator reads the moved code and shows the behaviour unchanged (every
+  existing egress and secret scenario green). W4 and W5 run on Sonnet high
+  (they attach a member's key to requests).
+- **Wave merges:** each green wave PR goes to the parent orchestrator, which
+  merges it into `feat/connectors` or says to merge it.
+
+New backlog lines:
+- Basic auth from several fields (`email/token:key`, as Zendesk and Freshdesk
+  use). `Decide: BACKLOG — proof 1, cost 2`; trigger: the first listing that
+  needs it.
+- An optional declared `verify` request the node calls once at connect.
+  `Decide: BACKLOG — proof 1, cost 1`.
 
 ##### Open questions (each with a default)
 
@@ -3887,3 +3923,4 @@ once).
 | 2026-11-20 | 6 | **Third review of #112 fixed** (branch `cn-6-review-3` into `feat/connectors`; CodeRabbit's 10 inline findings, all fixed, none deferred). Each fix has a test that fails without it. `GET /v1/connectors` reads the definitions, node rows and clients under one store snapshot, so a release is never shown with the enablement of another save; startup recovery and the reconnect decision refuse a reauth park past its deadline (left for the expiry sweep), and unexpired parks are still recovered; a rotated Microsoft 365 refresh token is kept across a disable while the consent tenant is unchanged, and dropped when consent is withdrawn or moves; import refuses binding placeholders the egress gate cannot tell apart (one contains the other), within a listing and against installed connectors; the guarded connect write refuses a new connection when another connect created the row meanwhile, and a mode change deletes the previous mode's credentials in the same transaction, after the check, so a refused write leaves the row and its tokens. Runner: `secret-absent` screens a denied listing's body for the secret (the denial still is not a readable listing, a required 500 still fails); cleanup scrubs a failed answer before cutting it to 200 characters, and retries the complete node reset after a transport failure before falling back to an address-only reset. The exchange race test's signal is scoped to the request's idempotency key. |
 | 2026-11-20 | 6 | **Release review rounds of #112, then released.** Three rounds, each merged into `feat/connectors` before #112: #113 (release review of #112, CodeRabbit's findings, branch `cn-6-review`), #116 (CodeRabbit's second review, `cn-6-review-2`), #117 (third review, `cn-6-review-3`). Then #112 merged into `main` as f016617 (VAM released). The app release (Squrell-App #15) stays held for the owner; deploy vamd before the app. New high-priority finding recorded in the close block: the static-connect self-race (Phase 7 CN-7.1). |
 | 2026-11-20 | 7 | **Breakdown written** (phase-breakdown agent, branch `docs/cn-7-breakdown` from `feat/connectors` f016617), awaiting approval: 5 scenarios (process, mock model; a new `provider: declared` mock built from a publisher's test file), CN-7.1–7.9, waves 0–7 (wave 1 starts with CN-7.1, the static-connect self-race; W1, W3, W4 Sonnet high; W3 runs the microVM lane because the gate's screening code moves to `vam-spec`; W6 Squrell-App, W7 vam-marketplace), 14 open questions with defaults (member-entered key only, narrowing the stated scope; bearer inject only; `vam connector test` offline in the CLI). Folded backlog: Ticketdesk Bearer-only and the no-run absence check (W0), `entry_for` and the openapi items (W4). |
+| 2026-11-20 | 7 | **Breakdown approved** by the parent orchestrator (owner's delegation); #118 merged into `feat/connectors` (ff6fcc2). Decisions: member-entered key only (scope narrowed, org-held keys stay later); bearer **and** `inject: header` with a required `headerName` (refused names listed) in wave 4, Basic auth to backlog; no provider call at connect, a declared `verify` to backlog; W6 waits for Squrell-App #15; W3, W4, W5 on Sonnet high. Wave 0 started (branch `cn-7/wave-0`). |
