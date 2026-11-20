@@ -1,0 +1,58 @@
+{
+  "hosts": [
+    "api.notesdesk.example",
+    "eu.api.notesdesk.example"
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "prefix": "/v1/notes",
+      "status": 200,
+      "body": {
+        "notes": [
+          {
+            "id": 1,
+            "title": "Printer notes"
+          }
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/notes",
+      "status": 201,
+      "body": {
+        "note": {
+          "id": 2,
+          "title": "Created by the agent"
+        }
+      }
+    }
+  ],
+  "cases": [
+    {
+      "tool": "note_search",
+      "input": {
+        "query": "printer"
+      },
+      "expect": "ok",
+      "contains": "Printer notes"
+    },
+    {
+      "tool": "note_create",
+      "input": {
+        "title": "Reply to the printer thread"
+      },
+      "expect": "ok",
+      "contains": "Created by the agent"
+    },
+    {
+      "tool": "note_search",
+      "input": {
+        "host": "api.elsewhere.example"
+      },
+      "expect": "refused",
+      "contains": "declared shape"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+piece: marketplace-kit-broken
+kind: git-marketplace
+# A marketplace whose one listing passes every check of a single file and fails the checks of the whole listing: two
+# connectors in `connector-kit/broken-file` whose binding placeholders are the same string (`vamsec_desk_api_x`, from
+# connector `desk` binding `api_x` and connector `desk_api` binding `x`), and a skill whose tool egress names binding
+# `files` and host `api.elsewhere.example`, which its connector declares neither of. `vam connector validate` on the same tree
+# must name what the node's import refuses.
+fixture: connector-kit/broken-file
+url: https://kitbroken.community.example/vam-marketplace
+publisherDomain: kitbroken.community.example
+tags: [kit-broken-v1.0.0]

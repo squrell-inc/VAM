@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
+use vam_spec::connector_kit::{ConnectorTestFile, TEST_FILE_PATH};
 
 /// The client id the runner gives `vamd` for `microsoft-365` (not a secret, not a real app).
 pub const TEST_CLIENT_ID: &str = "e2e-microsoft-365-client";
@@ -203,6 +204,31 @@ pub struct ConnectorConnect {
     pub token_endpoint: Option<String>,
     /// `tokens`: the client id named in the connection (default: the node's).
     pub client_id: Option<String>,
+    /// An API-key connector: the member enters a key, `PUT /v1/connectors/{id}/connection` with
+    /// `{ apiKey }` (REST and MCP alike). The value comes from the provider piece named in it.
+    pub api_key: Option<ApiKeyStep>,
+}
+
+/// `apiKey: { piece, which }` of `connector-connect`: which key the member types. The value is
+/// made by the runner, kept in memory and never printed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiKeyStep {
+    /// Alias of a `mock-provider` piece: a `declared` one (its own key) or `linear-server` (its
+    /// bearer, `which: current` only).
+    pub piece: String,
+    /// `current`: the key the provider accepts now. `other`: the provider replaces its key with a
+    /// new one first (the old one is refused from then on) and the member types the new one.
+    #[serde(default)]
+    pub which: KeyWhich,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyWhich {
+    #[default]
+    Current,
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -334,6 +360,20 @@ struct State {
     fb: Filebox,
     /// Ticketdesk: the provider's own state.
     td: Ticketdesk,
+    /// Declared: the provider's own state.
+    dc: Declared,
+}
+
+/// What the `declared` provider remembers: the publisher's test file and the one API key it
+/// accepts. Values are kept here and never logged.
+#[derive(Default)]
+struct Declared {
+    /// The routes and hosts the publisher declared (`tests/connector-test.json`).
+    file: Option<ConnectorTestFile>,
+    /// The key every route needs now.
+    key: String,
+    /// Keys that were accepted once.
+    stale: BTreeSet<String>,
 }
 
 /// What the ticketdesk provider remembers (one state for every company). Values are kept here and
@@ -390,6 +430,7 @@ enum Kind {
     Graph,
     Filebox,
     Ticketdesk,
+    Declared,
 }
 
 /// The providers.
@@ -399,8 +440,11 @@ pub struct Mocks {
     graph: Arc<Mutex<State>>,
     filebox: Arc<Mutex<State>>,
     ticketdesk: Arc<Mutex<State>>,
+    declared: Arc<Mutex<State>>,
     /// `(company, listener)` for each of `TICKETDESK_COMPANIES`.
     ticketdesk_addrs: Vec<(String, SocketAddr)>,
+    /// `(host, listener)` for each host the declared pieces of this run name.
+    declared_addrs: Vec<(String, SocketAddr)>,
     login_addr: SocketAddr,
     linear_addr: SocketAddr,
     graph_addr: SocketAddr,
@@ -415,8 +459,15 @@ struct Req {
 }
 
 impl Mocks {
-    /// Binds both providers on loopback and serves them on threads until the process ends.
+    /// Binds the providers on loopback and serves them on threads until the process ends.
     pub fn start() -> std::io::Result<Arc<Mocks>> {
+        Self::start_with(&[])
+    }
+
+    /// As [`Self::start`], with one more listener for each host the `declared` pieces of the run
+    /// name (the seam maps one https origin to one listener, and the seam is fixed when `vamd`
+    /// starts, so the hosts are known before it).
+    pub fn start_with(declared_hosts: &[String]) -> std::io::Result<Arc<Mocks>> {
         let login = Arc::new(Mutex::new(State::default()));
         let linear = Arc::new(Mutex::new(State::default()));
         let graph = Arc::new(Mutex::new(State::default()));
@@ -430,7 +481,22 @@ impl Mocks {
         for c in TICKETDESK_COMPANIES {
             td_listeners.push((c.to_string(), TcpListener::bind("127.0.0.1:0")?));
         }
+        let declared = Arc::new(Mutex::new(State::default()));
+        let mut dc_listeners = Vec::new();
+        for h in declared_hosts {
+            if !dc_listeners
+                .iter()
+                .any(|(x, _): &(String, TcpListener)| x == h)
+            {
+                dc_listeners.push((h.clone(), TcpListener::bind("127.0.0.1:0")?));
+            }
+        }
         let m = Mocks {
+            declared_addrs: dc_listeners
+                .iter()
+                .map(|(h, l)| Ok((h.clone(), l.local_addr()?)))
+                .collect::<std::io::Result<Vec<_>>>()?,
+            declared: declared.clone(),
             ticketdesk_addrs: td_listeners
                 .iter()
                 .map(|(c, l)| Ok((c.clone(), l.local_addr()?)))
@@ -451,6 +517,9 @@ impl Mocks {
         serve_graph(l3, graph, login);
         for (company, l) in td_listeners {
             serve_ticketdesk(l, ticketdesk.clone(), company);
+        }
+        for (host, l) in dc_listeners {
+            serve_declared(l, declared.clone(), host);
         }
         Ok(Arc::new(m))
     }
@@ -484,6 +553,10 @@ impl Mocks {
                 m[format!("rest:https://{company}.{TICKETDESK_SUFFIX}")] =
                     json!(format!("http://{addr}"));
             }
+            // One listener per host a publisher's test file declares (`provider: declared`).
+            for (host, addr) in &self.declared_addrs {
+                m[format!("rest:https://{host}")] = json!(format!("http://{addr}"));
+            }
         }
         m.to_string()
     }
@@ -504,6 +577,7 @@ impl Mocks {
             Kind::Graph => &self.graph,
             Kind::Filebox => &self.filebox,
             Kind::Ticketdesk => &self.ticketdesk,
+            Kind::Declared => &self.declared,
         }
     }
 
@@ -514,6 +588,12 @@ impl Mocks {
             Kind::Graph => self.graph_addr,
             Kind::Filebox => self.filebox_addr,
             Kind::Ticketdesk => self.ticketdesk_addr("acme"),
+            // No MCP server: the first declared host's listener stands in (or Linear's, when
+            // the run declares none, so the match stays total).
+            Kind::Declared => self
+                .declared_addrs
+                .first()
+                .map_or(self.linear_addr, |(_, a)| *a),
         }
     }
 }
@@ -701,6 +781,7 @@ fn respond(mut s: TcpStream, status: u16, ctype: &str, body: &str) {
         202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         405 => "Method Not Allowed",
         _ => "Not Found",
     };
@@ -720,6 +801,7 @@ fn handle(stream: TcpStream, state: &Arc<Mutex<State>>, kind: Kind) -> std::io::
         Kind::Filebox => filebox(out, req, state),
         Kind::Graph => unreachable!("served by serve_graph"),
         Kind::Ticketdesk => unreachable!("served by serve_ticketdesk"),
+        Kind::Declared => unreachable!("served by serve_declared"),
     }
     Ok(())
 }
@@ -1395,6 +1477,47 @@ fn ticketdesk_token(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, company
     }
 }
 
+/// What a request's `Authorization` header carries. Only the `Bearer` scheme carries a credential
+/// the mocks accept: a token sent bare, or under another scheme, is not a login.
+enum Sent {
+    /// No `Authorization` header.
+    Nothing,
+    /// A value that is not `Bearer <token>`.
+    Raw(String),
+    /// `Bearer <token>`.
+    Token(String),
+}
+
+fn sent_credential(req: &Req) -> Sent {
+    match req.headers.get("authorization") {
+        None => Sent::Nothing,
+        Some(v) => match v.strip_prefix("Bearer ") {
+            Some(t) => Sent::Token(t.to_string()),
+            None => Sent::Raw(v.clone()),
+        },
+    }
+}
+
+/// The label a mock logs for a credential, given what it accepts: `none`, `placeholder` (a
+/// `vamsec_` value the gate did not swap, with or without a scheme), `current`, `stale` or
+/// `unknown` (including a real token sent without the `Bearer` scheme). `authed` is true only for
+/// `current`.
+fn credential_label(
+    sent: &Sent,
+    current: Option<&String>,
+    stale: &BTreeSet<String>,
+) -> (&'static str, bool) {
+    match sent {
+        Sent::Nothing => ("none", false),
+        Sent::Raw(v) if v.starts_with("vamsec_") => ("placeholder", false),
+        Sent::Raw(_) => ("unknown", false),
+        Sent::Token(t) if t.starts_with("vamsec_") => ("placeholder", false),
+        Sent::Token(t) if current == Some(t) => ("current", true),
+        Sent::Token(t) if stale.contains(t) => ("stale", false),
+        Sent::Token(_) => ("unknown", false),
+    }
+}
+
 /// The REST API: 401 unless the bearer is the current access token of this company. Logs
 /// `method=` and `bearer=current|stale|placeholder|unknown|none`, never a value.
 fn ticketdesk_api(
@@ -1406,19 +1529,15 @@ fn ticketdesk_api(
     status: u16,
     body: Value,
 ) {
-    let sent = req
-        .headers
-        .get("authorization")
-        .map(|v| v.strip_prefix("Bearer ").unwrap_or(v).to_string());
+    let sent = sent_credential(&req);
     let (label, authed) = {
         let st = state.lock().unwrap_or_else(|e| e.into_inner());
-        match &sent {
-            None => ("none", false),
-            Some(t) if t.starts_with("vamsec_") => ("placeholder", false),
-            Some(t) if !st.revoked && st.td.access.get(company) == Some(t) => ("current", true),
-            Some(t) if st.td.stale.contains(t) => ("stale", false),
-            Some(_) => ("unknown", false),
-        }
+        let current = if st.revoked {
+            None
+        } else {
+            st.td.access.get(company)
+        };
+        credential_label(&sent, current, &st.td.stale)
     };
     let mut fields = BTreeSet::new();
     fields.insert(format!("method={}", req.method));
@@ -1428,6 +1547,86 @@ fn ticketdesk_api(
         return respond(out, 401, "application/json", r#"{"error":"unauthorized"}"#);
     }
     respond(out, status, "application/json", &body.to_string());
+}
+
+/// The label a declared host is logged under: its first DNS label (`api.notesdesk.example` is
+/// `api`, `eu.api.notesdesk.example` is `eu`).
+fn declared_label(host: &str) -> &str {
+    host.split('.').next().unwrap_or(host)
+}
+
+fn serve_declared(listener: TcpListener, state: Arc<Mutex<State>>, host: String) {
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let (state, host) = (state.clone(), host.clone());
+            std::thread::spawn(move || {
+                let Ok(req) = read_req(&stream) else { return };
+                let Ok(out) = stream.try_clone() else { return };
+                declared(out, req, &state, &host);
+            });
+        }
+    });
+}
+
+/// A service a publisher declared (`tests/connector-test.json`): every route needs the one key the
+/// runner made for this scenario as `Authorization: Bearer <key>` (401 otherwise); a request no route
+/// matches is 404. It logs `host=<first label>`, `method=<verb>`, `path=<path>`,
+/// `bearer=current|stale|placeholder|unknown|none` and `query-key=present|none` (the key, an old key
+/// or a placeholder in the query, or a parameter named like a key), never a value.
+fn declared(out: TcpStream, req: Req, state: &Arc<Mutex<State>>, host: &str) {
+    let (path, query) = req.path.split_once('?').unwrap_or((req.path.as_str(), ""));
+    let (path, query) = (path.to_string(), query.to_string());
+    let sent = sent_credential(&req);
+    let reply = {
+        let st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(file) = st.dc.file.as_ref() else {
+            drop(st);
+            return respond(out, 503, "text/plain", "no test file");
+        };
+        let current = (!st.dc.key.is_empty() && !st.revoked).then_some(&st.dc.key);
+        let (label, authed) = credential_label(&sent, current, &st.dc.stale);
+        let in_query = |k: &str| !k.is_empty() && query.contains(k);
+        let query_key = query.contains("vamsec_")
+            || in_query(&st.dc.key)
+            || st.dc.stale.iter().any(|k| in_query(k))
+            || query.split('&').any(|kv| {
+                let name = kv
+                    .split('=')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                matches!(
+                    name.as_str(),
+                    "key" | "api_key" | "apikey" | "token" | "access_token"
+                )
+            });
+        let route = file.route_for(host, &req.method, &path);
+        (
+            label,
+            authed,
+            query_key,
+            route.map(|r| (r.status, r.body.to_string())),
+        )
+    };
+    let (label, authed, query_key, route) = reply;
+    let mut fields = BTreeSet::new();
+    fields.insert(format!("host={}", declared_label(host)));
+    fields.insert(format!("method={}", req.method));
+    fields.insert(format!("path={path}"));
+    fields.insert(format!("bearer={label}"));
+    fields.insert(format!(
+        "query-key={}",
+        if query_key { "present" } else { "none" }
+    ));
+    log_filebox(state, &req, &path, fields);
+    if !authed {
+        return respond(out, 401, "application/json", r#"{"error":"unauthorized"}"#);
+    }
+    match route {
+        Some((status, body)) => respond(out, status, "application/json", &body),
+        None => respond(out, 404, "application/json", r#"{"error":"not found"}"#),
+    }
 }
 
 /// `*` matches every path; a leading or trailing `*` matches a suffix or a prefix.
@@ -1442,6 +1641,29 @@ fn path_matches(pattern: &str, path: &str) -> bool {
         return path.starts_with(prefix);
     }
     pattern == path
+}
+
+/// The publisher's test file of a `declared` piece: `tests/connector-test.json` in its fixture.
+pub fn declared_test_file(wp: &crate::world::WorldPiece) -> Result<ConnectorTestFile, String> {
+    let dir = wp
+        .fixture_dir
+        .as_ref()
+        .ok_or_else(|| "a declared piece needs `fixture` (a listing directory)".to_string())?;
+    let path = dir.join(TEST_FILE_PATH);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    ConnectorTestFile::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The hosts every `declared` piece of the scenarios names, sorted and without repeats, for the
+/// listeners the seam maps before `vamd` starts.
+pub fn declared_hosts<'a>(
+    pieces: impl Iterator<Item = &'a crate::world::WorldPiece>,
+) -> Result<Vec<String>, String> {
+    let mut hosts = BTreeSet::new();
+    for wp in pieces.filter(|w| w.provider.as_deref() == Some("declared")) {
+        hosts.extend(declared_test_file(wp)?.hosts);
+    }
+    Ok(hosts.into_iter().collect())
 }
 
 fn rand_token() -> String {
@@ -1511,6 +1733,8 @@ pub struct ConnState {
     ticketdesk_alias: Option<String>,
     /// How many of the ticketdesk provider's issued tokens the scrub list already holds.
     ticketdesk_synced: usize,
+    /// Alias of the declared `mock-provider` piece of this scenario.
+    declared_alias: Option<String>,
 }
 
 fn product(want: impl Into<String>, got: impl Into<String>) -> Fail {
@@ -1567,6 +1791,7 @@ impl Engine {
             Some(2) => Ok(Kind::Graph),
             Some(3) => Ok(Kind::Filebox),
             Some(4) => Ok(Kind::Ticketdesk),
+            Some(5) => Ok(Kind::Declared),
             Some(_) => Ok(Kind::Linear),
             None => Err(Fail::new(
                 Class::Scenario,
@@ -1613,7 +1838,22 @@ impl Engine {
                 format!("`{alias}` is a second one"),
             ));
         }
+        if wp.provider.as_deref() == Some("declared")
+            && self
+                .ctx
+                .conn
+                .declared_alias
+                .as_deref()
+                .is_some_and(|first| first != alias)
+        {
+            return Err(Fail::new(
+                Class::Scenario,
+                "one declared mock-provider piece per scenario",
+                format!("`{alias}` is a second one"),
+            ));
+        }
         let kind = match wp.provider.as_deref() {
+            Some("declared") => Kind::Declared,
             Some("ticketdesk") => Kind::Ticketdesk,
             Some("microsoft-login") => Kind::Login,
             Some("linear-server") => Kind::Linear,
@@ -1622,7 +1862,7 @@ impl Engine {
             other => {
                 return Err(Fail::new(
                     Class::Scenario,
-                    "provider microsoft-login, microsoft-graph, linear-server or filebox",
+                    "provider microsoft-login, microsoft-graph, linear-server, filebox, ticketdesk or declared",
                     format!("{other:?}"),
                 ))
             }
@@ -1641,6 +1881,31 @@ impl Engine {
             if kind == Kind::Ticketdesk {
                 st.td.wrong = rand_token();
             }
+            if kind == Kind::Declared {
+                let file = declared_test_file(wp).map_err(|e| {
+                    Fail::new(
+                        Class::Harness,
+                        format!("the test file of piece `{alias}`"),
+                        e,
+                    )
+                })?;
+                st.dc.file = Some(file);
+                st.dc.key = rand_token();
+            }
+        }
+        if kind == Kind::Declared {
+            // The key the provider accepts now, and later every key it replaced it with: all are in
+            // the scrub list, and `secret-absent: { secret: <alias> }` judges them all (the
+            // companions are `<alias>#...`).
+            let key = mocks
+                .state(kind)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .dc
+                .key
+                .clone();
+            self.ctx.secrets.insert(alias.to_string(), Secret(key));
+            self.ctx.conn.declared_alias = Some(alias.to_string());
         }
         if kind == Kind::Ticketdesk {
             // The value a test sends as a client secret (the provider has none) and, later, every
@@ -1673,6 +1938,11 @@ impl Engine {
         }
         if kind == Kind::Linear {
             self.remember(alias, &bearer);
+            // The bearer is also what a member types as an API key for an MCP connector, so
+            // `secret-absent` and `api-call.absent` can name the piece.
+            self.ctx
+                .secrets
+                .insert(alias.to_string(), Secret(bearer.clone()));
             self.ctx.conn.linear_bearer = bearer;
         }
         self.ctx.conn.providers.insert(
@@ -1683,6 +1953,7 @@ impl Engine {
                 Kind::Graph => 2,
                 Kind::Filebox => 3,
                 Kind::Ticketdesk => 4,
+                Kind::Declared => 5,
             },
         );
         Ok(())
@@ -2245,7 +2516,7 @@ impl Engine {
                 return Err(Fail::new(
                     Class::Scenario,
                     format!("`{alias}` holds secrets"),
-                    "not a filebox mock-provider piece in `given`",
+                    "not a filebox, ticketdesk, declared or linear-server mock-provider piece in `given`",
                 ));
             }
             for v in values {
@@ -2272,6 +2543,9 @@ impl Engine {
 
     pub(super) fn connector_connect(&mut self, c: &ConnectorConnect) -> Result<(), Fail> {
         let key = self.key_of(c.as_.as_deref())?;
+        if let Some(k) = &c.api_key {
+            return self.connect_api_key(c, k, key);
+        }
         let kind = match &c.piece {
             Some(p) => Some(self.provider_of(p)?),
             None => None,
@@ -2347,6 +2621,70 @@ impl Engine {
             )
             .map_err(conn)?;
         self.judge("PUT /v1/mcp/connections/<id>/oauth/tokens", false, &r)
+    }
+
+    /// A member types an API key: `PUT /v1/connectors/{id}/connection` with `{ apiKey }`, the same
+    /// route for a REST and an MCP connector. The value is the provider's key (`which: current`);
+    /// with `which: other` a `declared` provider first replaces its key (the old one is refused
+    /// from then on), so a member replaces the key by typing the new one. Every key is in the
+    /// scrub list before it is sent. The connection is removed at cleanup, as the same identity.
+    fn connect_api_key(
+        &mut self,
+        c: &ConnectorConnect,
+        k: &ApiKeyStep,
+        key: Option<String>,
+    ) -> Result<(), Fail> {
+        let kind = self.provider_of(&k.piece)?;
+        let mocks = self.mocks()?;
+        let value = match (kind, k.which) {
+            (Kind::Declared, KeyWhich::Current) => mocks
+                .state(kind)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .dc
+                .key
+                .clone(),
+            (Kind::Declared, KeyWhich::Other) => {
+                let fresh = rand_token();
+                let old = {
+                    let mut st = mocks.state(kind).lock().unwrap_or_else(|e| e.into_inner());
+                    let old = std::mem::replace(&mut st.dc.key, fresh.clone());
+                    st.dc.stale.insert(old.clone());
+                    old
+                };
+                // The key before this one moves to a companion; `<alias>` is always the latest.
+                let companions = self
+                    .ctx
+                    .secrets
+                    .keys()
+                    .filter(|n| n.starts_with(&format!("{}#key-", k.piece)))
+                    .count();
+                self.ctx
+                    .secrets
+                    .insert(format!("{}#key-{}", k.piece, companions + 1), Secret(old));
+                self.ctx
+                    .secrets
+                    .insert(k.piece.clone(), Secret(fresh.clone()));
+                fresh
+            }
+            (Kind::Linear, KeyWhich::Current) => self.ctx.conn.linear_bearer.clone(),
+            _ => {
+                return Err(Fail::new(
+                    Class::Scenario,
+                    "`apiKey.piece` is a declared mock-provider piece, or a linear-server one with `which: current`",
+                    format!("piece `{}`, which {:?}", k.piece, k.which),
+                ))
+            }
+        };
+        let ep = format!("/v1/connectors/{}/connection", seg(&c.id));
+        let r = self
+            .api
+            .put_as(key.as_deref(), &ep, &json!({ "apiKey": value }))
+            .map_err(conn)?;
+        if r.ok() {
+            self.ctx.conn.rest.push((c.id.clone(), key.clone()));
+        }
+        self.judge_with(&format!("PUT {ep}"), c.refused, c.contains.as_deref(), &r)
     }
 
     fn connect_rest(
@@ -2956,6 +3294,166 @@ mod tests {
                     && l.fields.contains("host=acme")),
             "a discovery probe is on the record"
         );
+    }
+
+    #[test]
+    fn ticketdesk_accepts_the_access_token_only_under_the_bearer_scheme() {
+        let m = Mocks::start().unwrap();
+        {
+            let mut st = m.ticketdesk.lock().unwrap();
+            *st = State::default();
+            st.td.access.insert("acme".into(), "t-current".into());
+        }
+        let acme = m.ticketdesk_addr("acme");
+        let hit = |auth: &str| get(acme, "/api/v2/search.json", auth);
+        assert!(hit("Authorization: Bearer t-current\r\n").starts_with("HTTP/1.1 200"));
+        // The right token under another scheme, or bare, is not a login.
+        for header in [
+            "Authorization: t-current\r\n",
+            "Authorization: Token t-current\r\n",
+            "Authorization: Basic t-current\r\n",
+            "Authorization: bearer-t-current\r\n",
+        ] {
+            assert!(hit(header).starts_with("HTTP/1.1 401"), "{header}");
+        }
+        let st = m.ticketdesk.lock().unwrap();
+        let labels = |l: &str| {
+            st.log
+                .iter()
+                .filter(|x| x.fields.contains(&format!("bearer={l}")))
+                .count()
+        };
+        assert_eq!((labels("current"), labels("unknown")), (1, 4));
+    }
+
+    fn declared_ready(m: &Mocks, key: &str) {
+        let mut st = m.declared.lock().unwrap();
+        *st = State::default();
+        st.dc.file = Some(
+            ConnectorTestFile::parse(
+                r#"{"hosts":["api.notesdesk.example","eu.api.notesdesk.example"],"routes":[
+                  {"method":"GET","prefix":"/v1/notes","status":200,"body":{"notes":[{"title":"Printer notes"}]}},
+                  {"method":"POST","path":"/v1/notes","status":201,"body":{"id":2}}]}"#,
+            )
+            .unwrap(),
+        );
+        st.dc.key = key.into();
+    }
+
+    #[test]
+    fn declared_serves_the_test_file_per_host_behind_the_one_key() {
+        let hosts = vec![
+            "api.notesdesk.example".to_string(),
+            "eu.api.notesdesk.example".to_string(),
+            "api.notesdesk.example".to_string(),
+        ];
+        let m = Mocks::start_with(&hosts).unwrap();
+        assert_eq!(m.declared_addrs.len(), 2, "one listener per distinct host");
+        declared_ready(&m, "k-current");
+        let seam: Value = serde_json::from_str(&m.endpoints_json()).unwrap();
+        assert!(seam["rest:https://api.notesdesk.example"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("http://127.0.0.1:")));
+        assert!(seam["rest:https://eu.api.notesdesk.example"].is_string());
+        let (api, eu) = (m.declared_addrs[0].1, m.declared_addrs[1].1);
+        assert_ne!(api, eu);
+        let auth = "Authorization: Bearer k-current\r\n";
+        let ok = get(api, "/v1/notes?query=a", auth);
+        assert!(
+            ok.starts_with("HTTP/1.1 200") && ok.contains("Printer notes"),
+            "{ok}"
+        );
+        assert!(get(api, "/v1/notes/7", auth).starts_with("HTTP/1.1 200"));
+        // A route the file does not name is 404, behind the key; without it, 401 first.
+        assert!(get(api, "/v1/users", auth).starts_with("HTTP/1.1 404"));
+        assert!(get(api, "/v1/users", "").starts_with("HTTP/1.1 401"));
+        assert!(post(api, "/v1/notes", auth, "{}").starts_with("HTTP/1.1 201"));
+        assert!(get(eu, "/v1/notes", auth).starts_with("HTTP/1.1 200"));
+        // The swap's failures are told apart, and the key is never what is logged.
+        assert!(get(
+            api,
+            "/v1/notes",
+            "Authorization: Bearer vamsec_notesdesk_api\r\n"
+        )
+        .starts_with("HTTP/1.1 401"));
+        assert!(
+            get(api, "/v1/notes", "Authorization: vamsec_notesdesk_api\r\n")
+                .starts_with("HTTP/1.1 401")
+        );
+        assert!(
+            get(api, "/v1/notes", "Authorization: Bearer k-other\r\n").starts_with("HTTP/1.1 401")
+        );
+        assert!(get(api, "/v1/notes?api_key=zzz", auth).starts_with("HTTP/1.1 200"));
+        assert!(get(api, "/v1/notes?q=k-current", auth).starts_with("HTTP/1.1 200"));
+        {
+            // The provider replaces its key: the old one is `stale` from then on.
+            let mut st = m.declared.lock().unwrap();
+            let old = std::mem::replace(&mut st.dc.key, "k-new".into());
+            st.dc.stale.insert(old);
+        }
+        assert!(get(api, "/v1/notes", auth).starts_with("HTTP/1.1 401"));
+        assert!(
+            get(api, "/v1/notes", "Authorization: Bearer k-new\r\n").starts_with("HTTP/1.1 200")
+        );
+        let st = m.declared.lock().unwrap();
+        let has = |host: &str, field: &str| {
+            st.log
+                .iter()
+                .any(|l| l.fields.contains(&format!("host={host}")) && l.fields.contains(field))
+        };
+        assert!(has("api", "bearer=current") && has("eu", "bearer=current"));
+        for f in [
+            "bearer=placeholder",
+            "bearer=unknown",
+            "bearer=none",
+            "bearer=stale",
+            "query-key=present",
+            "query-key=none",
+            "method=POST",
+            "path=/v1/notes",
+        ] {
+            assert!(has("api", f), "{f}");
+        }
+        assert!(!has("eu", "bearer=placeholder"));
+        assert!(!st
+            .log
+            .iter()
+            .flat_map(|l| l.fields.iter())
+            .any(|f| f.contains("k-current") || f.contains("k-new") || f.contains("k-other")));
+    }
+
+    #[test]
+    fn declared_hosts_come_from_the_test_files_of_the_declared_pieces() {
+        let dir = std::env::temp_dir().join(format!("vam-e2e-declared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(
+            dir.join(TEST_FILE_PATH),
+            r#"{"hosts":["b.example","a.example"]}"#,
+        )
+        .unwrap();
+        let piece = |kind: &str, fixture: bool| -> crate::world::WorldPiece {
+            let mut w: crate::world::WorldPiece = serde_yaml::from_str(&format!(
+                "piece: p\nkind: mock-provider\nprovider: {kind}\n"
+            ))
+            .unwrap();
+            if fixture {
+                w.fixture_dir = Some(dir.clone());
+            }
+            w
+        };
+        let (a, b, c) = (
+            piece("declared", true),
+            piece("linear-server", false),
+            piece("declared", false),
+        );
+        assert_eq!(
+            declared_hosts([&a, &b].into_iter()).unwrap(),
+            ["a.example", "b.example"]
+        );
+        // A declared piece without its fixture is an error, not a silent skip.
+        assert!(declared_hosts([&c].into_iter()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

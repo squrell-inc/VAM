@@ -44,6 +44,7 @@ guards:
   - vam:crates/vam-orchestrator/src/manager.rs
   - vam:crates/vam-orchestrator/src/connectors.rs
   - vam:crates/vam-spec/src/skill_egress.rs
+  - vam:crates/vam-spec/src/connection_envelope.rs
 mock:
   - when: { step: read, toolName: ticket_search }
     reply: { text: Found the ticket. }

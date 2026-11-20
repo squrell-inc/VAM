@@ -668,7 +668,21 @@ pub fn run(o: RunOpts) -> i32 {
         })
     });
     let connector_mocks = if uses_mocks {
-        match crate::engine::connectors::Mocks::start() {
+        // One listener per host a `declared` piece's test file names: the seam maps an https
+        // origin to one listener and is fixed when vamd starts.
+        let declared_hosts = match crate::engine::connectors::declared_hosts(
+            run_list
+                .iter()
+                .flat_map(|s| s.given.iter())
+                .filter_map(|g| cat.piece(g.piece())),
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("vam-e2e run: declared mock providers: {e}");
+                return 2;
+            }
+        };
+        match crate::engine::connectors::Mocks::start_with(&declared_hosts) {
             Ok(m) => {
                 extra_env.extend(crate::engine::connectors::node_env(&m));
                 Some(m)

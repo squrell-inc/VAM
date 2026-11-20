@@ -1,0 +1,33 @@
+{
+  "urn": "urn:vam:connector:kit.community.example/community/notesdesk",
+  "version": "1.0.0",
+  "displayName": "Notesdesk",
+  "publisher": "Kit Tools Ltd",
+  "description": "Notes in the member's own Notesdesk account, through its REST API and the API key the member enters.",
+  "icon": "notesdesk",
+  "provider": {
+    "kind": "api_key",
+    "fields": [
+      {
+        "name": "key",
+        "label": "Notesdesk API key"
+      }
+    ]
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "none"
+  },
+  "bindings": [
+    {
+      "name": "api",
+      "placeholder": "vamsec_notesdesk_api",
+      "value": "api_key",
+      "inject": "bearer",
+      "hosts": [
+        "api.notesdesk.example"
+      ]
+    }
+  ]
+}

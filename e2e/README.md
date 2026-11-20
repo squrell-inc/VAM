@@ -807,7 +807,7 @@ Connector scenarios use runner-hosted loopback listeners (Microsoft login, Micro
 filebox service and one per company of the ticketdesk service; std-only HTTP, started once per run when a scenario `given`s a `mock-provider` piece). Tag `connectors`. Token values are made by the runner, kept in memory,
 added to the scrub list and never printed or logged; a listing that holds one fails the `connectors` expect.
 
-- World piece `kind: mock-provider`, `provider: microsoft-login | microsoft-graph | linear-server | filebox | ticketdesk`. `microsoft-login` serves
+- World piece `kind: mock-provider`, `provider: microsoft-login | microsoft-graph | linear-server | filebox | ticketdesk | declared`. `microsoft-login` serves
   `POST /{tenant}/oauth2/v2.0/token` for `refresh_token` grants it was told about, logs form field **names** (and the
   values of `client_id`, `grant_type`, `scope` only), and answers `invalid_grant` once revoked. `linear-server` is a
   streamable-HTTP MCP server at `/mcp` (`list_issues`, `get_issue`, `save_issue`, `save_comment` and the unvetted
@@ -930,6 +930,65 @@ loopback `Host`, so the listener is what names the company (`host=<company>` in 
   assistant `ticketdesk-assistant`), and two listings that are refused: `company-address-outside-its-suffix` (a binding on
   `{subdomain}.elsewhere.example`) and `rest-connector-with-a-foreign-placeholder` (placeholder `vamsec_m365_graph`).
 
+### API keys and the connector kit (`mock-notesdesk-server`, `provider: declared`)
+
+For a connector whose sign-in is an API key the member types (`provider.kind: api_key`, one field, `inject: bearer`),
+and for the developer kit (`vam connector init`, `validate`, `test`) that builds one from nothing.
+
+**`provider: declared`.** `mock-provider` with `provider: declared` is a mock built from a publisher's test file: the
+piece's `fixture` is a listing directory and the mock serves its `tests/connector-test.json` (`vam_spec::connector_kit`:
+`hosts`, `routes [{ method, path | prefix, status, body }]`, `cases [{ tool, input, expect: ok | refused, contains }]`;
+types, checks and the route matcher only, no I/O). `vam connector test` reads the same file, so a publisher's CI and VAM's
+own scenarios judge one mock. The runner binds one loopback listener per host the test files of the run name before
+`vamd` starts and maps each as `rest:https://<host>` (`PASS_REST_SEAM`), so the egress gate dials the listener for that
+host; the listener names the host in the log. One declared piece per scenario.
+
+- Every route needs `Authorization: Bearer <key>` with the one key the runner made for the scenario (else 401); a request
+  no route matches is 404 (behind the key). It logs `host=<first DNS label>` (`api`, `eu`), `method=<verb>`,
+  `path=<path>`, `bearer=current|stale|placeholder|unknown|none` (a real token without the `Bearer` scheme is `unknown`;
+  a `vamsec_` value, with or without it, is `placeholder`) and `query-key=present|none` (the key, an old key, a
+  placeholder or a parameter named like a key in the query string), never a value. `mock-requests` judges them as for the
+  other providers (`with: "host=eu"`, `has`, `lacks`, `count`).
+- The key is in the scrub list under the piece's alias; every key that replaced it is `<alias>#key-<n>`.
+  `expect: { secret-absent: { secret: <alias> } }` and `api-call.absent: <alias>` judge them all.
+- `connector-connect: { id, apiKey: { piece, which }, as, refused, contains }`: the member types a key,
+  `PUT /v1/connectors/{id}/connection` with `{ apiKey }`, for a REST and an MCP connector alike (no `piece`, `url`, `via`,
+  `tenant`, `upn` or `expiresIn` next to it). `piece` is a declared piece or `mock-linear-server` (its bearer is the key of an MCP
+  connector; `which: current` only). `which: current` types the key the provider accepts now; `which: other` first makes
+  the provider replace its key (the old one is `bearer=stale` from then on) and types the new one. The connection is removed
+  at cleanup with `DELETE /v1/connectors/{id}/connection`. A key is entered by the member only; no scenario types one as an admin.
+- `api-call.absent` takes the alias of any piece that holds a secret under its alias (filebox, ticketdesk, declared,
+  linear-server): no form of it is in the answer body.
+- Fixture `marketplace-community-connectors` also lists `notesdesk-connector` (connector `notesdesk`: `provider: { kind:
+  api_key, fields: [{ name: key, label: "Notesdesk API key" }] }`, binding `api` / `vamsec_notesdesk_api`, `value:
+  api_key`, `inject: bearer`, host `api.notesdesk.example`; skill `notesdesk-notes` in python3 with `note_search` (GET, prefix
+  `/v1/notes`) and `note_create` (POST, exact `/v1/notes`, asks first), which take `host` and `path` arguments so a test can aim
+  them elsewhere; assistant `notesdesk-assistant`; `tests/connector-test.json` with the hosts `api.notesdesk.example` and
+  `eu.api.notesdesk.example`), `keyed-bugwatch-connector` (connector `keyed-bugwatch`: `api_key`, MCP
+  `https://mcp.bugwatch.example/mcp`, vetted `list_issues` and `get_issue`; served by `mock-linear-server`) and
+  `api-key-with-two-fields` (two fields, refused). The overlay `marketplace-community-connectors-notesdesk-update/` is the tag
+  `notesdesk-connector-v1.1.0`: the connector's binding and the skill's shapes also name `eu.api.notesdesk.example`. Until the
+  node supports the `api_key` kind these listings show an `error` in their summary.
+  A header-named key (`inject: header` with a `headerName`) is not exercised yet: no fixture uses it.
+
+**The kit.** Scenarios that run the CLI use `cli` steps on a copy of a tree under `world/fixtures/connector-kit/`:
+`empty` (one `.keep`; `vam connector init` treats a directory holding only `.keep` as empty and writes the kit into it),
+`broken-file` (a marketplace root whose listing passes each file's checks and fails the listing's: two connectors whose
+placeholders are the same string, and a skill whose egress names binding `files` and host `api.elsewhere.example`) and
+`broken-tool` (a valid listing whose `note_leak` puts the placeholder in the query string and whose `note_wander` reads a
+path outside its shape). The world pieces `marketplace-connector-kit` (fixture `empty`, no tags; the scenario tags the tree
+`init` wrote with `git-tag: { root: { same: true } }`) and `marketplace-kit-broken` (fixture `broken-file`, tag
+`kit-broken-v1.0.0`) put a tree on a node's side, so the offline report and the install can be compared.
+
+- `vam connector test` prints `pass <tool>` or `fail <tool>: <the gate's words>` per case and, when none failed, `the key
+  never reached a tool`. It makes its own key as `vamkey_` plus 32 hex digits, so a scenario checks
+  `absent: ["vamkey_"]` (the output and every file in the tree). It reaches nothing off the machine.
+- The words the scenarios hold the CLI and the node to: `cannot tell apart` (placeholders), ``binding `files` `` and the host
+  (a skill's egress its connector does not declare), `only valid as the Authorization value` (a placeholder in the
+  query string), `declared shape` (a path or host outside a tool's shape), `one field` (an API-key sign-in with several
+  values), `API key` (a client sent to an API-key connector; a generic MCP connect for an API-key connector id), `ask your admin`
+  (a key entered before the connector is enabled).
+
 ### Skills that call Microsoft Graph as the member
 
 - `mock-provider` with `provider: microsoft-graph` serves `GET /v1.0/me/messages` (two fixed messages) and
@@ -999,6 +1058,8 @@ same commit SHAs in every scenario: a node that remembers a tag's commit must no
   `with-a-connector`, `claims-the-squrell-name` (an artifact under `hub.squrell.cloud`) and `claims-the-org-name`
   (an artifact under `local.vam.dev`, the e2e registry domain). Overlay `marketplace-community-broken/` (an index
   that is not JSON).
+- `marketplace-connector-kit` (domain `kit.community.example`, starts empty) and `marketplace-kit-broken` (domain
+  `kitbroken.community.example`, one listing `kit-broken`): see "API keys and the connector kit".
 - `marketplace-community-connectors`: added by an admin, domain `connectors.community.example`. Six listings that ship a
   connector file (`connector.json`, the `spec/connectors/*.json` format): `bugwatch-connector` (installs: remote MCP at
   `https://mcp.bugwatch.example/mcp` with discovery) and three that must be refused with a reason
@@ -1019,9 +1080,11 @@ release gate checks both). A process-guest vamd does not read marketplaces on a 
 `contains` is text the refusal's body must hold. `as` is an `org` alias (the bootstrap key when omitted).
 `marketplace` is the alias of a `git-marketplace` piece in `given`.
 
-- `git-tag: { piece, tag, move, overlay }`: adds a tag. With `overlay` (a fixture directory) its files are copied
+- `git-tag: { piece, tag, move, overlay, root }`: adds a tag. With `overlay` (a fixture directory) its files are copied
   over the work tree and committed on `main` first, so the tag names a new commit and the index at the branch head
-  changes. `move: true` lets an existing tag move to the new commit (or to HEAD without an overlay).
+  changes. `root: { same: true }` does the same with the tree the previous `cli` step left (a connector kit the CLI
+  wrote is what gets tagged); it is one source, so not with `overlay`. `move: true` lets an existing tag move to the
+  new commit (or to HEAD without an overlay).
 - `marketplace-add: { piece, as, refused, contains }`: `POST /v1/marketplaces` with `{ url, publisherDomain }`.
 - `marketplace-refresh: { marketplace, as, refused, contains }`: `POST /v1/marketplaces/{id}/refresh`.
 - `marketplace-install: { marketplace, listing, as, refused, contains }`:

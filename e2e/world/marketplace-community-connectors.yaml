@@ -7,8 +7,13 @@ kind: git-marketplace
 # Three more for a company address: `ticketdesk-connector` (a REST connector on `{subdomain}.ticketdesk.example`, a skill that
 # reads and creates tickets, an assistant) installs; `company-address-outside-its-suffix` and
 # `rest-connector-with-a-foreign-placeholder` are refused.
+# Three more for an API key: `notesdesk-connector` (a REST connector with `provider.kind: api_key`, one field, bearer inject on
+# `api.notesdesk.example`, a skill with `note_search` and `note_create`, an assistant and the test file
+# `tests/connector-test.json` that `mock-notesdesk-server` serves) and `keyed-bugwatch-connector` (an MCP connector with an API key,
+# vetted `list_issues` and `get_issue`) are meant to install; `api-key-with-two-fields` is refused.
+# Overlay `marketplace-community-connectors-notesdesk-update/` is the tag `notesdesk-connector-v1.1.0`: the connector and the skill also name `eu.api.notesdesk.example`.
 # Overlay `marketplace-community-connectors-update/` is a newer tag of the good listing whose connector asks for one more scope and offers one more tool.
 fixture: marketplace-community-connectors
 url: https://connectors.community.example/vam-marketplace
 publisherDomain: connectors.community.example
-tags: [bugwatch-connector-v1.0.0, reserved-connector-id-v1.0.0, unknown-profile-connector-v1.0.0, connector-with-a-secret-v1.0.0, filebox-connector-v1.0.0, org-secret-without-org-client-v1.0.0, ticketdesk-connector-v1.0.0, company-address-outside-its-suffix-v1.0.0, rest-connector-with-a-foreign-placeholder-v1.0.0]
+tags: [bugwatch-connector-v1.0.0, reserved-connector-id-v1.0.0, unknown-profile-connector-v1.0.0, connector-with-a-secret-v1.0.0, filebox-connector-v1.0.0, org-secret-without-org-client-v1.0.0, ticketdesk-connector-v1.0.0, company-address-outside-its-suffix-v1.0.0, rest-connector-with-a-foreign-placeholder-v1.0.0, notesdesk-connector-v1.0.0, keyed-bugwatch-connector-v1.0.0, api-key-with-two-fields-v1.0.0]

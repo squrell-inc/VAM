@@ -1,0 +1,17 @@
+{
+  "hosts": [
+    "api.desk.example",
+    "api.deskapi.example"
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "prefix": "/v1/files",
+      "status": 200,
+      "body": {
+        "files": []
+      }
+    }
+  ],
+  "cases": []
+}

@@ -25,7 +25,7 @@ pub enum PieceKind {
     /// scenario starts (`fixture` names the directory under `e2e/world/fixtures`).
     #[serde(rename = "workspace-seed")]
     WorkspaceSeed,
-    /// A runner-hosted loopback provider (`provider`: `microsoft-login`, `microsoft-graph`, `linear-server`, `filebox` or `ticketdesk`).
+    /// A runner-hosted loopback provider (`provider`: `microsoft-login`, `microsoft-graph`, `linear-server`, `filebox`, `ticketdesk` or `declared`).
     /// The runner makes its tokens in memory and never prints them.
     #[serde(rename = "mock-provider")]
     MockProvider,
@@ -94,7 +94,9 @@ pub struct WorldPiece {
     /// (vamd reports the path only once the broker is registered).
     #[serde(default)]
     pub restart_with_gateway: bool,
-    /// `mock-provider` only: `microsoft-login`, `microsoft-graph`, `linear-server`, `filebox` or `ticketdesk`.
+    /// `mock-provider` only: `microsoft-login`, `microsoft-graph`, `linear-server`, `filebox`,
+    /// `ticketdesk` or `declared` (a mock built from a publisher's `tests/connector-test.json` in
+    /// the piece's `fixture`, a listing directory).
     pub provider: Option<String>,
     /// `skill` only: extra files packed into the package, `{ "path in the package": "path under
     /// e2e/world/fixtures" }` (a script a `localExec` tool runs).
@@ -123,7 +125,8 @@ pub struct WorldPiece {
     pub prerelease: bool,
     /// `release-server` only: `sum` writes one wrong hash line into `SHA256SUMS`.
     pub tamper: Option<String>,
-    /// Set by the loader: the absolute fixture directory of a `workspace-seed` or `git-marketplace` piece.
+    /// Set by the loader: the fixture directory of a `workspace-seed`, `git-marketplace` or
+    /// `declared` mock-provider piece.
     #[serde(skip)]
     pub fixture_dir: Option<std::path::PathBuf>,
 }

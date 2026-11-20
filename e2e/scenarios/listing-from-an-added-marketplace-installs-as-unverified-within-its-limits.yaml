@@ -41,4 +41,5 @@ guards:
   - vam:crates/vam-spec/src/connector_listing.rs
   - vam:crates/vam-orchestrator/src/skill_package_admit.rs
   - vam:crates/vam-spec/src/skill_egress.rs
+  - vam:crates/vam-spec/src/marketplace.rs
 status: active
