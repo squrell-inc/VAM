@@ -1,0 +1,39 @@
+{
+  "urn": "urn:vam:connector:connectors.community.example/community/zendesk",
+  "version": "1.0.0",
+  "displayName": "Zendesk Support",
+  "publisher": "Community Tools Ltd",
+  "description": "Tickets in the company's own Zendesk, through its REST API and a client the org's admin registered.",
+  "icon": "ticket",
+  "provider": {
+    "kind": "oauth2",
+    "profile": "oauth",
+    "client": "org",
+    "clientSecret": "none",
+    "endpoints": {
+      "authorize": "https://{subdomain}.zendesk.com/oauth/authorizations/new",
+      "token": "https://{subdomain}.zendesk.com/oauth/tokens"
+    },
+    "scopes": ["read", "write"],
+    "orgConsent": "none"
+  },
+  "tenant": {
+    "name": "subdomain",
+    "suffix": "zendesk.com",
+    "label": "Zendesk address"
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "none"
+  },
+  "bindings": [
+    {
+      "name": "api",
+      "placeholder": "vamsec_zendesk_api",
+      "value": "access_token",
+      "inject": "bearer",
+      "hosts": ["{subdomain}.zendesk.com"]
+    }
+  ]
+}

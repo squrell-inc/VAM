@@ -1,0 +1,44 @@
+{
+  "urn": "urn:vam:connector:connectors.community.example/community/ticketdesk",
+  "version": "1.0.0",
+  "displayName": "Ticketdesk",
+  "publisher": "Community Tools Ltd",
+  "description": "Tickets in the company's own Ticketdesk instance, through its REST API and a client the org's admin registered.",
+  "icon": "ticketdesk",
+  "provider": {
+    "kind": "oauth2",
+    "profile": "oauth",
+    "client": "org",
+    "clientSecret": "none",
+    "endpoints": {
+      "authorize": "https://{subdomain}.ticketdesk.example/oauth/authorizations/new",
+      "token": "https://{subdomain}.ticketdesk.example/oauth/tokens"
+    },
+    "scopes": [
+      "read",
+      "write"
+    ],
+    "orgConsent": "none"
+  },
+  "tenant": {
+    "name": "subdomain",
+    "suffix": "ticketdesk.example",
+    "label": "Ticketdesk address"
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "none"
+  },
+  "bindings": [
+    {
+      "name": "api",
+      "placeholder": "vamsec_ticketdesk_api",
+      "value": "access_token",
+      "inject": "bearer",
+      "hosts": [
+        "{subdomain}.ticketdesk.example"
+      ]
+    }
+  ]
+}

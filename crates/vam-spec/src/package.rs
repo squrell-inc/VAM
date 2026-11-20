@@ -559,11 +559,49 @@ pub struct ConnectorSummary {
     pub client_secret: String,
     pub org_consent: String,
     pub scopes: Vec<String>,
+    /// Absent for a REST connector (no MCP server).
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub mcp_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub mcp_host: String,
-    /// The hosts the connector reaches with a member's token: the MCP server's.
+    /// The hosts the connector reaches with a member's token: the MCP server's, or the binding
+    /// hosts of a REST connector (a company address is shown as `{subdomain}.<suffix>`).
     pub hosts: Vec<String>,
     pub tools: Vec<McpToolSummary>,
+    /// REST bindings: the name and hosts each attaches the member's token to.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<BindingSummary>,
+    /// Fixed sign-in endpoints (profile `oauth`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoints: Option<EndpointsSummary>,
+    /// The company address the admin will enter at Enable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<TenantSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindingSummary {
+    pub name: String,
+    pub hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointsSummary {
+    pub authorize: String,
+    pub token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoke: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantSummary {
+    pub label: String,
+    pub suffix: String,
+    /// "company address: <label> (…<suffix>)".
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -720,6 +758,7 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
                     OAuthProfile::Discover => "discover",
                     OAuthProfile::Google => "google",
                     OAuthProfile::Slack => "slack",
+                    OAuthProfile::Oauth => "oauth",
                 },
                 p.client_id.clone(),
                 p.client,
@@ -748,7 +787,7 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
     let (mcp_url, mcp_host, tools) = match &c.mcp {
         Some(m) => (
             m.url.clone(),
-            crate::connector_listing::check_mcp_server_url(&m.url).unwrap_or_default(),
+            crate::connector_listing::mcp_summary_host(&m.url),
             m.tools
                 .iter()
                 .map(|t| McpToolSummary {
@@ -772,11 +811,38 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
         ),
         None => (String::new(), String::new(), Vec::new()),
     };
-    let hosts = if mcp_host.is_empty() {
+    let mut hosts = if mcp_host.is_empty() {
         Vec::new()
     } else {
         vec![mcp_host.clone()]
     };
+    let bindings: Vec<BindingSummary> = c
+        .bindings
+        .iter()
+        .flatten()
+        .map(|b| BindingSummary {
+            name: b.name.clone(),
+            hosts: b.hosts.clone(),
+        })
+        .collect();
+    for h in bindings.iter().flat_map(|b| &b.hosts) {
+        if !hosts.contains(h) {
+            hosts.push(h.clone());
+        }
+    }
+    let endpoints = match &c.provider {
+        crate::connector::Provider::Oauth2(p) => p.endpoints.as_ref().map(|e| EndpointsSummary {
+            authorize: e.authorize.clone(),
+            token: e.token.clone(),
+            revoke: e.revoke.clone(),
+        }),
+        _ => None,
+    };
+    let tenant = c.tenant.as_ref().map(|t| TenantSummary {
+        label: t.label.clone(),
+        suffix: t.suffix.clone(),
+        text: format!("company address: {} (…{})", t.label, t.suffix),
+    });
     CapabilitySummary {
         kind: ArtifactKind::Connector.as_str().into(),
         urn: c.urn.clone(),
@@ -796,6 +862,9 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
             mcp_host,
             hosts,
             tools,
+            bindings,
+            endpoints,
+            tenant,
         }),
         ..Default::default()
     }

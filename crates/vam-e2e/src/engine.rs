@@ -3523,6 +3523,50 @@ impl Engine {
         Ok(())
     }
 
+    /// [`Self::expect_secret_absent`] for a scenario with no run: the secret (and its companions)
+    /// must be in none of the node's connector, MCP connection and secret listings, as read by the
+    /// bootstrap key and by every identity the scenario created.
+    fn expect_secret_absent_without_run(
+        &mut self,
+        x: &crate::scenario::SecretAbsent,
+        what: &str,
+    ) -> Result<(), Fail> {
+        self.sync_filebox();
+        let Some(value) = self.ctx.secrets.get(&x.secret).map(|v| v.0.clone()) else {
+            return Err(Fail::new(
+                Class::Scenario,
+                what.to_string(),
+                format!("`{}` is not a secret piece in `given`", x.secret),
+            ));
+        };
+        let prefix = format!("{}#", x.secret);
+        let values: Vec<String> = std::iter::once(value)
+            .chain(
+                self.ctx
+                    .secrets
+                    .iter()
+                    .filter(|(k, _)| k.starts_with(&prefix))
+                    .map(|(_, v)| v.0.clone()),
+            )
+            .collect();
+        // The listings filter rows by the caller, so a member's own connection or secret shows only
+        // to that member: every identity the scenario created reads them, besides the bootstrap key.
+        let readers: Vec<Option<String>> = std::iter::once(None)
+            .chain(self.ctx.identities.values().map(|k| Some(k.0.clone())))
+            .collect();
+        let mut answered = 0;
+        for key in &readers {
+            for path in ["/v1/connectors", "/v1/mcp/connections", "/v1/secrets"] {
+                let r = self.api.get_as(key.as_deref(), path).map_err(conn)?;
+                if screen_listing(r.status, key.is_none(), path, &r.body, &values, what)? {
+                    answered += 1;
+                }
+            }
+        }
+        // A search that read nothing proves nothing.
+        no_listing_answered(answered, what)
+    }
+
     /// `expect: { secret-absent: { secret } }`: no form of the secret's value is in the latest
     /// run's thread, run events, receipt (with its model appendix) or workspace files. A hit
     /// names the form and the place; the value is never put in the failure.
@@ -3531,6 +3575,11 @@ impl Engine {
             "no form of secret `{}` in what the run left behind",
             x.secret
         );
+        // A scenario that never started a run (a connector sign-in with no chat) has no thread,
+        // receipt or workspace to search: the node's own listings are what it can leak into.
+        if self.ctx.runs.is_empty() {
+            return self.expect_secret_absent_without_run(x, &what);
+        }
         // A run that is still refreshing a token when the values are collected would leave its fresh
         // token out of the search: wait until it is over (or parked), then collect.
         let i = self.last_run()?;
@@ -3661,6 +3710,78 @@ impl Engine {
     }
 }
 
+/// Whether a no-run `secret-absent` inspects one listing answer. A 2xx is inspected. A
+/// scenario identity's 401 or 403 is skipped (a member may lack `secrets:write`, and a listing
+/// it may not read shows it nothing). Any other answer, and any refusal to the bootstrap key,
+/// fails with the status: a listing that should have been read and was not proves nothing.
+fn listing_must_be_read(
+    status: u16,
+    bootstrap: bool,
+    path: &str,
+    what: &str,
+) -> Result<bool, Fail> {
+    if (200..300).contains(&status) {
+        return Ok(true);
+    }
+    if !bootstrap && (status == 401 || status == 403) {
+        return Ok(false);
+    }
+    let who = if bootstrap {
+        "the bootstrap key"
+    } else {
+        "a scenario identity"
+    };
+    Err(Fail::new(
+        Class::Product,
+        what.to_string(),
+        format!("GET {path} as {who} answered {status}, so it could not be searched"),
+    ))
+}
+
+/// One listing answer of a no-run `secret-absent`: fails when the listing could not be read (see
+/// [`listing_must_be_read`]) or when any form of a secret value is in its body. An expected denial
+/// (a member's 401/403) is searched too, since an error body can carry the value, but is not a
+/// readable listing: `Ok(true)` only for an answer that counts as one.
+fn screen_listing(
+    status: u16,
+    bootstrap: bool,
+    path: &str,
+    body: &str,
+    values: &[String],
+    what: &str,
+) -> Result<bool, Fail> {
+    let readable = listing_must_be_read(status, bootstrap, path, what)?;
+    let mut strings = Vec::new();
+    match serde_json::from_str::<Value>(body) {
+        Ok(v) => crate::forms::strings_of(&v, &mut strings),
+        // A body that is not JSON (a plain-text error) is searched as it is.
+        Err(_) => strings.push(body.to_string()),
+    }
+    let hit = strings
+        .iter()
+        .find_map(|t| values.iter().find_map(|v| crate::forms::find_form(v, t)));
+    if let Some(form) = hit {
+        return Err(Fail::new(
+            Class::Product,
+            what.to_string(),
+            format!("the {form} form is in the answer ({status}) of GET {path}"),
+        ));
+    }
+    Ok(readable)
+}
+
+/// The failure of a no-run `secret-absent` that read none of the node's listings.
+fn no_listing_answered(answered: usize, what: &str) -> Result<(), Fail> {
+    if answered == 0 {
+        return Err(Fail::new(
+            Class::Scenario,
+            what.to_string(),
+            "none of /v1/connectors, /v1/mcp/connections, /v1/secrets answered".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Calls `get` until it answers something other than 409, or the budget or the
 /// scenario deadline is spent; then returns the last answer.
 fn poll_while_pending<E>(
@@ -3692,6 +3813,49 @@ fn first_str(values: &[&Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_search_that_read_no_listing_fails_as_a_scenario_problem() {
+        let e = no_listing_answered(0, "no form of secret `x`").unwrap_err();
+        assert_eq!(e.class, Class::Scenario);
+        assert!(no_listing_answered(1, "w").is_ok());
+    }
+
+    #[test]
+    fn a_failed_required_listing_fails_the_secret_search_with_its_status() {
+        // A member's 500 on the connector listing is not a skip, even when other listings read clean.
+        let e = listing_must_be_read(500, false, "/v1/connectors", "w").unwrap_err();
+        assert_eq!(e.class, Class::Product);
+        assert!(e.observed.contains("500"), "{}", e.observed);
+        assert!(e.observed.contains("/v1/connectors"), "{}", e.observed);
+        // The bootstrap key is never expected to be refused.
+        assert!(listing_must_be_read(403, true, "/v1/secrets", "w").is_err());
+        // A member without the scope for a listing is an expected denial: skipped.
+        assert!(!listing_must_be_read(403, false, "/v1/secrets", "w").unwrap());
+        assert!(listing_must_be_read(200, false, "/v1/connectors", "w").unwrap());
+        assert!(listing_must_be_read(200, true, "/v1/secrets", "w").unwrap());
+    }
+
+    #[test]
+    fn a_secret_in_an_expected_denial_body_fails_the_secret_search() {
+        let values = vec!["sk-live-0123456789abcdef".to_string()];
+        let leak = r#"{"error":"bad token sk-live-0123456789abcdef"}"#;
+        // A member's 403 whose error body carries the value is a leak, not a skip.
+        let e = screen_listing(403, false, "/v1/secrets", leak, &values, "w").unwrap_err();
+        assert_eq!(e.class, Class::Product);
+        assert!(e.observed.contains("/v1/secrets"), "{}", e.observed);
+        assert!(!e.observed.contains("sk-live"), "{}", e.observed);
+        // So is a plain-text denial body.
+        let plain = "denied: sk-live-0123456789abcdef";
+        assert!(screen_listing(401, false, "/v1/secrets", plain, &values, "w").is_err());
+        // A clean denial is searched but not counted as a readable listing.
+        let clean = r#"{"error":"forbidden"}"#;
+        assert!(!screen_listing(403, false, "/v1/secrets", clean, &values, "w").unwrap());
+        assert!(screen_listing(200, false, "/v1/secrets", "[]", &values, "w").unwrap());
+        // A required read that fails still fails, whatever its body.
+        assert!(screen_listing(500, false, "/v1/connectors", clean, &values, "w").is_err());
+        assert!(screen_listing(403, true, "/v1/connectors", clean, &values, "w").is_err());
+    }
 
     struct NoVamd;
     impl crate::vamd::Vamd for NoVamd {

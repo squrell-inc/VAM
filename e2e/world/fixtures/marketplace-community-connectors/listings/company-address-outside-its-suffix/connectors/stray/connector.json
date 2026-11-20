@@ -1,0 +1,44 @@
+{
+  "urn": "urn:vam:connector:connectors.community.example/community/stray",
+  "version": "1.0.0",
+  "displayName": "Stray",
+  "publisher": "Community Tools Ltd",
+  "description": "A connector whose binding host is outside its company-address suffix.",
+  "icon": "stray",
+  "provider": {
+    "kind": "oauth2",
+    "profile": "oauth",
+    "client": "org",
+    "clientSecret": "none",
+    "endpoints": {
+      "authorize": "https://{subdomain}.ticketdesk.example/oauth/authorizations/new",
+      "token": "https://{subdomain}.ticketdesk.example/oauth/tokens"
+    },
+    "scopes": [
+      "read",
+      "write"
+    ],
+    "orgConsent": "none"
+  },
+  "tenant": {
+    "name": "subdomain",
+    "suffix": "ticketdesk.example",
+    "label": "Ticketdesk address"
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "none"
+  },
+  "bindings": [
+    {
+      "name": "api",
+      "placeholder": "vamsec_stray_api",
+      "value": "access_token",
+      "inject": "bearer",
+      "hosts": [
+        "{subdomain}.elsewhere.example"
+      ]
+    }
+  ]
+}

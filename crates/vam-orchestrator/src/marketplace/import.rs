@@ -15,14 +15,15 @@
 //!    shared package check (`vam_spec::package::check_dir`). Its URN must be under the
 //!    marketplace's own `publisherDomain` and, for an added marketplace, that domain must not be
 //!    one the node reserves (M3). A connector file is held to the limits of a marketplace
-//!    connector (`vam_spec::connector_listing`): remote MCP with discovery, no secret, no
-//!    Squrell id.
+//!    connector (`vam_spec::connector_listing`): remote MCP with discovery, or REST bindings with
+//!    profile `oauth` and the org's client; no Squrell secret, no Squrell id. A skill's company
+//!    address host must be the suffix of the connector the listing ships.
 //! 4. Refs inside the listing are frozen to the listing's own artifacts (version and digest); a
 //!    ref to anything the listing does not ship is refused. An agent must carry `permissions`.
 //! 5. One transaction writes the released rows (connectors, skills, then playbooks, then agents)
 //!    with owner `marketplace:<id>`, tier `marketplace`, their origin and the install record. A
 //!    failing artifact leaves no row. A connector that is new, or whose capability summary differs
-//!    from the installed one (publisher, client id, scopes, MCP server or tools), is set back to
+//!    from the installed one (publisher, client id, scopes, MCP server or tools, bindings, endpoints, company address), is set back to
 //!    **not enabled** in the same transaction and its members' connections are marked
 //!    `needs_reauth`: the admin enables it again, the members connect again.
 //!
@@ -35,7 +36,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
-use vam_spec::connector_listing::{connector_id_of_urn, is_reserved_connector_id};
+use vam_spec::connector_listing::{
+    connector_id_of_urn, is_reserved_connector_id, placeholders_overlap,
+};
 use vam_spec::marketplace::{urn_domain, NodeRequirement};
 use vam_spec::package::{check_dir, ArtifactKind, CheckedPackage, CheckedSpec};
 use vam_spec::v1::{AgentSpec, Digest, PlaybookSpec, ResourceRef, SkillManifest, Version};
@@ -315,6 +318,8 @@ fn prepare(
             skill,
         });
     }
+    check_templated_skill_hosts(&out, &listing.id)?;
+    check_listing_placeholders(&out, &listing.id)?;
     // One URN is one artifact.
     let mut seen = std::collections::BTreeSet::new();
     for p in &out {
@@ -325,7 +330,63 @@ fn prepare(
             )));
         }
     }
+    check_listing_connector_ids(&out, &listing.id)?;
     Ok(out)
+}
+
+/// No two connectors of one listing have the same id (the last segment of the URN): an id names one
+/// connector on the node. Each is compared with the installed connectors at write time
+/// (`admit_connector_id`), but neither of two new ones from one listing is installed yet.
+fn check_listing_connector_ids(
+    prepared: &[Prepared],
+    listing: &str,
+) -> Result<(), OrchestratorError> {
+    let mut ids: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for p in prepared {
+        if !matches!(p.checked.spec, CheckedSpec::Connector(_)) {
+            continue;
+        }
+        let urn = p.checked.urn.as_str();
+        if let Some(first) = ids.insert(connector_id_of_urn(urn), urn) {
+            return Err(invalid(format!(
+                "listing `{listing}`: the connectors {first} and {urn} have the same id `{}`: an id names one connector",
+                connector_id_of_urn(urn)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// No two connectors of one listing declare binding placeholders the egress gate cannot tell apart
+/// (the same one, or one inside the other: [`placeholders_overlap`]). Each is compared with the
+/// installed connectors at write time (`admit_connector_id`), but the whole listing is planned
+/// before any of it is inserted, so two of its own connectors would pass that check together.
+fn check_listing_placeholders(
+    prepared: &[Prepared],
+    listing: &str,
+) -> Result<(), OrchestratorError> {
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for p in prepared {
+        let CheckedSpec::Connector(def) = &p.checked.spec else {
+            continue;
+        };
+        for b in def.bindings.iter().flatten() {
+            // A connector's own bindings are compared by the file check.
+            if let Some((ph, first)) = seen
+                .iter()
+                .find(|(ph, urn)| *urn != def.urn && placeholders_overlap(ph, &b.placeholder))
+            {
+                return Err(invalid(format!(
+                    "listing `{listing}`: the connectors {first} and {} declare the binding placeholders `{ph}` and `{}`, which the gate cannot tell apart: a placeholder must name one binding",
+                    def.urn, b.placeholder
+                )));
+            }
+        }
+        for b in def.bindings.iter().flatten() {
+            seen.push((b.placeholder.as_str(), def.urn.as_str()));
+        }
+    }
+    Ok(())
 }
 
 /// A deterministic `.tar.gz` of the regular files under `dir` (sorted, no timestamps, no owners),
@@ -686,6 +747,51 @@ struct PlanCtx<'a> {
     playbooks: Pins,
 }
 
+/// A skill that names a company address host (`{subdomain}.<suffix>`) must require a connector this
+/// listing ships whose own company address has that suffix: a listing cannot aim a skill at a host
+/// its connector does not own (T1, T2).
+fn check_templated_skill_hosts(
+    prepared: &[Prepared],
+    listing_id: &str,
+) -> Result<(), OrchestratorError> {
+    for p in prepared.iter().filter(|p| p.kind == ArtifactKind::Skill) {
+        let hosts: Vec<&str> = p
+            .checked
+            .summary
+            .tools
+            .iter()
+            .flat_map(|t| t.egress.iter().map(|e| e.host.as_str()))
+            .filter(|h| h.contains('{'))
+            .collect();
+        if hosts.is_empty() {
+            continue;
+        }
+        let required = &p.checked.summary.requires_connector;
+        let suffix = prepared.iter().find_map(|c| match &c.checked.spec {
+            CheckedSpec::Connector(def) if &c.checked.urn == required => {
+                def.tenant.as_ref().map(|t| t.suffix.as_str())
+            }
+            _ => None,
+        });
+        for h in hosts {
+            let ok = suffix.is_some_and(|sfx| {
+                vam_spec::connector::templated_suffix(h).is_some_and(|got| got == sfx)
+            });
+            if !ok {
+                return Err(invalid(format!(
+                    "listing `{listing_id}`: skill {} names the host `{h}`, which is not the company address ({}) of the connector it requires: a templated host must be `{{subdomain}}.<suffix>` of the connector the listing ships",
+                    p.checked.urn,
+                    suffix.map_or_else(
+                        || "no connector of this listing with a company address".to_string(),
+                        |sfx| format!("suffix `{sfx}`")
+                    )
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// SHA-256 of the artifact's capability summary, in words an admin reviewed before installing.
 /// An update whose summary digest differs from the installed one changed what the artifact can do.
 /// Wording (display names and descriptions) is left out: rewording is not a change of capability.
@@ -850,6 +956,35 @@ fn admit_connector_id(
             )));
         }
     }
+    // A binding placeholder is `vamsec_<connector id>_<binding name>`, and both parts may hold `_`,
+    // so two connectors can declare the same one (`a_b` with `c`, `a` with `b_c`). The gate refuses
+    // a request carrying a placeholder two bindings share, which would stop the connection that is
+    // already installed. Every installed connector's placeholders are compared, at install and at
+    // update (this runs for both); a connector's own earlier release is not another connector.
+    let ours: Vec<&str> = def
+        .bindings
+        .iter()
+        .flatten()
+        .map(|b| b.placeholder.as_str())
+        .collect();
+    if !ours.is_empty() {
+        for other in super::connector_store::installed_in(tx)? {
+            if other.def.urn == urn {
+                continue;
+            }
+            for b in other.def.bindings.iter().flatten() {
+                if let Some(mine) = ours
+                    .iter()
+                    .find(|p| placeholders_overlap(p, &b.placeholder))
+                {
+                    return Err(conflict(format!(
+                        "connector `{urn}`: its binding placeholder `{mine}` overlaps the installed connector {}'s `{}`, and the gate cannot tell them apart: a placeholder must name one binding",
+                        other.def.urn, b.placeholder
+                    )));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -858,13 +993,16 @@ fn admit_connector_id(
 /// marked `needs_reauth`, so nothing is sent on the old shape (a member connects again after the
 /// admin enabled it again). A connector that was not installed before has no connections.
 ///
-/// An admin-supplied client (CN-5.2) was pinned from the old MCP URL's metadata and approved with
-/// it: when the URL moved, or the connector no longer uses the org's client, the stored client and
-/// its secret are removed and the admin enters them again with the next Enable.
+/// An admin-supplied client (CN-5.2) was pinned from the old MCP URL's metadata, or from the old
+/// fixed endpoints (CN-6.2), and approved with it: when the URL or the fixed endpoints (filled
+/// with the node's company address) moved, or the connector no longer uses the org's client, the
+/// stored client and its secret are removed and the admin enters them again with the next Enable.
+#[allow(clippy::too_many_arguments)] // one call site; the flat list mirrors what it compares
 fn reset_connector(
     tx: &Connection,
     urn: &str,
     new_url: &str,
+    new_def: Option<&vam_spec::connector::Connector>,
     new_org_client: bool,
     had_before: bool,
     by: &str,
@@ -879,8 +1017,10 @@ fn reset_connector(
     if had_before {
         // The rows on the server the connector named before and on the one it names now are the
         // members' connections to it; a server added by hand under the same id is not.
-        let old_url = super::connector_store::installed_by_id_in(tx, id)?
-            .and_then(|i| i.def.mcp.map(|m| m.url))
+        let old_def = super::connector_store::installed_by_id_in(tx, id)?.map(|i| i.def);
+        let old_url = old_def
+            .as_ref()
+            .and_then(|d| d.mcp.as_ref().map(|m| m.url.clone()))
             .unwrap_or_default();
         crate::mcp_registry::mark_connector_rows_need_reauth(
             tx,
@@ -888,7 +1028,20 @@ fn reset_connector(
             &[old_url.as_str(), new_url],
             "the connector changed: reconnect once the admin has enabled it again",
         )?;
-        if old_url != new_url || !new_org_client {
+        // The fixed endpoints as the client was pinned to them: filled with this node's address.
+        let address =
+            crate::connectors::node_connector_in(tx, id)?.and_then(|n| n.tenant_subdomain);
+        let fixed = |d: &vam_spec::connector::Connector| match crate::connectors::resolve(
+            d,
+            address.as_deref(),
+        )
+        .provider
+        {
+            vam_spec::connector::Provider::Oauth2(o) => o.endpoints,
+            vam_spec::connector::Provider::ApiKey(_) => None,
+        };
+        let endpoints_moved = old_def.as_ref().and_then(fixed) != new_def.and_then(fixed);
+        if old_url != new_url || endpoints_moved || !new_org_client {
             crate::connector_client::clear_client_in(tx, id)?;
         }
     }
@@ -962,19 +1115,23 @@ fn write(
         let same = old
             .is_some_and(|o| !o.summary_digest.is_empty() && o.summary_digest == pl.summary_digest);
         if !same {
-            let (new_url, new_org_client) =
-                match &prepared_by_urn(&prepared, &pl.urn).map(|p| &p.checked.spec) {
-                    Some(CheckedSpec::Connector(def)) => (
-                        def.mcp.as_ref().map(|m| m.url.clone()).unwrap_or_default(),
-                        crate::connector_client::client_kind(def)
-                            == vam_spec::connector::ClientKind::Org,
-                    ),
-                    _ => (String::new(), false),
-                };
+            let new_def = match prepared_by_urn(&prepared, &pl.urn).map(|p| &p.checked.spec) {
+                Some(CheckedSpec::Connector(def)) => Some(&**def),
+                _ => None,
+            };
+            let (new_url, new_org_client) = match new_def {
+                Some(def) => (
+                    def.mcp.as_ref().map(|m| m.url.clone()).unwrap_or_default(),
+                    crate::connector_client::client_kind(def)
+                        == vam_spec::connector::ClientKind::Org,
+                ),
+                None => (String::new(), false),
+            };
             reset_connector(
                 &tx,
                 &pl.urn,
                 &new_url,
+                new_def,
                 new_org_client,
                 old.is_some(),
                 by,
