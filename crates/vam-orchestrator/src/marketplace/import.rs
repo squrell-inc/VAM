@@ -897,6 +897,32 @@ fn admit_connector_id(
             )));
         }
     }
+    // A binding placeholder is `vamsec_<connector id>_<binding name>`, and both parts may hold `_`,
+    // so two connectors can declare the same one (`a_b` with `c`, `a` with `b_c`). The gate refuses
+    // a request carrying a placeholder two bindings share, which would stop the connection that is
+    // already installed. Every installed connector's placeholders are compared, at install and at
+    // update (this runs for both); a connector's own earlier release is not another connector.
+    let ours: Vec<&str> = def
+        .bindings
+        .iter()
+        .flatten()
+        .map(|b| b.placeholder.as_str())
+        .collect();
+    if !ours.is_empty() {
+        for other in super::connector_store::installed_in(tx)? {
+            if other.def.urn == urn {
+                continue;
+            }
+            for b in other.def.bindings.iter().flatten() {
+                if ours.contains(&b.placeholder.as_str()) {
+                    return Err(conflict(format!(
+                        "connector `{urn}`: its binding placeholder `{}` is also the installed connector {}'s: a placeholder must name one binding",
+                        b.placeholder, other.def.urn
+                    )));
+                }
+            }
+        }
+    }
     Ok(())
 }
 

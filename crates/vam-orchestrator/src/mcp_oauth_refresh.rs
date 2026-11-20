@@ -2198,6 +2198,25 @@ mod org_client_tests {
         assert_eq!(form["code_verifier"], "V");
         assert_eq!(form["redirect_uri"], "squrell://oauth");
 
+        // The same with the client-secret-basic method: the secret handed over by mistake must not
+        // become an `Authorization` header either (the Post method has none to check).
+        let (base, worker) = serve_once(
+            "200 OK",
+            r#"{"access_token":"A1","token_type":"Bearer","expires_in":3600,"refresh_token":"R1"}"#,
+        );
+        test_seam::serve("acme.oauth-wire-basic.example", base);
+        let grant = CodeGrant {
+            token_endpoint: "https://acme.oauth-wire-basic.example/oauth/tokens",
+            ..code_grant(CodeProfile::Oauth, TokenAuthMethod::ClientSecretBasic)
+        };
+        exchange_authorization_code(&grant, Some(&secret))
+            .ok()
+            .unwrap();
+        let request = worker.join().unwrap();
+        assert_eq!(header_of(&request, "authorization"), None, "{request}");
+        assert!(!request.contains("MUST-NOT-TRAVEL"), "{request}");
+        assert!(!form_of(&request).contains_key("client_secret"));
+
         let (base, worker) = serve_once(
             "200 OK",
             r#"{"access_token":"A2","token_type":"Bearer","refresh_token":"R2"}"#,

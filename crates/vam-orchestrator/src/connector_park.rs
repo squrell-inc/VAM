@@ -346,6 +346,7 @@ mod tests {
                 updated_at: 1,
                 last_check_at: None,
                 last_error: None,
+                client_id: None,
             })
             .unwrap();
         for (b, v, h) in [
@@ -520,6 +521,7 @@ mod tests {
                 updated_at: 1,
                 last_check_at: None,
                 last_error: None,
+                client_id: None,
             })
             .unwrap();
         assert_eq!(

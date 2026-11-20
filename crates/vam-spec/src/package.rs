@@ -787,7 +787,7 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
     let (mcp_url, mcp_host, tools) = match &c.mcp {
         Some(m) => (
             m.url.clone(),
-            crate::connector_listing::check_mcp_server_url(&m.url).unwrap_or_default(),
+            crate::connector_listing::mcp_summary_host(&m.url),
             m.tools
                 .iter()
                 .map(|t| McpToolSummary {

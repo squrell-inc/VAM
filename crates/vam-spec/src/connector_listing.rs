@@ -142,6 +142,18 @@ pub fn check_mcp_server_url(url: &str) -> Result<String, String> {
     Ok(host.to_string())
 }
 
+/// The host a connector's MCP URL names, for the capability summary: [`check_mcp_server_url`]'s host,
+/// or for a URL whose first label is `{subdomain}` that host with the template kept
+/// (`{subdomain}.bugwatch.example.org`). Empty when the URL is not one a marketplace connector may name.
+pub fn mcp_summary_host(url: &str) -> String {
+    match url.strip_prefix("https://{subdomain}") {
+        Some(rest) => check_mcp_server_url(&format!("https://{SAMPLE_LABEL}{rest}"))
+            .map(|host| format!("{{subdomain}}{}", &host[SAMPLE_LABEL.len()..]))
+            .unwrap_or_default(),
+        None => check_mcp_server_url(url).unwrap_or_default(),
+    }
+}
+
 /// A full lowercase public DNS name: at least two labels of `[a-z0-9-]` (1-63, no edge hyphen),
 /// last label not all digits, at most 253 characters, no private-network suffix. `what` names the
 /// field in the error.
@@ -171,8 +183,10 @@ pub fn check_public_dns_host(what: &str, host: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The label a template is filled with to check a host's DNS form.
-const SAMPLE_LABEL: &str = "x";
+/// The label a template is filled with to check a host's DNS form: the longest company label the
+/// node accepts (63 characters), so a suffix that would make a filled host longer than a DNS name
+/// can be is refused here and no host the node fills in is ever too long.
+const SAMPLE_LABEL: &str = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
 /// `host` with a leading `{subdomain}` filled by [`SAMPLE_LABEL`]; any other host unchanged.
 fn sample_fill(host: &str) -> String {
@@ -882,6 +896,37 @@ mod tests {
         assert!(parse_marketplace_connector(&v.to_string()).is_ok());
         v["mcp"]["url"] = json!("https://{subdomain}.elsewhere.example.org/mcp");
         assert!(err(v).contains("suffix"));
+    }
+
+    #[test]
+    fn a_templated_mcp_host_is_kept_in_the_summary() {
+        let mut v = good();
+        v["tenant"] = json!({ "name": "subdomain", "suffix": "bugwatch.example.org",
+                              "label": "Bugwatch address" });
+        v["mcp"]["url"] = json!("https://{subdomain}.bugwatch.example.org/mcp");
+        let c = parse_marketplace_connector(&v.to_string()).unwrap();
+        let cs = crate::package::summarize_connector(&c).connector.unwrap();
+        assert_eq!(cs.mcp_host, "{subdomain}.bugwatch.example.org");
+        assert_eq!(cs.hosts, vec!["{subdomain}.bugwatch.example.org"]);
+        // An exact host is unchanged.
+        let c = parse_marketplace_connector(&good().to_string()).unwrap();
+        let cs = crate::package::summarize_connector(&c).connector.unwrap();
+        assert_eq!(cs.mcp_host, "mcp.bugwatch.example.org");
+        assert_eq!(cs.hosts, vec!["mcp.bugwatch.example.org"]);
+    }
+
+    #[test]
+    fn a_suffix_that_makes_a_filled_host_longer_than_a_dns_name_is_refused() {
+        let label = "a".repeat(63);
+        let long = format!("{label}.{label}.{label}.com"); // 195 characters: 63 + 1 + 195 = 259
+        let ok = format!("{label}.{label}.com"); // 63 + 1 + 129 = 193
+        let with = |suffix: &str| {
+            let text = zendesk().to_string().replace("zendesk.com", suffix);
+            serde_json::from_str::<Value>(&text).unwrap()
+        };
+        assert!(parse_marketplace_connector(&with(&ok).to_string()).is_ok());
+        let e = err(with(&long));
+        assert!(e.contains("DNS name"), "{e}");
     }
 
     #[test]

@@ -1680,8 +1680,17 @@ pub(crate) mod test_support {
     /// The `zendesk`-shaped company-address connector (`profile: oauth`, `{subdomain}` under
     /// `zendesk.com`, one REST binding, no secret) as a marketplace installs it.
     pub(crate) fn install_company_address_rows(store: &SqliteWorkflowStore) {
+        install_company_address_variant(store, |_| {});
+    }
+
+    /// [`install_company_address_rows`] with the file edited by `edit` first.
+    pub(crate) fn install_company_address_variant(
+        store: &SqliteWorkflowStore,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) {
         let raw = include_str!("../../vam-spec/tests/fixtures/zendesk-shaped-connector.json");
-        let json: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(raw).unwrap();
+        edit(&mut json);
         let urn = json["urn"].as_str().unwrap_or_default().to_string();
         let c = store.connection.lock().unwrap();
         c.execute(

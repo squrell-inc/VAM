@@ -63,7 +63,8 @@ async fn list_connectors(
             let def = &e.def;
             let id = e.id();
             let node = nodes.iter().find(|n| n.connector_id == id);
-            let (mine, account) = caller_connection_state(&state, &auth, &id, node);
+            let client = clients.iter().find(|c| c.connector_id == id);
+            let (mine, account) = caller_connection_state(&state, &auth, &id, node, client);
             let mut entry = connectors::list_entry(def, &cfg, node, mine, admin);
             connectors::show_account(
                 &mut entry,
@@ -71,7 +72,6 @@ async fn list_connectors(
                 account.as_deref(),
             );
             connectors::annotate_source(&mut entry, e, admin);
-            let client = clients.iter().find(|c| c.connector_id == id);
             connector_client::annotate_client(&mut entry, def, client, admin);
             entry
         })
@@ -84,12 +84,14 @@ async fn list_connectors(
 
 /// The caller's own connection to a connector, as a state and the account to show: from their MCP
 /// row for an MCP connector, from their `connector_connections` row for a REST one (`None`: no
-/// connection yet).
+/// connection yet). `node` and `client` are the pair the caller read in one snapshot: the state is
+/// judged against that client, never against one read again here.
 fn caller_connection_state(
     state: &AppState,
     auth: &AuthContext,
     id: &str,
     node: Option<&connectors::NodeConnector>,
+    client: Option<&connector_client::NodeClient>,
 ) -> (Option<connectors::CallerState>, Option<String>) {
     let scope = SecretScope::User;
     let owner = vault_owner_user_id(scope, auth.owner_user_id()).to_string();
@@ -103,13 +105,12 @@ fn caller_connection_state(
             .unwrap_or(false);
         // An `oauth` connector's connection is judged against the token endpoint of the node's
         // client as well (a connection made against another is not this company's).
-        let endpoint = state
-            .store
-            .node_client(id)
-            .ok()
-            .flatten()
-            .map(|c| c.token_endpoint);
-        let st = connectors::rest_connection_state(&conn, node, has_refresh, endpoint.as_deref());
+        let st = connectors::rest_connection_state(
+            &conn,
+            node,
+            has_refresh,
+            client.map(|c| c.token_endpoint.as_str()),
+        );
         return (Some(st), conn.label);
     };
     let Ok(conn) = state.store.get_mcp_connection(scope, &owner, id) else {
@@ -138,7 +139,7 @@ fn entry_for(
     let def = &e.def;
     let id = e.id();
     let (node, client) = state.store.node_connector_and_client(&id)?;
-    let (mine, account) = caller_connection_state(state, auth, &id, node.as_ref());
+    let (mine, account) = caller_connection_state(state, auth, &id, node.as_ref(), client.as_ref());
     let mut entry = connectors::list_entry(
         def,
         &connectors::config(),
@@ -263,7 +264,8 @@ async fn put_node(
     }
     // The node row and the client are the ones this save committed, read in its transaction: a
     // concurrent save cannot pair this node row with another save's client (or with none).
-    let (mine, account) = caller_connection_state(&state, &auth, &id, Some(&saved.node));
+    let (mine, account) =
+        caller_connection_state(&state, &auth, &id, Some(&saved.node), saved.client.as_ref());
     let mut entry = connectors::list_entry(&def, &cfg, Some(&saved.node), mine, true);
     connectors::show_account(
         &mut entry,
@@ -407,13 +409,20 @@ async fn delete_connection(
     let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
     let _gate = connectors::lock_connection(&owner, &id).await;
     // An `oauth` connector's refresh token is revoked only when its file declares a revocation
-    // endpoint (RFC 7009, public client). Read before the rows go; sent once they are gone.
-    let revoke = connector_client::is_rest_oauth(&def.def)
-        .then(|| connectors::prepare_rest_revoke(&state.store, &state.vault, &owner, &id))
-        .flatten();
+    // endpoint (RFC 7009, public client) and the grant was issued to the client the node has now:
+    // revocation authenticates as the issuing client, so a grant of a replaced client is deleted
+    // locally with nothing sent. Read before the rows go; sent once they are gone.
+    let plan = if connector_client::is_rest_oauth(&def.def) {
+        connectors::prepare_rest_revoke(&state.store, &state.vault, &owner, &id)
+    } else {
+        connectors::RestRevokePlan::Nothing
+    };
     connectors::disconnect(&state.store, &state.vault, &owner, &id)?;
-    if let Some(r) = revoke {
-        let _ = tokio::task::spawn_blocking(move || {
+    // The answer says when the provider's grant may remain: not revoked (another client issued it,
+    // or its pins no longer match) or the revocation did not go through.
+    let mut may_remain = matches!(plan, connectors::RestRevokePlan::Skipped);
+    if let connectors::RestRevokePlan::Send(r) = plan {
+        let sent = tokio::task::spawn_blocking(move || {
             crate::mcp_oauth_refresh::revoke_oauth_connector_refresh_token(
                 &r.revocation_endpoint,
                 &r.client_id,
@@ -421,11 +430,13 @@ async fn delete_connection(
             )
         })
         .await;
+        may_remain = !sent.is_ok_and(|a| a.succeeded);
     }
-    Ok(json_http_response(
-        StatusCode::OK,
-        entry_for(&state, &auth, &def)?.to_string(),
-    ))
+    let mut entry = entry_for(&state, &auth, &def)?;
+    if may_remain {
+        entry["providerGrantMayRemain"] = Value::Bool(true);
+    }
+    Ok(json_http_response(StatusCode::OK, entry.to_string()))
 }
 
 /// `POST /v1/connectors/{id}/connection/check`: one refresh at the consent tenant. The answer is
@@ -444,7 +455,9 @@ async fn check_connection(
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let def = entry_or_404(&state, &id)?;
     let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
-    let _gate = connectors::lock_connection(&owner, &id).await;
+    // The lock moves into the worker: a client that goes away mid-refresh does not release it while
+    // the refresh is still running, so a sign-in cannot interleave with a stale check result.
+    let gate = connectors::lock_connection(&owner, &id).await;
     let (store, vault, cfg) = (
         state.store.clone(),
         state.vault.clone(),
@@ -452,6 +465,7 @@ async fn check_connection(
     );
     let (owner2, id2) = (owner.clone(), id.clone());
     let outcome = tokio::task::spawn_blocking(move || {
+        let _gate = gate;
         connectors::check_connection(
             &store,
             &vault,
@@ -544,9 +558,14 @@ async fn exchange_code(
     if org.is_rest() {
         // The connection's lock: a refresh of this member's connection does not interleave with the
         // exchange. The exchange and every write after it run to the end on a worker that owns the
-        // lock, so a caller that goes away cannot leave a spent code or refresh token unstored.
+        // lock, so a caller that goes away cannot leave a spent code or refresh token unstored. The
+        // worker also resumes the runs parked on this member's connection once the connection is
+        // committed and the lock is released (a resumed intent takes it), whether or not this
+        // request is still there to see it.
         let gate = connectors::lock_connection(&owner, &id).await;
         let owner2 = owner.clone();
+        let resume_state = state.clone();
+        let park = crate::connector_park::park_key(&owner, &id);
         tokio::task::spawn_blocking(move || {
             let c = connector_exchange::CodeConnect {
                 owner: &owner2,
@@ -557,7 +576,10 @@ async fn exchange_code(
                 request: &req,
                 idempotency_key: &idempotency,
             };
-            connector_exchange::exchange_and_connect_rest(&store, &c, &vault, gate)
+            connector_exchange::exchange_and_connect_rest(&store, &c, &vault, gate, || {
+                // Runs parked on this member's connection continue (the key carries the owner).
+                super::reauth::resume_key(&resume_state, &park);
+            })
         })
         .await
         .map_err(|_| {
@@ -565,8 +587,6 @@ async fn exchange_code(
                 "connector code exchange task failed".into(),
             ))
         })??;
-        // Runs parked on this member's connection continue (the key carries the owner).
-        super::reauth::resume_key(&state, &crate::connector_park::park_key(&owner, &id));
         return Ok(json_http_response(
             StatusCode::OK,
             entry_for(&state, &auth, &found)?.to_string(),
@@ -4919,5 +4939,350 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
         assert!(b.to_string().contains("app's own exchange"), "{b}");
+    }
+
+    // ---- the release review of #112: the REST exchange, disconnect and the connect route -----------
+
+    #[tokio::test]
+    async fn a_code_is_not_sent_to_a_client_the_admin_replaced_while_the_exchange_waited_for_the_lock(
+    ) {
+        let (app, state, p) = zendesk_node("xrest-wait").await;
+        p.reply(200, tokens_reply());
+        // The member's connection is busy (a refresh, another sign-in): the exchange passes the
+        // route's checks and waits for the lock.
+        let held = crate::connectors::lock_connection("ada", "zendesk").await;
+        let waiting = {
+            let app = app.clone();
+            tokio::spawn(async move { zendesk_exchange(&app, "squrell://oauth", "zk-w").await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Meanwhile the admin saves another client for the same address.
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({
+                "enabled": true, "tenant": { "subdomain": "xrest-wait" },
+                "client": { "clientId": "zc2" }
+            }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        drop(held);
+        let (s, b) = waiting.await.unwrap();
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(
+            p.requests().is_empty(),
+            "the code never left the node: {:?}",
+            p.requests()
+        );
+        nothing_stored(&state);
+    }
+
+    /// `zendesk` as a connector with fixed endpoints and no company address (no `tenant`).
+    async fn fixed_endpoint_node(host: &str, revoke: bool) -> (axum::Router, AppState, Provider) {
+        let (app, state) = app_world_with_state();
+        crate::connector_client::test_support::install_company_address_variant(&state.store, |j| {
+            j.as_object_mut().unwrap().remove("tenant");
+            let mut endpoints = serde_json::json!({
+                "authorize": format!("https://auth.{host}/oauth/authorize"),
+                "token": format!("https://auth.{host}/oauth/token"),
+            });
+            if revoke {
+                endpoints["revoke"] = format!("https://auth.{host}/oauth/revoke").into();
+            }
+            j["provider"]["endpoints"] = endpoints;
+            j["bindings"][0]["hosts"] = serde_json::json!([format!("api.{host}")]);
+        });
+        let p = provider();
+        crate::mcp_oauth_refresh::test_seam::serve(&format!("auth.{host}"), p.base.clone());
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": true, "client": { "clientId": "zc1" } }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        (app, state, p)
+    }
+
+    #[tokio::test]
+    async fn a_connector_with_fixed_endpoints_and_no_company_address_completes_the_exchange() {
+        let (app, state, p) = fixed_endpoint_node("fixedrest.example", false).await;
+        p.reply(200, tokens_reply());
+        let (s, b) = zendesk_exchange(&app, "squrell://oauth", "zk-fixed").await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected", "{b}");
+        let row = state
+            .store
+            .connector_connection("ada", "zendesk")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.tenant_id, "", "no address, so none is stored");
+        assert_eq!(
+            row.token_endpoint,
+            "https://auth.fixedrest.example/oauth/token"
+        );
+        assert_eq!(row.client_id.as_deref(), Some("zc1"));
+        assert_eq!(p.requests().len(), 1);
+        // It stays connected: the listing and a check judge it against no address too.
+        assert_eq!(
+            zendesk_entry(&app, "member-secret").await["state"],
+            "connected"
+        );
+        let (s, b) = call(
+            &app,
+            "POST",
+            "/v1/connectors/zendesk/connection/check",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::BAD_GATEWAY,
+            "the provider mock has no refresh answer: {b}"
+        );
+        assert_eq!(
+            zendesk_entry(&app, "member-secret").await["state"],
+            "connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_after_the_admin_replaced_the_client_revokes_nothing_and_says_so() {
+        let (app, state, p) = fixed_endpoint_node("fixedrevoke.example", true).await;
+        p.reply(200, tokens_reply());
+        let (s, b) = zendesk_exchange(&app, "squrell://oauth", "zk-rv").await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        // The admin replaces the client at the same endpoint.
+        let (s, b) = put_zendesk(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "enabled": true, "client": { "clientId": "zc2" } }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let before = p.requests().len();
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/zendesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["providerGrantMayRemain"], true, "{b}");
+        assert_eq!(
+            p.requests().len(),
+            before,
+            "no credentials were sent to the provider"
+        );
+        assert!(state
+            .store
+            .connector_connection("ada", "zendesk")
+            .unwrap()
+            .is_none());
+        assert_no_value("the disconnect answer", &b.to_string());
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_of_a_grant_the_nodes_client_issued_revokes_it_and_claims_nothing_remains()
+    {
+        let (app, _state, p) = fixed_endpoint_node("fixedrevoke2.example", true).await;
+        p.reply(200, tokens_reply());
+        let (s, b) = zendesk_exchange(&app, "squrell://oauth", "zk-rv2").await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        p.reply(200, serde_json::Value::Null);
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/zendesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(b.get("providerGrantMayRemain").is_none(), "{b}");
+        let revoke = p.requests().into_iter().last().unwrap();
+        assert_eq!(revoke.path, "/oauth/revoke");
+        assert_eq!(revoke.form["client_id"], "zc1");
+        assert_eq!(revoke.form["token"], NEW_REFRESH);
+    }
+
+    #[tokio::test]
+    async fn the_committed_rest_exchange_resumes_parked_runs_after_the_lock_is_released_and_only_then(
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_app, state, p) = zendesk_node("xrest-resume").await;
+        let org = state.store.org_connector("zendesk").unwrap().unwrap();
+        let client = org.client.clone().unwrap();
+        let p = &p;
+        let resumed = Arc::new(AtomicUsize::new(0));
+        let lock_free = Arc::new(AtomicBool::new(false));
+        let run = |key: &'static str, ok: bool| {
+            let (store, vault) = (state.store.clone(), state.vault.clone());
+            let (org, client) = (org.clone(), client.clone());
+            let req: connector_client::CodeExchangeRequest =
+                serde_json::from_value(exchange_body("squrell://oauth")).unwrap();
+            let (resumed, lock_free) = (resumed.clone(), lock_free.clone());
+            async move {
+                if ok {
+                    p.reply(200, tokens_reply());
+                } else {
+                    p.reply(400, serde_json::json!({ "error": "invalid_grant" }));
+                }
+                let gate = crate::connectors::lock_connection("ada", "zendesk").await;
+                tokio::task::spawn_blocking(move || {
+                    let c = connector_exchange::CodeConnect {
+                        owner: "ada",
+                        creator: "ada",
+                        connector_id: "zendesk",
+                        org: &org,
+                        client: &client,
+                        request: &req,
+                        idempotency_key: key,
+                    };
+                    connector_exchange::exchange_and_connect_rest(&store, &c, &vault, gate, || {
+                        // The resumed intents take this lock: it must be free by now.
+                        let free = tokio::runtime::Handle::current().block_on(async {
+                            tokio::time::timeout(
+                                std::time::Duration::from_millis(500),
+                                crate::connectors::lock_connection("ada", "zendesk"),
+                            )
+                            .await
+                            .is_ok()
+                        });
+                        lock_free.store(free, Ordering::SeqCst);
+                        resumed.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .is_ok()
+                })
+                .await
+                .unwrap()
+            }
+        };
+        // A refused code resumes nothing; a committed connection resumes once, lock released.
+        assert!(!run("zk-r1", false).await);
+        assert_eq!(resumed.load(Ordering::SeqCst), 0);
+        assert!(run("zk-r2", true).await);
+        assert_eq!(resumed.load(Ordering::SeqCst), 1);
+        assert!(
+            lock_free.load(Ordering::SeqCst),
+            "the lock was held while resuming"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connect_the_connector_refuses_leaves_the_stale_row_and_its_grant_alone() {
+        // `filebox` moved from the old server to `xchg-purge`; the member's row is on the old one.
+        let n = xchg_node("xchg-purge");
+        let (s, b) = put_client(&n, "c-1", Some(SECRET)).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        previous_server_row(&n);
+        // An OAuth block on a connector whose client is the admin's is refused (the node's exchange
+        // is the way in): the answer is a 400, and the old row and its tokens are exactly where they were.
+        let (s, b) = call(
+            &n.app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(serde_json::json!({
+                "connectionId": "filebox",
+                "url": "https://mcp.xchg-purge.example/mcp",
+                "authMode": "oauth",
+                "oauth": {
+                    "resource": "https://mcp.xchg-purge.example/mcp",
+                    "authorizationServer": "https://auth.xchg-purge.example",
+                    "tokenEndpoint": "https://auth.xchg-purge.example/token",
+                    "clientId": "c-1",
+                    "registrationMethod": "manual"
+                }
+            })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        let row = row_of(&n, "ada");
+        assert_eq!(row.url, "https://mcp.old-home.example/mcp");
+        assert_eq!(token_of(&n, "ada", "filebox/oauth/refresh-token"), "OLD-R");
+        assert_eq!(token_of(&n, "ada", "filebox/oauth/access-token"), "OLD-A");
+        assert!(
+            n.token.requests().is_empty(),
+            "nothing was revoked at the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settings_write_does_not_put_back_oauth_state_a_sign_in_committed_while_it_waited() {
+        use crate::mcp_registry::{
+            McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
+        };
+        let (app, state) = app_world_with_state();
+        let oauth = |expires_at: i64| McpOauthMetadata {
+            resource: "https://mcp.settings-race.example/mcp".into(),
+            authorization_server: "https://auth.settings-race.example".into(),
+            token_endpoint: "https://auth.settings-race.example/token".into(),
+            revocation_endpoint: None,
+            client_id: "c-1".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: Some(expires_at),
+            status: McpOauthStatus::Connected,
+            last_refresh_at: None,
+            last_refresh_error: None,
+        };
+        let upsert = |meta: &McpOauthMetadata| {
+            state
+                .store
+                .upsert_mcp_connection(
+                    crate::secrets::SecretScope::User,
+                    "ada",
+                    "settings-race",
+                    "https://mcp.settings-race.example/mcp",
+                    "",
+                    &[],
+                    &[],
+                    McpAuthMode::Oauth,
+                    Some(meta),
+                )
+                .unwrap()
+        };
+        let conn = upsert(&oauth(100));
+        // A sign-in holds the credential gate; the settings write (no OAuth block) waits for it.
+        let gate = crate::host_tools::lock_mcp_credentials(&state.store, &conn)
+            .await
+            .unwrap();
+        let waiting = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                call(
+                    &app,
+                    "PUT",
+                    "/v1/mcp/connections",
+                    "member-secret",
+                    Some(serde_json::json!({
+                        "connectionId": "settings-race",
+                        "url": "https://mcp.settings-race.example/mcp",
+                        "timeoutMs": 90000
+                    })),
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        upsert(&oauth(999_999));
+        drop(gate);
+        let (s, b) = waiting.await.unwrap();
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let stored = state
+            .store
+            .get_mcp_connection(crate::secrets::SecretScope::User, "ada", "settings-race")
+            .unwrap();
+        assert_eq!(
+            stored.oauth.unwrap().expires_at,
+            Some(999_999),
+            "the write carried the sign-in's expiry forward, not the one it read before waiting"
+        );
+        assert_eq!(stored.timeout_ms, 90_000);
     }
 }
