@@ -1097,7 +1097,6 @@ pub async fn run_manager_loop(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // flat parameter list is the established call shape; a params struct would change callers
 /// Writes the connector files of the session's skills into the staged catalog tree
 /// ([`crate::skill_connector_file::write_connector_files`]); on an error the session is settled
 /// `Failed` before the error is returned, as the other pre-boot failures are, so the row does not
@@ -1116,6 +1115,7 @@ fn stage_connector_files(
         })
 }
 
+#[allow(clippy::too_many_arguments)] // flat parameter list is the established call shape; a params struct would change callers
 async fn handle_create_session(
     store: Arc<SqliteWorkflowStore>,
     vault: Arc<crate::secrets::SecretsVault>,
