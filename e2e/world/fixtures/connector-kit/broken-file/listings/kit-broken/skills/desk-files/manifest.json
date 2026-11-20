@@ -1,0 +1,36 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:skill:kitbroken.community.example/community/desk-files"
+  },
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "description": "Read the member's Desk files",
+  "requiresConnector": "urn:vam:connector:kitbroken.community.example/community/desk",
+  "tools": [
+    {
+      "name": "file_read",
+      "description": "Reads files (GET /v1/files)",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{}}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "python3",
+        "entrypoint": "./files.py"
+      },
+      "egress": [
+        {
+          "binding": "files",
+          "host": "api.elsewhere.example",
+          "methods": [
+            "GET"
+          ],
+          "pathPrefixes": [
+            "/v1/files"
+          ]
+        }
+      ]
+    }
+  ]
+}

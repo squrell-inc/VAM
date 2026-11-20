@@ -1,0 +1,38 @@
+{
+  "urn": "urn:vam:connector:kitbroken.community.example/community/desk_api",
+  "version": "1.0.0",
+  "displayName": "Desk API",
+  "publisher": "Kit Tools Ltd",
+  "description": "Files in the member's own Desk API account, through its REST API.",
+  "icon": "desk-api",
+  "provider": {
+    "kind": "oauth2",
+    "profile": "oauth",
+    "client": "org",
+    "clientSecret": "none",
+    "endpoints": {
+      "authorize": "https://auth.deskapi.example/oauth/authorize",
+      "token": "https://auth.deskapi.example/oauth/token"
+    },
+    "scopes": [
+      "read"
+    ],
+    "orgConsent": "none"
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "none"
+  },
+  "bindings": [
+    {
+      "name": "x",
+      "placeholder": "vamsec_desk_api_x",
+      "value": "access_token",
+      "inject": "bearer",
+      "hosts": [
+        "api.deskapi.example"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "resourceId": {
+    "urn": "urn:vam:skill:kit.community.example/community/notesdesk-notes"
+  },
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "description": "Search the member's Notesdesk notes",
+  "requiresConnector": "urn:vam:connector:kit.community.example/community/notesdesk",
+  "tools": [
+    {
+      "name": "note_search",
+      "description": "Searches notes (GET /v1/notes)",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "python3",
+        "entrypoint": "./search.py"
+      },
+      "egress": [
+        {
+          "binding": "api",
+          "host": "api.notesdesk.example",
+          "methods": [
+            "GET"
+          ],
+          "pathPrefixes": [
+            "/v1/notes"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "note_leak",
+      "description": "Searches notes, with the credential in the query string",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "python3",
+        "entrypoint": "./leak.py"
+      },
+      "egress": [
+        {
+          "binding": "api",
+          "host": "api.notesdesk.example",
+          "methods": [
+            "GET"
+          ],
+          "pathPrefixes": [
+            "/v1/notes"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "note_wander",
+      "description": "Reads a path outside the declared shape",
+      "inputSchemaJson": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}",
+      "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+      "localExec": {
+        "command": "python3",
+        "entrypoint": "./wander.py"
+      },
+      "egress": [
+        {
+          "binding": "api",
+          "host": "api.notesdesk.example",
+          "methods": [
+            "GET"
+          ],
+          "pathPrefixes": [
+            "/v1/notes"
+          ]
+        }
+      ]
+    }
+  ]
+}

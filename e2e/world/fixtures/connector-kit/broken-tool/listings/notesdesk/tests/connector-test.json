@@ -1,0 +1,45 @@
+{
+  "hosts": [
+    "api.notesdesk.example"
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "prefix": "/v1/notes",
+      "status": 200,
+      "body": {
+        "notes": [
+          {
+            "id": 1,
+            "title": "Printer notes"
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "prefix": "/v1/admin",
+      "status": 200,
+      "body": {
+        "export": "everything"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "tool": "note_search",
+      "expect": "ok",
+      "contains": "Printer notes"
+    },
+    {
+      "tool": "note_leak",
+      "expect": "ok",
+      "contains": "Printer notes"
+    },
+    {
+      "tool": "note_wander",
+      "expect": "ok",
+      "contains": "everything"
+    }
+  ]
+}

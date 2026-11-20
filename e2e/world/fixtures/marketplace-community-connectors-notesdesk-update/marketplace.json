@@ -1,0 +1,178 @@
+{
+  "name": "Community connectors",
+  "publisherDomain": "connectors.community.example",
+  "listings": [
+    {
+      "id": "bugwatch-connector",
+      "displayName": "Bugwatch",
+      "description": "Issues in the member's own Bugwatch workspace, through its remote MCP server.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/bugwatch-connector/connectors/bugwatch"
+        }
+      ],
+      "ref": "bugwatch-connector-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "reserved-connector-id",
+      "displayName": "Linear tracker",
+      "description": "A connector that takes the id of a Squrell connector.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/reserved-connector-id/connectors/linear"
+        }
+      ],
+      "ref": "reserved-connector-id-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "unknown-profile-connector",
+      "displayName": "Oddjob",
+      "description": "A connector that names a sign-in profile the node does not know.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/unknown-profile-connector/connectors/oddjob"
+        }
+      ],
+      "ref": "unknown-profile-connector-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "connector-with-a-secret",
+      "displayName": "Keyed",
+      "description": "A connector that asks the node for a client secret.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/connector-with-a-secret/connectors/keyed"
+        }
+      ],
+      "ref": "connector-with-a-secret-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "filebox-connector",
+      "displayName": "Filebox",
+      "description": "Files in the member's own Filebox account, through a client the org's admin registered with Filebox.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/filebox-connector/connectors/filebox"
+        }
+      ],
+      "ref": "filebox-connector-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "org-secret-without-org-client",
+      "displayName": "Orgsecret",
+      "description": "A connector that asks for an org-held client secret but names no admin-supplied client.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/org-secret-without-org-client/connectors/orgsecret"
+        }
+      ],
+      "ref": "org-secret-without-org-client-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "ticketdesk-connector",
+      "displayName": "Ticketdesk",
+      "description": "Tickets in the company's own Ticketdesk, through its REST API: a connector, a skill and an assistant.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/ticketdesk-connector/connectors/ticketdesk"
+        },
+        {
+          "kind": "skill",
+          "path": "listings/ticketdesk-connector/skills/ticketdesk-tickets"
+        },
+        {
+          "kind": "agent",
+          "path": "listings/ticketdesk-connector/agents/ticketdesk-assistant"
+        }
+      ],
+      "ref": "ticketdesk-connector-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "company-address-outside-its-suffix",
+      "displayName": "Stray",
+      "description": "A connector whose binding host is outside its company-address suffix.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/company-address-outside-its-suffix/connectors/stray"
+        }
+      ],
+      "ref": "company-address-outside-its-suffix-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "rest-connector-with-a-foreign-placeholder",
+      "displayName": "Lookalike",
+      "description": "A connector whose binding placeholder is another connector's.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/rest-connector-with-a-foreign-placeholder/connectors/lookalike"
+        }
+      ],
+      "ref": "rest-connector-with-a-foreign-placeholder-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "notesdesk-connector",
+      "displayName": "Notesdesk",
+      "description": "Notes in the member's own Notesdesk account, through its REST API and an API key: a connector, a skill and an assistant.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/notesdesk-connector/connectors/notesdesk"
+        },
+        {
+          "kind": "skill",
+          "path": "listings/notesdesk-connector/skills/notesdesk-notes"
+        },
+        {
+          "kind": "agent",
+          "path": "listings/notesdesk-connector/agents/notesdesk-assistant"
+        }
+      ],
+      "ref": "notesdesk-connector-v1.1.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "keyed-bugwatch-connector",
+      "displayName": "Bugwatch (API key)",
+      "description": "Bugwatch issues through its remote MCP server, with an API key the member enters.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/keyed-bugwatch-connector/connectors/keyed-bugwatch"
+        }
+      ],
+      "ref": "keyed-bugwatch-connector-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "api-key-with-two-fields",
+      "displayName": "Twofields",
+      "description": "A connector whose API-key sign-in asks for two values.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/api-key-with-two-fields/connectors/twofields"
+        }
+      ],
+      "ref": "api-key-with-two-fields-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    }
+  ]
+}

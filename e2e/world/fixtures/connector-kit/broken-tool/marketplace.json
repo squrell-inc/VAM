@@ -1,0 +1,23 @@
+{
+  "name": "Kit broken tools",
+  "publisherDomain": "kit.community.example",
+  "listings": [
+    {
+      "id": "notesdesk",
+      "displayName": "Notesdesk",
+      "description": "A valid listing whose tests fail: one tool puts its placeholder in the query string and one calls a path outside its declared shape.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/notesdesk/connector"
+        },
+        {
+          "kind": "skill",
+          "path": "listings/notesdesk/skills/notesdesk-notes"
+        }
+      ],
+      "ref": "notesdesk-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    }
+  ]
+}

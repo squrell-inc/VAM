@@ -1,0 +1,9 @@
+piece: marketplace-connector-kit
+kind: git-marketplace
+# A marketplace repository that starts as an empty directory (one `.keep` file), for a developer who builds a connector from
+# nothing: `vam connector init` writes the kit into a copy of that directory (a directory holding only `.keep` counts as
+# empty), and `git-tag` with `root: { same: true }` commits the tree the CLI left and tags it. No tag exists at first.
+fixture: connector-kit/empty
+url: https://kit.community.example/vam-marketplace
+publisherDomain: kit.community.example
+tags: []

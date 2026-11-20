@@ -1,0 +1,35 @@
+{
+  "urn": "urn:vam:connector:connectors.community.example/community/keyed-bugwatch",
+  "version": "1.0.0",
+  "displayName": "Bugwatch (API key)",
+  "publisher": "Community Tools Ltd",
+  "description": "Bugwatch issues in the member's own workspace, through its remote MCP server and the API key the member enters.",
+  "icon": "bugwatch",
+  "provider": {
+    "kind": "api_key",
+    "fields": [
+      {
+        "name": "key",
+        "label": "Bugwatch API key"
+      }
+    ]
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "none"
+  },
+  "mcp": {
+    "url": "https://mcp.bugwatch.example/mcp",
+    "tools": [
+      {
+        "remote": "list_issues",
+        "sideEffect": "READ_ONLY"
+      },
+      {
+        "remote": "get_issue",
+        "sideEffect": "READ_ONLY"
+      }
+    ]
+  }
+}
