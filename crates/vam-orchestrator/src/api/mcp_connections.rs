@@ -584,6 +584,24 @@ async fn connect(
         })
         .collect();
     let normalized = normalize_connect_headers(secret_value.as_deref(), &header_inputs)?;
+    // The bindings this write carries forward from the stored row (those no header in this
+    // request replaces) must be the connection's own: the row write refuses a foreign one, so it
+    // is refused here, before any header credential is written.
+    if let Some(prior) = existing.as_ref().filter(|prior| {
+        !(prior.auth_mode == McpAuthMode::Static && auth_mode == McpAuthMode::Oauth)
+    }) {
+        for binding in &prior.header_bindings {
+            let replaced = normalized
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(&binding.name));
+            if !replaced {
+                crate::mcp_registry::refuse_foreign_binding_id(
+                    &req.connection_id,
+                    &binding.binding_id,
+                )?;
+            }
+        }
+    }
     let mut stored_bindings = Vec::with_capacity(normalized.len());
     for (name, value) in &normalized {
         let binding_id = store_mcp_header_credential(
@@ -2329,8 +2347,14 @@ mod tests {
             })),
         )
         .await;
-        assert_ne!(status, StatusCode::OK, "{b}");
-        assert!(!b.to_string().contains("ORG-ROW-VALUE"), "{b}");
+        // The member's own row is looked up, and there is none: the org row is never tried.
+        assert_eq!(status, StatusCode::NOT_FOUND, "{b}");
+        let text = b.to_string();
+        assert!(
+            text.contains("secret 'probe/auth-header' not found"),
+            "{text}"
+        );
+        assert!(!text.contains("ORG-ROW-VALUE"), "{text}");
         assert!(seen.lock().unwrap().methods.is_empty());
         assert!(no_row(&w.store, "ada", "probe"));
     }
@@ -2451,20 +2475,37 @@ mod tests {
         assert!(text.contains("jira/auth-header"), "{text}");
         assert!(text.contains("not one of its own"), "{text}");
         assert!(!text.contains("USER-JIRA-VALUE"), "{text}");
-        // A connect that carries the stored bindings forward: refused the same way.
-        let (status, b) = pin_http(
-            &w.app,
-            "PUT",
-            "/v1/mcp/connections",
-            "member-secret",
-            Some(serde_json::json!({
-                "connectionId": "probe",
-                "url": format!("https://{host}/mcp"),
-                "scope": "user",
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{b}");
+        // A connect that carries the stored bindings forward is refused before anything is
+        // written, with or without a new header of its own.
+        for headers in [
+            serde_json::json!([]),
+            serde_json::json!([{ "name": "X-Other", "value": "NEW-HEADER-VALUE" }]),
+        ] {
+            let (status, b) = pin_http(
+                &w.app,
+                "PUT",
+                "/v1/mcp/connections",
+                "member-secret",
+                Some(serde_json::json!({
+                    "connectionId": "probe",
+                    "url": format!("https://{host}/mcp"),
+                    "scope": "user",
+                    "headers": headers,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{b}");
+            let text = b.to_string();
+            assert!(
+                text.contains("vault binding 'jira/auth-header' is not one of connection 'probe''s own credentials"),
+                "{text}"
+            );
+            assert!(!text.contains("USER-JIRA-VALUE"), "{text}");
+        }
+        assert!(!w
+            .vault
+            .has_binding_at(SecretScope::User, "ada", "probe/header/x-other")
+            .unwrap());
         // The per-session resolver refuses it too.
         let err = crate::mcp_registry::resolve_mcp_connection_headers(&w.vault, "ada", &stored)
             .unwrap_err();
@@ -2535,25 +2576,36 @@ mod tests {
             row.header_bindings[0].binding_id,
             "probe-headers/header/x-api-key"
         );
-        // A refresh re-reads the stored own rows.
-        let (status, b) = pin_http(
-            &w.app,
-            "POST",
-            "/v1/mcp/connections/probe/refresh?scope=user",
-            "member-secret",
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{b}");
-        let seen = seen.lock().unwrap();
-        assert!(seen
-            .auth
-            .iter()
-            .any(|a| a.as_deref() == Some("Bearer static-value")));
-        assert!(seen
-            .headers
-            .iter()
-            .any(|h| h.get("x-api-key").map(String::as_str) == Some("header-value")));
+        // Each refresh re-reads its own stored rows. The traffic is cleared before each, so only
+        // the refresh's own requests are checked, and every one of them carries the header.
+        for (id, check) in [
+            (
+                "probe",
+                (|h: &std::collections::BTreeMap<String, String>| {
+                    h.get("authorization").map(String::as_str) == Some("Bearer static-value")
+                        && !h.contains_key("x-api-key")
+                }) as fn(&std::collections::BTreeMap<String, String>) -> bool,
+            ),
+            ("probe-headers", |h| {
+                h.get("x-api-key").map(String::as_str) == Some("header-value")
+                    && !h.contains_key("authorization")
+            }),
+        ] {
+            *seen.lock().unwrap() = Default::default();
+            let (status, b) = pin_http(
+                &w.app,
+                "POST",
+                &format!("/v1/mcp/connections/{id}/refresh?scope=user"),
+                "member-secret",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{id}: {b}");
+            let seen = seen.lock().unwrap();
+            assert!(seen.methods.contains(&"tools/list".to_string()), "{id}");
+            assert!(!seen.headers.is_empty(), "{id}");
+            assert!(seen.headers.iter().all(check), "{id}: {:?}", seen.headers);
+        }
     }
 
     #[tokio::test]
@@ -2577,6 +2629,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{b}");
+        // Only the refresh's own traffic is checked below.
+        *seen.lock().unwrap() = Default::default();
         let (status, b) = pin_http(
             &w.app,
             "POST",
@@ -2596,7 +2650,8 @@ mod tests {
             crate::mcp_registry::resolve_mcp_connection_headers(&w.vault, "ada", &conn).unwrap();
         assert_eq!(headers[0].1.expose_secret(), "Bearer org-connection-value");
         let seen = seen.lock().unwrap();
-        assert!(seen.auth.len() >= 2);
+        assert!(seen.methods.contains(&"tools/list".to_string()));
+        assert!(!seen.auth.is_empty());
         assert!(seen
             .auth
             .iter()

@@ -248,6 +248,28 @@ impl SecretScope {
 /// Empty owner for org-scope rows. User-scope rows use `users.user_id`.
 pub const ORG_OWNER_USER_ID: &str = "";
 
+/// [`SqliteWorkflowStore::delete_connection_secret`] on a connection (or transaction) the caller
+/// holds: deletes the row only when its kind is `connection`, in one statement.
+pub(crate) fn delete_connection_secret_in(
+    connection: &rusqlite::Connection,
+    scope: SecretScope,
+    owner_user_id: &str,
+    binding_id: &str,
+) -> Result<bool, OrchestratorError> {
+    let owner = vault_owner_user_id(scope, owner_user_id);
+    let changed = connection.execute(
+        "DELETE FROM host_secrets
+         WHERE scope = ?1 AND owner_user_id = ?2 AND binding_id = ?3 AND kind = ?4",
+        params![
+            scope.as_str(),
+            owner,
+            binding_id,
+            SecretKind::Connection.as_str()
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Owner column stored in the vault key `(scope, owner_user_id, binding_id)`.
 pub fn vault_owner_user_id(scope: SecretScope, owner_user_id: &str) -> &str {
     match scope {
@@ -1175,6 +1197,22 @@ impl SqliteWorkflowStore {
             return Err(secret_missing(scope, owner, binding_id));
         }
         Ok(meta)
+    }
+
+    /// Delete the row at `binding_id` only if it is a `connection` row (an MCP connection's own
+    /// credential). A row of any other kind at the same id is left in place. Check and delete are
+    /// one statement. Returns whether a row was deleted.
+    pub(crate) fn delete_connection_secret(
+        &self,
+        scope: SecretScope,
+        owner_user_id: &str,
+        binding_id: &str,
+    ) -> Result<bool, OrchestratorError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        delete_connection_secret_in(&connection, scope, owner_user_id, binding_id)
     }
 
     pub fn load_host_secret_ciphertext(

@@ -2556,13 +2556,14 @@ fn mcp_connection_secret_values(
         // Only what the connection may send: its own `connection` rows, at its own scope,
         // pinned to its host. A binding that is refused there was never sent either.
         let target = conn.credential_target();
-        for binding_id in conn
+        let binding_ids: std::collections::BTreeSet<&str> = conn
             .header_bindings
             .iter()
             .map(|b| b.binding_id.as_str())
             .chain(std::iter::once(conn.secret_binding_id.as_str()))
             .filter(|id| !id.is_empty())
-        {
+            .collect();
+        for binding_id in binding_ids {
             if let Ok(value) =
                 crate::mcp_registry::decrypt_mcp_connection_secret(vault, target, binding_id)
             {
@@ -3348,9 +3349,24 @@ fn exchange_and_store_mcp_tokens(
     {
         return Err(RefreshFailure::needs_reauth("refresh token unavailable"));
     }
-    let refresh_token = vault
-        .decrypt_secret_at(conn.scope, &conn.owner_user_id, &refresh_id)
-        .map_err(vault_error)?;
+    // The refresh token and a per-row client secret were pinned to the token endpoint's host when
+    // they were stored. They are read only if they are still pinned to the host of the row's
+    // current token endpoint (the one the request below goes to): a connect that moved the
+    // endpoint to another host needs a new sign-in, and nothing is sent. The org client's branch
+    // further down also requires this endpoint to be the node's own.
+    let token_host = crate::mcp_client::connection_host(&metadata.token_endpoint)
+        .map_err(|_| RefreshFailure::needs_reauth("the token endpoint changed: reconnect"))?;
+    let pinned_read = |binding_id: &str| {
+        vault
+            .decrypt_mcp_credential_pinned(conn.scope, &conn.owner_user_id, binding_id, &token_host)
+            .map_err(|err| match err {
+                crate::error::OrchestratorError::PermissionDenied(_) => {
+                    RefreshFailure::needs_reauth("the token endpoint changed: reconnect")
+                }
+                other => vault_error(other),
+            })
+    };
+    let refresh_token = pinned_read(&refresh_id)?;
     // A connector whose client is the admin's refreshes with the node's client: the endpoints and
     // client id the node pinned at Enable, and the org-scope secret read now (no cache, so a replaced
     // secret is used by the next refresh). The member's own row never names the endpoint the secret
@@ -3366,11 +3382,7 @@ fn exchange_and_store_mcp_tokens(
                 .has_binding_at(conn.scope, &conn.owner_user_id, &client_secret_id)
                 .map_err(vault_error)?
             {
-                Some(
-                    vault
-                        .decrypt_secret_at(conn.scope, &conn.owner_user_id, &client_secret_id)
-                        .map_err(vault_error)?,
-                )
+                Some(pinned_read(&client_secret_id)?)
             } else {
                 None
             };
@@ -11376,5 +11388,169 @@ mod org_client_refresh_tests {
         assert_eq!(auth.len(), 4, "{auth:?}");
         assert!(auth[..2].iter().all(|a| a == "Bearer A-old"), "{auth:?}");
         assert!(auth[2..].iter().all(|a| a == "Bearer A-new"), "{auth:?}");
+    }
+}
+
+/// An own-client OAuth refresh reads the refresh token and a per-row client secret only while they
+/// are pinned to the host of the row's current token endpoint: an endpoint moved to another host
+/// sends nothing and asks for a new sign-in.
+#[cfg(test)]
+mod own_client_refresh_pin_tests {
+    use super::*;
+    use crate::mcp_oauth_refresh::{RefreshFailure, RefreshFailureKind, RefreshedToken};
+    use crate::mcp_registry::{
+        mcp_oauth_client_secret_binding_id, mcp_oauth_refresh_token_binding_id,
+        store_mcp_oauth_tokens, McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod,
+        McpOauthStatus, McpOauthTokenWrite,
+    };
+    use crate::secrets::{SecretKind, SecretScope};
+    use crate::users::UserRole;
+    use secrecy::SecretString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const URL: &str = "https://mcp.refresh-pin.example/mcp";
+
+    fn meta(token_endpoint: &str) -> McpOauthMetadata {
+        McpOauthMetadata {
+            resource: URL.into(),
+            authorization_server: "https://auth.example.com".into(),
+            token_endpoint: token_endpoint.into(),
+            revocation_endpoint: None,
+            client_id: "own-client".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: None,
+            status: McpOauthStatus::Connected,
+            last_refresh_at: None,
+            last_refresh_error: None,
+        }
+    }
+
+    /// An own-client row signed in against `auth.example.com`, with a per-row client secret.
+    fn world(id: &str) -> (Arc<SqliteWorkflowStore>, Arc<SecretsVault>) {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        let conn = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                id,
+                URL,
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&meta("https://auth.example.com/token")),
+            )
+            .unwrap();
+        store_mcp_oauth_tokens(
+            &vault,
+            &conn,
+            &McpOauthTokenWrite {
+                access_token: "A-old".into(),
+                refresh_token: "R-old".into(),
+                client_secret: Some("CLIENT-SECRET-old".into()),
+            },
+            None,
+            UserRole::Member,
+        )
+        .unwrap();
+        (store, vault)
+    }
+
+    fn move_endpoint(store: &SqliteWorkflowStore, id: &str, token_endpoint: &str) {
+        store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                id,
+                URL,
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&meta(token_endpoint)),
+            )
+            .unwrap();
+    }
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn refresher(
+        _oauth: &McpOauthMetadata,
+        _rt: &SecretString,
+        _secret: Option<&SecretString>,
+        _method: crate::connector_client::TokenAuthMethod,
+    ) -> Result<RefreshedToken, RefreshFailure> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(RefreshedToken {
+            access_token: "A-new".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("R-new".into()),
+        })
+    }
+
+    fn refresh(
+        store: &SqliteWorkflowStore,
+        vault: &SecretsVault,
+        id: &str,
+    ) -> Result<(), RefreshFailure> {
+        let conn = store
+            .get_mcp_connection(SecretScope::User, "ada", id)
+            .unwrap();
+        refresh_mcp_connection(store, vault, &conn, refresher)
+    }
+
+    // One test, so the shared request counter is read by one test at a time.
+    #[test]
+    fn credentials_pinned_to_another_token_host_are_never_sent_on_refresh() {
+        // A refresh token pinned to auth.example.com, the row's endpoint now on another host.
+        let (store, vault) = world("moved-refresh");
+        move_endpoint(
+            &store,
+            "moved-refresh",
+            "https://auth.elsewhere.example/token",
+        );
+        let before = CALLS.load(Ordering::SeqCst);
+        let failure = refresh(&store, &vault, "moved-refresh").unwrap_err();
+        assert_eq!(failure.kind, RefreshFailureKind::NeedsReauth, "{failure:?}");
+        assert_eq!(failure.reason, "the token endpoint changed: reconnect");
+        assert_eq!(CALLS.load(Ordering::SeqCst), before, "no token request");
+
+        // The refresh token follows the endpoint, the per-row client secret does not.
+        let (store, vault) = world("moved-secret");
+        move_endpoint(
+            &store,
+            "moved-secret",
+            "https://auth.elsewhere.example/token",
+        );
+        vault
+            .put_secret_with_owner(
+                &mcp_oauth_refresh_token_binding_id("moved-secret"),
+                "R-old",
+                SecretKind::Connection,
+                &["auth.elsewhere.example".to_string()],
+                None,
+                "ada",
+            )
+            .unwrap();
+        let failure = refresh(&store, &vault, "moved-secret").unwrap_err();
+        assert_eq!(failure.kind, RefreshFailureKind::NeedsReauth, "{failure:?}");
+        assert_eq!(failure.reason, "the token endpoint changed: reconnect");
+        assert_eq!(CALLS.load(Ordering::SeqCst), before, "no token request");
+        // The client secret is still the old one, pinned where it was.
+        let meta = vault
+            .get_metadata_at(
+                SecretScope::User,
+                "ada",
+                &mcp_oauth_client_secret_binding_id("moved-secret"),
+            )
+            .unwrap();
+        assert_eq!(meta.allowed_destinations, ["auth.example.com"]);
+
+        // The same host: the refresh goes ahead once.
+        let (store, vault) = world("same-host");
+        refresh(&store, &vault, "same-host").unwrap();
+        assert_eq!(CALLS.load(Ordering::SeqCst), before + 1);
     }
 }
