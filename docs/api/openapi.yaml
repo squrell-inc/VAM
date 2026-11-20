@@ -7330,7 +7330,7 @@ components:
               description: "The hosts the connector reaches with a member's credential (a company address is shown as `{subdomain}.<suffix>` until it is entered)."
             bindings:
               type: array
-              description: REST connectors. The name and hosts each binding attaches the member's credential to.
+              description: "REST connectors. The name and hosts each binding attaches the member's credential to, and where the credential goes when that is not `Authorization: Bearer`. All of it is part of the summary an admin enabled: an update that moves the key (bearer to a named header, another `headerName` or `prefix`) changes the summary and resets Enable."
               items:
                 type: object
                 properties:
@@ -7338,6 +7338,12 @@ components:
                   hosts:
                     type: array
                     items: { type: string }
+                  inject:
+                    type: string
+                    enum: [header, query]
+                    description: "Present only when the credential is not sent as `Authorization: Bearer`: `header` (an API key in the header named by `headerName`)."
+                  headerName: { type: string, description: "`inject: header` only." }
+                  prefix: { type: string, description: "`inject: header` only. Fixed text before the key in that header." }
             endpoints:
               type: object
               description: "Fixed sign-in endpoints (`profile: oauth`)."

@@ -1226,6 +1226,79 @@ mod tests {
         for c in crate::connector::builtin_connectors() {
             let got = serde_json::to_value(crate::package::summarize_connector(&c)).unwrap();
             assert!(got["connector"].get("fields").is_none(), "{}", c.urn);
+            // A built-in's bindings are the name and hosts they always were.
+            for b in got["connector"]["bindings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let mut keys: Vec<&str> =
+                    b.as_object().unwrap().keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                assert_eq!(keys, ["hosts", "name"], "{}: {b}", c.urn);
+            }
         }
+        // A bearer API-key binding serializes as before the header form was summarized.
+        let c = parse_marketplace_connector(&api_key_rest().to_string()).unwrap();
+        let got = serde_json::to_value(crate::package::summarize_connector(&c)).unwrap();
+        assert_eq!(
+            got["connector"]["bindings"],
+            json!([{ "name": "api", "hosts": ["api.notesdesk.example.org"] }])
+        );
+    }
+
+    /// The summary digest in `marketplace/import.rs` is the SHA-256 of the summary JSON without
+    /// wording, so the JSON's difference is the digest's.
+    fn summary_json(v: &Value) -> String {
+        let c = parse_marketplace_connector(&v.to_string()).unwrap();
+        let mut j = serde_json::to_value(crate::package::summarize_connector(&c)).unwrap();
+        fn strip(v: &mut Value) {
+            match v {
+                Value::Object(m) => {
+                    m.remove("displayName");
+                    m.remove("description");
+                    m.values_mut().for_each(strip);
+                }
+                Value::Array(a) => a.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        strip(&mut j);
+        j.to_string()
+    }
+
+    #[test]
+    fn where_the_key_goes_is_part_of_the_summary_so_moving_it_resets_enable() {
+        let bearer = api_key_rest();
+        let named = |name: &str, prefix: Option<&str>| {
+            let mut v = api_key_rest();
+            v["bindings"][0]["inject"] = json!("header");
+            v["bindings"][0]["headerName"] = json!(name);
+            if let Some(p) = prefix {
+                v["bindings"][0]["prefix"] = json!(p);
+            }
+            v
+        };
+        let base = summary_json(&bearer);
+        let x_key = summary_json(&named("X-Api-Key", None));
+        // Bearer to a named header: a different summary.
+        assert_ne!(base, x_key);
+        assert!(
+            x_key.contains(r#""inject":"header""#) && x_key.contains(r#""headerName":"X-Api-Key""#)
+        );
+        // The header name and the prefix are each part of it.
+        let other_name = summary_json(&named("X-Token", None));
+        let prefixed = summary_json(&named("X-Api-Key", Some("Token ")));
+        let other_prefix = summary_json(&named("X-Api-Key", Some("Key ")));
+        let all = [&base, &x_key, &other_name, &prefixed, &other_prefix];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        // Wording is not capability: the same placement digests the same.
+        let mut reworded = named("X-Api-Key", None);
+        reworded["description"] = json!("Another sentence.");
+        assert_eq!(x_key, summary_json(&reworded));
     }
 }
