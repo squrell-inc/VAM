@@ -784,6 +784,13 @@ pub(crate) fn prepare_oauth_refresh_revoke(
     {
         return Err(RevokeAttempt::skipped());
     }
+    // The refresh token was pinned to the token endpoint's host when it was stored. It is read only
+    // while it is still pinned to the host of the current token endpoint, and it is sent to the
+    // revocation endpoint only when that host is pinned on the same row too. Anything else is a
+    // local delete only: nothing is sent.
+    let Some(hosts) = RevokeHosts::of(oauth) else {
+        return Err(RevokeAttempt::skipped());
+    };
     let refresh_id = mcp_oauth_refresh_token_binding_id(&conn.connection_id);
     let has_refresh = match vault.has_binding_at(conn.scope, &conn.owner_user_id, &refresh_id) {
         Ok(present) => present,
@@ -792,11 +799,7 @@ pub(crate) fn prepare_oauth_refresh_revoke(
     if !has_refresh {
         return Err(RevokeAttempt::skipped());
     }
-    let refresh_token = match vault.decrypt_secret_at(conn.scope, &conn.owner_user_id, &refresh_id)
-    {
-        Ok(token) => token,
-        Err(_) => return Err(RevokeAttempt::failed("credential store unavailable")),
-    };
+    let refresh_token = read_for_revoke(vault, conn, &refresh_id, &hosts)?;
     if let Some(org) = &org {
         let client_secret = match (
             org.keeps_secret,
@@ -830,12 +833,8 @@ pub(crate) fn prepare_oauth_refresh_revoke(
     let client_secret_id = mcp_oauth_client_secret_binding_id(&conn.connection_id);
     let client_secret =
         match vault.has_binding_at(conn.scope, &conn.owner_user_id, &client_secret_id) {
-            Ok(true) => {
-                match vault.decrypt_secret_at(conn.scope, &conn.owner_user_id, &client_secret_id) {
-                    Ok(secret) => Some(secret),
-                    Err(_) => return Err(RevokeAttempt::failed("credential store unavailable")),
-                }
-            }
+            // The per-row client secret follows the same rule as the refresh token.
+            Ok(true) => Some(read_for_revoke(vault, conn, &client_secret_id, &hosts)?),
             Ok(false) => None,
             Err(_) => return Err(RevokeAttempt::failed("credential store unavailable")),
         };
@@ -846,6 +845,74 @@ pub(crate) fn prepare_oauth_refresh_revoke(
         auth_method: TokenAuthMethod::default(),
         connection_id: conn.connection_id.clone(),
     })
+}
+
+/// The two hosts a revoke involves: the current token endpoint's (where the refresh token and a
+/// per-row client secret are pinned) and the revocation endpoint's (where they would be sent).
+struct RevokeHosts {
+    token: String,
+    revocation: String,
+}
+
+impl RevokeHosts {
+    /// `None` when either endpoint has no exact https host: nothing can be checked, nothing is sent.
+    fn of(oauth: &McpOauthMetadata) -> Option<Self> {
+        let token = crate::mcp_client::connection_host(&oauth.token_endpoint).ok()?;
+        let revocation =
+            crate::mcp_client::connection_host(oauth.revocation_endpoint.as_deref()?.trim())
+                .ok()?;
+        Some(Self { token, revocation })
+    }
+}
+
+/// Read a connection credential that a revoke would send. One read checks the row (a `connection`
+/// row pinned to the current token host) and records whether the revocation host is pinned on it
+/// too, and decrypts only if the first holds.
+///
+/// - Not a `connection` row, or not pinned to the token host: skipped, nothing is sent.
+/// - The revocation host not pinned on the row: skipped with a warning, nothing is sent; the
+///   caller's local delete goes ahead.
+/// - A store error: failed.
+fn read_for_revoke(
+    vault: &SecretsVault,
+    conn: &McpConnection,
+    binding_id: &str,
+    hosts: &RevokeHosts,
+) -> Result<SecretString, RevokeAttempt> {
+    // Set when the row is pinned to the token host but not to the revocation host.
+    let mut revocation_unpinned = false;
+    let read =
+        vault.decrypt_secret_at_checked(conn.scope, &conn.owner_user_id, binding_id, |meta| {
+            let pinned = meta.kind == crate::secrets::SecretKind::Connection
+                && crate::secrets::destinations_name_host(&meta.allowed_destinations, &hosts.token);
+            if !pinned {
+                return Err(OrchestratorError::PermissionDenied(format!(
+                    "'{binding_id}' is not pinned to the token endpoint's host"
+                )));
+            }
+            if crate::secrets::destinations_name_host(&meta.allowed_destinations, &hosts.revocation)
+            {
+                Ok(())
+            } else {
+                revocation_unpinned = true;
+                Err(OrchestratorError::PermissionDenied(format!(
+                    "'{binding_id}' is not pinned to the revocation endpoint's host"
+                )))
+            }
+        });
+    match read {
+        Ok(value) => Ok(value),
+        Err(OrchestratorError::PermissionDenied(_)) => {
+            if revocation_unpinned {
+                tracing::warn!(
+                    connection_id = %conn.connection_id,
+                    "revocation endpoint host not pinned; local delete only"
+                );
+            }
+            Err(RevokeAttempt::skipped())
+        }
+        Err(_) => Err(RevokeAttempt::failed("credential store unavailable")),
+    }
 }
 
 /// RFC 7009 revocation of a REST connector's refresh token at the revocation endpoint the node
@@ -1773,7 +1840,9 @@ mod tests {
         let (url, worker) = mock_revoke("401 Unauthorized", &body);
         let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
         let vault = SecretsVault::for_tests(store.clone());
-        let oauth = revocation_metadata(url);
+        let mut oauth = revocation_metadata(url.clone());
+        // The revocation endpoint is on the token endpoint's host, where the tokens are pinned.
+        oauth.token_endpoint = url.replace("/oauth/revoke", "/oauth/token");
         let conn = store
             .upsert_mcp_connection(
                 SecretScope::User,
@@ -1836,6 +1905,171 @@ mod tests {
         assert!(!logged.contains(access), "{logged}");
         assert!(!logged.contains(secret), "{logged}");
         assert!(!logged.contains("error_description"), "{logged}");
+    }
+
+    /// A listener on loopback that answers nothing: `revoke_url` points at it, and
+    /// [`assert_no_request`] says whether anything connected.
+    fn silent_revoke_endpoint() -> (TcpListener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}/oauth/revoke", listener.local_addr().unwrap());
+        (listener, url)
+    }
+
+    fn assert_no_request(listener: &TcpListener) {
+        listener.set_nonblocking(true).unwrap();
+        assert!(
+            matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "the revocation endpoint was contacted"
+        );
+    }
+
+    /// An own-client OAuth row with its tokens and a per-row client secret, stored for `oauth`.
+    fn revoke_world(
+        oauth: &McpOauthMetadata,
+    ) -> (
+        std::sync::Arc<SqliteWorkflowStore>,
+        std::sync::Arc<SecretsVault>,
+        McpConnection,
+    ) {
+        use crate::mcp_registry::{store_mcp_oauth_tokens, McpOauthTokenWrite};
+        use crate::secrets::SecretScope;
+        use crate::users::UserRole;
+
+        let store = std::sync::Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        let conn = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "alice",
+                "acme",
+                "https://mcp.example.com/mcp",
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(oauth),
+            )
+            .unwrap();
+        store_mcp_oauth_tokens(
+            &vault,
+            &conn,
+            &McpOauthTokenWrite {
+                access_token: "pin-access".into(),
+                refresh_token: "pin-refresh".into(),
+                client_secret: Some("pin-client-secret".into()),
+            },
+            None,
+            UserRole::Member,
+        )
+        .unwrap();
+        (store, vault, conn)
+    }
+
+    fn assert_rows_deleted(store: &SqliteWorkflowStore, vault: &SecretsVault) {
+        use crate::secrets::SecretScope;
+        for binding in [
+            crate::mcp_registry::mcp_oauth_access_token_binding_id("acme"),
+            crate::mcp_registry::mcp_oauth_refresh_token_binding_id("acme"),
+            crate::mcp_registry::mcp_oauth_client_secret_binding_id("acme"),
+        ] {
+            assert!(
+                vault
+                    .get_metadata_at(SecretScope::User, "alice", &binding)
+                    .is_err(),
+                "{binding}"
+            );
+        }
+        assert!(matches!(
+            store.get_mcp_connection(SecretScope::User, "alice", "acme"),
+            Err(OrchestratorError::NotFound(_))
+        ));
+    }
+
+    /// Purge under a log capture; returns what was logged.
+    fn purge_logged(
+        store: &SqliteWorkflowStore,
+        vault: &SecretsVault,
+        conn: &McpConnection,
+    ) -> String {
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sub = LogCapture(logs.clone());
+        tracing::subscriber::with_default(sub, || {
+            purge_disconnected_mcp_connection(vault, store, conn).unwrap()
+        });
+        let logged = logs.lock().unwrap().clone();
+        logged
+    }
+
+    #[test]
+    fn a_revocation_host_not_pinned_on_the_refresh_token_gets_nothing_and_the_rows_go() {
+        let (listener, revoke_url) = silent_revoke_endpoint();
+        // Tokens pinned to auth.example.com; the row names a revocation endpoint elsewhere.
+        let oauth = revocation_metadata(revoke_url);
+        let (store, vault, conn) = revoke_world(&oauth);
+        let attempt = best_effort_revoke_oauth_refresh(&vault, &conn);
+        assert!(!attempt.attempted, "{attempt:?}");
+        let logged = purge_logged(&store, &vault, &conn);
+        assert!(
+            logged.contains("revocation endpoint host not pinned; local delete only"),
+            "{logged}"
+        );
+        assert!(!logged.contains("pin-refresh"), "{logged}");
+        assert_no_request(&listener);
+        assert_rows_deleted(&store, &vault);
+    }
+
+    #[test]
+    fn a_refresh_token_pinned_to_an_old_token_host_is_not_revoked_and_the_rows_go() {
+        use crate::secrets::SecretKind;
+
+        let (listener, revoke_url) = silent_revoke_endpoint();
+        let mut oauth = revocation_metadata(revoke_url.clone());
+        oauth.token_endpoint = revoke_url.replace("/oauth/revoke", "/oauth/token");
+        let (store, vault, conn) = revoke_world(&oauth);
+        // The refresh token is still pinned to the host the token endpoint had before.
+        vault
+            .put_secret_with_owner(
+                &crate::mcp_registry::mcp_oauth_refresh_token_binding_id("acme"),
+                "pin-refresh",
+                SecretKind::Connection,
+                &["auth.old.example".to_string()],
+                None,
+                "alice",
+            )
+            .unwrap();
+        let attempt = best_effort_revoke_oauth_refresh(&vault, &conn);
+        assert!(!attempt.attempted, "{attempt:?}");
+        let logged = purge_logged(&store, &vault, &conn);
+        assert!(!logged.contains("pin-refresh"), "{logged}");
+        assert_no_request(&listener);
+        assert_rows_deleted(&store, &vault);
+    }
+
+    #[test]
+    fn a_client_secret_pinned_to_an_old_token_host_is_not_revoked_and_the_rows_go() {
+        use crate::secrets::SecretKind;
+
+        let (listener, revoke_url) = silent_revoke_endpoint();
+        let mut oauth = revocation_metadata(revoke_url.clone());
+        oauth.token_endpoint = revoke_url.replace("/oauth/revoke", "/oauth/token");
+        let (store, vault, conn) = revoke_world(&oauth);
+        // The refresh token is pinned where it should be; the per-row client secret is not.
+        vault
+            .put_secret_with_owner(
+                &crate::mcp_registry::mcp_oauth_client_secret_binding_id("acme"),
+                "pin-client-secret",
+                SecretKind::Connection,
+                &["auth.old.example".to_string()],
+                None,
+                "alice",
+            )
+            .unwrap();
+        let attempt = best_effort_revoke_oauth_refresh(&vault, &conn);
+        assert!(!attempt.attempted, "{attempt:?}");
+        let logged = purge_logged(&store, &vault, &conn);
+        assert!(!logged.contains("pin-client-secret"), "{logged}");
+        assert_no_request(&listener);
+        assert_rows_deleted(&store, &vault);
     }
 
     #[test]

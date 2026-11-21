@@ -12,8 +12,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::OrchestratorError;
 use crate::mcp_client::{
-    allowlist_from_connection_url, connection_host, resolve_auth_header, McpClient, McpClientError,
-    McpTool, McpToolAnnotations,
+    allowlist_from_connection_url, connection_host, McpClient, McpClientError, McpTool,
+    McpToolAnnotations,
 };
 use crate::secrets::{
     authorize_org_secret_write, vault_owner_user_id, SecretKind, SecretScope, SecretsVault,
@@ -791,6 +791,86 @@ pub fn mcp_oauth_client_secret_binding_id(connection_id: &str) -> String {
     format!("{connection_id}/oauth/client-secret")
 }
 
+/// True when `binding_id` is one of the ids this connection generates for its own credentials:
+/// `{id}/auth-header`, `{id}/header/{name}` ([`mcp_header_binding_id`]) and the OAuth rows
+/// (`{id}/oauth/access-token`, `{id}/oauth/refresh-token`, `{id}/oauth/client-secret`).
+///
+/// A connection never names another vault row: not another connection's, not a user's own
+/// secret, not an org row. Connection ids are `[a-z0-9_-]`, so no other connection's id can
+/// share this prefix.
+pub fn is_own_mcp_binding_id(connection_id: &str, binding_id: &str) -> bool {
+    let Some(rest) = binding_id
+        .strip_prefix(connection_id)
+        .and_then(|rest| rest.strip_prefix('/'))
+    else {
+        return false;
+    };
+    match rest {
+        "auth-header" | "oauth/access-token" | "oauth/refresh-token" | "oauth/client-secret" => {
+            true
+        }
+        _ => rest.strip_prefix("header/").is_some_and(|name| {
+            is_http_token_name(name)
+                && name == name.to_ascii_lowercase()
+                && mcp_header_binding_id(connection_id, name) == binding_id
+        }),
+    }
+}
+
+/// Refuse a binding id that is not this connection's own ([`is_own_mcp_binding_id`]). The text
+/// names the binding id, never a value.
+pub fn ensure_own_mcp_binding_id(
+    connection_id: &str,
+    binding_id: &str,
+) -> Result<(), OrchestratorError> {
+    if is_own_mcp_binding_id(connection_id, binding_id) {
+        Ok(())
+    } else {
+        Err(OrchestratorError::PermissionDenied(format!(
+            "MCP connection '{connection_id}' names vault binding '{binding_id}', which is not one of its own credentials: reconnect the connection"
+        )))
+    }
+}
+
+/// Where an MCP connection's credentials live and where they may go: the connection's own scope
+/// and owner (an org connection reads only the org row, a user connection only its owner's row),
+/// its id (which bounds the binding ids it may name) and the URL being called (whose exact host
+/// every credential must be pinned to).
+#[derive(Debug, Clone, Copy)]
+pub struct McpCredentialTarget<'a> {
+    pub scope: SecretScope,
+    pub owner_user_id: &'a str,
+    pub connection_id: &'a str,
+    pub url: &'a str,
+}
+
+impl McpConnection {
+    /// This connection's [`McpCredentialTarget`], for its stored URL.
+    pub fn credential_target(&self) -> McpCredentialTarget<'_> {
+        McpCredentialTarget {
+            scope: self.scope,
+            owner_user_id: &self.owner_user_id,
+            connection_id: &self.connection_id,
+            url: &self.url,
+        }
+    }
+}
+
+/// Decrypt one credential of an MCP connection for an outbound call to `target.url`.
+///
+/// Refused, before anything is decrypted, when `binding_id` is not the connection's own, when
+/// the row is not a `connection` row, or when it is not pinned to the exact host of
+/// `target.url`. The row is read at the connection's own scope only (no user→org fallback).
+pub fn decrypt_mcp_connection_secret(
+    vault: &SecretsVault,
+    target: McpCredentialTarget<'_>,
+    binding_id: &str,
+) -> Result<SecretString, OrchestratorError> {
+    ensure_own_mcp_binding_id(target.connection_id, binding_id)?;
+    let host = connection_host(target.url)?;
+    vault.decrypt_mcp_credential_pinned(target.scope, target.owner_user_id, binding_id, &host)
+}
+
 /// Cap on an OAuth token or client secret written through upsert.
 pub const MCP_OAUTH_SECRET_MAX_BYTES: usize = 16 * 1024;
 
@@ -999,6 +1079,9 @@ pub fn normalize_connect_headers(
 }
 
 /// Union previous bindings with newly upserted ones (by case-insensitive name).
+///
+/// The result is only ever written through [`SqliteWorkflowStore::upsert_mcp_connection`] or
+/// its guarded variant, which refuse any binding id that is not the connection's own.
 pub fn merge_header_bindings(
     existing: &[HeaderBinding],
     upserted: &[HeaderBinding],
@@ -1113,6 +1196,9 @@ pub fn store_mcp_oauth_tokens(
             "oauth token upsert requires authMode=oauth".into(),
         ));
     }
+    // The row upsert that follows refuses a row naming a foreign binding: refuse it here, before
+    // any token is written, so a refused update never rotates credentials.
+    refuse_foreign_connection_bindings(conn)?;
     let oauth = conn.oauth.as_ref().ok_or_else(|| {
         OrchestratorError::InvalidContract(
             "oauth token upsert requires oauth metadata on the connection".into(),
@@ -1282,10 +1368,14 @@ fn put_mcp_connection_secret(
 /// and its own client secret), in a stable order.
 pub(crate) fn connection_binding_ids(conn: &McpConnection) -> Vec<String> {
     let mut ids: BTreeMap<String, ()> = BTreeMap::new();
+    // A row stored before binding ids were checked may name a foreign vault row: that row is not
+    // this connection's and is never deleted with it.
     for binding in &conn.header_bindings {
-        ids.insert(binding.binding_id.clone(), ());
+        if is_own_mcp_binding_id(&conn.connection_id, &binding.binding_id) {
+            ids.insert(binding.binding_id.clone(), ());
+        }
     }
-    if !conn.secret_binding_id.is_empty() {
+    if is_own_mcp_binding_id(&conn.connection_id, &conn.secret_binding_id) {
         ids.insert(conn.secret_binding_id.clone(), ());
     }
     ids.insert(mcp_oauth_access_token_binding_id(&conn.connection_id), ());
@@ -1295,15 +1385,16 @@ pub(crate) fn connection_binding_ids(conn: &McpConnection) -> Vec<String> {
 }
 
 /// Delete every vault binding listed on the connection (and legacy auth id).
+///
+/// Only `connection` rows are deleted: a row of another kind at one of these ids (a user's own
+/// secret that happens to share the id) is not the connection's and is left in place.
 pub fn delete_mcp_connection_secrets(
     vault: &SecretsVault,
     conn: &McpConnection,
 ) -> Result<(), OrchestratorError> {
+    let store = vault.workflow_store();
     for binding_id in &connection_binding_ids(conn) {
-        match vault.delete_secret_at(conn.scope, &conn.owner_user_id, binding_id) {
-            Ok(_) | Err(OrchestratorError::NotFound(_)) => {}
-            Err(err) => return Err(err),
-        }
+        store.delete_connection_secret(conn.scope, &conn.owner_user_id, binding_id)?;
     }
     Ok(())
 }
@@ -1322,11 +1413,10 @@ pub fn delete_replaced_auth_mode_bindings(
     new_mode: McpAuthMode,
     retained_binding_ids: &[String],
 ) -> Result<(), OrchestratorError> {
+    let store = vault.workflow_store();
     for binding_id in &replaced_auth_mode_binding_ids(previous, new_mode, retained_binding_ids) {
-        match vault.delete_secret_at(previous.scope, &previous.owner_user_id, binding_id) {
-            Ok(_) | Err(OrchestratorError::NotFound(_)) => {}
-            Err(err) => return Err(err),
-        }
+        // Only `connection` rows: another kind at the same id is not the connection's.
+        store.delete_connection_secret(previous.scope, &previous.owner_user_id, binding_id)?;
     }
     Ok(())
 }
@@ -1357,10 +1447,13 @@ pub(crate) fn replaced_auth_mode_binding_ids(
             );
         }
         McpAuthMode::Static => {
+            // Only the connection's own ids: a foreign id on an old row is not deleted.
             for binding in &previous.header_bindings {
-                ids.insert(binding.binding_id.clone(), ());
+                if is_own_mcp_binding_id(&previous.connection_id, &binding.binding_id) {
+                    ids.insert(binding.binding_id.clone(), ());
+                }
             }
-            if !previous.secret_binding_id.is_empty() {
+            if is_own_mcp_binding_id(&previous.connection_id, &previous.secret_binding_id) {
                 ids.insert(previous.secret_binding_id.clone(), ());
             }
             ids.insert(mcp_auth_binding_id(&previous.connection_id), ());
@@ -1374,74 +1467,109 @@ pub(crate) fn replaced_auth_mode_binding_ids(
         .collect()
 }
 
-/// Resolve every connection header for `caller_user_id`.
+/// Resolve every connection header for a call to `target.url`.
+///
+/// Each binding must be the connection's own id and name a `connection` row, at the
+/// connection's own scope, pinned to the exact host of `target.url`
+/// ([`decrypt_mcp_connection_secret`]). Every binding is checked before any is decrypted, so a
+/// refused binding leaves nothing decrypted and nothing sent.
 pub fn resolve_mcp_headers(
     vault: &SecretsVault,
-    caller_user_id: &str,
+    target: McpCredentialTarget<'_>,
     header_bindings: &[HeaderBinding],
 ) -> Result<Vec<(String, SecretString)>, OrchestratorError> {
+    for binding in header_bindings {
+        ensure_own_mcp_binding_id(target.connection_id, &binding.binding_id)?;
+    }
     let mut out = Vec::with_capacity(header_bindings.len());
     for binding in header_bindings {
-        let value = resolve_auth_header(vault, caller_user_id, &binding.binding_id)?;
+        let value = decrypt_mcp_connection_secret(vault, target, &binding.binding_id)?;
         out.push((binding.name.clone(), value));
     }
     Ok(out)
+}
+
+/// A user connection's credentials are its owner's: a call made for anyone else is refused. An
+/// org connection is shared, and reads the org row whoever calls. An empty caller is the host
+/// itself (a connect or refresh made for the connection's own scope).
+fn ensure_caller_may_use(
+    caller_user_id: &str,
+    conn: &McpConnection,
+) -> Result<(), OrchestratorError> {
+    if conn.scope == SecretScope::User
+        && !caller_user_id.is_empty()
+        && vault_owner_user_id(SecretScope::User, caller_user_id)
+            != vault_owner_user_id(SecretScope::User, &conn.owner_user_id)
+    {
+        return Err(OrchestratorError::PermissionDenied(format!(
+            "MCP connection '{}' belongs to another user",
+            conn.connection_id
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve outbound HTTP headers for a stored connection.
 ///
 /// Static mode uses [`resolve_mcp_headers`]. OAuth mode reads the access-token
 /// vault binding and emits `Authorization: Bearer <access>` (plus any extra
-/// non-Authorization header bindings).
+/// non-Authorization header bindings). Either way every value is read at the
+/// connection's own scope, must be the connection's own binding, and must be a
+/// `connection` row pinned to the exact host of the connection URL
+/// ([`decrypt_mcp_connection_secret`]). `caller_user_id` is only checked: a user
+/// connection is never resolved for anyone but its owner.
 pub fn resolve_mcp_connection_headers(
     vault: &SecretsVault,
     caller_user_id: &str,
     conn: &McpConnection,
 ) -> Result<Vec<(String, SecretString)>, OrchestratorError> {
+    ensure_caller_may_use(caller_user_id, conn)?;
+    let target = conn.credential_target();
     match conn.auth_mode {
-        McpAuthMode::Static => resolve_mcp_headers(vault, caller_user_id, &conn.header_bindings),
+        McpAuthMode::Static => resolve_mcp_headers(vault, target, &conn.header_bindings),
         McpAuthMode::Oauth => {
+            let extra: Vec<HeaderBinding> = conn
+                .header_bindings
+                .iter()
+                .filter(|binding| !binding.name.eq_ignore_ascii_case("Authorization"))
+                .cloned()
+                .collect();
+            for binding in &extra {
+                ensure_own_mcp_binding_id(&conn.connection_id, &binding.binding_id)?;
+            }
             let binding_id = mcp_oauth_access_token_binding_id(&conn.connection_id);
             // OAuth bindings are written at the connection's scope by token
             // upsert/refresh. Do not accidentally prefer a caller's same-named
             // personal secret when invoking a shared org connection.
-            let access = vault.decrypt_secret_at(conn.scope, &conn.owner_user_id, &binding_id)?;
-            let mut headers = Vec::with_capacity(conn.header_bindings.len() + 1);
+            let access = decrypt_mcp_connection_secret(vault, target, &binding_id)?;
+            let mut headers = Vec::with_capacity(extra.len() + 1);
             headers.push((
                 "Authorization".into(),
                 SecretString::new(mcp_oauth_authorization_header(access.expose_secret())),
             ));
-            for binding in &conn.header_bindings {
-                if binding.name.eq_ignore_ascii_case("Authorization") {
-                    continue;
-                }
-                let value = vault.decrypt_secret_at(
-                    conn.scope,
-                    &conn.owner_user_id,
-                    &binding.binding_id,
-                )?;
-                headers.push((binding.name.clone(), value));
-            }
+            headers.extend(resolve_mcp_headers(vault, target, &extra)?);
             Ok(headers)
         }
     }
 }
 
-/// Resolve the credential for `caller_user_id`, connect, and return the
+/// Resolve the connection's credentials, connect to `target.url`, and return the
 /// server's full `tools/list`. Blocking.
 ///
-/// The SSRF allowlist is the exact host of `url` (the stored connection URL).
-/// The secret's `allowed_destinations` is not consulted: an empty list or `*`
-/// must not widen the call.
+/// The SSRF allowlist is the exact host of `target.url`. Each header is resolved
+/// by [`resolve_mcp_headers`]: only the connection's own `connection` rows,
+/// pinned to exactly that host, at the connection's own scope. A row whose
+/// `allowed_destinations` is empty, `*` or another host is refused before
+/// anything is decrypted or sent.
 pub fn fetch_tools_snapshot(
     vault: &SecretsVault,
-    caller_user_id: &str,
-    url: &str,
+    target: McpCredentialTarget<'_>,
     header_bindings: &[HeaderBinding],
     timeout_ms: u64,
 ) -> Result<McpSnapshot, OrchestratorError> {
+    let url = target.url;
     let allowlist = allowlist_from_connection_url(url)?;
-    let headers = resolve_mcp_headers(vault, caller_user_id, header_bindings)?;
+    let headers = resolve_mcp_headers(vault, target, header_bindings)?;
     let mut client = McpClient::connect(url, &allowlist, headers, timeout_ms)?;
     let tools = client.list_tools()?;
     Ok(McpSnapshot {
@@ -2376,12 +2504,9 @@ fn delete_bindings_in(
     owner_user_id: &str,
     ids: &[String],
 ) -> Result<(), OrchestratorError> {
-    let owner = vault_owner_user_id(scope, owner_user_id);
+    // Only `connection` rows: a row of another kind at one of these ids is left in place.
     for binding_id in ids {
-        connection.execute(
-            "DELETE FROM host_secrets WHERE scope = ?1 AND owner_user_id = ?2 AND binding_id = ?3",
-            params![scope.as_str(), owner, binding_id],
-        )?;
+        crate::secrets::delete_connection_secret_in(connection, scope, owner_user_id, binding_id)?;
     }
     Ok(())
 }
@@ -2479,6 +2604,14 @@ fn write_mcp_connection_row(
     let snapshot = serde_json::to_string(&tools)
         .map_err(|e| OrchestratorError::InvalidContract(e.to_string()))?;
     let header_bindings = synthesize_header_bindings(secret_binding_id, header_bindings.to_vec());
+    // A connection names only its own credentials. A foreign id (another connection's row, a
+    // user's own secret, an org row) is never stored, so it can never be resolved and sent.
+    for binding in &header_bindings {
+        refuse_foreign_binding_id(connection_id, &binding.binding_id)?;
+    }
+    if !secret_binding_id.is_empty() {
+        refuse_foreign_binding_id(connection_id, secret_binding_id)?;
+    }
     let auth_binding = if secret_binding_id.is_empty() {
         authorization_binding_id(&header_bindings)
     } else {
@@ -2528,6 +2661,33 @@ fn write_mcp_connection_row(
         ],
     )?;
     Ok(())
+}
+
+/// [`refuse_foreign_binding_id`] for every binding a stored row would carry forward: its header
+/// bindings and its `secret_binding_id`.
+pub(crate) fn refuse_foreign_connection_bindings(
+    conn: &McpConnection,
+) -> Result<(), OrchestratorError> {
+    for binding in &conn.header_bindings {
+        refuse_foreign_binding_id(&conn.connection_id, &binding.binding_id)?;
+    }
+    if !conn.secret_binding_id.is_empty() {
+        refuse_foreign_binding_id(&conn.connection_id, &conn.secret_binding_id)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn refuse_foreign_binding_id(
+    connection_id: &str,
+    binding_id: &str,
+) -> Result<(), OrchestratorError> {
+    if is_own_mcp_binding_id(connection_id, binding_id) {
+        Ok(())
+    } else {
+        Err(OrchestratorError::InvalidContract(format!(
+            "vault binding '{binding_id}' is not one of connection '{connection_id}''s own credentials"
+        )))
+    }
 }
 
 fn oauth_metadata_json(oauth: Option<&McpOauthMetadata>) -> Result<String, OrchestratorError> {
@@ -3767,7 +3927,21 @@ mod tests {
     use super::*;
     use secrecy::ExposeSecret;
 
-    use crate::mcp_client::{mock, resolve_auth_header, McpClient};
+    use crate::mcp_client::{mock, McpClient};
+
+    fn target<'a>(
+        scope: SecretScope,
+        owner_user_id: &'a str,
+        connection_id: &'a str,
+        url: &'a str,
+    ) -> McpCredentialTarget<'a> {
+        McpCredentialTarget {
+            scope,
+            owner_user_id,
+            connection_id,
+            url,
+        }
+    }
 
     fn tool(name: &str) -> McpTool {
         McpTool {
@@ -3985,26 +4159,290 @@ mod tests {
         let (url, seen) = mock::spawn(mock::standard);
         let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
         let vault = SecretsVault::for_tests(store);
-        vault
-            .put_secret(
-                "linear/auth-header",
-                "Bearer t",
-                SecretKind::Egress,
-                &["*".to_string()],
-                None,
-            )
-            .unwrap();
         let url = url.replace("http://", "https://");
+        // A credential the connection may send (its own row, pinned to the URL's host), so the
+        // refusal under test is the loopback URL's, not the credential's.
+        store_mcp_credential(
+            &vault,
+            SecretScope::Org,
+            "alice",
+            "linear",
+            "Bearer t",
+            &connection_host(&url).unwrap(),
+            None,
+            UserRole::Operator,
+        )
+        .unwrap();
         let headers = [HeaderBinding {
             name: "Authorization".into(),
             binding_id: "linear/auth-header".into(),
         }];
-        let err = fetch_tools_snapshot(&vault, "", &url, &headers, 1_000).unwrap_err();
+        let err = fetch_tools_snapshot(
+            &vault,
+            target(SecretScope::Org, "", "linear", &url),
+            &headers,
+            1_000,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, OrchestratorError::InvalidContract(_)),
             "{err}"
         );
         assert!(seen.lock().unwrap().methods.is_empty());
+    }
+
+    #[test]
+    fn only_a_connections_own_generated_ids_are_its_bindings() {
+        for own in [
+            "acme/auth-header",
+            "acme/header/x-api-key",
+            "acme/oauth/access-token",
+            "acme/oauth/refresh-token",
+            "acme/oauth/client-secret",
+        ] {
+            assert!(is_own_mcp_binding_id("acme", own), "{own}");
+        }
+        for foreign in [
+            "",
+            "acme",
+            "acme/",
+            "acme/header/",
+            "acme/header/X-Api-Key",
+            "acme/header/authorization",
+            "acme/header/a/b",
+            "acme/oauth/other",
+            "acme-2/auth-header",
+            "acm/auth-header",
+            "jira/auth-header",
+            "connector/acme/oauth/client-secret",
+            "connector/acme/oauth/access-token",
+        ] {
+            assert!(!is_own_mcp_binding_id("acme", foreign), "{foreign}");
+        }
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        let err = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "alice",
+                "acme",
+                "https://mcp.example.com/mcp",
+                "",
+                &[HeaderBinding {
+                    name: "X-Api-Key".into(),
+                    binding_id: "jira/auth-header".into(),
+                }],
+                &[],
+                McpAuthMode::Static,
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, OrchestratorError::InvalidContract(_)),
+            "{err}"
+        );
+        assert!(store
+            .get_mcp_connection(SecretScope::User, "alice", "acme")
+            .is_err());
+    }
+
+    #[test]
+    fn cleanup_deletes_only_connection_rows_at_a_connections_own_ids() {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        let url = "https://mcp.example.com/mcp";
+        let conn = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "alice",
+                "acme",
+                url,
+                "acme/auth-header",
+                &[],
+                &[],
+                McpAuthMode::Static,
+                None,
+            )
+            .unwrap();
+        let put = |kind: SecretKind| {
+            vault
+                .put_secret_with_owner(
+                    "acme/auth-header",
+                    "VALUE",
+                    kind,
+                    &["mcp.example.com".to_string()],
+                    None,
+                    "alice",
+                )
+                .unwrap();
+        };
+        let present = || {
+            vault
+                .has_binding_at(SecretScope::User, "alice", "acme/auth-header")
+                .unwrap()
+        };
+        // Disconnect: an `egress` row at the connection's id is the user's, and stays.
+        put(SecretKind::Egress);
+        delete_mcp_connection_secrets(&vault, &conn).unwrap();
+        assert!(present());
+        // An auth-mode change: the same.
+        delete_replaced_auth_mode_bindings(&vault, &conn, McpAuthMode::Oauth, &[]).unwrap();
+        assert!(present());
+        // The guarded write's in-transaction cleanup: the same.
+        let oauth = McpOauthMetadata {
+            resource: url.into(),
+            authorization_server: "https://auth.example.com".into(),
+            token_endpoint: "https://auth.example.com/token".into(),
+            revocation_endpoint: None,
+            client_id: "c".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: None,
+            status: McpOauthStatus::Connected,
+            last_refresh_at: None,
+            last_refresh_error: None,
+        };
+        let switched = store
+            .upsert_mcp_connection_guarded(
+                SecretScope::User,
+                "alice",
+                "acme",
+                url,
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&oauth),
+                McpAuthWrite::Replace {
+                    observed: Some(&conn),
+                },
+            )
+            .unwrap();
+        assert!(present());
+        // A `connection` row at the same id is the connection's, and each path deletes it.
+        vault
+            .delete_secret_at(SecretScope::User, "alice", "acme/auth-header")
+            .unwrap();
+        put(SecretKind::Connection);
+        delete_mcp_connection_secrets(&vault, &conn).unwrap();
+        assert!(!present());
+        put(SecretKind::Connection);
+        delete_replaced_auth_mode_bindings(&vault, &conn, McpAuthMode::Oauth, &[]).unwrap();
+        assert!(!present());
+        put(SecretKind::Connection);
+        store
+            .upsert_mcp_connection_guarded(
+                SecretScope::User,
+                "alice",
+                "acme",
+                url,
+                &[],
+                &[],
+                McpAuthMode::Static,
+                None,
+                McpAuthWrite::Replace {
+                    observed: Some(&switched),
+                },
+            )
+            .unwrap();
+        store
+            .upsert_mcp_connection_guarded(
+                SecretScope::User,
+                "alice",
+                "acme",
+                url,
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&oauth),
+                McpAuthWrite::Replace {
+                    observed: Some(&conn),
+                },
+            )
+            .unwrap();
+        assert!(!present());
+    }
+
+    #[test]
+    fn a_token_upsert_on_a_row_naming_a_foreign_binding_writes_nothing() {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        let url = "https://mcp.example.com/mcp";
+        let oauth = McpOauthMetadata {
+            resource: url.into(),
+            authorization_server: "https://auth.example.com".into(),
+            token_endpoint: "https://auth.example.com/token".into(),
+            revocation_endpoint: None,
+            client_id: "c".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: None,
+            status: McpOauthStatus::Connected,
+            last_refresh_at: None,
+            last_refresh_error: None,
+        };
+        let conn = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "alice",
+                "acme",
+                url,
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&oauth),
+            )
+            .unwrap();
+        let old = McpOauthTokenWrite {
+            access_token: "A-old".into(),
+            refresh_token: "R-old".into(),
+            client_secret: Some("S-old".into()),
+        };
+        store_mcp_oauth_tokens(&vault, &conn, &old, None, UserRole::Member).unwrap();
+        // A row written before binding ids were checked.
+        {
+            let c = store.connection.lock().unwrap();
+            c.execute(
+                "UPDATE mcp_connections SET
+                 header_bindings_json = '[{\"name\":\"X-Extra\",\"bindingId\":\"jira/auth-header\"}]'
+                 WHERE owner_user_id = 'alice' AND connection_id = 'acme'",
+                [],
+            )
+            .unwrap();
+        }
+        let legacy = store
+            .get_mcp_connection(SecretScope::User, "alice", "acme")
+            .unwrap();
+        let err = store_mcp_oauth_tokens(
+            &vault,
+            &legacy,
+            &McpOauthTokenWrite {
+                access_token: "A-new".into(),
+                refresh_token: "R-new".into(),
+                client_secret: Some("S-new".into()),
+            },
+            None,
+            UserRole::Member,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, OrchestratorError::InvalidContract(_)),
+            "{err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("vault binding 'jira/auth-header' is not one of connection 'acme''s own credentials"),
+            "{err}"
+        );
+        for (id, value) in [
+            (mcp_oauth_access_token_binding_id("acme"), "A-old"),
+            (mcp_oauth_refresh_token_binding_id("acme"), "R-old"),
+            (mcp_oauth_client_secret_binding_id("acme"), "S-old"),
+        ] {
+            let got = vault
+                .decrypt_secret_at(SecretScope::User, "alice", &id)
+                .unwrap();
+            assert_eq!(got.expose_secret(), value, "{id}");
+        }
     }
 
     #[test]
@@ -4076,19 +4514,33 @@ mod tests {
         assert!(!dumped.contains("alice-token"), "{dumped}");
         assert!(!dumped.contains("org-token"), "{dumped}");
 
-        for (caller, expect) in [
-            ("alice", "Bearer alice-token"),
-            ("bob", "Bearer bob-token"),
-            ("", "Bearer org-token"),
+        // Each connection reads its own scope's row: the owner's for a user connection, the
+        // org row for the org connection.
+        let linear_url = "https://mcp.linear.app/mcp";
+        for (scope, owner, expect) in [
+            (SecretScope::User, "alice", "Bearer alice-token"),
+            (SecretScope::User, "bob", "Bearer bob-token"),
+            (SecretScope::Org, "", "Bearer org-token"),
         ] {
-            let auth = resolve_auth_header(&vault, caller, &alice).unwrap();
+            let auth = decrypt_mcp_connection_secret(
+                &vault,
+                target(scope, owner, "linear", linear_url),
+                &alice,
+            )
+            .unwrap();
             assert_eq!(auth.expose_secret(), expect);
             let mut client = McpClient::unpinned_for_tests(&url, Some(auth));
             client.list_tools().unwrap();
         }
 
-        let carol = resolve_auth_header(&vault, "carol", &alice).unwrap();
-        assert_eq!(carol.expose_secret(), "Bearer org-token");
+        // A user connection of someone with no row of their own never falls back to the org row.
+        let carol = decrypt_mcp_connection_secret(
+            &vault,
+            target(SecretScope::User, "carol", "linear", linear_url),
+            &alice,
+        )
+        .unwrap_err();
+        assert!(matches!(carol, OrchestratorError::NotFound(_)), "{carol}");
 
         let auth = seen.lock().unwrap().auth.clone();
         assert_eq!(auth.len(), 9, "{auth:?}");
@@ -4164,7 +4616,12 @@ mod tests {
             .is_ok());
         let resolved = resolve_mcp_headers(
             &vault,
-            "alice",
+            target(
+                SecretScope::User,
+                "alice",
+                "acme",
+                "https://mcp.example.com/mcp",
+            ),
             &[
                 HeaderBinding {
                     name: "Authorization".into(),
@@ -4216,7 +4673,12 @@ mod tests {
         .unwrap();
         let resolved = resolve_mcp_headers(
             &vault,
-            "alice",
+            target(
+                SecretScope::User,
+                "alice",
+                "acme",
+                "https://mcp.example.com/mcp",
+            ),
             &[
                 HeaderBinding {
                     name: "Authorization".into(),
