@@ -3755,6 +3755,7 @@ New backlog lines:
 - From the Phase 7 review (R12): `vam connector validate` prints `ok` lines for the artifacts of a listing that has listing-level errors. Print the listing errors first and no `ok` for that listing. `Decide: BACKLOG — proof 1, cost 1`.
 - From the Phase 7 review (R13): the orphan header rows on replace, already recorded above (wave 5). No new line.
 - The smoke suite runs close to `vam-e2e`'s 15-minute whole-run budget on a slow runner: on #134 (5623777) the last 14 scenarios failed at `when.0` in 0 ms when the budget ran out (the re-run on the next head passed). Raise the smoke budget in `rust.yml`, or split smoke into two jobs, before it flakes again. `Decide: BACKLOG — proof 1, cost 1`.
+- The shared cargo target fills the session disk (about 50 GB): two agents building in it at once ran the disk out three times in the review round (`cargo clean` each time; one false scenario failure when two worktrees overwrote `target/debug/vam-e2e`). Run fewer parallel builds, or give the environment more disk. `Decide: BACKLOG — proof 1, cost 1`.
 
 ##### Open questions (each with a default)
 
