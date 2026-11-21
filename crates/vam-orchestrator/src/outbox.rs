@@ -474,7 +474,7 @@ fn attach_show_card_at(
     let Some(card) = cards.show else {
         return skip("card_unavailable");
     };
-    if result_text.len() > MAX_CARD_DATA_BYTES {
+    if result_text.len() > trim::MAX_TRIM_SOURCE_BYTES {
         return skip("result_too_large");
     }
     let data = match serde_json::from_str::<serde_json::Value>(result_text) {
@@ -488,18 +488,39 @@ fn attach_show_card_at(
         );
         return skip("result_does_not_fit");
     }
+    // Over the card limit (measured as compact JSON, so whitespace in the tool's output does not
+    // count): keep the rows of the bound list that fit. The model's result is unchanged. A result
+    // that cannot be cut, or whose cut no longer fits the card's schema (`minItems`), is skipped.
+    let compact_len = serde_json::to_vec(&data).map_or(usize::MAX, |b| b.len());
+    let (ir, data, trimmed) = if compact_len > MAX_CARD_DATA_BYTES {
+        let Some(t) = trim::trim_to_fit(&card.ir, &data) else {
+            return skip("result_too_large");
+        };
+        if vam_spec::jig::check_data_against(&card.schema, &t.data).is_err() {
+            return skip("result_too_large");
+        }
+        let note = serde_json::json!({ "path": t.path, "total": t.total, "kept": t.kept });
+        (t.ir, t.data, Some(note))
+    } else {
+        (card.ir, data, None)
+    };
     if !admit_at(run_id, now) {
         return skip("rate_limited");
     }
     let mut payload = serde_json::json!({
-        "jig": card.jig, "ir": card.ir, "data": data,
+        "jig": card.jig, "ir": ir, "data": data,
         "tool": tool, "callId": call_id, "skill": card.skill, "source": "tool",
     });
+    if let Some(note) = trimmed {
+        payload["trimmed"] = note;
+    }
     if let Some(card_id) = payload["data"].get("card_id").cloned() {
         payload["card_id"] = card_id;
     }
     append_card_event(store, run_id, TYPE_OUTBOX_CARD, payload);
 }
+
+mod trim;
 
 #[cfg(test)]
 mod tests;

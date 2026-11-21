@@ -15,7 +15,6 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::secrets::SecretsVault;
 use crate::ssrf_guard::PinnedUrl;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -269,20 +268,6 @@ fn reject_lax_allowlist(allowlist: &[String]) -> Result<(), McpClientError> {
         _ => Err(McpClientError::UrlRejected(
             "MCP allowlist must be the single exact host of the registered connection".into(),
         )),
-    }
-}
-
-/// Resolve the `Authorization` header value for `caller_user_id`, the same
-/// way `host_tools_http` does: empty caller reads org scope only.
-pub fn resolve_auth_header(
-    vault: &SecretsVault,
-    caller_user_id: &str,
-    binding_id: &str,
-) -> Result<SecretString, crate::error::OrchestratorError> {
-    if caller_user_id.is_empty() {
-        vault.decrypt_secret(binding_id)
-    } else {
-        vault.decrypt_secret_for_caller(caller_user_id, binding_id)
     }
 }
 

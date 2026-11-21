@@ -112,6 +112,16 @@ pub fn destination_within_domains(destination: &str, domains: &[String]) -> bool
     })
 }
 
+/// True when `destinations` names exactly `host`: trimmed, trailing dot removed,
+/// case-insensitive. No pattern matching: `*` or `*.example.com` never matches.
+pub(crate) fn destinations_name_host(destinations: &[String], host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.');
+    !host.is_empty()
+        && destinations
+            .iter()
+            .any(|dest| dest.trim().trim_end_matches('.').eq_ignore_ascii_case(host))
+}
+
 /// May a secret pinned to `destinations` be sent to `host`? Same rule as the
 /// egress gate: an exact host, a `*.base` pattern (strict subdomains) or `*`.
 /// An empty list allows nothing.
@@ -247,6 +257,28 @@ impl SecretScope {
 
 /// Empty owner for org-scope rows. User-scope rows use `users.user_id`.
 pub const ORG_OWNER_USER_ID: &str = "";
+
+/// [`SqliteWorkflowStore::delete_connection_secret`] on a connection (or transaction) the caller
+/// holds: deletes the row only when its kind is `connection`, in one statement.
+pub(crate) fn delete_connection_secret_in(
+    connection: &rusqlite::Connection,
+    scope: SecretScope,
+    owner_user_id: &str,
+    binding_id: &str,
+) -> Result<bool, OrchestratorError> {
+    let owner = vault_owner_user_id(scope, owner_user_id);
+    let changed = connection.execute(
+        "DELETE FROM host_secrets
+         WHERE scope = ?1 AND owner_user_id = ?2 AND binding_id = ?3 AND kind = ?4",
+        params![
+            scope.as_str(),
+            owner,
+            binding_id,
+            SecretKind::Connection.as_str()
+        ],
+    )?;
+    Ok(changed > 0)
+}
 
 /// Owner column stored in the vault key `(scope, owner_user_id, binding_id)`.
 pub fn vault_owner_user_id(scope: SecretScope, owner_user_id: &str) -> &str {
@@ -676,6 +708,36 @@ impl SecretsVault {
         self.store
             .touch_host_secret_used(scope, owner, binding_id)?;
         Ok(SecretString::new(plaintext))
+    }
+
+    /// Decrypt an MCP connection credential that is about to be sent to `host`.
+    ///
+    /// Reads exactly one row, at `scope` and `owner_user_id` (no user→org fallback), and decrypts
+    /// it only if it is a `connection` row whose `allowed_destinations` names exactly `host`. The
+    /// kind check, the pin check and the decrypt are one read
+    /// ([`Self::decrypt_secret_at_checked`]): a refused row is never decrypted. A refusal is
+    /// [`OrchestratorError::PermissionDenied`] naming the binding id, never the value.
+    pub(crate) fn decrypt_mcp_credential_pinned(
+        &self,
+        scope: SecretScope,
+        owner_user_id: &str,
+        binding_id: &str,
+        host: &str,
+    ) -> Result<SecretString, OrchestratorError> {
+        let host = host.trim().trim_end_matches('.');
+        self.decrypt_secret_at_checked(scope, owner_user_id, binding_id, |meta| {
+            if meta.kind != SecretKind::Connection {
+                return Err(OrchestratorError::PermissionDenied(format!(
+                    "secret '{binding_id}' is not an MCP connection credential and is never sent as an MCP header"
+                )));
+            }
+            if !destinations_name_host(&meta.allowed_destinations, host) {
+                return Err(OrchestratorError::PermissionDenied(format!(
+                    "MCP credential '{binding_id}' is not pinned to host '{host}': reconnect the connection"
+                )));
+            }
+            Ok(())
+        })
     }
 
     pub fn has_binding(&self, binding_id: &str) -> Result<bool, OrchestratorError> {
@@ -1139,6 +1201,22 @@ impl SqliteWorkflowStore {
             return Err(secret_missing(scope, owner, binding_id));
         }
         Ok(meta)
+    }
+
+    /// Delete the row at `binding_id` only if it is a `connection` row (an MCP connection's own
+    /// credential). A row of any other kind at the same id is left in place. Check and delete are
+    /// one statement. Returns whether a row was deleted.
+    pub(crate) fn delete_connection_secret(
+        &self,
+        scope: SecretScope,
+        owner_user_id: &str,
+        binding_id: &str,
+    ) -> Result<bool, OrchestratorError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        delete_connection_secret_in(&connection, scope, owner_user_id, binding_id)
     }
 
     pub fn load_host_secret_ciphertext(
