@@ -2123,7 +2123,7 @@ async fn run_mcp_call_journaled(
     match outcome {
         Ok((output, attempt_secrets)) => {
             let mut secrets = attempt_secrets;
-            secrets.extend(mcp_connection_secret_values(vault, caller_user_id, conn));
+            secrets.extend(mcp_connection_secret_values(vault, conn));
             let (text, artifacts) = package_mcp_result(
                 store,
                 run_id,
@@ -2523,7 +2523,6 @@ fn redact_vendor_text(text: String, secrets: &[String]) -> String {
 /// credential is redacted even if it was not part of this attempt's headers.
 fn mcp_connection_secret_values(
     vault: Option<&SecretsVault>,
-    caller_user_id: &str,
     conn: &crate::mcp_registry::McpConnection,
 ) -> Vec<String> {
     let Some(vault) = vault else {
@@ -2553,11 +2552,26 @@ fn mcp_connection_secret_values(
                 }
             }
         }
-    } else if !conn.secret_binding_id.is_empty() {
-        if let Ok(value) =
-            crate::mcp_client::resolve_auth_header(vault, caller_user_id, &conn.secret_binding_id)
-        {
-            values.push(value.expose_secret().to_string());
+    } else {
+        // Only what the connection may send: its own `connection` rows, at its own scope,
+        // pinned to its host. A binding that is refused there was never sent either.
+        let target = conn.credential_target();
+        let binding_ids: std::collections::BTreeSet<&str> = conn
+            .header_bindings
+            .iter()
+            .map(|b| b.binding_id.as_str())
+            .chain(std::iter::once(conn.secret_binding_id.as_str()))
+            .filter(|id| !id.is_empty())
+            .collect();
+        for binding_id in binding_ids {
+            if let Ok(value) =
+                crate::mcp_registry::decrypt_mcp_connection_secret(vault, target, binding_id)
+            {
+                let value = value.expose_secret().to_string();
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+            }
         }
     }
     values
@@ -2930,9 +2944,12 @@ async fn invoke_mcp_tool_inner(
         let vault = vault.ok_or_else(|| "mcp denied: vault is not available".to_string())?;
         crate::mcp_registry::resolve_mcp_connection_headers(vault, caller_user_id, conn).map_err(
             |err| {
-                if oauth {
+                if oauth && !matches!(err, crate::error::OrchestratorError::PermissionDenied(_)) {
                     "mcp denied: credential unavailable".to_string()
                 } else {
+                    // A refused credential (not the connection's own, not a `connection` row, or
+                    // not pinned to this host) names the binding id and asks for a reconnect;
+                    // the value is never read, so it cannot be in the text.
                     format!("mcp denied: {err}")
                 }
             },
@@ -3068,14 +3085,14 @@ async fn invoke_mcp_tool_inner(
         Err(err) => {
             trace.verdict(mcp_error_is_definite(&err));
             let mut secrets = attempt_secrets.clone();
-            secrets.extend(mcp_connection_secret_values(vault, caller_user_id, conn));
+            secrets.extend(mcp_connection_secret_values(vault, conn));
             return Err(mcp_call_error(err, oauth, !read_class, &secrets));
         }
     };
     if result.is_error {
         trace.verdict(true);
         let mut secrets = attempt_secrets.clone();
-        secrets.extend(mcp_connection_secret_values(vault, caller_user_id, conn));
+        secrets.extend(mcp_connection_secret_values(vault, conn));
         let text = mcp_result_text(&result);
         if text.trim().is_empty() {
             return Err("mcp tool returned an error".into());
@@ -3332,9 +3349,24 @@ fn exchange_and_store_mcp_tokens(
     {
         return Err(RefreshFailure::needs_reauth("refresh token unavailable"));
     }
-    let refresh_token = vault
-        .decrypt_secret_at(conn.scope, &conn.owner_user_id, &refresh_id)
-        .map_err(vault_error)?;
+    // The refresh token and a per-row client secret were pinned to the token endpoint's host when
+    // they were stored. They are read only if they are still pinned to the host of the row's
+    // current token endpoint (the one the request below goes to): a connect that moved the
+    // endpoint to another host needs a new sign-in, and nothing is sent. The org client's branch
+    // further down also requires this endpoint to be the node's own.
+    let token_host = crate::mcp_client::connection_host(&metadata.token_endpoint)
+        .map_err(|_| RefreshFailure::needs_reauth("the token endpoint changed: reconnect"))?;
+    let pinned_read = |binding_id: &str| {
+        vault
+            .decrypt_mcp_credential_pinned(conn.scope, &conn.owner_user_id, binding_id, &token_host)
+            .map_err(|err| match err {
+                crate::error::OrchestratorError::PermissionDenied(_) => {
+                    RefreshFailure::needs_reauth("the token endpoint changed: reconnect")
+                }
+                other => vault_error(other),
+            })
+    };
+    let refresh_token = pinned_read(&refresh_id)?;
     // A connector whose client is the admin's refreshes with the node's client: the endpoints and
     // client id the node pinned at Enable, and the org-scope secret read now (no cache, so a replaced
     // secret is used by the next refresh). The member's own row never names the endpoint the secret
@@ -3350,11 +3382,7 @@ fn exchange_and_store_mcp_tokens(
                 .has_binding_at(conn.scope, &conn.owner_user_id, &client_secret_id)
                 .map_err(vault_error)?
             {
-                Some(
-                    vault
-                        .decrypt_secret_at(conn.scope, &conn.owner_user_id, &client_secret_id)
-                        .map_err(vault_error)?,
-                )
+                Some(pinned_read(&client_secret_id)?)
             } else {
                 None
             };
@@ -6978,16 +7006,20 @@ mod mcp_call_tests {
             .unwrap();
             conn
         } else {
-            vault
-                .put_secret_with_owner(
-                    "example/key",
-                    STATIC_SECRET,
-                    crate::secrets::SecretKind::Egress,
-                    &[],
-                    None,
-                    "alice",
-                )
-                .unwrap();
+            // The header row the connect writes: the connection's own id, a `connection` row
+            // pinned to the MCP host.
+            let binding_id = crate::mcp_registry::store_mcp_header_credential(
+                &vault,
+                SecretScope::User,
+                "alice",
+                "example",
+                "X-Api-Key",
+                STATIC_SECRET,
+                &crate::mcp_client::connection_host(&url).unwrap(),
+                None,
+                UserRole::Member,
+            )
+            .unwrap();
             store
                 .upsert_mcp_connection(
                     SecretScope::User,
@@ -6997,7 +7029,7 @@ mod mcp_call_tests {
                     "",
                     &[HeaderBinding {
                         name: "X-Api-Key".into(),
-                        binding_id: "example/key".into(),
+                        binding_id,
                     }],
                     &tools(),
                     McpAuthMode::Static,
@@ -7216,6 +7248,122 @@ mod mcp_call_tests {
     #[tokio::test]
     async fn mcp_error_echoing_token_is_redacted_for_oauth_connection_jsonrpc() {
         exercise_redaction(true, true).await;
+    }
+
+    // ---- an MCP header goes only to its own connection's pinned host ----
+
+    #[tokio::test]
+    async fn mcp_header_pinned_to_another_host_is_never_sent_per_session() {
+        let (url, calls, seen) = spawn_script(|_, id| result_reply(id, "created", false));
+        for oauth_mode in [false, true] {
+            let fx = fixture(&url, oauth_mode);
+            // The connection's own row, rewritten pinned to another host.
+            let binding = if oauth_mode {
+                crate::mcp_registry::mcp_oauth_access_token_binding_id("example")
+            } else {
+                "example/header/x-api-key".to_string()
+            };
+            fx.vault
+                .put_secret_with_owner(
+                    &binding,
+                    fx.secret,
+                    crate::secrets::SecretKind::Connection,
+                    &["mcp.elsewhere.example".to_string()],
+                    None,
+                    "alice",
+                )
+                .unwrap();
+            let run = call(&fx, "list_issues", json!({}), CAP).await;
+            let err = run.result.unwrap_err();
+            assert!(err.contains("not pinned to host"), "{err}");
+            assert!(err.contains(&binding), "{err}");
+            assert!(!err.contains(fx.secret), "{err}");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(seen.lock().unwrap().methods.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_foreign_or_non_connection_header_row_is_never_sent_per_session() {
+        let (url, calls, seen) = spawn_script(|_, id| result_reply(id, "created", false));
+        let fx = fixture(&url, false);
+        let host = crate::mcp_client::connection_host(&fx.conn.url).unwrap();
+        // A foreign id (the user's own egress secret, pinned to the MCP host) on a row stored
+        // before ids were checked.
+        fx.vault
+            .put_secret_with_owner(
+                "jira/auth-header",
+                "FOREIGN-VALUE",
+                crate::secrets::SecretKind::Egress,
+                std::slice::from_ref(&host),
+                None,
+                "alice",
+            )
+            .unwrap();
+        let mut foreign = fx.conn.clone();
+        foreign.header_bindings = vec![HeaderBinding {
+            name: "Authorization".into(),
+            binding_id: "jira/auth-header".into(),
+        }];
+        let run = run_mcp_call(
+            &fx.store,
+            &foreign,
+            Some(&fx.vault),
+            "list_issues",
+            &to_struct(&json!({})),
+            "alice",
+            RUN,
+            CAP,
+            connect_mock,
+            crate::mcp_oauth_refresh::refresh_access_token_unpinned_for_tests,
+        )
+        .await;
+        let err = run.result.unwrap_err();
+        assert!(err.contains("not one of its own credentials"), "{err}");
+        assert!(!err.contains("FOREIGN-VALUE"), "{err}");
+        // The connection's own id, but an `egress` row.
+        fx.vault
+            .delete_secret_at(SecretScope::User, "alice", "example/header/x-api-key")
+            .unwrap();
+        fx.vault
+            .put_secret_with_owner(
+                "example/header/x-api-key",
+                "EGRESS-VALUE",
+                crate::secrets::SecretKind::Egress,
+                &[host],
+                None,
+                "alice",
+            )
+            .unwrap();
+        let run = call(&fx, "list_issues", json!({}), CAP).await;
+        let err = run.result.unwrap_err();
+        assert!(err.contains("not an MCP connection credential"), "{err}");
+        assert!(!err.contains("EGRESS-VALUE"), "{err}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(seen.lock().unwrap().methods.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_user_connection_is_never_resolved_for_another_caller() {
+        let (url, calls, seen) = spawn_script(|_, id| result_reply(id, "created", false));
+        let fx = fixture(&url, false);
+        let run = run_mcp_call(
+            &fx.store,
+            &fx.conn,
+            Some(&fx.vault),
+            "list_issues",
+            &to_struct(&json!({})),
+            "mallory",
+            RUN,
+            CAP,
+            connect_mock,
+            crate::mcp_oauth_refresh::refresh_access_token_unpinned_for_tests,
+        )
+        .await;
+        let err = run.result.unwrap_err();
+        assert!(err.contains("belongs to another user"), "{err}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(seen.lock().unwrap().methods.is_empty());
     }
 
     #[tokio::test]
@@ -11240,5 +11388,169 @@ mod org_client_refresh_tests {
         assert_eq!(auth.len(), 4, "{auth:?}");
         assert!(auth[..2].iter().all(|a| a == "Bearer A-old"), "{auth:?}");
         assert!(auth[2..].iter().all(|a| a == "Bearer A-new"), "{auth:?}");
+    }
+}
+
+/// An own-client OAuth refresh reads the refresh token and a per-row client secret only while they
+/// are pinned to the host of the row's current token endpoint: an endpoint moved to another host
+/// sends nothing and asks for a new sign-in.
+#[cfg(test)]
+mod own_client_refresh_pin_tests {
+    use super::*;
+    use crate::mcp_oauth_refresh::{RefreshFailure, RefreshFailureKind, RefreshedToken};
+    use crate::mcp_registry::{
+        mcp_oauth_client_secret_binding_id, mcp_oauth_refresh_token_binding_id,
+        store_mcp_oauth_tokens, McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod,
+        McpOauthStatus, McpOauthTokenWrite,
+    };
+    use crate::secrets::{SecretKind, SecretScope};
+    use crate::users::UserRole;
+    use secrecy::SecretString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const URL: &str = "https://mcp.refresh-pin.example/mcp";
+
+    fn meta(token_endpoint: &str) -> McpOauthMetadata {
+        McpOauthMetadata {
+            resource: URL.into(),
+            authorization_server: "https://auth.example.com".into(),
+            token_endpoint: token_endpoint.into(),
+            revocation_endpoint: None,
+            client_id: "own-client".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: None,
+            status: McpOauthStatus::Connected,
+            last_refresh_at: None,
+            last_refresh_error: None,
+        }
+    }
+
+    /// An own-client row signed in against `auth.example.com`, with a per-row client secret.
+    fn world(id: &str) -> (Arc<SqliteWorkflowStore>, Arc<SecretsVault>) {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        let conn = store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                id,
+                URL,
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&meta("https://auth.example.com/token")),
+            )
+            .unwrap();
+        store_mcp_oauth_tokens(
+            &vault,
+            &conn,
+            &McpOauthTokenWrite {
+                access_token: "A-old".into(),
+                refresh_token: "R-old".into(),
+                client_secret: Some("CLIENT-SECRET-old".into()),
+            },
+            None,
+            UserRole::Member,
+        )
+        .unwrap();
+        (store, vault)
+    }
+
+    fn move_endpoint(store: &SqliteWorkflowStore, id: &str, token_endpoint: &str) {
+        store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                id,
+                URL,
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&meta(token_endpoint)),
+            )
+            .unwrap();
+    }
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn refresher(
+        _oauth: &McpOauthMetadata,
+        _rt: &SecretString,
+        _secret: Option<&SecretString>,
+        _method: crate::connector_client::TokenAuthMethod,
+    ) -> Result<RefreshedToken, RefreshFailure> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(RefreshedToken {
+            access_token: "A-new".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("R-new".into()),
+        })
+    }
+
+    fn refresh(
+        store: &SqliteWorkflowStore,
+        vault: &SecretsVault,
+        id: &str,
+    ) -> Result<(), RefreshFailure> {
+        let conn = store
+            .get_mcp_connection(SecretScope::User, "ada", id)
+            .unwrap();
+        refresh_mcp_connection(store, vault, &conn, refresher)
+    }
+
+    // One test, so the shared request counter is read by one test at a time.
+    #[test]
+    fn credentials_pinned_to_another_token_host_are_never_sent_on_refresh() {
+        // A refresh token pinned to auth.example.com, the row's endpoint now on another host.
+        let (store, vault) = world("moved-refresh");
+        move_endpoint(
+            &store,
+            "moved-refresh",
+            "https://auth.elsewhere.example/token",
+        );
+        let before = CALLS.load(Ordering::SeqCst);
+        let failure = refresh(&store, &vault, "moved-refresh").unwrap_err();
+        assert_eq!(failure.kind, RefreshFailureKind::NeedsReauth, "{failure:?}");
+        assert_eq!(failure.reason, "the token endpoint changed: reconnect");
+        assert_eq!(CALLS.load(Ordering::SeqCst), before, "no token request");
+
+        // The refresh token follows the endpoint, the per-row client secret does not.
+        let (store, vault) = world("moved-secret");
+        move_endpoint(
+            &store,
+            "moved-secret",
+            "https://auth.elsewhere.example/token",
+        );
+        vault
+            .put_secret_with_owner(
+                &mcp_oauth_refresh_token_binding_id("moved-secret"),
+                "R-old",
+                SecretKind::Connection,
+                &["auth.elsewhere.example".to_string()],
+                None,
+                "ada",
+            )
+            .unwrap();
+        let failure = refresh(&store, &vault, "moved-secret").unwrap_err();
+        assert_eq!(failure.kind, RefreshFailureKind::NeedsReauth, "{failure:?}");
+        assert_eq!(failure.reason, "the token endpoint changed: reconnect");
+        assert_eq!(CALLS.load(Ordering::SeqCst), before, "no token request");
+        // The client secret is still the old one, pinned where it was.
+        let meta = vault
+            .get_metadata_at(
+                SecretScope::User,
+                "ada",
+                &mcp_oauth_client_secret_binding_id("moved-secret"),
+            )
+            .unwrap();
+        assert_eq!(meta.allowed_destinations, ["auth.example.com"]);
+
+        // The same host: the refresh goes ahead once.
+        let (store, vault) = world("same-host");
+        refresh(&store, &vault, "same-host").unwrap();
+        assert_eq!(CALLS.load(Ordering::SeqCst), before + 1);
     }
 }

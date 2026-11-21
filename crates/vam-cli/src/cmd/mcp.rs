@@ -17,7 +17,7 @@ pub enum McpCmd {
         /// HTTPS endpoint of the vendor's MCP server.
         #[arg(long)]
         url: String,
-        /// Existing vault binding. Omit when passing a token to store.
+        /// The connection's own stored credential, `<ID>/auth-header` (no other binding is accepted). Omit when passing a token to store.
         #[arg(long)]
         secret: Option<String>,
         /// Token to store. Prefer `--from-env` so the shell history stays clean.
