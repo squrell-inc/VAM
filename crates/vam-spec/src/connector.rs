@@ -531,29 +531,42 @@ fn check_tenant(c: &Connector) -> Result<(), ConnectorError> {
 const HEADER_NAME_MAX: usize = 64;
 const HEADER_PREFIX_MAX: usize = 32;
 
-/// Header names an API key is never injected into: the ones that decide where a request goes or
-/// how it is framed (`Host`, `Connection`, `Content-Length`, `Transfer-Encoding`, `Keep-Alive`,
-/// `TE`, `Trailer`, `Upgrade`, any `Proxy-*`), the ones other credentials and sessions live in
-/// (`Cookie`) and `Authorization` (a key there is `inject: bearer`). Compared case-insensitively.
-const REFUSED_HEADER_NAMES: [&str; 10] = [
-    "host",
-    "authorization",
-    "cookie",
+/// The request headers the node's egress filter strips before it dispatches a guest request
+/// (framing, hop-by-hop, routing and `Content-Length`), besides every `Proxy-*` header. The one
+/// list: `vam-network`'s `HeaderFilter::STRIPPED_HEADERS` is this constant, and `headerName`
+/// refuses every entry, so a key can never be injected into a header the filter would drop. All
+/// lowercase; compare case-insensitively.
+pub const STRIPPED_HEADERS: &[&str] = &[
     "connection",
-    "content-length",
-    "transfer-encoding",
     "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
     "te",
     "trailer",
+    "trailers",
+    "transfer-encoding",
     "upgrade",
+    "host",
+    "x-target-url",
+    "content-length",
 ];
+
+/// The prefix of the header names the egress filter strips whatever follows it.
+pub const STRIPPED_HEADER_PREFIX: &str = "proxy-";
+
+/// Header names an API key is never injected into besides the stripped ones: the ones other
+/// credentials and sessions live in (`Cookie`), and `Authorization` (a key there is
+/// `inject: bearer`, refused with its own words). Compared case-insensitively.
+const REFUSED_HEADER_NAMES: [&str; 2] = ["authorization", "cookie"];
 
 fn is_tchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
 /// The rules of a `headerName` (RFC 9110 field name): a non-empty token of `tchar` only, at most
-/// 64 characters, and none of the names an injected key must never land in. The same check runs at
+/// 64 characters, and none of the names an injected key must never land in (every
+/// [`STRIPPED_HEADERS`] entry, every `Proxy-*`, `Authorization`, `Cookie`). The same check runs at
 /// validation, at import and again where the node sets the header.
 pub fn check_header_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > HEADER_NAME_MAX || !name.bytes().all(is_tchar) {
@@ -567,7 +580,10 @@ pub fn check_header_name(name: &str) -> Result<(), String> {
             "`headerName` cannot be `Authorization`: a key sent there uses `inject: bearer`".into(),
         );
     }
-    if REFUSED_HEADER_NAMES.contains(&lower.as_str()) || lower.starts_with("proxy-") {
+    if REFUSED_HEADER_NAMES.contains(&lower.as_str())
+        || STRIPPED_HEADERS.contains(&lower.as_str())
+        || lower.starts_with(STRIPPED_HEADER_PREFIX)
+    {
         return Err(format!(
             "`headerName` cannot be `{name}`: that header decides where or how a request is sent, or carries other credentials"
         ));
@@ -1237,6 +1253,36 @@ mod tests {
         }
         let e = check_header_name("Authorization").unwrap_err();
         assert!(e.contains("inject: bearer"), "{e}");
+        // Every name the egress filter strips is refused, in three spellings, and so is every
+        // `Proxy-*` form (the filter drops all of them).
+        for name in STRIPPED_HEADERS.iter().copied().chain([
+            "proxy-",
+            "proxy-cache",
+            "proxy-x-anything",
+            "x-target-url",
+            "trailers",
+        ]) {
+            for spelled in [
+                name.to_string(),
+                name.to_ascii_uppercase(),
+                name.split('-')
+                    .map(|p| {
+                        let mut c = p.chars();
+                        c.next()
+                            .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("-"),
+            ] {
+                assert!(check_header_name(&spelled).is_err(), "{spelled}");
+                let e = err(keyed(json!({ "inject": "header", "headerName": spelled })));
+                assert!(
+                    e.contains("`headerName`") && e.contains("`api`"),
+                    "{spelled}: {e}"
+                );
+            }
+        }
         let long_name = "x".repeat(65);
         // Not a token: empty, a space, a colon, CR or LF, non-ASCII, a separator, too long.
         for bad in [

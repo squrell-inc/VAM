@@ -1207,7 +1207,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ConnectorEntry"
         "400":
-          description: Unknown body field, a tenant that is not a GUID, consent on a connector that takes none, a client on a connector that uses the publisher's own, a missing client secret, or a malformed client (the answer never quotes the body).
+          description: "Unknown body field, a tenant that is not a GUID, consent on a connector that takes none, a client on a connector that uses the publisher's own, a missing client secret, a malformed client, or a `client` or `consent` for an `api_key` connector (it takes neither: the member enters the key, and there is no OAuth client or admin consent; the text says \"API key\"). The answer never quotes the body."
           content:
             application/json:
               schema:
@@ -1340,7 +1340,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "409":
-          description: No admin consent is recorded, or the sign-in is from another Microsoft tenant than the consented one; for an API key connector, a company address the node has not got.
+          description: "No admin consent is recorded, or the sign-in is from another Microsoft tenant than the consented one; for an API key connector, a company address the node has not got. For an MCP connector with an API key: the member's row changed while the tool list was read (another connect, or an admin's change; nothing is written), a tool name that clashes with another connection's, a connection this connector did not make (an OAuth or static row on another server: disconnect it first, then enter the key), or the connector changed while the key was saved. An OAuth sign-in at the connector's own URL, left from before the connector moved to `api_key`, is not refused: the key replaces it, and its OAuth tokens are deleted in the same transaction."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: "For an MCP connector with an API key, the server's tool listing failed or could not be used (a refused key, a server that is down). Nothing is written: an earlier row, its key and any OAuth sign-in stay as they were."
           content:
             application/json:
               schema:
@@ -1349,7 +1355,11 @@ paths:
       summary: Disconnect a REST connector
       description: |
         Removes the caller's own token rows (or, for an API key connector, the key row) and
-        connection row (`secrets:write`; Idempotency-Key required). Allowed while the connector
+        connection row (`secrets:write`; Idempotency-Key required). The vault rows go first: if
+        one cannot be deleted the request fails (5xx), the connection row stays and nothing is
+        reported as disconnected, so the member can retry. For an MCP connector with an API key
+        it deletes the member's static MCP row and its `Authorization` header row (the key), in
+        that order. Allowed while the connector
         is disabled. 404 when the caller is not connected. No request is made to a provider for
         an API key. The answer is the caller's list entry as it reads after the delete: `connect`
         while the connector is enabled, `askAdmin` once the admin has disabled it.
@@ -1469,7 +1479,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ConnectorEntry"
         "400":
-          description: An unknown body field, a redirect URI that is not the app's, a malformed code or verifier, a connector whose client is the publisher's own (it has no node exchange), or the provider refused the code (spent, expired, wrong verifier).
+          description: "An unknown body field, a redirect URI that is not the app's, a malformed code or verifier, a connector whose client is the publisher's own (it has no node exchange), an `api_key` connector (it has no sign-in: the member enters the key at `PUT /v1/connectors/{id}/connection`; nothing is read or sent), or the provider refused the code (spent, expired, wrong verifier)."
           content:
             application/json:
               schema:
@@ -3784,6 +3794,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConnectMcpResponse"
+        "400":
+          description: "Among other body errors, the `connectionId` is a connector that signs in with an API key (its text says \"API key\"): connect it with `PUT /v1/connectors/{id}/connection` and `{ apiKey }`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "403":
           description: Caller lacks `secrets:write` or org-scope write role.
           content:
@@ -3980,7 +3996,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/UpsertMcpOauthTokensResponse"
         "400":
-          description: Connection is `authMode=static`, tokens are invalid or empty, expiry/status or resulting OAuth metadata is invalid, or body is invalid.
+          description: Connection is `authMode=static`, tokens are invalid or empty, expiry/status or resulting OAuth metadata is invalid, body is invalid, or the connection id is a connector that signs in with an API key (connect it with `PUT /v1/connectors/{id}/connection`).
           content:
             application/json:
               schema:
@@ -7330,7 +7346,7 @@ components:
               description: "The hosts the connector reaches with a member's credential (a company address is shown as `{subdomain}.<suffix>` until it is entered)."
             bindings:
               type: array
-              description: REST connectors. The name and hosts each binding attaches the member's credential to.
+              description: "REST connectors. The name and hosts each binding attaches the member's credential to, and where the credential goes when that is not `Authorization: Bearer`. All of it is part of the summary an admin enabled: an update that moves the key (bearer to a named header, another `headerName` or `prefix`) changes the summary and resets Enable."
               items:
                 type: object
                 properties:
@@ -7338,6 +7354,12 @@ components:
                   hosts:
                     type: array
                     items: { type: string }
+                  inject:
+                    type: string
+                    enum: [header, query]
+                    description: "Present only when the credential is not sent as `Authorization: Bearer`: `header` (an API key in the header named by `headerName`)."
+                  headerName: { type: string, description: "`inject: header` only." }
+                  prefix: { type: string, description: "`inject: header` only. Fixed text before the key in that header." }
             endpoints:
               type: object
               description: "Fixed sign-in endpoints (`profile: oauth`)."
@@ -7406,7 +7428,7 @@ components:
                 description: "`bearer`: `Authorization: Bearer <credential>`. `header`: the header named by `headerName`, with the optional `prefix`, only for an API key. `query` is never attached."
               headerName:
                 type: string
-                description: "`inject: header` only. The one header that carries the key (an RFC 9110 token; `Host`, `Authorization`, `Cookie`, `Proxy-*`, `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade` and `Content-Length` are refused). The guest never picks it."
+                description: "`inject: header` only. The one header that carries the key (an RFC 9110 token; `Authorization`, `Cookie`, every header the egress filter strips (`Host`, `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Trailers`, `Transfer-Encoding`, `Upgrade`, `Content-Length`, `X-Target-Url`) and every `Proxy-*` name are refused, whatever the letter case). The guest never picks it."
               prefix:
                 type: string
                 description: "`inject: header` only. Text put before the key in that header, for example `Token `."

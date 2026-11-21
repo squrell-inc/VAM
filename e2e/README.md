@@ -981,8 +981,9 @@ path outside its shape). The world pieces `marketplace-connector-kit` (fixture `
 `init` wrote with `git-tag: { root: { same: true } }`) and `marketplace-kit-broken` (fixture `broken-file`, tag
 `kit-broken-v1.0.0`) put a tree on a node's side, so the offline report and the install can be compared.
 
-- `vam connector test` prints `pass <tool>` or `fail <tool>: <the gate's words>` per case and, when none failed, `the key
-  never reached a tool`. It makes its own key as `vamkey_` plus 32 hex digits, so a scenario checks
+- `vam connector test` prints `pass <tool>` or `fail <tool>: <the gate's words>` per case and, when at least one case ran
+  and none failed, `the key never reached a tool`. When no case ran it says `no case ran` and exits 6, unless the only
+  listings were remote MCP connectors (checked: nothing runs for them). It makes its own key as `vamkey_` plus 32 hex digits, so a scenario checks
   `absent: ["vamkey_"]` (the output and every file in the tree). It reaches nothing off the machine.
 - The words the scenarios hold the CLI and the node to: `cannot tell apart` (placeholders), ``binding `files` `` and the host
   (a skill's egress its connector does not declare), `only valid as the Authorization value` (a placeholder in the

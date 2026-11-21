@@ -62,6 +62,14 @@ const MAX_REQUEST: usize = 8 * 1024 * 1024;
 /// The sample company address when neither `--subdomain` nor the test file names one.
 const DEFAULT_SUBDOMAIN: &str = "demo";
 
+/// A listing `test` did not run a case for.
+struct Skip {
+    text: String,
+    /// The listing was still checked (a remote MCP connector: its test file is valid, and there is
+    /// nothing to run here), as opposed to not looked at (no test file).
+    checked: bool,
+}
+
 /// What `vam connector test` printed for one case or listing.
 struct Line {
     listing: String,
@@ -76,7 +84,7 @@ pub fn test(dir: &str, listing: Option<&str>, subdomain: Option<&str>) -> Result
         .transpose()?;
     let (root, listings) = locate(dir, listing)?;
     let mut lines: Vec<Line> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
+    let mut skipped: Vec<Skip> = Vec::new();
     for id in &listings {
         test_listing(
             &root,
@@ -95,13 +103,18 @@ pub fn test(dir: &str, listing: Option<&str>, subdomain: Option<&str>) -> Result
                 lines.push(l);
             },
             &mut |s| {
-                human(|| println!("skip {s}"));
+                human(|| println!("skip {}", s.text));
                 skipped.push(s);
             },
         )?;
     }
     let failed = lines.iter().filter(|l| l.failure.is_some()).count();
     let summary = format!("{} case(s) passed, {failed} failed", lines.len() - failed);
+    let checked_only = skipped.iter().filter(|s| s.checked).count();
+    // Nothing ran and nothing was looked at (every listing skipped for want of a test file, or no
+    // listing): a green exit would say the key never reached a tool when no tool ever ran.
+    let nothing_ran = lines.is_empty();
+    let nothing_checked = nothing_ran && checked_only == 0;
     if output::is_json() {
         let cases: Vec<Value> = lines
             .iter()
@@ -124,6 +137,10 @@ pub fn test(dir: &str, listing: Option<&str>, subdomain: Option<&str>) -> Result
                 format!("{summary}; {}", why.join("; ")),
             ));
         }
+        if nothing_checked {
+            return Err(fail(ExitCode::Invalid, no_case_ran(&skipped)));
+        }
+        let skipped: Vec<&str> = skipped.iter().map(|s| s.text.as_str()).collect();
         println!(
             "{}",
             json!({ "ok": true, "cases": cases, "skipped": skipped })
@@ -137,8 +154,31 @@ pub fn test(dir: &str, listing: Option<&str>, subdomain: Option<&str>) -> Result
             format!("{failed} of {} case(s) failed", lines.len()),
         ));
     }
+    if nothing_checked {
+        return Err(fail(ExitCode::Invalid, no_case_ran(&skipped)));
+    }
+    if nothing_ran {
+        println!("no case ran: {checked_only} remote MCP listing(s) checked, nothing to run here");
+        return Ok(());
+    }
     println!("the key never reached a tool");
     Ok(())
+}
+
+/// The failure when no case ran and no listing was checked.
+fn no_case_ran(skipped: &[Skip]) -> String {
+    if skipped.is_empty() {
+        "no case ran: the marketplace has no listing to test".to_string()
+    } else {
+        format!(
+            "no case ran: every listing was skipped ({}); add listings/<id>/{TEST_FILE_PATH}",
+            skipped
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    }
 }
 
 fn human(print: impl FnOnce()) {
@@ -196,7 +236,7 @@ fn test_listing(
     subdomain: Option<&str>,
     explicit: bool,
     report: &mut dyn FnMut(Line),
-    skip: &mut dyn FnMut(String),
+    skip: &mut dyn FnMut(Skip),
 ) -> Result<()> {
     let listing_fail = |report: &mut dyn FnMut(Line), why: String| {
         report(Line {
@@ -213,7 +253,10 @@ fn test_listing(
                 format!("listings/{id}/{TEST_FILE_PATH} is missing: there is nothing to run"),
             );
         } else {
-            skip(format!("{id}: no listings/{id}/{TEST_FILE_PATH}"));
+            skip(Skip {
+                text: format!("{id}: no listings/{id}/{TEST_FILE_PATH}"),
+                checked: false,
+            });
         }
         return Ok(());
     }
@@ -243,11 +286,14 @@ fn test_listing(
         return Ok(());
     };
     if shipped.connector.mcp.is_some() {
-        skip(format!(
-            "{id}: a remote MCP connector (the node is its client): nothing runs here; the test file is valid ({} route(s), {} case(s))",
-            file.routes.len(),
-            file.cases.len()
-        ));
+        skip(Skip {
+            text: format!(
+                "{id}: a remote MCP connector (the node is its client): nothing runs here; the test file is valid ({} route(s), {} case(s))",
+                file.routes.len(),
+                file.cases.len()
+            ),
+            checked: true,
+        });
         return Ok(());
     }
     let world = match World::new(&shipped, &file, subdomain) {

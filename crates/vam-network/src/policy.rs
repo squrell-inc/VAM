@@ -264,21 +264,9 @@ impl ActivePolicyContainer {
 pub struct HeaderFilter;
 
 impl HeaderFilter {
-    pub const STRIPPED_HEADERS: &'static [&'static str] = &[
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "proxy-connection",
-        "te",
-        "trailer",
-        "trailers",
-        "transfer-encoding",
-        "upgrade",
-        "host",
-        "x-target-url",
-        "content-length",
-    ];
+    /// Defined once, in `vam-spec`, so a connector file's `headerName` can never name a header
+    /// this filter drops.
+    pub const STRIPPED_HEADERS: &'static [&'static str] = vam_spec::connector::STRIPPED_HEADERS;
 
     pub fn sanitize_headers(
         headers: std::collections::HashMap<String, String>,
@@ -286,7 +274,9 @@ impl HeaderFilter {
         let mut clean = std::collections::HashMap::new();
         for (k, v) in headers {
             let k_lower = k.to_lowercase();
-            if k_lower.starts_with("proxy-") || Self::STRIPPED_HEADERS.contains(&k_lower.as_str()) {
+            if k_lower.starts_with(vam_spec::connector::STRIPPED_HEADER_PREFIX)
+                || Self::STRIPPED_HEADERS.contains(&k_lower.as_str())
+            {
                 continue;
             }
             clean.insert(k, v);
@@ -298,6 +288,52 @@ impl HeaderFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_header_filter_strips_exactly_what_it_always_stripped() {
+        // The list moved to `vam-spec`; this is the list as it was in this file.
+        assert_eq!(
+            HeaderFilter::STRIPPED_HEADERS,
+            &[
+                "connection",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "proxy-connection",
+                "te",
+                "trailer",
+                "trailers",
+                "transfer-encoding",
+                "upgrade",
+                "host",
+                "x-target-url",
+                "content-length",
+            ]
+        );
+        let input: std::collections::HashMap<String, String> = [
+            "Connection",
+            "Keep-Alive",
+            "Proxy-Authorization",
+            "Proxy-Anything",
+            "TE",
+            "Trailers",
+            "Transfer-Encoding",
+            "Upgrade",
+            "Host",
+            "X-Target-Url",
+            "Content-Length",
+            "Authorization",
+            "Cookie",
+            "X-Api-Key",
+            "Accept",
+        ]
+        .into_iter()
+        .map(|k| (k.to_string(), "v".to_string()))
+        .collect();
+        let mut kept: Vec<String> = HeaderFilter::sanitize_headers(input).into_keys().collect();
+        kept.sort();
+        assert_eq!(kept, ["Accept", "Authorization", "Cookie", "X-Api-Key"]);
+    }
 
     #[test]
     fn test_is_ip_denied() {

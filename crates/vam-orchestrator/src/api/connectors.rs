@@ -6228,6 +6228,76 @@ mod tests {
         assert_eq!(s, StatusCode::NOT_FOUND);
     }
 
+    /// Makes every delete of `binding` from the vault fail, as a vault that cannot be written
+    /// would (the vault shares the store's database, so a trigger is the failure).
+    fn fail_vault_delete(state: &AppState, binding: &str) {
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER vault_delete_fails BEFORE DELETE ON host_secrets
+                 WHEN old.binding_id = '{binding}'
+                 BEGIN SELECT RAISE(ABORT, 'vault is read only'); END;"
+            ))
+            .unwrap();
+    }
+
+    fn vault_delete_works_again(state: &AppState) {
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER vault_delete_fails;")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_that_cannot_delete_the_key_fails_keeps_the_row_and_a_retry_succeeds() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        let (s, _) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK);
+        fail_vault_delete(&state, KEY_ROW);
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/notesdesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{b}");
+        assert!(!s.is_success(), "{b}");
+        assert!(!b.to_string().contains(KEY), "{b}");
+        // The key and the row are both still there: the member is told, and can retry.
+        assert!(key_meta(&state, "ada").is_ok());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_some());
+        vault_delete_works_again(&state);
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/notesdesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(key_meta(&state, "ada").is_err());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_none());
+    }
+
     #[tokio::test]
     async fn a_host_change_by_an_update_keeps_the_key_but_reads_needs_reconnect_until_it_is_entered_again(
     ) {
@@ -6724,6 +6794,166 @@ mod tests {
         assert_eq!(bugwatch_state(&app).await, "connected");
     }
 
+    /// The three vault rows an OAuth sign-in to `keyed-bugwatch` leaves (access, refresh and a
+    /// per-row client secret), and the OAuth row itself at `url`, marked for reconnect as
+    /// `reset_connector` leaves a member's row when a connector's update moves it to `api_key`.
+    const OAUTH_ROWS: [&str; 3] = [
+        "keyed-bugwatch/oauth/access-token",
+        "keyed-bugwatch/oauth/refresh-token",
+        "keyed-bugwatch/oauth/client-secret",
+    ];
+
+    fn seed_oauth_row(state: &AppState, url: &str) {
+        use crate::mcp_registry::{
+            McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
+        };
+        let meta = McpOauthMetadata {
+            resource: url.into(),
+            authorization_server: "https://auth.bugwatch-old.example".into(),
+            token_endpoint: "https://auth.bugwatch-old.example/token".into(),
+            revocation_endpoint: None,
+            client_id: "c-1".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: Some(4_000_000_000),
+            status: McpOauthStatus::NeedsReauth,
+            last_refresh_at: None,
+            last_refresh_error: Some("the connector now signs in with an API key".into()),
+        };
+        for row in OAUTH_ROWS {
+            state
+                .vault
+                .put_secret_with_owner(
+                    row,
+                    "old-oauth-secret-value",
+                    crate::secrets::SecretKind::Connection,
+                    &["auth.bugwatch-old.example".to_string()],
+                    None,
+                    "ada",
+                )
+                .unwrap();
+        }
+        state
+            .store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                MCP_ID,
+                url,
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&meta),
+            )
+            .unwrap();
+    }
+
+    fn oauth_rows_left(state: &AppState) -> Vec<&'static str> {
+        OAUTH_ROWS
+            .into_iter()
+            .filter(|row| {
+                state
+                    .vault
+                    .has_binding_at(SecretScope::User, "ada", row)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_oauth_member_of_a_connector_that_became_api_key_reads_needs_reconnect_and_the_key_replaces_it(
+    ) {
+        let host = "mcp.bugwatch-update.example";
+        let (app, state, seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        seed_oauth_row(&state, &format!("https://{host}/mcp"));
+        // The tile is not `connect`: the member has a connection that needs the key.
+        assert_eq!(bugwatch_state(&app).await, "needsReconnect");
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "u-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected", "{b}");
+        assert_eq!(bugwatch_state(&app).await, "connected");
+        // The row is the static one, and no OAuth credential of the old sign-in is left.
+        let row = mcp_row(&state).unwrap();
+        assert_eq!(row.auth_mode, crate::mcp_registry::McpAuthMode::Static);
+        assert!(row.oauth.is_none());
+        assert_eq!(row.header_bindings[0].binding_id, MCP_HEADER_ROW);
+        assert_eq!(mcp_header(&state), format!("Bearer {MCP_KEY}"));
+        assert_eq!(oauth_rows_left(&state), Vec::<&str>::new());
+        assert!(seen
+            .lock()
+            .unwrap()
+            .auth
+            .iter()
+            .any(|a| a.as_deref() == Some(format!("Bearer {MCP_KEY}").as_str())));
+    }
+
+    #[tokio::test]
+    async fn a_failed_listing_while_an_oauth_row_is_replaced_keeps_the_row_and_its_tokens() {
+        let host = "mcp.bugwatch-keep-oauth.example";
+        let tools_ok = Arc::new(AtomicBool::new(false));
+        let (app, state, _seen) = mcp_world(host, tools_ok.clone()).await;
+        seed_oauth_row(&state, &format!("https://{host}/mcp"));
+        let before = mcp_row(&state).unwrap();
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "k-1",
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{b}");
+        // Nothing changed: the OAuth row, all its tokens, and no key.
+        let after = mcp_row(&state).unwrap();
+        assert_eq!(after.auth_mode, crate::mcp_registry::McpAuthMode::Oauth);
+        assert_eq!(after.oauth, before.oauth);
+        assert_eq!(oauth_rows_left(&state), OAUTH_ROWS.to_vec());
+        assert!(!has_mcp_header(&state));
+        assert_eq!(bugwatch_state(&app).await, "needsReconnect");
+        // The listing works again: the same request now replaces the row.
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "k-2",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(oauth_rows_left(&state), Vec::<&str>::new());
+    }
+
+    #[tokio::test]
+    async fn an_oauth_row_on_another_server_is_refused_with_a_conflict_and_a_hint_to_disconnect() {
+        let host = "mcp.bugwatch-foreign.example";
+        let (app, state, seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        seed_oauth_row(&state, "https://mcp.somewhere-else.example/mcp");
+        assert_eq!(bugwatch_state(&app).await, "needsReconnect");
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "f-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("disconnect it first"), "{b}");
+        // Refused before the server was asked, and nothing was touched.
+        assert!(seen.lock().unwrap().methods.is_empty());
+        assert_eq!(
+            mcp_row(&state).unwrap().auth_mode,
+            crate::mcp_registry::McpAuthMode::Oauth
+        );
+        assert_eq!(oauth_rows_left(&state), OAUTH_ROWS.to_vec());
+        assert!(!has_mcp_header(&state));
+    }
+
     #[tokio::test]
     async fn two_concurrent_first_mcp_key_connects_leave_the_accepted_ones_key_in_force() {
         let host = "mcp.bugwatch-race.example";
@@ -6826,6 +7056,45 @@ mod tests {
         // The refused write stored no key, in the transaction or outside it.
         assert!(!has_mcp_header(&state));
         assert!(mcp_row(&state).unwrap().header_bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_mcp_disconnect_that_cannot_delete_the_key_fails_keeps_the_row_and_a_retry_succeeds()
+    {
+        let host = "mcp.bugwatch-disconnect.example";
+        let (app, state, _seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        let (s, _) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "d-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        fail_vault_delete(&state, MCP_HEADER_ROW);
+        let disconnect = || {
+            call(
+                &app,
+                "DELETE",
+                "/v1/connectors/keyed-bugwatch/connection",
+                "member-secret",
+                None,
+            )
+        };
+        let (s, b) = disconnect().await;
+        assert!(!s.is_success(), "{s} {b}");
+        assert!(!b.to_string().contains(MCP_KEY), "{b}");
+        assert!(
+            mcp_row(&state).is_ok(),
+            "the row stays so the member can retry"
+        );
+        assert!(has_mcp_header(&state));
+        assert_eq!(bugwatch_state(&app).await, "connected");
+        vault_delete_works_again(&state);
+        let (s, b) = disconnect().await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(mcp_row(&state).is_err());
+        assert!(!has_mcp_header(&state));
     }
 
     #[tokio::test]

@@ -448,11 +448,12 @@ pub fn mcp_connection_state(
 }
 
 /// The caller's state of an MCP connector that signs in with an API key (CN-7.7), from their own
-/// static MCP row: `Connected` when the row is the connector's (its URL) in static mode and its
+/// MCP row: `Connected` when the row is the connector's (its URL) in static mode and its
 /// `Authorization` header row exists (`has_header`); a row on another URL reads `NeedsReconnect`
-/// (the key was entered for another server and is never sent to this one); no row, or a row with
-/// no header, is `None` (the tile reads `connect`). It never looks at a refresh token: a key has
-/// none.
+/// (the key was entered for another server and is never sent to this one), and so does an OAuth
+/// row at the connector's URL (a sign-in from before an update to `api_key`: the key replaces
+/// it); no row, or a static row with no header, is `None` (the tile reads `connect`). It never
+/// looks at a refresh token: a key has none.
 pub fn mcp_api_key_state(
     policy: &McpPolicy,
     conn: Option<&McpConnection>,
@@ -462,7 +463,13 @@ pub fn mcp_api_key_state(
     if conn.url != policy.url {
         return Some(CallerState::NeedsReconnect);
     }
-    (conn.auth_mode == McpAuthMode::Static && has_header).then_some(CallerState::Connected)
+    match conn.auth_mode {
+        McpAuthMode::Static => has_header.then_some(CallerState::Connected),
+        // The sign-in an update from `oauth` to `api_key` left at the connector's own URL: the
+        // member enters the key to replace it (never `connect`, which would hide that they had
+        // a connection).
+        McpAuthMode::Oauth => Some(CallerState::NeedsReconnect),
+    }
 }
 
 /// The stored node state of one connector.
@@ -1299,39 +1306,54 @@ pub(crate) fn write_connection(
         client_id: None,
     };
     if let Err(err) = store.put_connector_connection(&row) {
-        delete_connection_secrets(vault, owner, id);
+        // Best effort: the write's own error is the one the caller needs.
+        let _ = delete_connection_secrets(vault, owner, id);
         return Err(err);
     }
     store.resolve_connection_needs_reauth(owner, id, "acted");
     Ok(row)
 }
 
-/// Removes the token rows and the API key row (a missing one is fine).
-pub(crate) fn delete_connection_secrets(vault: &SecretsVault, owner: &str, id: &str) {
+/// Removes the token rows and the API key row. A missing row is fine; any other failure is
+/// returned (after every row has been tried), so a disconnect never reports success while a
+/// credential survives.
+pub(crate) fn delete_connection_secrets(
+    vault: &SecretsVault,
+    owner: &str,
+    id: &str,
+) -> Result<(), OrchestratorError> {
+    let mut first_error = None;
     for binding in [
         refresh_token_binding_id(id),
         access_token_binding_id(id),
         api_key_binding_id(id),
     ] {
-        let _ = vault.delete_secret_at(SecretScope::User, owner, &binding);
+        match vault.delete_secret_at(SecretScope::User, owner, &binding) {
+            Ok(_) | Err(OrchestratorError::NotFound(_)) => {}
+            Err(err) => {
+                first_error.get_or_insert(err);
+            }
+        }
     }
+    first_error.map_or(Ok(()), Err)
 }
 
-/// `DELETE …/connection`: the rows, the token secrets. `NotFound` when there is no connection.
+/// `DELETE …/connection`: the token secrets, then the row. The vault rows go FIRST and a failure
+/// is returned with the row kept, so the member can retry and the row never outlives a request that
+/// answered "disconnected" while the key was still stored. `NotFound` when there is no connection.
 pub(crate) fn disconnect(
     store: &SqliteWorkflowStore,
     vault: &SecretsVault,
     owner: &str,
     id: &str,
 ) -> Result<(), OrchestratorError> {
+    // Rows without a table row (an interrupted write) go too.
+    delete_connection_secrets(vault, owner, id)?;
     if !store.delete_connector_connection(owner, id)? {
-        // Rows without a table row (an interrupted write) still go.
-        delete_connection_secrets(vault, owner, id);
         return Err(OrchestratorError::NotFound(format!(
             "connection to `{id}` (you are not connected)"
         )));
     }
-    delete_connection_secrets(vault, owner, id);
     store.resolve_connection_needs_reauth(owner, id, "dismissed");
     Ok(())
 }

@@ -8,6 +8,8 @@ proves:
   - node-reports-the-isolation-it-runs
   - crates/vam-orchestrator/tests/api_tests.rs
   - crates/vam-orchestrator/tests/login_tests.rs
+  - connector-built-from-nothing-passes-validate-and-test-and-installs
+  - connector-kit-names-what-the-node-would-refuse
   - member-changes-own-password-and-signs-in-with-the-new-one
   - crates/vam-orchestrator/src/paging_store_tests.rs::runs_page_newest_first_by_rowid_cursor
   - crates/vam-cli/tests/cli_tests.rs
@@ -434,7 +436,7 @@ vam skill release urn:vam:skill:local.vam.dev/vam/jira-integration --note "Searc
 vam skill versions urn:vam:skill:local.vam.dev/vam/jira-integration
 ```
 
-`vam catalog validate <dir> [--strict] [--kind skill|agent|playbook]` checks a skill, agent or playbook directory, or a marketplace root (a directory with `marketplace.json`), offline: no vamd, no token. It runs the checks vamd runs at publish (manifest, `SKILLS.md`, cards, egress shapes), prints one line per finding and exits 6 on an error (`--strict` also on a warning).
+`vam catalog validate <dir> [--strict] [--kind skill|agent|playbook]` checks a skill, agent or playbook directory, or a marketplace root (a directory with `marketplace.json`), offline: no vamd, no token. It runs the checks vamd runs at publish (manifest, `SKILLS.md`, cards, egress shapes), prints one line per finding and exits 6 on an error (`--strict` also on a warning). For a connector listing, use `vam connector validate` ([below](#build-and-test-a-connector-vam-connector)), which adds the rules the node applies at install.
 
 `vam catalog import <git url> --path <dir> --ref <tag>` (org admin) installs a listing of a marketplace the node already trusts (`vam marketplace ls`): `--path` is the listing's directory in the repository (for example `listings/microsoft-365`) and `--ref` the tag the marketplace's index names for it. It is the same import as the Marketplace page: the node installs exactly the commit that tag names (a tag that moved is refused), checks every package, and writes released, read-only catalog rows with their origin. If an older tag of the listing is installed, the command updates it. A URL the node does not trust is refused; nothing is fetched from it.
 
@@ -453,6 +455,55 @@ vam skill get urn:vam:skill:local.vam.dev/vam/jira-integration
 ```
 
 For a full publish → run walkthrough on Mac + Lima, see [Publish a Skill Package](/authoring/publish-skill/).
+
+### Build and test a connector (`vam connector`)
+
+`vam connector` (the older spelling `vam connectors` is the same command) also holds three commands for a developer who builds a connector. They work on files, offline: no vamd, no token, no host. Nothing leaves the machine.
+
+```bash
+# Write a new marketplace root: the connector, a skill with one read tool, an assistant and a test file
+vam connector init ./notesdesk --id notesdesk --auth api_key --host api.notesdesk.example \
+  --domain connectors.example.com --runtime python3
+
+# Check it the way an install on a node would
+vam connector validate ./notesdesk --strict
+
+# Run the skill's tools against the mock the test file declares
+vam connector test ./notesdesk
+```
+
+**`init <dir>`** writes `marketplace.json`, `listings/<id>/connector/connector.json`, a skill with one read tool, an agent and `listings/<id>/tests/connector-test.json`. They pass `validate` and `test` as written.
+
+| Flag | Meaning |
+|---|---|
+| `--id <id>` | The connector id (the last segment of its URN). A reserved or malformed id is refused. |
+| `--auth api_key\|oauth\|discover` | How a member signs in: an API key or OAuth (REST), or `discover` (a remote MCP server). |
+| `--host <host>` | The REST API's host. With `--tenant-suffix <suffix>`, write it `'{subdomain}.<suffix>'`: the admin enters the company address at Enable. |
+| `--mcp-url <url>` | The remote MCP server's URL (with `--auth discover`). |
+| `--domain <domain>` | The domain the listing publishes under (`publisherDomain`). |
+| `--runtime bun\|python3` | The language of the skill's tool (REST only). Default `bun`. |
+
+The directory must be new or empty (a lone `.keep` counts as empty): otherwise `init` exits 5 and writes nothing. It also writes nothing and exits 6 when the result would not pass `validate`.
+
+**`validate <dir>`** takes a marketplace root, or one listing (`listings/<id>`), and prints one line per artifact (`ok connector …`) or per finding. It applies the package checks and the listing rules the node applies at install: placeholders that overlap between connectors, a skill's `egress` naming a binding or host its connector does not declare, and the connector file's own rules (`api_key` with one field, `headerName` rules). Exit 6 on an error; `--strict` also on a warning. Global `--json` prints the findings as JSON.
+
+**`test <dir> [--listing <id>] [--subdomain <label>]`** runs each case of each listing's `tests/connector-test.json`: the tool's entrypoint runs on this machine, as the guest runs it (cleared environment, a scratch home and workspace, its input on stdin), behind a stub that stands where the node's egress gate stands. The stub screens every request with the gate's own code (the tool's declared method, path and host, and where the placeholder may appear), puts a generated key in place of the placeholder only after the gate admits the request, answers from the routes in the test file and scrubs the key from the answer. It prints `pass <tool>`, or `fail <tool>: <the gate's words>`. A listing whose connector has no company address fails when `--subdomain` is given. A case also fails if the generated key shows up in the tool's output or in a file the tool left behind. The tool's code runs unsandboxed, with a cleared environment: it is your own code.
+
+| Flag | Meaning |
+|---|---|
+| `--listing <id>` | Test one listing of the root. Naming a listing with no test file fails. |
+| `--subdomain <label>` | The sample company address for a connector that has one (default `demo`, or the test file's). |
+
+A remote MCP connector has nothing to run here (the node is its client): `test` checks its test file and prints a `skip` line. A listing with no test file is skipped, and says so.
+
+When at least one case ran and none failed, `test` prints `the key never reached a tool`. When no case ran at all (every listing skipped for want of a test file), it prints `no case ran` and exits 6, so a CI job cannot pass on an empty run; a root of remote MCP listings that were checked still exits 0.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Everything passed. |
+| 2 | Bad options (a `--subdomain` that is not a valid label, a `--listing` the root does not name, an unknown flag). |
+| 5 | `init` refused a directory that is not empty. |
+| 6 | An error in the files, a failed case, or no case ran. |
 
 ---
 

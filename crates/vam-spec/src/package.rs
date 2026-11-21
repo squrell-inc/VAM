@@ -596,6 +596,19 @@ pub struct FieldSummary {
 pub struct BindingSummary {
     pub name: String,
     pub hosts: Vec<String>,
+    /// Where the credential goes, when it is not the default `Authorization: Bearer` (`header`;
+    /// `query` is refused in a listing). Absent for a bearer binding, so a summary, and the
+    /// digest of an installed release, is exactly what it was before a key could go elsewhere.
+    /// It is part of the digest: an update that moves the key from the `Authorization` header to
+    /// a named header changes what the admin enabled, and resets Enable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject: Option<String>,
+    /// `inject: header`: the header that carries the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_name: Option<String>,
+    /// `inject: header`: the fixed text before the key in that header.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -835,6 +848,13 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
         .map(|b| BindingSummary {
             name: b.name.clone(),
             hosts: b.hosts.clone(),
+            inject: match b.inject {
+                crate::connector::Inject::Bearer => None,
+                crate::connector::Inject::Header => Some("header".to_string()),
+                crate::connector::Inject::Query => Some("query".to_string()),
+            },
+            header_name: b.header_name.clone(),
+            prefix: b.prefix.clone(),
         })
         .collect();
     for h in bindings.iter().flat_map(|b| &b.hosts) {
