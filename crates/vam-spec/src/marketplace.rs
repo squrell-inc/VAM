@@ -21,8 +21,14 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::connector::{
+    connectors_from_files, templated_suffix, Connector, BUILTIN_CONNECTOR_FILES,
+};
+use crate::connector_kit::TEST_FILE_PATH;
+use crate::connector_listing::{connector_id_of_urn, placeholders_overlap};
 use crate::package::{
-    check_dir, read_package_file, ArtifactKind, CapabilitySummary, CheckedPackage, PackageError,
+    check_dir, read_package_file, ArtifactKind, CapabilitySummary, CheckedPackage, CheckedSpec,
+    PackageError,
 };
 use crate::validation::{is_registry, is_slug};
 
@@ -430,9 +436,20 @@ pub fn resolve_artifact_dir(root: &Path, rel: &str) -> Result<PathBuf, String> {
 }
 
 /// Check a marketplace root: the index, then every artifact of every listing with the package
-/// check of its kind. One listing's problem never hides another's. Domain consistency (an
-/// artifact URN outside `publisherDomain`, which a node refuses at install) is a warning here.
+/// check of its kind, then each listing as a whole ([`check_listing`]). One listing's problem never
+/// hides another's. Domain consistency (an artifact URN outside `publisherDomain`, which a node
+/// refuses at install) is a warning here.
 pub fn check_marketplace_root(root: &Path) -> MarketplaceReport {
+    check_marketplace(root, None)
+}
+
+/// Like [`check_marketplace_root`], for the one listing `only` of the index (`vam connector
+/// validate` on a listing directory). A listing the index does not name is an error.
+pub fn check_marketplace_listing(root: &Path, only: &str) -> MarketplaceReport {
+    check_marketplace(root, Some(only))
+}
+
+fn check_marketplace(root: &Path, only: Option<&str>) -> MarketplaceReport {
     let mut report = MarketplaceReport::default();
     let index_path = root.join(INDEX_FILE);
     let raw = match read_package_file(&index_path) {
@@ -453,12 +470,55 @@ pub fn check_marketplace_root(root: &Path) -> MarketplaceReport {
             return report;
         }
     };
-    for listing in &index.listings {
+    if let Some(id) = only {
+        if !index.listings.iter().any(|l| l.id == id) {
+            report.findings.push(Finding::error(
+                None,
+                None,
+                format!("the marketplace index names no listing `{id}`"),
+            ));
+            return report;
+        }
+    }
+    for listing in index
+        .listings
+        .iter()
+        .filter(|l| only.is_none_or(|id| l.id == id))
+    {
+        let before = report.findings.len();
+        let mut checked = Vec::new();
         for a in &listing.artifacts {
-            check_listing_artifact(root, &index, listing, a, &mut report);
+            if let Some(c) = check_listing_artifact(root, &index, listing, a, &mut report) {
+                checked.push(c);
+            }
+        }
+        let artifact_errors = report.findings[before..]
+            .iter()
+            .any(|f| f.level == Level::Error);
+        // The listing's own rules need every one of its artifacts: with one missing they would
+        // report what that artifact's own error already says.
+        if !artifact_errors {
+            report.findings.extend(check_listing(&listing.id, &checked));
+            if checked.iter().any(|c| c.kind == ArtifactKind::Connector)
+                && !test_file_exists(root, &listing.id)
+            {
+                report.findings.push(Finding::warning(
+                    Some(&listing.id),
+                    None,
+                    format!(
+                        "the listing ships a connector but no listings/{}/{TEST_FILE_PATH}: `vam connector test` has nothing to run",
+                        listing.id
+                    ),
+                ));
+            }
         }
     }
     report
+}
+
+fn test_file_exists(root: &Path, listing_id: &str) -> bool {
+    fs::symlink_metadata(root.join("listings").join(listing_id).join(TEST_FILE_PATH))
+        .is_ok_and(|m| m.is_file())
 }
 
 fn check_listing_artifact(
@@ -467,7 +527,7 @@ fn check_listing_artifact(
     listing: &Listing,
     a: &ListingArtifact,
     report: &mut MarketplaceReport,
-) {
+) -> Option<CheckedPackage> {
     let lid = Some(listing.id.as_str());
     let path = Some(a.path.as_str());
     let dir = match resolve_artifact_dir(root, &a.path) {
@@ -476,14 +536,14 @@ fn check_listing_artifact(
             report
                 .findings
                 .push(Finding::error(lid, path, format!("artifact path {why}")));
-            return;
+            return None;
         }
     };
     let checked: CheckedPackage = match check_dir(&dir, Some(a.kind)) {
         Ok(c) => c,
         Err(PackageError(msg)) => {
             report.findings.push(Finding::error(lid, path, msg));
-            return;
+            return None;
         }
     };
     for w in &checked.warnings {
@@ -503,9 +563,233 @@ fn check_listing_artifact(
         listing: listing.id.clone(),
         path: a.path.clone(),
         kind: checked.kind,
-        urn: checked.urn,
-        summary: checked.summary,
+        urn: checked.urn.clone(),
+        summary: checked.summary.clone(),
     });
+    Some(checked)
+}
+
+// ---- the listing as a whole ---------------------------------------------------------------------
+
+/// The rules that look at a listing's artifacts together, once each passed its own check. One
+/// function for `vam connector validate` ([`check_marketplace_root`]) and for vamd's import, so an
+/// offline pass is not an install refusal. Errors come in the order import refuses them (the first
+/// error is the one an install names); a warning is for what only a node can decide.
+///
+/// 1. A skill's company address host belongs to the connector it requires.
+/// 2. No two connectors have binding placeholders the gate cannot tell apart.
+/// 3. One URN is one artifact.
+/// 4. No two connectors have the same id.
+/// 5. Each tool's `egress[].binding` names a binding of the skill's `requiresConnector`, and
+///    `egress[].host` is one of that binding's hosts. Checked when that connector ships in the
+///    listing or is built in; otherwise a warning (the gate decides at call time).
+pub fn check_listing(listing_id: &str, packages: &[CheckedPackage]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut err = |message: String| out.push(Finding::error(Some(listing_id), None, message));
+    check_templated_skill_hosts(packages, listing_id, &mut err);
+    check_listing_placeholders(packages, listing_id, &mut err);
+    let mut seen = std::collections::BTreeSet::new();
+    for p in packages {
+        if !seen.insert(p.urn.as_str()) {
+            err(format!("listing `{listing_id}` names {} twice", p.urn));
+        }
+    }
+    check_listing_connector_ids(packages, listing_id, &mut err);
+    let mut warnings = Vec::new();
+    check_skill_egress_bindings(packages, listing_id, &mut err, &mut warnings);
+    out.extend(
+        warnings
+            .into_iter()
+            .map(|w| Finding::warning(Some(listing_id), None, w)),
+    );
+    out
+}
+
+/// A skill that names a company address host (`{subdomain}.<suffix>`) must require a connector this
+/// listing ships whose own company address has that suffix: a listing cannot aim a skill at a host
+/// its connector does not own (T1, T2).
+fn check_templated_skill_hosts(
+    packages: &[CheckedPackage],
+    listing_id: &str,
+    err: &mut impl FnMut(String),
+) {
+    for p in packages.iter().filter(|p| p.kind == ArtifactKind::Skill) {
+        let hosts: Vec<&str> = p
+            .summary
+            .tools
+            .iter()
+            .flat_map(|t| t.egress.iter().map(|e| e.host.as_str()))
+            .filter(|h| h.contains('{'))
+            .collect();
+        if hosts.is_empty() {
+            continue;
+        }
+        let required = &p.summary.requires_connector;
+        let suffix = packages.iter().find_map(|c| match &c.spec {
+            CheckedSpec::Connector(def) if &c.urn == required => {
+                def.tenant.as_ref().map(|t| t.suffix.as_str())
+            }
+            _ => None,
+        });
+        for h in hosts {
+            let ok = suffix.is_some_and(|sfx| templated_suffix(h).is_some_and(|got| got == sfx));
+            if !ok {
+                err(format!(
+                    "listing `{listing_id}`: skill {} names the host `{h}`, which is not the company address ({}) of the connector it requires: a templated host must be `{{subdomain}}.<suffix>` of the connector the listing ships",
+                    p.urn,
+                    suffix.map_or_else(
+                        || "no connector of this listing with a company address".to_string(),
+                        |sfx| format!("suffix `{sfx}`")
+                    )
+                ));
+            }
+        }
+    }
+}
+
+/// No two connectors of one listing declare binding placeholders the egress gate cannot tell apart
+/// (the same one, or one inside the other: [`placeholders_overlap`]). Each is compared with the
+/// installed connectors at write time (`admit_connector_id`), but the whole listing is planned
+/// before any of it is inserted, so two of its own connectors would pass that check together.
+fn check_listing_placeholders(
+    packages: &[CheckedPackage],
+    listing_id: &str,
+    err: &mut impl FnMut(String),
+) {
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for p in packages {
+        let CheckedSpec::Connector(def) = &p.spec else {
+            continue;
+        };
+        for b in def.bindings.iter().flatten() {
+            // A connector's own bindings are compared by the file check.
+            if let Some((ph, first)) = seen
+                .iter()
+                .find(|(ph, urn)| *urn != def.urn && placeholders_overlap(ph, &b.placeholder))
+            {
+                err(format!(
+                    "listing `{listing_id}`: the connectors {first} and {} declare the binding placeholders `{ph}` and `{}`, which the gate cannot tell apart: a placeholder must name one binding",
+                    def.urn, b.placeholder
+                ));
+                return;
+            }
+        }
+        for b in def.bindings.iter().flatten() {
+            seen.push((b.placeholder.as_str(), def.urn.as_str()));
+        }
+    }
+}
+
+/// No two connectors of one listing have the same id (the last segment of the URN): an id names one
+/// connector on the node. Each is compared with the installed connectors at write time
+/// (`admit_connector_id`), but neither of two new ones from one listing is installed yet.
+fn check_listing_connector_ids(
+    packages: &[CheckedPackage],
+    listing_id: &str,
+    err: &mut impl FnMut(String),
+) {
+    let mut ids: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for p in packages {
+        if !matches!(p.spec, CheckedSpec::Connector(_)) {
+            continue;
+        }
+        let urn = p.urn.as_str();
+        if let Some(first) = ids.insert(connector_id_of_urn(urn), urn) {
+            err(format!(
+                "listing `{listing_id}`: the connectors {first} and {urn} have the same id `{}`: an id names one connector",
+                connector_id_of_urn(urn)
+            ));
+            return;
+        }
+    }
+}
+
+/// Each tool's egress names a binding of the connector its skill requires, and one of that
+/// binding's hosts. A templated host (`{subdomain}.<suffix>`) is compared as written with the
+/// binding's, when the listing ships the connector with that company address; any other templated
+/// host is [`check_templated_skill_hosts`]'s.
+fn check_skill_egress_bindings(
+    packages: &[CheckedPackage],
+    listing_id: &str,
+    err: &mut impl FnMut(String),
+    warnings: &mut Vec<String>,
+) {
+    let mut builtin: Option<Vec<Connector>> = None;
+    for p in packages.iter().filter(|p| p.kind == ArtifactKind::Skill) {
+        let required = p.summary.requires_connector.as_str();
+        if required.is_empty() || p.summary.tools.iter().all(|t| t.egress.is_empty()) {
+            continue;
+        }
+        let shipped = packages.iter().find_map(|c| match &c.spec {
+            CheckedSpec::Connector(def) if c.urn == required => Some(def.as_ref()),
+            _ => None,
+        });
+        let def = match shipped {
+            Some(def) => def,
+            None => {
+                let all = builtin.get_or_insert_with(|| {
+                    connectors_from_files(BUILTIN_CONNECTOR_FILES).unwrap_or_default()
+                });
+                match all.iter().find(|c| c.urn == required) {
+                    Some(found) => found,
+                    None => {
+                        warnings.push(format!(
+                            "skill {} requires the connector {required}, which this listing does not ship and no node builds in: its egress bindings and hosts cannot be checked offline",
+                            p.urn
+                        ));
+                        continue;
+                    }
+                }
+            }
+        };
+        let bindings = def.bindings.as_deref().unwrap_or_default();
+        for t in &p.summary.tools {
+            for e in &t.egress {
+                if e.host.contains('{') {
+                    let ours = shipped.is_some()
+                        && def.tenant.as_ref().is_some_and(|tn| {
+                            templated_suffix(&e.host) == Some(tn.suffix.as_str())
+                        });
+                    if !ours {
+                        continue;
+                    }
+                }
+                let Some(b) = bindings.iter().find(|b| b.name == e.binding) else {
+                    let declared = if bindings.is_empty() {
+                        "it declares no bindings".to_string()
+                    } else {
+                        format!(
+                            "its bindings: {}",
+                            bindings
+                                .iter()
+                                .map(|b| format!("`{}`", b.name))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    err(format!(
+                        "listing `{listing_id}`: skill {} tool `{}` names the binding `{}` for the host `{}`, which the connector it requires ({required}) does not declare ({declared}): a tool's egress must name a binding of its connector",
+                        p.urn, t.name, e.binding, e.host
+                    ));
+                    continue;
+                };
+                if !b.hosts.contains(&e.host) {
+                    err(format!(
+                        "listing `{listing_id}`: skill {} tool `{}` names the host `{}` on the binding `{}`, which that binding of {required} does not list (its hosts: {}): a tool's egress host must be one of its binding's hosts",
+                        p.urn,
+                        t.name,
+                        e.host,
+                        e.binding,
+                        b.hosts
+                            .iter()
+                            .map(|h| format!("`{h}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -130,13 +130,17 @@ pub struct FireExpect {
     pub same_run: Option<bool>,
 }
 
-/// `create-space: { label, agent }`: `POST /v1/spaces` for an agent; later chats go into it.
+/// `create-space: { label, agent, as }`: `POST /v1/spaces` for an agent; later chats go into it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateSpace {
     pub label: String,
-    /// Alias of the agent piece; the only agent when omitted.
+    /// Alias of the agent piece (or a marketplace agent's URN); the only agent when omitted.
     pub agent: Option<String>,
+    /// Alias of the `org` piece whose Space it is (a chat `as` that identity goes into it); the
+    /// bootstrap key when omitted.
+    #[serde(rename = "as")]
+    pub as_: Option<String>,
 }
 
 /// `rename-space: { label }`: renames the created Space (or the latest run's) in place.
@@ -967,9 +971,14 @@ impl Engine {
     pub(super) fn create_space(&mut self, c: &CreateSpace) -> Result<(), Fail> {
         let (_, urn) = self.agent_of(c.agent.as_deref())?;
         let want = format!("POST /v1/spaces makes a Space labelled {:?}", c.label);
+        let key = self.key_of(c.as_.as_deref())?;
         let r = self
             .api
-            .post("/v1/spaces", &json!({ "agentUrn": urn, "label": c.label }))
+            .post_as(
+                key.as_deref(),
+                "/v1/spaces",
+                &json!({ "agentUrn": urn, "label": c.label }),
+            )
             .map_err(conn)?;
         if !r.ok() {
             return Err(product(want, format!("{} {}", r.status, r.body)));

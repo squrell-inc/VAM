@@ -577,6 +577,18 @@ pub struct ConnectorSummary {
     /// The company address the admin will enter at Enable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant: Option<TenantSummary>,
+    /// What a member is asked to enter (provider `api_key`): the label of the one field. Absent
+    /// for every other provider, so an existing summary, and the digest of an installed release,
+    /// is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<FieldSummary>,
+}
+
+/// One field a member enters to connect (the label only: the name is internal).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldSummary {
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -584,6 +596,19 @@ pub struct ConnectorSummary {
 pub struct BindingSummary {
     pub name: String,
     pub hosts: Vec<String>,
+    /// Where the credential goes, when it is not the default `Authorization: Bearer` (`header`;
+    /// `query` is refused in a listing). Absent for a bearer binding, so a summary, and the
+    /// digest of an installed release, is exactly what it was before a key could go elsewhere.
+    /// It is part of the digest: an update that moves the key from the `Authorization` header to
+    /// a named header changes what the admin enabled, and resets Enable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject: Option<String>,
+    /// `inject: header`: the header that carries the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_name: Option<String>,
+    /// `inject: header`: the fixed text before the key in that header.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -823,6 +848,13 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
         .map(|b| BindingSummary {
             name: b.name.clone(),
             hosts: b.hosts.clone(),
+            inject: match b.inject {
+                crate::connector::Inject::Bearer => None,
+                crate::connector::Inject::Header => Some("header".to_string()),
+                crate::connector::Inject::Query => Some("query".to_string()),
+            },
+            header_name: b.header_name.clone(),
+            prefix: b.prefix.clone(),
         })
         .collect();
     for h in bindings.iter().flat_map(|b| &b.hosts) {
@@ -837,6 +869,16 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
             revoke: e.revoke.clone(),
         }),
         _ => None,
+    };
+    let fields: Vec<FieldSummary> = match &c.provider {
+        crate::connector::Provider::ApiKey(p) => p
+            .fields
+            .iter()
+            .map(|f| FieldSummary {
+                label: f.label.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
     };
     let tenant = c.tenant.as_ref().map(|t| TenantSummary {
         label: t.label.clone(),
@@ -865,6 +907,7 @@ pub fn summarize_connector(c: &Connector) -> CapabilitySummary {
             bindings,
             endpoints,
             tenant,
+            fields,
         }),
         ..Default::default()
     }

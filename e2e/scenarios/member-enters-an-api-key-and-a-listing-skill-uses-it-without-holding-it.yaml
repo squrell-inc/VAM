@@ -1,0 +1,90 @@
+id: member-enters-an-api-key-and-a-listing-skill-uses-it-without-holding-it
+title: A member enters an API key, and a listing's skill uses it as the member without ever holding it
+description: >
+  The admin installs the Notesdesk listing, whose connector signs in with an API key. Before installing, the listing
+  shows the sign-in kind, the field's label and the one host; a listing whose sign-in asks for two values is refused
+  and names "one field". A key entered before the admin enables the connector is refused and sends the member to the
+  admin. Enabling takes no OAuth client (one is refused and names the API key). The member's entry reads "connect",
+  the member types the key, and it reads "connected" with no field that carries the key. The member's assistant
+  searches notes: the service at `api.notesdesk.example` sees the member's key, never the placeholder and never a key in
+  the query string. A call the assistant aims at a path outside the tool's declared shape is refused with a message that
+  names the shape, and the service saw nothing there. A replaced key is the one sent next, and the old one is never
+  sent again. After the member disconnects, the next call parks and asks the member to connect; typing the key again
+  resumes it. No form of the key is in the thread, the events, the receipt, the node's listings or the workspace.
+tags: [connectors, egress, members]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - org-administrator
+  - mock-notesdesk-server
+  - marketplace-community-connectors
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: notesdesk-connector, as: org-admin, fields: { installed: null, summary.connectors.0.provider: api_key, summary.connectors.0.fields.0.label: Notesdesk API key, summary.connectors.0.bindings.0.hosts.0: api.notesdesk.example } } }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: api-key-with-two-fields, as: org-admin, refused: true, contains: one field }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: notesdesk-connector, as: org-admin }
+  - connector-connect: { id: notesdesk, apiKey: { piece: mock-notesdesk-server, which: current }, as: org-member, refused: true, contains: ask your admin }
+  - connector-node: { id: notesdesk, enabled: true, as: org-administrator, client: { clientId: e2e-notesdesk-client }, refused: true, contains: API key }
+  - connector-node: { id: notesdesk, enabled: true, as: org-administrator }
+  - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: connect, provider.kind: api_key, provider.fields.0.label: Notesdesk API key }, absent: [apiKey, accessToken, key] } }
+  - connector-connect: { id: notesdesk, apiKey: { piece: mock-notesdesk-server, which: current }, as: org-member }
+  - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: connected }, absent: [apiKey, accessToken, key] } }
+  - chat: { text: "e2e-step:read Find the printer notes", agent: "urn:vam:agent:connectors.community.example/community/notesdesk-assistant", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-notesdesk-server, path: /v1/notes, method: GET, count: 1, has: ["host=api", "bearer=current", "query-key=none"], lacks: ["bearer=placeholder", "query-key=present"] } }
+  - expect: { thread: { role: tool, contains: Printer notes } }
+  - chat: { text: "e2e-step:outside Read the admin export", agent: "urn:vam:agent:connectors.community.example/community/notesdesk-assistant", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: declared shape } }
+  - expect: { mock-requests: { piece: mock-notesdesk-server, path: /v1/admin/export, count: 0 } }
+  - connector-connect: { id: notesdesk, apiKey: { piece: mock-notesdesk-server, which: other }, as: org-member }
+  - chat: { text: "e2e-step:read Find the printer notes once more", agent: "urn:vam:agent:connectors.community.example/community/notesdesk-assistant", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-notesdesk-server, path: /v1/notes, method: GET, count: 2, has: ["host=api", "bearer=current"], lacks: ["bearer=stale", "bearer=unknown", "bearer=placeholder"] } }
+  - api-call: { method: DELETE, path: /v1/connectors/notesdesk/connection, as: org-member }
+  - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: connect } } }
+  - chat: { text: "e2e-step:parked Find the printer notes after disconnecting", agent: "urn:vam:agent:connectors.community.example/community/notesdesk-assistant", as: org-member, wait: false }
+  - expect: { run: paused }
+  - expect: { approval: pending, tool: note_search }
+  - expect: { mock-requests: { piece: mock-notesdesk-server, path: /v1/notes, count: 2 } }
+  - connector-connect: { id: notesdesk, apiKey: { piece: mock-notesdesk-server, which: current }, as: org-member }
+then:
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-notesdesk-server, path: /v1/notes, method: GET, count: 3, has: ["bearer=current"], lacks: ["bearer=none", "bearer=placeholder", "query-key=present"] } }
+  - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: connected } } }
+  - api-call: { path: /v1/connectors, as: org-member, absent: mock-notesdesk-server }
+  - api-call: { path: /v1/mcp/connections, as: org-member, absent: mock-notesdesk-server }
+  - expect: { secret-absent: { secret: mock-notesdesk-server } }
+guards:
+  - vam:crates/vam-orchestrator/src/connection_egress.rs
+  - vam:crates/vam-orchestrator/src/connector_park.rs
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+  - vam:crates/vam-orchestrator/src/marketplace/summary.rs
+  - vam:crates/vam-spec/src/connector.rs
+  - vam:crates/vam-spec/src/connector_listing.rs
+  - vam:crates/vam-spec/src/package.rs
+mock:
+  - when: { step: read, toolName: note_search }
+    reply: { text: Found the note. }
+  - when: { step: read, toolName: load_skill }
+    reply: { toolCall: { name: note_search, args: { query: printer } } }
+  - when: { step: read, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: notesdesk-notes } } }
+  - when: { step: outside, toolName: note_search }
+    reply: { text: The tool was refused. }
+  - when: { step: outside, toolName: load_skill }
+    reply: { toolCall: { name: note_search, args: { path: /v1/admin/export } } }
+  - when: { step: outside, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: notesdesk-notes } } }
+  - when: { step: parked, toolName: note_search }
+    reply: { text: Found the note. }
+  - when: { step: parked, toolName: load_skill }
+    reply: { toolCall: { name: note_search, args: { query: printer } } }
+  - when: { step: parked, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: notesdesk-notes } } }
+  - when: { step: parked, afterTool: note_search }
+    reply: { text: Found the note. }
+status: active

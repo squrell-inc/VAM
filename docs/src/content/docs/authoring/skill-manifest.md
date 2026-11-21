@@ -235,7 +235,19 @@ A skill that acts as the member in a service the org's admin connected (Microsof
 }]
 ```
 
-The tool sends the connector's **placeholder** (`vamsec_<connector id>_<binding>`, for example `vamsec_ticketdesk_api`) as the `Authorization` value through the guest's egress proxy and never holds a token. The node attaches the member's access token only when the request carries that connector's placeholder, goes to one of the connector's binding hosts, and fits the tool's declared shape (method and path); any other request is refused with the declared shape in the message.
+The tool sends the connector's **placeholder** (`vamsec_<connector id>_<binding>`, for example `vamsec_ticketdesk_api`) through the guest's egress proxy and never holds a credential. The node swaps in the member's credential only when the request carries that connector's placeholder in the one place the binding allows, goes to one of the connector's binding hosts, and fits the tool's declared shape (method and path); any other request is refused with the declared shape in the message. What the node attaches, and where, is set by the connector's binding (`value` and `inject` in the connector file), not by the tool:
+
+| Binding | The credential | The placeholder goes |
+|---|---|---|
+| `value: access_token`, `inject: bearer` | the member's OAuth access token | as the whole `Authorization` value, bare or after `Bearer ` |
+| `value: api_key`, `inject: bearer` | the API key the member entered | as the whole `Authorization` value, bare or after `Bearer ` |
+| `value: api_key`, `inject: header` | the API key the member entered | as the whole value of the header the binding names (`headerName`), after the binding's `prefix` if it has one |
+
+With `inject: header` the connector file names the header (`headerName`, for example `X-Api-Key`) and may give a fixed `prefix` (`Token `). The tool writes `<prefix><placeholder>` (or just the placeholder) in that header, and the node sends `<prefix><key>`. The placeholder is refused anywhere else: in the URL, in the body, in any other header (`Authorization` included), or next to other text in the named header, with the words "only valid as the `<header>` value". The guest never picks the header: a request cannot move the key to another one.
+
+A connector refuses these `headerName` values when it is checked (`vam connector validate`) and again at import: the headers the node's egress filter strips before a request leaves (`Host`, `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Trailers`, `Transfer-Encoding`, `Upgrade`, `Content-Length`, `X-Target-Url`, `Proxy-Authenticate`, `Proxy-Authorization`, `Proxy-Connection`, and every other `Proxy-*` name), `Cookie`, and `Authorization` (a key there is `inject: bearer`). Names are compared without regard to letter case. A key is never sent as a query parameter (`inject: query` is refused in a listing).
+
+An API key is entered by the member at Connect, stored on the node pinned to the connector's hosts, and used only for that member's own calls. Where the key goes is part of the connector's capability summary: an update that moves it (for example from `Authorization` to a named header) resets the admin's Enable, as a changed host does.
 
 **A company host.** For a connector that asks the admin for a company address, the host in `egress[].host` may be written `{subdomain}.<suffix>`, where `<suffix>` is the connector's own. The node fills it with the address the admin entered when the session boots. A templated host with another suffix, or on a tool that names no connector, is dropped.
 

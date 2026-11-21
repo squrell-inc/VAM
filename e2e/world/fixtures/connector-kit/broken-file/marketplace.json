@@ -1,0 +1,27 @@
+{
+  "name": "Kit broken",
+  "publisherDomain": "kitbroken.community.example",
+  "listings": [
+    {
+      "id": "kit-broken",
+      "displayName": "Desk files",
+      "description": "A listing that passes the file checks and fails the listing checks: two connectors whose placeholders overlap, and a skill whose egress names a binding and a host its connector does not declare.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/kit-broken/connectors/desk"
+        },
+        {
+          "kind": "connector",
+          "path": "listings/kit-broken/connectors/desk-api"
+        },
+        {
+          "kind": "skill",
+          "path": "listings/kit-broken/skills/desk-files"
+        }
+      ],
+      "ref": "kit-broken-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    }
+  ]
+}

@@ -16,7 +16,8 @@ use crate::mcp_client::{
     McpToolAnnotations,
 };
 use crate::secrets::{
-    authorize_org_secret_write, vault_owner_user_id, SecretKind, SecretScope, SecretsVault,
+    authorize_org_secret_write, vault_owner_user_id, SealedSecret, SecretKind, SecretScope,
+    SecretsVault,
 };
 use crate::users::UserRole;
 use crate::workflow::SqliteWorkflowStore;
@@ -332,6 +333,18 @@ pub enum McpAuthWrite<'a> {
     /// The write sets the sign-in columns; `observed` is the row the request read (none for a new
     /// connection), which the stored sign-in state must still equal.
     Replace { observed: Option<&'a McpConnection> },
+}
+
+/// One connection header credential a connect has validated and sealed but not stored: the
+/// guarded row write puts it in the vault, in the transaction that writes the row, so a write that
+/// is refused leaves the vault as it was. Holds no plaintext.
+pub(crate) struct StagedHeader {
+    pub(crate) binding_id: String,
+    pub(crate) sealed: SealedSecret,
+    /// The exact connection host the credential is pinned to.
+    pub(crate) host: String,
+    /// The vault idempotency key (`{http key}:{binding id}`), when the request carried one.
+    pub(crate) idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1180,6 +1193,38 @@ pub fn store_mcp_header_credential(
     )
 }
 
+/// Validate and seal one connection header value for the guarded row write, without storing it.
+///
+/// The same checks as [`store_mcp_header_credential`] (org-write authority, header name and value,
+/// the exact connection host), the same binding id and the same vault idempotency key; nothing is
+/// written. [`SqliteWorkflowStore::upsert_mcp_connection_guarded`] stores it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stage_mcp_header_credential(
+    vault: &SecretsVault,
+    scope: SecretScope,
+    connection_id: &str,
+    header_name: &str,
+    value: &str,
+    allowed_host: &str,
+    idempotency_key: Option<&str>,
+    role: UserRole,
+) -> Result<StagedHeader, OrchestratorError> {
+    authorize_org_secret_write(scope, role)?;
+    let name = validate_mcp_header_name(header_name)?;
+    validate_mcp_header_value(value)?;
+    check_connection_secret_host(allowed_host)?;
+    let binding_id = mcp_header_binding_id(connection_id, &name);
+    let idempotency_key = idempotency_key
+        .filter(|k| !k.is_empty())
+        .map(|k| format!("{k}:{binding_id}"));
+    Ok(StagedHeader {
+        sealed: vault.seal(value)?,
+        host: allowed_host.to_string(),
+        binding_id,
+        idempotency_key,
+    })
+}
+
 /// Store access + refresh (and optional client secret) as host-pinned Connection-kind
 /// secrets. Replaces existing ciphertext for the same binding ids. Never logs
 /// or returns token values.
@@ -1319,6 +1364,15 @@ pub fn apply_oauth_token_metadata(
     Ok(next)
 }
 
+fn check_connection_secret_host(allowed_host: &str) -> Result<(), OrchestratorError> {
+    if allowed_host.is_empty() || allowed_host.contains('*') {
+        return Err(OrchestratorError::InvalidContract(
+            "MCP credential must be bound to the exact connection host".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn put_mcp_connection_secret(
     vault: &SecretsVault,
@@ -1329,11 +1383,7 @@ fn put_mcp_connection_secret(
     allowed_host: &str,
     idempotency_key: Option<&str>,
 ) -> Result<String, OrchestratorError> {
-    if allowed_host.is_empty() || allowed_host.contains('*') {
-        return Err(OrchestratorError::InvalidContract(
-            "MCP credential must be bound to the exact connection host".into(),
-        ));
-    }
+    check_connection_secret_host(allowed_host)?;
     let destinations = vec![allowed_host.to_string()];
     // One HTTP Idempotency-Key may cover several bindings; vault idempotency is
     // keyed per (scope, owner, idempotency_key) so suffix the binding id.
@@ -1478,12 +1528,32 @@ pub fn resolve_mcp_headers(
     target: McpCredentialTarget<'_>,
     header_bindings: &[HeaderBinding],
 ) -> Result<Vec<(String, SecretString)>, OrchestratorError> {
+    resolve_mcp_headers_staged(vault, target, header_bindings, &[])
+}
+
+/// [`resolve_mcp_headers`], where a binding named in `staged` (binding id, plaintext) takes that
+/// value from memory and only the other bindings are read from the vault: the headers of a connect
+/// that has not been written yet.
+///
+/// Every binding, staged or not, must be the connection's own id, and all are checked before
+/// anything is decrypted. A staged value is the one this connect is writing for its own id, so it
+/// needs no pin check; every other binding is read by [`decrypt_mcp_connection_secret`] (a
+/// `connection` row at the connection's own scope, pinned to the exact host of `target.url`).
+pub(crate) fn resolve_mcp_headers_staged(
+    vault: &SecretsVault,
+    target: McpCredentialTarget<'_>,
+    header_bindings: &[HeaderBinding],
+    staged: &[(String, SecretString)],
+) -> Result<Vec<(String, SecretString)>, OrchestratorError> {
     for binding in header_bindings {
         ensure_own_mcp_binding_id(target.connection_id, &binding.binding_id)?;
     }
     let mut out = Vec::with_capacity(header_bindings.len());
     for binding in header_bindings {
-        let value = decrypt_mcp_connection_secret(vault, target, &binding.binding_id)?;
+        let value = match staged.iter().find(|(id, _)| *id == binding.binding_id) {
+            Some((_, value)) => SecretString::new(value.expose_secret().clone()),
+            None => decrypt_mcp_connection_secret(vault, target, &binding.binding_id)?,
+        };
         out.push((binding.name.clone(), value));
     }
     Ok(out)
@@ -1567,9 +1637,22 @@ pub fn fetch_tools_snapshot(
     header_bindings: &[HeaderBinding],
     timeout_ms: u64,
 ) -> Result<McpSnapshot, OrchestratorError> {
+    fetch_tools_snapshot_staged(vault, target, header_bindings, &[], timeout_ms)
+}
+
+/// [`fetch_tools_snapshot`] for a connect that has not written its headers yet: a binding in
+/// `staged` (binding id, plaintext) is sent from memory, the others are read from the vault with
+/// the same checks ([`resolve_mcp_headers_staged`]).
+pub(crate) fn fetch_tools_snapshot_staged(
+    vault: &SecretsVault,
+    target: McpCredentialTarget<'_>,
+    header_bindings: &[HeaderBinding],
+    staged: &[(String, SecretString)],
+    timeout_ms: u64,
+) -> Result<McpSnapshot, OrchestratorError> {
     let url = target.url;
     let allowlist = allowlist_from_connection_url(url)?;
-    let headers = resolve_mcp_headers(vault, target, header_bindings)?;
+    let headers = resolve_mcp_headers_staged(vault, target, header_bindings, staged)?;
     let mut client = McpClient::connect(url, &allowlist, headers, timeout_ms)?;
     let tools = client.list_tools()?;
     Ok(McpSnapshot {
@@ -3038,9 +3121,11 @@ impl SqliteWorkflowStore {
     /// longer equal what was observed (another writer, such as an admin's client save marking the
     /// row for reconnect, changed it since); naming no row, it refuses if a row now exists. A
     /// `Replace` that changes the auth mode deletes the previous mode's credentials (see
-    /// [`replaced_auth_mode_binding_ids`]) in the same transaction, after the check.
+    /// [`replaced_auth_mode_binding_ids`]) in the same transaction, after the check. `staged`
+    /// header credentials (sealed, not yet stored) are written in that transaction too, after the
+    /// check and the deletes and before the row: a refused write stores none of them.
     #[allow(clippy::too_many_arguments)] // same flat shape as `upsert_mcp_connection`
-    pub fn upsert_mcp_connection_guarded(
+    pub(crate) fn upsert_mcp_connection_guarded(
         &self,
         scope: SecretScope,
         owner_user_id: &str,
@@ -3051,6 +3136,7 @@ impl SqliteWorkflowStore {
         auth_mode: McpAuthMode,
         oauth: Option<&McpOauthMetadata>,
         auth: McpAuthWrite<'_>,
+        staged: &[StagedHeader],
     ) -> Result<McpConnection, OrchestratorError> {
         let owner = vault_owner_user_id(scope, owner_user_id).to_string();
         {
@@ -3099,6 +3185,23 @@ impl SqliteWorkflowStore {
                         &replaced_auth_mode_binding_ids(prior, auth_mode, &kept),
                     )?;
                 }
+            }
+            // The staged header credentials are written only now: after the check and the
+            // mode-change deletes above, in the transaction that writes the row, so a refused
+            // write stores none of them and an accepted one stores all of them with the row.
+            for header in staged {
+                crate::secrets::put_host_secret_in(
+                    &tx,
+                    &header.binding_id,
+                    SecretKind::Connection,
+                    &header.sealed.nonce,
+                    &header.sealed.ciphertext,
+                    &header.sealed.fingerprint,
+                    std::slice::from_ref(&header.host),
+                    header.idempotency_key.as_deref(),
+                    scope,
+                    owner_user_id,
+                )?;
             }
             write_mcp_connection_row(
                 &tx,
@@ -4314,6 +4417,7 @@ mod tests {
                 McpAuthWrite::Replace {
                     observed: Some(&conn),
                 },
+                &[],
             )
             .unwrap();
         assert!(present());
@@ -4341,6 +4445,7 @@ mod tests {
                 McpAuthWrite::Replace {
                     observed: Some(&switched),
                 },
+                &[],
             )
             .unwrap();
         store
@@ -4356,6 +4461,7 @@ mod tests {
                 McpAuthWrite::Replace {
                     observed: Some(&conn),
                 },
+                &[],
             )
             .unwrap();
         assert!(!present());
@@ -5439,6 +5545,7 @@ forbid (
                 McpAuthMode::Oauth,
                 observed.oauth.as_ref(),
                 McpAuthWrite::Keep,
+                &[],
             )
             .unwrap();
         assert_eq!(kept.oauth.unwrap().status, McpOauthStatus::NeedsReauth);
@@ -5459,6 +5566,7 @@ forbid (
                 McpAuthWrite::Replace {
                     observed: Some(&observed),
                 },
+                &[],
             )
             .unwrap_err();
         assert!(matches!(err, OrchestratorError::Conflict(_)), "{err:?}");
@@ -5483,6 +5591,7 @@ forbid (
                 McpAuthWrite::Replace {
                     observed: Some(&row),
                 },
+                &[],
             )
             .unwrap();
         assert_eq!(done.oauth.unwrap().client_id, "client-456");
@@ -5503,6 +5612,7 @@ forbid (
                 mode,
                 oauth,
                 McpAuthWrite::Replace { observed: None },
+                &[],
             )
         };
         // Uncontended, a new connection is created.
@@ -5517,6 +5627,136 @@ forbid (
             .unwrap();
         assert_eq!(row.auth_mode, McpAuthMode::Oauth);
         assert_eq!(row.oauth, Some(sample_oauth_meta()));
+    }
+
+    #[test]
+    fn a_refused_guarded_write_stores_none_of_its_staged_headers_and_an_accepted_one_stores_them_with_the_row(
+    ) {
+        let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+        let vault = SecretsVault::for_tests(store.clone());
+        let url = "https://mcp.example.com/mcp";
+        let stage = |connection_id: &str, name: &str, value: &str| {
+            stage_mcp_header_credential(
+                &vault,
+                SecretScope::User,
+                connection_id,
+                name,
+                value,
+                "mcp.example.com",
+                Some("http-key"),
+                UserRole::Member,
+            )
+            .unwrap()
+        };
+        let present = |binding: &str| {
+            vault
+                .get_metadata_at(SecretScope::User, "alice", binding)
+                .is_ok()
+        };
+        let plaintext = |binding: &str| {
+            vault
+                .decrypt_secret_at(SecretScope::User, "alice", binding)
+                .unwrap()
+                .expose_secret()
+                .clone()
+        };
+        let guarded = |connection_id: &str,
+                       headers: &[HeaderBinding],
+                       observed: Option<&McpConnection>,
+                       staged: &[StagedHeader]| {
+            store.upsert_mcp_connection_guarded(
+                SecretScope::User,
+                "alice",
+                connection_id,
+                url,
+                headers,
+                &[tool("t")],
+                McpAuthMode::Static,
+                None,
+                McpAuthWrite::Replace { observed },
+                staged,
+            )
+        };
+        let bindings = |connection_id: &str| {
+            vec![
+                HeaderBinding {
+                    name: "Authorization".into(),
+                    binding_id: mcp_header_binding_id(connection_id, "Authorization"),
+                },
+                HeaderBinding {
+                    name: "X-Extra".into(),
+                    binding_id: mcp_header_binding_id(connection_id, "X-Extra"),
+                },
+            ]
+        };
+
+        // Staging stores nothing.
+        let first = [
+            stage("acme", "Authorization", "Bearer first"),
+            stage("acme", "X-Extra", "extra-first"),
+        ];
+        assert!(!present("acme/auth-header"));
+        // A row a competing connect created meanwhile refuses the write (a first connect observed
+        // no row): none of the staged headers is stored.
+        store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "alice",
+                "acme",
+                url,
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&sample_oauth_meta()),
+            )
+            .unwrap();
+        let err = guarded("acme", &bindings("acme"), None, &first).unwrap_err();
+        assert!(matches!(err, OrchestratorError::Conflict(_)), "{err:?}");
+        assert!(
+            !present("acme/auth-header"),
+            "a refused write stored a header"
+        );
+        assert!(
+            !present("acme/header/x-extra"),
+            "a refused write stored a header"
+        );
+
+        // An accepted first write stores every staged header in the same commit as the row, pinned
+        // to the host.
+        let second = [
+            stage("beta", "Authorization", "Bearer second"),
+            stage("beta", "X-Extra", "extra-second"),
+        ];
+        let row = guarded("beta", &bindings("beta"), None, &second).unwrap();
+        assert_eq!(row.header_bindings, bindings("beta"));
+        assert_eq!(plaintext("beta/auth-header"), "Bearer second");
+        assert_eq!(plaintext("beta/header/x-extra"), "extra-second");
+        let meta = vault
+            .get_metadata_at(SecretScope::User, "alice", "beta/auth-header")
+            .unwrap();
+        assert_eq!(meta.kind, SecretKind::Connection);
+        assert_eq!(
+            meta.allowed_destinations,
+            vec!["mcp.example.com".to_string()]
+        );
+
+        // A replacement written against a row that moved on is refused and leaves the old header;
+        // against the current row it replaces it.
+        let mut stale = row.clone();
+        stale.auth_mode = McpAuthMode::Oauth;
+        stale.oauth = Some(sample_oauth_meta());
+        let replacement = [stage("beta", "Authorization", "Bearer third")];
+        let err = guarded("beta", &bindings("beta"), Some(&stale), &replacement).unwrap_err();
+        assert!(matches!(err, OrchestratorError::Conflict(_)), "{err:?}");
+        assert_eq!(plaintext("beta/auth-header"), "Bearer second");
+        guarded("beta", &bindings("beta"), Some(&row), &replacement).unwrap();
+        assert_eq!(plaintext("beta/auth-header"), "Bearer third");
+        assert_eq!(
+            plaintext("beta/header/x-extra"),
+            "extra-second",
+            "a header the write did not stage is left as it was"
+        );
     }
 
     #[test]
@@ -5604,6 +5844,7 @@ forbid (
                 McpAuthWrite::Replace {
                     observed: Some(seen),
                 },
+                &[],
             )
         };
         let err = to_static(&observed).unwrap_err();

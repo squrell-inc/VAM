@@ -18,7 +18,7 @@ use crate::api::{ensure_ready, json_http_response, AppState};
 use crate::connectors::{self, PutNodeRequest};
 use crate::error::OrchestratorError;
 use crate::keys::USERS_ADMIN_SCOPE;
-use crate::mcp_registry::mcp_oauth_refresh_token_binding_id;
+use crate::mcp_registry::{mcp_auth_binding_id, mcp_oauth_refresh_token_binding_id};
 use crate::secrets::{vault_owner_user_id, SecretScope};
 use crate::{connector_client, connector_discovery, connector_exchange};
 use vam_spec::v1::VamErrorCode;
@@ -64,7 +64,7 @@ async fn list_connectors(
             let e = &connectors::entry_for_node(e, node);
             let def = &e.def;
             let client = clients.iter().find(|c| c.connector_id == id);
-            let (mine, account) = caller_connection_state(&state, &auth, &id, node, client);
+            let (mine, account) = caller_connection_state(&state, &auth, def, node, client);
             let mut entry = connectors::list_entry(def, &cfg, node, mine, admin);
             connectors::show_account(
                 &mut entry,
@@ -89,26 +89,33 @@ async fn list_connectors(
 fn caller_connection_state(
     state: &AppState,
     auth: &AuthContext,
-    id: &str,
+    def: &vam_spec::connector::Connector,
     node: Option<&connectors::NodeConnector>,
     client: Option<&connector_client::NodeClient>,
 ) -> (Option<connectors::CallerState>, Option<String>) {
+    let id = connectors::connector_id(def);
+    let id = id.as_str();
     let scope = SecretScope::User;
     let owner = vault_owner_user_id(scope, auth.owner_user_id()).to_string();
     let Some(policy) = state.store.mcp_policy(id).ok().flatten() else {
         let Ok(Some(conn)) = state.store.connector_connection(&owner, id) else {
             return (None, None);
         };
-        let has_refresh = state
-            .vault
-            .has_binding_at(scope, &owner, &connectors::refresh_token_binding_id(id))
-            .unwrap_or(false);
         // An `oauth` connector's connection is judged against the token endpoint of the node's
-        // client as well (a connection made against another is not this company's).
-        let st = connectors::rest_connection_state(
+        // client as well (a connection made against another is not this company's). An `api_key`
+        // connection is judged by its key's pin against the filled hosts (`rest_state_for`).
+        let st = connectors::rest_state_for(
+            &state.store,
+            def,
+            &owner,
             &conn,
             node,
-            has_refresh,
+            || {
+                state
+                    .vault
+                    .has_binding_at(scope, &owner, &connectors::refresh_token_binding_id(id))
+                    .unwrap_or(false)
+            },
             client.map(|c| c.token_endpoint.as_str()),
         );
         return (Some(st), conn.label);
@@ -116,6 +123,21 @@ fn caller_connection_state(
     let Ok(conn) = state.store.get_mcp_connection(scope, &owner, id) else {
         return (None, None);
     };
+    // An MCP connector with an API key has a static row and a header row, never a refresh token.
+    if connectors::is_api_key(def) {
+        let has_header = state
+            .vault
+            .has_binding_at(
+                scope,
+                &conn.owner_user_id,
+                &mcp_auth_binding_id(&conn.connection_id),
+            )
+            .unwrap_or(false);
+        return (
+            connectors::mcp_api_key_state(&policy, Some(&conn), has_header),
+            None,
+        );
+    }
     let has_tokens = state
         .vault
         .has_binding_at(
@@ -136,10 +158,13 @@ fn entry_for(
     auth: &AuthContext,
     e: &connectors::ConnectorEntry,
 ) -> Result<Value, OrchestratorError> {
-    let def = &e.def;
     let id = e.id();
     let (node, client) = state.store.node_connector_and_client(&id)?;
-    let (mine, account) = caller_connection_state(state, auth, &id, node.as_ref(), client.as_ref());
+    // Every host shown is filled from the node row this response shows, not from the definition the
+    // caller resolved before it (an admin's save or an update may have landed between).
+    let e = &connectors::entry_for_node(e, node.as_ref());
+    let def = &e.def;
+    let (mine, account) = caller_connection_state(state, auth, def, node.as_ref(), client.as_ref());
     let mut entry = connectors::list_entry(
         def,
         &connectors::config(),
@@ -264,8 +289,13 @@ async fn put_node(
     }
     // The node row and the client are the ones this save committed, read in its transaction: a
     // concurrent save cannot pair this node row with another save's client (or with none).
-    let (mine, account) =
-        caller_connection_state(&state, &auth, &id, Some(&saved.node), saved.client.as_ref());
+    let (mine, account) = caller_connection_state(
+        &state,
+        &auth,
+        &def,
+        Some(&saved.node),
+        saved.client.as_ref(),
+    );
     let mut entry = connectors::list_entry(&def, &cfg, Some(&saved.node), mine, true);
     connectors::show_account(
         &mut entry,
@@ -347,6 +377,10 @@ async fn put_connection(
         .authorize(&auth, "PutConnectorConnection", CONNECTION_SCOPE)?;
     let idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let def = entry_or_404(&state, &id)?;
+    // A connector that signs in with an API key takes the member's key and nothing else (CN-7.6).
+    if connectors::is_api_key(&def.template) {
+        return put_api_key_connection(&state, &auth, &def, &body, &idempotency).await;
+    }
     // A connector with fixed endpoints and the admin's client connects only through the node's code
     // exchange (CN-6.3): tokens the app holds cannot be tied to the company address, so they are
     // refused before the body is read. Nothing is written. The Entra route below is unchanged.
@@ -386,6 +420,96 @@ async fn put_connection(
     ))
 }
 
+/// `PUT /v1/connectors/{id}/connection` for an `api_key` connector: the member's own key (CN-7.6).
+///
+/// The body is `{ apiKey }` and nothing else. Every refusal is decided before anything is written
+/// and is a fixed text that never quotes the key: not enabled (403), no company address (409), a
+/// body or key that does not fit (400). Under the member's connection lock, ONE transaction writes
+/// the `connector_connections` row and the `connector/<id>/api-key` vault row (`connection` kind,
+/// sealed before the transaction, pinned to the filled binding hosts); the enable, the address and
+/// the hosts are checked again inside it. Then this member's parks on the connector continue. No
+/// request is made to the provider. The answer is the member's list entry: no key is in it.
+async fn put_api_key_connection(
+    state: &AppState,
+    auth: &AuthContext,
+    found: &connectors::ConnectorEntry,
+    body: &str,
+    idempotency: &str,
+) -> Result<Response, ApiError> {
+    let id = found.id();
+    // A fixed message: a serde error can quote the value it rejected, and this body holds a key.
+    let req = connectors::parse_api_key_body(body)?;
+    let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
+    {
+        let _gate = connectors::lock_connection(&owner, &id).await;
+        let now = connectors::now_secs();
+        let node = state.store.node_connector(&id)?;
+        // Every refusal is decided here, before any write.
+        let plan = connectors::plan_api_key_connection(&found.template, node.as_ref(), &req)?;
+        if let Some(url) = &plan.mcp_url {
+            // An MCP connector: the node writes the member's static MCP row (CN-7.7). The key is
+            // staged and listed from memory, then written with the row in one transaction.
+            super::mcp_connections::connect_api_key_mcp(
+                state,
+                auth,
+                &id,
+                url,
+                &req.api_key,
+                idempotency,
+            )
+            .await?;
+            state
+                .store
+                .resolve_connection_needs_reauth(&owner, &id, "acted");
+        } else {
+            // Inside the transaction: the connector is still enabled, still at the address and still
+            // names the hosts the key is about to be pinned to (an admin's save or a listing update
+            // that landed meanwhile stores nothing).
+            let (check_id, address, hosts) = (id.clone(), plan.address.clone(), plan.hosts.clone());
+            let still_current = move |tx: &rusqlite::Connection| -> Result<(), OrchestratorError> {
+                let node_now = connectors::node_connector_in(tx, &check_id)?;
+                let enabled = node_now.as_ref().is_some_and(|n| n.enabled);
+                let same_address =
+                    connectors::address_key(node_now.and_then(|n| n.tenant_subdomain).as_deref())
+                        == address;
+                let same_file = connectors::entry_in(tx, &check_id)?.is_some_and(|e| {
+                    connectors::is_api_key(&e.def) && connectors::binding_hosts(&e.def) == hosts
+                });
+                if enabled && same_address && same_file {
+                    Ok(())
+                } else {
+                    Err(OrchestratorError::Conflict(format!(
+                    "the `{check_id}` connector changed while the key was being saved: read it again and retry"
+                )))
+                }
+            };
+            state.store.commit_api_key_connection(
+                &state.vault,
+                &connectors::ApiKeyCommit {
+                    owner: &owner,
+                    connector_id: &id,
+                    address: &plan.address,
+                    hosts: &plan.hosts,
+                    api_key: &req.api_key,
+                    now,
+                },
+                &still_current,
+            )?;
+            // The member's reconnect notification (if any) is resolved: they entered the key again.
+            state
+                .store
+                .resolve_connection_needs_reauth(&owner, &id, "acted");
+        }
+    }
+    // The lock is released: a resumed intent takes it. Only this owner's parks on this connector
+    // continue (the key carries the owner).
+    super::reauth::resume_key(state, &crate::connector_park::park_key(&owner, &id));
+    Ok(json_http_response(
+        StatusCode::OK,
+        entry_for(state, auth, found)?.to_string(),
+    ))
+}
+
 /// `DELETE /v1/connectors/{id}/connection`: the caller's token rows and connection row. Allowed
 /// whether or not the node still has the connector enabled.
 async fn delete_connection(
@@ -400,13 +524,23 @@ async fn delete_connection(
         .authorize(&auth, "DeleteConnectorConnection", CONNECTION_SCOPE)?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let def = entry_or_404(&state, &id)?;
+    let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
     if state.store.mcp_policy(&id)?.is_some() {
+        // An MCP connector with an API key: its static row and its header row go, and nothing is
+        // asked of the provider (CN-7.7). An OAuth MCP connector disconnects at the generic route.
+        if connectors::is_api_key(&def.template) {
+            let _gate = connectors::lock_connection(&owner, &id).await;
+            connectors::disconnect_mcp_api_key(&state.store, &state.vault, &owner, &id)?;
+            return Ok(json_http_response(
+                StatusCode::OK,
+                entry_for(&state, &auth, &def)?.to_string(),
+            ));
+        }
         return Err(OrchestratorError::InvalidContract(format!(
             "`{id}` is an MCP connector; disconnect it with `vam mcp disconnect {id}` (/v1/mcp/connections)"
         ))
         .into());
     }
-    let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
     let _gate = connectors::lock_connection(&owner, &id).await;
     // An `oauth` connector's refresh token is revoked only when its file declares a revocation
     // endpoint (RFC 7009, public client) and the grant was issued to the client the node has now:
@@ -455,6 +589,14 @@ async fn check_connection(
         .authorize(&auth, "CheckConnectorConnection", CONNECTION_SCOPE)?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let def = entry_or_404(&state, &id)?;
+    // An API key has nothing to refresh and nothing at the provider to ask: the answer is the
+    // stored state (the row, the key's pin and the address), with no request made.
+    if connectors::is_api_key(&def.template) {
+        return Ok(json_http_response(
+            StatusCode::OK,
+            entry_for(&state, &auth, &def)?.to_string(),
+        ));
+    }
     let owner = vault_owner_user_id(SecretScope::User, auth.owner_user_id()).to_string();
     // The lock moves into the worker: a client that goes away mid-refresh does not release it while
     // the refresh is still running, so a sign-in cannot interleave with a stale check result.
@@ -516,6 +658,10 @@ async fn exchange_code(
         .authorize(&auth, "ExchangeConnectorCode", CONNECTION_SCOPE)?;
     let idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let found = entry_or_404(&state, &id)?;
+    // An API key has no code to exchange: the member enters the key itself (CN-7.6).
+    if connectors::is_api_key(&found.template) {
+        return Err(OrchestratorError::InvalidContract(connectors::api_key_only(&id)).into());
+    }
     // A fixed message: a serde error can quote the value it rejected, and this body holds a code.
     let req: connector_client::CodeExchangeRequest = serde_json::from_str(&body).map_err(|_| {
         OrchestratorError::InvalidContract(
@@ -5388,6 +5534,245 @@ mod tests {
         assert_eq!(stored.timeout_ms, 90_000);
     }
 
+    /// A hand-added static MCP server on loopback, answering `host`; `tools_ok` false makes its
+    /// `tools/list` fail.
+    fn static_mcp_server(
+        host: &str,
+        tools_ok: Arc<AtomicBool>,
+    ) -> Arc<std::sync::Mutex<crate::mcp_client::mock::Seen>> {
+        let (url, seen) = crate::mcp_client::mock::spawn(move |method, id, params| {
+            if method == "tools/list" && !tools_ok.load(std::sync::atomic::Ordering::SeqCst) {
+                return Some((
+                    "application/json".into(),
+                    serde_json::json!({ "jsonrpc": "2.0", "id": id,
+                        "error": { "code": -32000, "message": "tools are down" } })
+                    .to_string(),
+                ));
+            }
+            crate::mcp_client::mock::standard(method, id, params)
+        });
+        crate::mcp_oauth_refresh::test_seam::serve(host, url::Url::parse(&url).unwrap());
+        seen
+    }
+
+    fn static_connect_body(id: &str, host: &str, authorization: &str) -> serde_json::Value {
+        serde_json::json!({
+            "connectionId": id,
+            "url": format!("https://{host}/mcp"),
+            "secretValue": authorization,
+        })
+    }
+
+    fn stored_header(state: &AppState, id: &str) -> String {
+        secrecy::ExposeSecret::expose_secret(
+            &state
+                .vault
+                .decrypt_secret_at(
+                    crate::secrets::SecretScope::User,
+                    "ada",
+                    &format!("{id}/auth-header"),
+                )
+                .unwrap(),
+        )
+        .clone()
+    }
+
+    #[tokio::test]
+    async fn two_first_time_static_connects_leave_the_accepted_ones_header_in_force() {
+        let (app, state) = app_world_with_state();
+        let host = "mcp.static-race.example";
+        static_mcp_server(host, Arc::new(AtomicBool::new(true)));
+        let connect = |app: axum::Router, key: &'static str, authorization: &'static str| {
+            tokio::spawn(async move {
+                call_with_key(
+                    &app,
+                    "PUT",
+                    "/v1/mcp/connections",
+                    "member-secret",
+                    Some(static_connect_body("static-race", host, authorization)),
+                    key,
+                )
+                .await
+            })
+        };
+        let wait = |arrived: std::sync::mpsc::Receiver<()>| {
+            tokio::task::spawn_blocking(move || {
+                arrived.recv_timeout(std::time::Duration::from_secs(10))
+            })
+        };
+        // A and B are both first-time connects: each has read "no row" and listed the tools, and
+        // each stops just before its row write.
+        let (arrived_a, release_a) =
+            crate::connectors::test_signal::arm_pause("mcp-connect-write:static-race");
+        let a = connect(app.clone(), "race-a", "Bearer token-A");
+        wait(arrived_a)
+            .await
+            .unwrap()
+            .expect("A reached its row write");
+        let (arrived_b, release_b) =
+            crate::connectors::test_signal::arm_pause("mcp-connect-write:static-race");
+        let b = connect(app.clone(), "race-b", "Bearer token-B");
+        wait(arrived_b)
+            .await
+            .unwrap()
+            .expect("B reached its row write");
+        // A's row commits; B is refused.
+        release_a.send(()).unwrap();
+        let (s, body) = a.await.unwrap();
+        assert_eq!(s, StatusCode::OK, "{body}");
+        release_b.send(()).unwrap();
+        let (s, body) = b.await.unwrap();
+        assert_eq!(s, StatusCode::CONFLICT, "{body}");
+        // The request the member was told succeeded is the one in force.
+        assert_eq!(
+            stored_header(&state, "static-race"),
+            "Bearer token-A",
+            "the accepted row's header is not the refused request's value"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_static_connect_whose_tool_listing_fails_keeps_the_old_header() {
+        let (app, state) = app_world_with_state();
+        let host = "mcp.static-keep.example";
+        let tools_ok = Arc::new(AtomicBool::new(true));
+        let seen = static_mcp_server(host, tools_ok.clone());
+        let (s, body) = call_with_key(
+            &app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(static_connect_body("static-keep", host, "Bearer old")),
+            "keep-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(stored_header(&state, "static-keep"), "Bearer old");
+        // The server now refuses the listing; the member replaces the header.
+        tools_ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (s, body) = call_with_key(
+            &app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(static_connect_body("static-keep", host, "Bearer new")),
+            "keep-2",
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{body}");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .auth
+                .iter()
+                .any(|a| a.as_deref() == Some("Bearer new")),
+            "the listing was tried with the new header"
+        );
+        assert_eq!(
+            stored_header(&state, "static-keep"),
+            "Bearer old",
+            "a refused connect replaced a working header"
+        );
+        // A listing that works takes the new header.
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (s, body) = call_with_key(
+            &app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(static_connect_body("static-keep", host, "Bearer new")),
+            "keep-3",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(stored_header(&state, "static-keep"), "Bearer new");
+    }
+
+    /// A marketplace connector that signs in with an API key (REST, one bearer binding).
+    fn install_notesdesk(store: &SqliteWorkflowStore) {
+        install_notesdesk_with(store, |_| {});
+    }
+
+    /// [`install_notesdesk`] with the file edited by `edit` first.
+    fn install_notesdesk_with(
+        store: &SqliteWorkflowStore,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) {
+        let mut json = serde_json::json!({
+            "urn": "urn:vam:connector:connectors.community.example/community/notesdesk",
+            "version": "1.0.0", "displayName": "Notesdesk", "publisher": "Community Tools Ltd",
+            "description": "Notes.", "icon": "notesdesk",
+            "provider": { "kind": "api_key",
+                          "fields": [{ "name": "key", "label": "Notesdesk API key" }] },
+            "connection": { "holder": "user", "multiAccount": false, "label": "none" },
+            "bindings": [{ "name": "api", "placeholder": "vamsec_notesdesk_api",
+                           "value": "api_key", "inject": "bearer",
+                           "hosts": ["api.notesdesk.example"] }]
+        });
+        edit(&mut json);
+        let urn = json["urn"].as_str().unwrap().to_string();
+        let c = store.connection.lock().unwrap();
+        c.execute(
+            "INSERT INTO connector_releases (urn, major, minor, patch, digest, spec_bytes, created_at,
+                 updated_at, owner_user_id) VALUES (?1, 1, 0, 0, 'd', ?2, 1, 1, 'system')",
+            rusqlite::params![urn, json.to_string().as_bytes()],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO catalog_origins (kind, urn, major, minor, patch, marketplace_id, listing_id,
+                 git_ref, commit_sha, package_digest, installed_at)
+             VALUES ('connector', ?1, 1, 0, 0, 'm-1', 'notesdesk-connector', 'notesdesk-v1', 'c', 'd', 1)",
+            [urn],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_api_key_connector_takes_no_client_and_no_consent_and_lists_its_field() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        let node = |body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                call(
+                    &app,
+                    "PUT",
+                    "/v1/connectors/notesdesk/node",
+                    "orgadmin-secret",
+                    Some(body),
+                )
+                .await
+            }
+        };
+        for body in [
+            serde_json::json!({ "enabled": true, "client": { "clientId": "c-1" } }),
+            serde_json::json!({ "enabled": true, "client": { "clientId": "c-1", "clientSecret": "s" } }),
+            serde_json::json!({ "enabled": true, "consent": { "tenantId": "11111111-2222-3333-4444-555555555555" } }),
+        ] {
+            let (s, b) = node(body).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+            assert!(b.to_string().contains("API key"), "{b}");
+        }
+        // Nothing was saved by the refused bodies.
+        assert!(state.store.node_connector("notesdesk").unwrap().is_none());
+        let (s, e) = node(serde_json::json!({ "enabled": true })).await;
+        assert_eq!(s, StatusCode::OK, "{e}");
+        assert_eq!(e["provider"]["kind"], "api_key");
+        assert_eq!(e["provider"]["fields"][0]["label"], "Notesdesk API key");
+        // A member reads the same entry: the sign-in kind and the label, and the connect state.
+        let (s, l) = call(&app, "GET", "/v1/connectors", "member-secret", None).await;
+        assert_eq!(s, StatusCode::OK);
+        let entry = l["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "notesdesk")
+            .unwrap();
+        assert_eq!(entry["state"], "connect", "{entry}");
+        assert_eq!(entry["provider"]["kind"], "api_key");
+        assert_eq!(entry["provider"]["fields"][0]["label"], "Notesdesk API key");
+    }
+
     #[tokio::test]
     async fn a_check_whose_request_goes_away_keeps_the_members_lock_until_the_refresh_returns() {
         let (app, _state, p) = fixed_endpoint_node("fixedcheck.example", false).await;
@@ -5436,5 +5821,1397 @@ mod tests {
         )
         .await;
         assert!(late.is_ok(), "the lock is free once the refresh returned");
+    }
+
+    // ---- the API key connection (CN-7.6) ---------------------------------------------------------
+
+    const KEY: &str = "ndk_live_0123456789abcdef";
+    const KEY_ROW: &str = "connector/notesdesk/api-key";
+
+    async fn enable_notesdesk(app: &axum::Router, body: serde_json::Value) {
+        let (s, b) = call(
+            app,
+            "PUT",
+            "/v1/connectors/notesdesk/node",
+            "orgadmin-secret",
+            Some(body),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+    }
+
+    async fn put_key(
+        app: &axum::Router,
+        secret: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        call(
+            app,
+            "PUT",
+            "/v1/connectors/notesdesk/connection",
+            secret,
+            Some(body),
+        )
+        .await
+    }
+
+    fn key_meta(
+        state: &AppState,
+        owner: &str,
+    ) -> Result<crate::secrets::HostSecretMetadata, OrchestratorError> {
+        state
+            .store
+            .get_host_secret_metadata(SecretScope::User, owner, KEY_ROW)
+    }
+
+    fn stored_key(state: &AppState, owner: &str) -> String {
+        use secrecy::ExposeSecret;
+        state
+            .vault
+            .decrypt_secret_at(SecretScope::User, owner, KEY_ROW)
+            .unwrap()
+            .expose_secret()
+            .clone()
+    }
+
+    async fn member_entry(app: &axum::Router) -> serde_json::Value {
+        let (s, l) = call(app, "GET", "/v1/connectors", "member-secret", None).await;
+        assert_eq!(s, StatusCode::OK);
+        l["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "notesdesk")
+            .cloned()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_api_key_is_stored_pinned_to_the_filled_hosts_and_shown_nowhere() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        assert_eq!(member_entry(&app).await["state"], "connect");
+
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected", "{b}");
+        // The vault row: this member's, `connection` kind, pinned to the one filled host.
+        let meta = key_meta(&state, "ada").unwrap();
+        assert_eq!(meta.kind, crate::secrets::SecretKind::Connection);
+        assert_eq!(meta.allowed_destinations, vec!["api.notesdesk.example"]);
+        assert_eq!(stored_key(&state, "ada"), KEY);
+        // The row: connected, no token endpoint, no expiry, the empty address.
+        let row = state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, crate::connectors::ConnectionStatus::Connected);
+        assert_eq!(row.token_endpoint, "");
+        assert_eq!(row.tenant_id, "");
+        assert_eq!(row.expires_at, None);
+        // No answer holds the key, for the member or for the admin; and it is one vault row only.
+        for secret in ["member-secret", "orgadmin-secret"] {
+            let (_, l) = call(&app, "GET", "/v1/connectors", secret, None).await;
+            assert!(!l.to_string().contains(KEY), "{secret}: {l}");
+        }
+        assert!(!b.to_string().contains(KEY));
+        // Only the member's own tile reads connected.
+        let (_, l) = call(&app, "GET", "/v1/connectors", "orgadmin-secret", None).await;
+        let admin_entry = l["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "notesdesk")
+            .unwrap();
+        assert_eq!(admin_entry["state"], "connect");
+        assert!(key_meta(&state, "olga").is_err());
+        // A replaced key is the stored one.
+        let (s, b) = put_key(
+            &app,
+            "member-secret",
+            serde_json::json!({ "apiKey": "ndk_live_ZZZZZZZZZZZZZZZZ" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(stored_key(&state, "ada"), "ndk_live_ZZZZZZZZZZZZZZZZ");
+        assert!(!b.to_string().contains("ndk_live_"));
+    }
+
+    #[tokio::test]
+    async fn every_api_key_refusal_is_a_fixed_text_that_never_quotes_the_key() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        let long = "k".repeat(4097);
+        let bad_values: Vec<String> = vec![
+            "short".into(),
+            "1234567".into(),
+            long,
+            " ndk_live_0123456789".into(),
+            "ndk_live_0123456789 ".into(),
+            "ndk live 0123456789".into(),
+            "ndk_live_\n0123456789".into(),
+            "ndk_live_\t0123456789".into(),
+            "ndk_live_\r\n0123456789".into(),
+            "ndk_live_\u{0}0123456789".into(),
+            "ndk_live_\u{7f}0123456789".into(),
+            "ndk_live_\u{a0}0123456789".into(),
+            "ndk_live_\u{2028}0123456789".into(),
+        ];
+        for v in &bad_values {
+            let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": v })).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+            assert!(
+                b.to_string().contains(
+                    "apiKey must be 8 to 4096 bytes, with no whitespace or control characters"
+                ),
+                "{b}"
+            );
+            let shown = b.to_string();
+            assert!(
+                !shown.contains("ndk_live_") && !shown.contains(&"k".repeat(20)),
+                "{b}"
+            );
+        }
+        // A body that is not exactly `{ apiKey }`: one fixed text, the value is never echoed.
+        for raw in [
+            serde_json::json!({}),
+            serde_json::json!({ "apiKey": KEY, "extra": 1 }),
+            serde_json::json!({ "apiKey": KEY, "accessToken": "x" }),
+            serde_json::json!({ "apiKey": 12345678 }),
+            serde_json::json!({ "api_key": KEY }),
+            serde_json::json!([KEY]),
+            serde_json::json!({ "accessToken": KEY, "refreshToken": KEY, "idToken": KEY }),
+        ] {
+            let (s, b) = put_key(&app, "member-secret", raw).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+            assert!(
+                b.to_string().contains("connection body must be { apiKey }"),
+                "{b}"
+            );
+            assert!(!b.to_string().contains(KEY), "{b}");
+        }
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/v1/connectors/notesdesk/connection")
+            .header("authorization", "Bearer member-secret")
+            .header("idempotency-key", "k-1")
+            .body(Body::from(format!("{{\"apiKey\": \"{KEY}\" ")))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let text = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec())
+            .unwrap();
+        assert!(!text.contains(KEY), "{text}");
+        // Nothing was written by any refusal.
+        assert!(key_meta(&state, "ada").is_err());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_none());
+        // The limits themselves are accepted, and the key is kept exactly as typed.
+        for ok in [
+            "12345678".to_string(),
+            "k".repeat(4096),
+            "ünïcode-key-çhars".to_string(),
+        ] {
+            let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": ok })).await;
+            assert_eq!(s, StatusCode::OK, "{b}");
+            assert_eq!(stored_key(&state, "ada"), ok);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_key_is_refused_before_enable_and_before_the_company_address() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        // Not enabled: 403 with the Phase 6 words; a disabled row too.
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        assert!(b.to_string().contains("ask your admin"), "{b}");
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        enable_notesdesk(&app, serde_json::json!({ "enabled": false })).await;
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        assert!(!b.to_string().contains(KEY));
+        assert!(key_meta(&state, "ada").is_err());
+
+        // A connector with a company address: enabled with none stored is a 409, nothing written.
+        let (app, state) = app_world_with_state();
+        install_notesdesk_with(&state.store, |j| {
+            j["tenant"] = serde_json::json!({
+                "name": "subdomain", "suffix": "notesdesk.example", "label": "Notesdesk address"
+            });
+            j["bindings"][0]["hosts"] = serde_json::json!(["{subdomain}.notesdesk.example"]);
+        });
+        state
+            .store
+            .put_node_connector(&crate::connectors::NodeConnector {
+                connector_id: "notesdesk".into(),
+                enabled: true,
+                consent_tenant_id: None,
+                consent_recorded_at: None,
+                consent_recorded_by: None,
+                tenant_subdomain: None,
+                updated_at: 1,
+                updated_by: "olga".into(),
+            })
+            .unwrap();
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("company address"), "{b}");
+        assert!(key_meta(&state, "ada").is_err());
+        // With the address the key is pinned to the filled host and the row carries the address.
+        enable_notesdesk(
+            &app,
+            serde_json::json!({ "enabled": true, "tenant": { "subdomain": "acme" } }),
+        )
+        .await;
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected");
+        assert_eq!(
+            key_meta(&state, "ada").unwrap().allowed_destinations,
+            vec!["acme.notesdesk.example"]
+        );
+        assert_eq!(
+            state
+                .store
+                .connector_connection("ada", "notesdesk")
+                .unwrap()
+                .unwrap()
+                .tenant_id,
+            "acme"
+        );
+        // A move of the address reads needsReconnect: the key stays pinned to the old host.
+        enable_notesdesk(
+            &app,
+            serde_json::json!({ "enabled": true, "tenant": { "subdomain": "globex" } }),
+        )
+        .await;
+        assert_eq!(member_entry(&app).await["state"], "needsReconnect");
+        assert_eq!(
+            key_meta(&state, "ada").unwrap().allowed_destinations,
+            vec!["acme.notesdesk.example"]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_api_key_is_the_members_own_and_needs_the_connection_scope() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        state
+            .store
+            .create_api_key_owned(
+                "readonly-key",
+                "ada",
+                "readonly-secret",
+                "User::\"ada\"",
+                &["node:read".to_string()],
+                "ada",
+            )
+            .unwrap();
+        let (s, b) = put_key(
+            &app,
+            "readonly-secret",
+            serde_json::json!({ "apiKey": KEY }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        assert!(key_meta(&state, "ada").is_err());
+        // No key at all: not authorized.
+        let (s, _) = put_key(&app, "nobody", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+        // The member writes their own row; the admin's is untouched, and the admin's key is theirs.
+        let (s, _) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(state
+            .store
+            .connector_connection("olga", "notesdesk")
+            .unwrap()
+            .is_none());
+        let (s, _) = put_key(
+            &app,
+            "orgadmin-secret",
+            serde_json::json!({ "apiKey": "ndk_admin_0123456789" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(stored_key(&state, "ada"), KEY);
+        assert_eq!(stored_key(&state, "olga"), "ndk_admin_0123456789");
+        // The Entra body is not taken for an API key connector, and writes nothing more.
+        let (s, b) = put_key(
+            &app,
+            "member-secret",
+            serde_json::json!({ "accessToken": "a1234567", "refreshToken": "r1234567", "idToken": "x.y.z" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert_eq!(stored_key(&state, "ada"), KEY);
+    }
+
+    #[tokio::test]
+    async fn disconnect_and_check_for_an_api_key_ask_the_provider_nothing() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        let (s, _) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK);
+        // The check answers the stored state (the node has no route to any provider here: a
+        // provider call would have to fail the test by hanging or erroring).
+        let (s, b) = call(
+            &app,
+            "POST",
+            "/v1/connectors/notesdesk/connection/check",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected");
+        assert!(!b.to_string().contains(KEY));
+        // A key pinned to other hosts reads needsReconnect on the check as on the tile.
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE host_secrets SET allowed_destinations_json = '[\"evil.example\"]' WHERE binding_id = ?1",
+                [KEY_ROW],
+            )
+            .unwrap();
+        let (_, b) = call(
+            &app,
+            "POST",
+            "/v1/connectors/notesdesk/connection/check",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(b["state"], "needsReconnect", "{b}");
+        // A code exchange is refused for an API key connector, before anything is read.
+        let (s, b) = call(
+            &app,
+            "POST",
+            "/v1/connectors/notesdesk/connection/oauth/code",
+            "member-secret",
+            Some(serde_json::json!({ "code": "c", "codeVerifier": "v", "redirectUri": "squrell://oauth" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+        assert!(b.to_string().contains("API key"), "{b}");
+        // Disconnect removes the row and the key, whether or not the node still enables it.
+        enable_notesdesk(&app, serde_json::json!({ "enabled": false })).await;
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/notesdesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(b.get("providerGrantMayRemain").is_none(), "{b}");
+        assert!(key_meta(&state, "ada").is_err());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_none());
+        let (s, _) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/notesdesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+    }
+
+    /// Makes every delete of `binding` from the vault fail, as a vault that cannot be written
+    /// would (the vault shares the store's database, so a trigger is the failure).
+    fn fail_vault_delete(state: &AppState, binding: &str) {
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER vault_delete_fails BEFORE DELETE ON host_secrets
+                 WHEN old.binding_id = '{binding}'
+                 BEGIN SELECT RAISE(ABORT, 'vault is read only'); END;"
+            ))
+            .unwrap();
+    }
+
+    fn vault_delete_works_again(state: &AppState) {
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER vault_delete_fails;")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_that_cannot_delete_the_key_fails_keeps_the_row_and_a_retry_succeeds() {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        let (s, _) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK);
+        fail_vault_delete(&state, KEY_ROW);
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/notesdesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{b}");
+        assert!(!s.is_success(), "{b}");
+        assert!(!b.to_string().contains(KEY), "{b}");
+        // The key and the row are both still there: the member is told, and can retry.
+        assert!(key_meta(&state, "ada").is_ok());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_some());
+        vault_delete_works_again(&state);
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/notesdesk/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(key_meta(&state, "ada").is_err());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_host_change_by_an_update_keeps_the_key_but_reads_needs_reconnect_until_it_is_entered_again(
+    ) {
+        let (app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        enable_notesdesk(&app, serde_json::json!({ "enabled": true })).await;
+        let (s, _) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(member_entry(&app).await["state"], "connected");
+        // The listing is updated: the connector now also names the EU host.
+        let urn = "urn:vam:connector:connectors.community.example/community/notesdesk";
+        let updated = serde_json::json!({
+            "urn": urn,
+            "version": "1.1.0", "displayName": "Notesdesk", "publisher": "Community Tools Ltd",
+            "description": "Notes.", "icon": "notesdesk",
+            "provider": { "kind": "api_key",
+                          "fields": [{ "name": "key", "label": "Notesdesk API key" }] },
+            "connection": { "holder": "user", "multiAccount": false, "label": "none" },
+            "bindings": [{ "name": "api", "placeholder": "vamsec_notesdesk_api",
+                           "value": "api_key", "inject": "bearer",
+                           "hosts": ["api.notesdesk.example", "eu.api.notesdesk.example"] }]
+        });
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE connector_releases SET spec_bytes = ?1 WHERE urn = ?2",
+                rusqlite::params![updated.to_string().as_bytes(), urn],
+            )
+            .unwrap();
+        // The key is kept where it was, pinned to the old host, and reads needsReconnect.
+        let entry = member_entry(&app).await;
+        assert_eq!(entry["state"], "needsReconnect", "{entry}");
+        assert_eq!(
+            key_meta(&state, "ada").unwrap().allowed_destinations,
+            vec!["api.notesdesk.example"]
+        );
+        assert_eq!(stored_key(&state, "ada"), KEY);
+        // Entering it again pins it to both hosts and the tile reads connected.
+        let (s, b) = put_key(&app, "member-secret", serde_json::json!({ "apiKey": KEY })).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected");
+        assert_eq!(
+            key_meta(&state, "ada").unwrap().allowed_destinations,
+            vec!["api.notesdesk.example", "eu.api.notesdesk.example"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listing_update_that_lands_during_the_save_stores_nothing() {
+        // The transaction checks the hosts again: a connector whose hosts moved since the plan was
+        // made refuses the write.
+        let (_app, state) = app_world_with_state();
+        install_notesdesk(&state.store);
+        let node = crate::connectors::NodeConnector {
+            connector_id: "notesdesk".into(),
+            enabled: true,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            tenant_subdomain: None,
+            updated_at: 1,
+            updated_by: "olga".into(),
+        };
+        state.store.put_node_connector(&node).unwrap();
+        let hosts = vec!["api.notesdesk.example".to_string()];
+        let moved = |_: &rusqlite::Connection| -> Result<(), OrchestratorError> {
+            Err(OrchestratorError::Conflict("moved".into()))
+        };
+        let commit = crate::connectors::ApiKeyCommit {
+            owner: "ada",
+            connector_id: "notesdesk",
+            address: "",
+            hosts: &hosts,
+            api_key: KEY,
+            now: 1,
+        };
+        assert!(state
+            .store
+            .commit_api_key_connection(&state.vault, &commit, &moved)
+            .is_err());
+        assert!(key_meta(&state, "ada").is_err());
+        assert!(state
+            .store
+            .connector_connection("ada", "notesdesk")
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn the_entry_a_write_returns_is_filled_from_the_node_row_it_shows() {
+        use crate::keys::{ApiKeyRecord, AuthSource, AuthenticatedKey};
+        let (_app, state) = app_world_with_state();
+        install_notesdesk_with(&state.store, |j| {
+            j["tenant"] = serde_json::json!({
+                "name": "subdomain", "suffix": "notesdesk.example", "label": "Notesdesk address"
+            });
+            j["bindings"][0]["hosts"] = serde_json::json!(["{subdomain}.notesdesk.example"]);
+        });
+        let node = |sub: &str| crate::connectors::NodeConnector {
+            connector_id: "notesdesk".into(),
+            enabled: true,
+            consent_tenant_id: None,
+            consent_recorded_at: None,
+            consent_recorded_by: None,
+            tenant_subdomain: Some(sub.into()),
+            updated_at: 1,
+            updated_by: "olga".into(),
+        };
+        // The entry the route resolved when the node was at `old`...
+        state.store.put_node_connector(&node("old")).unwrap();
+        let stale = state.store.connector_entry("notesdesk").unwrap().unwrap();
+        assert_eq!(
+            stale.def.bindings.as_ref().unwrap()[0].hosts,
+            vec!["old.notesdesk.example"]
+        );
+        // ...and an admin's save that moved the address before the response is built.
+        state.store.put_node_connector(&node("acme")).unwrap();
+        let auth = crate::api::auth::AuthContext {
+            key: AuthenticatedKey {
+                record: ApiKeyRecord {
+                    key_id: "k".into(),
+                    name: "k".into(),
+                    sha256_secret: "h".into(),
+                    principal: "User::\"ada\"".into(),
+                    scopes: default_scopes_for_role(UserRole::Member),
+                    created_at: 1,
+                    owner_user_id: "ada".into(),
+                    ..Default::default()
+                },
+                source: AuthSource::ApiKey,
+                role: UserRole::Member,
+            },
+        };
+        let entry = super::entry_for(&state, &auth, &stale).unwrap();
+        assert_eq!(
+            entry["bindings"][0]["hosts"],
+            serde_json::json!(["acme.notesdesk.example"]),
+            "{entry}"
+        );
+        assert_eq!(
+            entry["node"]["tenant"]["hosts"],
+            serde_json::json!(["acme.notesdesk.example"]),
+            "{entry}"
+        );
+    }
+
+    // ---- an MCP connector with an API key (CN-7.7) ---------------------------------------------
+
+    const MCP_ID: &str = "keyed-bugwatch";
+    const MCP_HEADER_ROW: &str = "keyed-bugwatch/auth-header";
+    const MCP_KEY: &str = "bwk_live_0123456789abcdef";
+
+    /// The marketplace connector `keyed-bugwatch`: an API key, a remote MCP server at `host`, one
+    /// vetted tool (`list_issues`; the loopback server also offers `create_issue`).
+    fn install_bugwatch(store: &SqliteWorkflowStore, host: &str) {
+        install_notesdesk_with(store, |j| {
+            j["urn"] = serde_json::json!(
+                "urn:vam:connector:connectors.community.example/community/keyed-bugwatch"
+            );
+            j["displayName"] = serde_json::json!("Bugwatch");
+            j["provider"]["fields"][0]["label"] = serde_json::json!("Bugwatch API key");
+            j.as_object_mut().unwrap().remove("bindings");
+            j["mcp"] = serde_json::json!({
+                "url": format!("https://{host}/mcp"),
+                "tools": [{ "remote": "list_issues", "sideEffect": "READ_ONLY" }]
+            });
+        });
+    }
+
+    async fn mcp_world(
+        host: &str,
+        tools_ok: Arc<AtomicBool>,
+    ) -> (
+        axum::Router,
+        AppState,
+        Arc<std::sync::Mutex<crate::mcp_client::mock::Seen>>,
+    ) {
+        let (app, state) = app_world_with_state();
+        let seen = static_mcp_server(host, tools_ok);
+        install_bugwatch(&state.store, host);
+        let (s, b) = call(
+            &app,
+            "PUT",
+            "/v1/connectors/keyed-bugwatch/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        (app, state, seen)
+    }
+
+    async fn put_mcp_key(
+        app: &axum::Router,
+        key: &str,
+        body: serde_json::Value,
+        idempotency: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let answer = call_with_key(
+            app,
+            "PUT",
+            "/v1/connectors/keyed-bugwatch/connection",
+            "member-secret",
+            Some(body),
+            idempotency,
+        )
+        .await;
+        // No answer of the route, accepted or refused, holds the key it was sent.
+        assert!(
+            !answer.1.to_string().contains(key),
+            "the answer holds the key"
+        );
+        answer
+    }
+
+    fn mcp_header(state: &AppState) -> String {
+        use secrecy::ExposeSecret;
+        state
+            .vault
+            .decrypt_secret_at(SecretScope::User, "ada", MCP_HEADER_ROW)
+            .unwrap()
+            .expose_secret()
+            .clone()
+    }
+
+    fn mcp_row(state: &AppState) -> Result<crate::mcp_registry::McpConnection, OrchestratorError> {
+        state
+            .store
+            .get_mcp_connection(SecretScope::User, "ada", MCP_ID)
+    }
+
+    fn has_mcp_header(state: &AppState) -> bool {
+        state
+            .vault
+            .has_binding_at(SecretScope::User, "ada", MCP_HEADER_ROW)
+            .unwrap()
+    }
+
+    async fn bugwatch_state(app: &axum::Router) -> serde_json::Value {
+        let (_, l) = call(app, "GET", "/v1/connectors", "member-secret", None).await;
+        entry_of(&l, MCP_ID)["state"].clone()
+    }
+
+    #[tokio::test]
+    async fn the_generic_mcp_routes_refuse_an_api_key_connector_id() {
+        let host = "mcp.bugwatch-generic.example";
+        let (app, state, seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        install_notesdesk(&state.store);
+        let refused = |what: &str, s: StatusCode, b: &serde_json::Value| {
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{what}: {b}");
+            let text = b.to_string();
+            assert!(
+                text.contains("signs in with an API key")
+                    && text.contains("PUT /v1/connectors/")
+                    && text.contains("apiKey"),
+                "{what}: {b}"
+            );
+        };
+        for (id, url) in [
+            (MCP_ID, format!("https://{host}/mcp")),
+            ("notesdesk", "https://mcp.elsewhere.example/mcp".to_string()),
+        ] {
+            // The connect, whatever the URL, header, mode or scope the app sends.
+            for body in [
+                serde_json::json!({ "connectionId": id, "url": url, "secretValue": "Bearer sneaky-value" }),
+                serde_json::json!({ "connectionId": id, "url": url,
+                    "headers": [{ "name": "X-Api-Key", "value": "sneaky-value" }] }),
+                serde_json::json!({ "connectionId": id, "url": url, "authMode": "oauth" }),
+            ] {
+                let (s, b) = call(
+                    &app,
+                    "PUT",
+                    "/v1/mcp/connections",
+                    "member-secret",
+                    Some(body),
+                )
+                .await;
+                refused(&format!("connect {id}"), s, &b);
+                assert!(!b.to_string().contains("sneaky-value"), "{b}");
+            }
+            // The OAuth token upsert, for a connection that does not exist.
+            let (s, b) = call(
+                &app,
+                "PUT",
+                &format!("/v1/mcp/connections/{id}/oauth/tokens"),
+                "member-secret",
+                Some(serde_json::json!({ "accessToken": "a1234567", "refreshToken": "r1234567" })),
+            )
+            .await;
+            refused(&format!("tokens {id}"), s, &b);
+        }
+        // Nothing was written, and the server was never asked.
+        assert!(mcp_row(&state).is_err());
+        assert!(!has_mcp_header(&state));
+        assert!(seen.lock().unwrap().methods.is_empty());
+        // The refusal does not reach into other ids: a hand-added server still connects.
+        let (s, b) = call(
+            &app,
+            "PUT",
+            "/v1/mcp/connections",
+            "member-secret",
+            Some(serde_json::json!({ "connectionId": "hand-added", "url": format!("https://{host}/mcp"),
+                "secretValue": "Bearer fine" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+    }
+
+    #[tokio::test]
+    async fn an_mcp_api_key_writes_the_static_row_with_the_vetted_tools_and_shows_nowhere() {
+        let host = "mcp.bugwatch-connect.example";
+        let (app, state, seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        assert_eq!(bugwatch_state(&app).await, "connect");
+
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "mcp-key-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected", "{b}");
+        assert_eq!(b["mcp"]["url"], format!("https://{host}/mcp"), "{b}");
+        // The row: this member's, static, the connector's own URL, one header binding, and only the
+        // vetted tool (the server also offered `create_issue`).
+        let row = mcp_row(&state).unwrap();
+        assert_eq!(row.auth_mode, crate::mcp_registry::McpAuthMode::Static);
+        assert_eq!(row.url, format!("https://{host}/mcp"));
+        assert_eq!(row.header_bindings.len(), 1);
+        assert_eq!(row.header_bindings[0].name, "Authorization");
+        assert_eq!(row.header_bindings[0].binding_id, MCP_HEADER_ROW);
+        let names: Vec<&str> = row.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["list_issues"]);
+        // The connector's risk class is applied: the read-only tool.
+        assert!(row.ask_tools.is_empty(), "{:?}", row.ask_tools);
+        // The header row: `Authorization: Bearer <key>`, a `connection` row pinned to the one MCP host.
+        assert_eq!(mcp_header(&state), format!("Bearer {MCP_KEY}"));
+        let meta = state
+            .store
+            .get_host_secret_metadata(SecretScope::User, "ada", MCP_HEADER_ROW)
+            .unwrap();
+        assert_eq!(meta.kind, crate::secrets::SecretKind::Connection);
+        assert_eq!(meta.allowed_destinations, vec![host.to_string()]);
+        // The server saw the member's key as the bearer.
+        assert!(seen
+            .lock()
+            .unwrap()
+            .auth
+            .iter()
+            .any(|a| a.as_deref() == Some(format!("Bearer {MCP_KEY}").as_str())));
+        // No route answer holds the key, for the member or for the admin.
+        for (secret, uri) in [
+            ("member-secret", "/v1/connectors"),
+            ("orgadmin-secret", "/v1/connectors"),
+            ("member-secret", "/v1/mcp/connections"),
+        ] {
+            let (s, l) = call(&app, "GET", uri, secret, None).await;
+            assert_eq!(s, StatusCode::OK);
+            assert!(!l.to_string().contains(MCP_KEY), "{secret} {uri}: {l}");
+        }
+        // Only the member's own tile reads connected.
+        let (_, l) = call(&app, "GET", "/v1/connectors", "orgadmin-secret", None).await;
+        assert_eq!(entry_of(&l, MCP_ID)["state"], "connect");
+        // A replaced key is the stored one, and the row stays the one row.
+        let (s, b) = put_mcp_key(
+            &app,
+            "bwk_live_ZZZZZZZZZZZZZZZZ",
+            serde_json::json!({ "apiKey": "bwk_live_ZZZZZZZZZZZZZZZZ" }),
+            "mcp-key-2",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(mcp_header(&state), "Bearer bwk_live_ZZZZZZZZZZZZZZZZ");
+        assert_eq!(mcp_row(&state).unwrap().tools.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_mcp_key_route_keeps_the_rest_routes_refusals_and_texts() {
+        let host = "mcp.bugwatch-refusals.example";
+        let (app, state) = app_world_with_state();
+        static_mcp_server(host, Arc::new(AtomicBool::new(true)));
+        install_bugwatch(&state.store, host);
+        // Not enabled: 403 in the Phase 6 words, nothing written, the server never asked.
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "r-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+        assert!(b.to_string().contains("ask your admin"), "{b}");
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/v1/connectors/keyed-bugwatch/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        // The body rules and their fixed texts.
+        for body in [
+            serde_json::json!({ "apiKey": "short" }),
+            serde_json::json!({ "apiKey": "has white space in it" }),
+            serde_json::json!({ "apiKey": MCP_KEY, "url": "https://evil.example/mcp" }),
+            serde_json::json!({ "accessToken": "a1234567", "refreshToken": "r1234567", "idToken": "x" }),
+            serde_json::json!([MCP_KEY]),
+        ] {
+            let (s, b) = put_mcp_key(&app, MCP_KEY, body, "r-2").await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+            let t = b.to_string();
+            assert!(
+                t.contains(crate::connectors::API_KEY_BODY_TEXT)
+                    || t.contains(crate::connectors::API_KEY_VALUE_TEXT),
+                "{b}"
+            );
+        }
+        assert!(mcp_row(&state).is_err());
+        assert!(!has_mcp_header(&state));
+        // A key with no connection scope is refused before anything else.
+        let (s, b) = call_with_key(
+            &app,
+            "PUT",
+            "/v1/connectors/keyed-bugwatch/connection",
+            "wrong-secret",
+            Some(serde_json::json!({ "apiKey": MCP_KEY })),
+            "r-3",
+        )
+        .await;
+        assert!(
+            s == StatusCode::UNAUTHORIZED || s == StatusCode::FORBIDDEN,
+            "{s} {b}"
+        );
+        assert!(!has_mcp_header(&state));
+    }
+
+    #[tokio::test]
+    async fn a_failed_tool_listing_writes_no_key_and_keeps_the_old_one() {
+        let host = "mcp.bugwatch-listing.example";
+        let tools_ok = Arc::new(AtomicBool::new(false));
+        let (app, state, seen) = mcp_world(host, tools_ok.clone()).await;
+        // A first connect whose listing fails stores nothing: no row, no header row.
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "l-1",
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{b}");
+        assert!(mcp_row(&state).is_err());
+        assert!(!has_mcp_header(&state));
+        assert_eq!(bugwatch_state(&app).await, "connect");
+        // A working listing connects with the first key.
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "l-2",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        let before = mcp_row(&state).unwrap();
+        // The server refuses the listing again; a new key is tried and refused, and the old key
+        // and the row stay exactly as they were.
+        tools_ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        let new_key = "bwk_live_NEWNEWNEWNEWNEWN";
+        let (s, b) = put_mcp_key(
+            &app,
+            new_key,
+            serde_json::json!({ "apiKey": new_key }),
+            "l-3",
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{b}");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .auth
+                .iter()
+                .any(|a| a.as_deref() == Some(format!("Bearer {new_key}").as_str())),
+            "the listing was tried with the new key"
+        );
+        assert_eq!(mcp_header(&state), format!("Bearer {MCP_KEY}"));
+        let after = mcp_row(&state).unwrap();
+        assert_eq!(after.tools, before.tools);
+        assert_eq!(after.header_bindings, before.header_bindings);
+        assert_eq!(bugwatch_state(&app).await, "connected");
+    }
+
+    /// The three vault rows an OAuth sign-in to `keyed-bugwatch` leaves (access, refresh and a
+    /// per-row client secret), and the OAuth row itself at `url`, marked for reconnect as
+    /// `reset_connector` leaves a member's row when a connector's update moves it to `api_key`.
+    const OAUTH_ROWS: [&str; 3] = [
+        "keyed-bugwatch/oauth/access-token",
+        "keyed-bugwatch/oauth/refresh-token",
+        "keyed-bugwatch/oauth/client-secret",
+    ];
+
+    fn seed_oauth_row(state: &AppState, url: &str) {
+        use crate::mcp_registry::{
+            McpAuthMode, McpOauthMetadata, McpOauthRegistrationMethod, McpOauthStatus,
+        };
+        let meta = McpOauthMetadata {
+            resource: url.into(),
+            authorization_server: "https://auth.bugwatch-old.example".into(),
+            token_endpoint: "https://auth.bugwatch-old.example/token".into(),
+            revocation_endpoint: None,
+            client_id: "c-1".into(),
+            registration_method: McpOauthRegistrationMethod::Manual,
+            scopes: vec![],
+            expires_at: Some(4_000_000_000),
+            status: McpOauthStatus::NeedsReauth,
+            last_refresh_at: None,
+            last_refresh_error: Some("the connector now signs in with an API key".into()),
+        };
+        for row in OAUTH_ROWS {
+            state
+                .vault
+                .put_secret_with_owner(
+                    row,
+                    "old-oauth-secret-value",
+                    crate::secrets::SecretKind::Connection,
+                    &["auth.bugwatch-old.example".to_string()],
+                    None,
+                    "ada",
+                )
+                .unwrap();
+        }
+        state
+            .store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                MCP_ID,
+                url,
+                "",
+                &[],
+                &[],
+                McpAuthMode::Oauth,
+                Some(&meta),
+            )
+            .unwrap();
+    }
+
+    fn oauth_rows_left(state: &AppState) -> Vec<&'static str> {
+        OAUTH_ROWS
+            .into_iter()
+            .filter(|row| {
+                state
+                    .vault
+                    .has_binding_at(SecretScope::User, "ada", row)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_oauth_member_of_a_connector_that_became_api_key_reads_needs_reconnect_and_the_key_replaces_it(
+    ) {
+        let host = "mcp.bugwatch-update.example";
+        let (app, state, seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        seed_oauth_row(&state, &format!("https://{host}/mcp"));
+        // The tile is not `connect`: the member has a connection that needs the key.
+        assert_eq!(bugwatch_state(&app).await, "needsReconnect");
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "u-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected", "{b}");
+        assert_eq!(bugwatch_state(&app).await, "connected");
+        // The row is the static one, and no OAuth credential of the old sign-in is left.
+        let row = mcp_row(&state).unwrap();
+        assert_eq!(row.auth_mode, crate::mcp_registry::McpAuthMode::Static);
+        assert!(row.oauth.is_none());
+        assert_eq!(row.header_bindings[0].binding_id, MCP_HEADER_ROW);
+        assert_eq!(mcp_header(&state), format!("Bearer {MCP_KEY}"));
+        assert_eq!(oauth_rows_left(&state), Vec::<&str>::new());
+        assert!(seen
+            .lock()
+            .unwrap()
+            .auth
+            .iter()
+            .any(|a| a.as_deref() == Some(format!("Bearer {MCP_KEY}").as_str())));
+    }
+
+    #[tokio::test]
+    async fn a_failed_listing_while_an_oauth_row_is_replaced_keeps_the_row_and_its_tokens() {
+        let host = "mcp.bugwatch-keep-oauth.example";
+        let tools_ok = Arc::new(AtomicBool::new(false));
+        let (app, state, _seen) = mcp_world(host, tools_ok.clone()).await;
+        seed_oauth_row(&state, &format!("https://{host}/mcp"));
+        let before = mcp_row(&state).unwrap();
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "k-1",
+        )
+        .await;
+        assert_ne!(s, StatusCode::OK, "{b}");
+        // Nothing changed: the OAuth row, all its tokens, and no key.
+        let after = mcp_row(&state).unwrap();
+        assert_eq!(after.auth_mode, crate::mcp_registry::McpAuthMode::Oauth);
+        assert_eq!(after.oauth, before.oauth);
+        assert_eq!(oauth_rows_left(&state), OAUTH_ROWS.to_vec());
+        assert!(!has_mcp_header(&state));
+        assert_eq!(bugwatch_state(&app).await, "needsReconnect");
+        // The listing works again: the same request now replaces the row.
+        tools_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "k-2",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(oauth_rows_left(&state), Vec::<&str>::new());
+    }
+
+    #[tokio::test]
+    async fn an_oauth_row_on_another_server_is_refused_with_a_conflict_and_a_hint_to_disconnect() {
+        let host = "mcp.bugwatch-foreign.example";
+        let (app, state, seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        seed_oauth_row(&state, "https://mcp.somewhere-else.example/mcp");
+        assert_eq!(bugwatch_state(&app).await, "needsReconnect");
+        let (s, b) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "f-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(b.to_string().contains("disconnect it first"), "{b}");
+        // Refused before the server was asked, and nothing was touched.
+        assert!(seen.lock().unwrap().methods.is_empty());
+        assert_eq!(
+            mcp_row(&state).unwrap().auth_mode,
+            crate::mcp_registry::McpAuthMode::Oauth
+        );
+        assert_eq!(oauth_rows_left(&state), OAUTH_ROWS.to_vec());
+        assert!(!has_mcp_header(&state));
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_first_mcp_key_connects_leave_the_accepted_ones_key_in_force() {
+        let host = "mcp.bugwatch-race.example";
+        let (app, state, _seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        let send = |app: axum::Router, key: &'static str, idempotency: &'static str| {
+            tokio::spawn(async move {
+                call_with_key(
+                    &app,
+                    "PUT",
+                    "/v1/connectors/keyed-bugwatch/connection",
+                    "member-secret",
+                    Some(serde_json::json!({ "apiKey": key })),
+                    idempotency,
+                )
+                .await
+            })
+        };
+        let wait = |arrived: std::sync::mpsc::Receiver<()>, secs: u64| {
+            tokio::task::spawn_blocking(move || {
+                arrived.recv_timeout(std::time::Duration::from_secs(secs))
+            })
+        };
+        let key_a = "bwk_live_AAAAAAAAAAAAAAAA";
+        let key_b = "bwk_live_BBBBBBBBBBBBBBBB";
+        // A has read "no row", listed the tools and stops just before its write.
+        let (arrived_a, release_a) =
+            crate::connectors::test_signal::arm_pause("mcp-connect-write:keyed-bugwatch");
+        let a = send(app.clone(), key_a, "race-a");
+        wait(arrived_a, 10)
+            .await
+            .unwrap()
+            .expect("A reached its write");
+        // B is sent while A holds the member's connection lock: it cannot reach its own write.
+        let (arrived_b, release_b) =
+            crate::connectors::test_signal::arm_pause("mcp-connect-write:keyed-bugwatch");
+        let b = send(app.clone(), key_b, "race-b");
+        assert!(
+            wait(arrived_b, 1).await.unwrap().is_err(),
+            "B got past the member's lock while A was writing"
+        );
+        // A commits; its key is the one in force.
+        release_a.send(()).unwrap();
+        let (s, body) = a.await.unwrap();
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(mcp_header(&state), format!("Bearer {key_a}"));
+        // B then reads A's row, replaces it, and its key is the one in force: the accepted
+        // request is always the one whose key is stored.
+        let _ = release_b.send(());
+        let (s, body) = b.await.unwrap();
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(mcp_header(&state), format!("Bearer {key_b}"));
+        assert_eq!(mcp_row(&state).unwrap().tools.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_row_another_writer_created_meanwhile_refuses_the_write_and_stores_no_key() {
+        let host = "mcp.bugwatch-guard.example";
+        let (app, state, _seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        let (arrived, release) =
+            crate::connectors::test_signal::arm_pause("mcp-connect-write:keyed-bugwatch");
+        let a = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                call_with_key(
+                    &app,
+                    "PUT",
+                    "/v1/connectors/keyed-bugwatch/connection",
+                    "member-secret",
+                    Some(serde_json::json!({ "apiKey": MCP_KEY })),
+                    "guard-a",
+                )
+                .await
+            })
+        };
+        tokio::task::spawn_blocking(move || {
+            arrived.recv_timeout(std::time::Duration::from_secs(10))
+        })
+        .await
+        .unwrap()
+        .expect("the write reached its guard");
+        // A writer that does not take the member's connection lock puts a row there.
+        state
+            .store
+            .upsert_mcp_connection(
+                SecretScope::User,
+                "ada",
+                MCP_ID,
+                &format!("https://{host}/mcp"),
+                "",
+                &[],
+                &[],
+                crate::mcp_registry::McpAuthMode::Static,
+                None,
+            )
+            .unwrap();
+        release.send(()).unwrap();
+        let (s, b) = a.await.unwrap();
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(!b.to_string().contains(MCP_KEY), "{b}");
+        // The refused write stored no key, in the transaction or outside it.
+        assert!(!has_mcp_header(&state));
+        assert!(mcp_row(&state).unwrap().header_bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_mcp_disconnect_that_cannot_delete_the_key_fails_keeps_the_row_and_a_retry_succeeds()
+    {
+        let host = "mcp.bugwatch-disconnect.example";
+        let (app, state, _seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        let (s, _) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "d-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        fail_vault_delete(&state, MCP_HEADER_ROW);
+        let disconnect = || {
+            call(
+                &app,
+                "DELETE",
+                "/v1/connectors/keyed-bugwatch/connection",
+                "member-secret",
+                None,
+            )
+        };
+        let (s, b) = disconnect().await;
+        assert!(!s.is_success(), "{s} {b}");
+        assert!(!b.to_string().contains(MCP_KEY), "{b}");
+        assert!(
+            mcp_row(&state).is_ok(),
+            "the row stays so the member can retry"
+        );
+        assert!(has_mcp_header(&state));
+        assert_eq!(bugwatch_state(&app).await, "connected");
+        vault_delete_works_again(&state);
+        let (s, b) = disconnect().await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(mcp_row(&state).is_err());
+        assert!(!has_mcp_header(&state));
+    }
+
+    #[tokio::test]
+    async fn the_mcp_state_reads_connect_and_connected_and_disconnect_removes_both_rows() {
+        let host = "mcp.bugwatch-state.example";
+        let (app, state, seen) = mcp_world(host, Arc::new(AtomicBool::new(true))).await;
+        assert_eq!(bugwatch_state(&app).await, "connect");
+        // Disconnecting when not connected is a 404, as for a REST connector.
+        let (s, _) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/keyed-bugwatch/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let (s, _) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "s-1",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(bugwatch_state(&app).await, "connected");
+        // The check answers the stored state and asks the MCP server nothing.
+        let asked = seen.lock().unwrap().methods.len();
+        let (s, b) = call(
+            &app,
+            "POST",
+            "/v1/connectors/keyed-bugwatch/connection/check",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["state"], "connected");
+        assert_eq!(
+            seen.lock().unwrap().methods.len(),
+            asked,
+            "the check made a request"
+        );
+        // A row whose header row is gone is not connected.
+        state
+            .vault
+            .delete_secret_at(SecretScope::User, "ada", MCP_HEADER_ROW)
+            .unwrap();
+        assert!(mcp_row(&state).is_ok());
+        assert_eq!(bugwatch_state(&app).await, "connect");
+        let (s, _) = put_mcp_key(
+            &app,
+            MCP_KEY,
+            serde_json::json!({ "apiKey": MCP_KEY }),
+            "s-2",
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(bugwatch_state(&app).await, "connected");
+        // Another member's row is theirs: olga's tile is `connect`.
+        let (_, l) = call(&app, "GET", "/v1/connectors", "orgadmin-secret", None).await;
+        assert_eq!(entry_of(&l, MCP_ID)["state"], "connect");
+        // Disconnect removes the row and the key, with no request to the server, and works when the
+        // node no longer enables the connector.
+        let asked = seen.lock().unwrap().methods.len();
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/v1/connectors/keyed-bugwatch/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({ "enabled": false })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, b) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/keyed-bugwatch/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert!(b.get("providerGrantMayRemain").is_none(), "{b}");
+        assert!(mcp_row(&state).is_err());
+        assert!(!has_mcp_header(&state));
+        assert_eq!(
+            seen.lock().unwrap().methods.len(),
+            asked,
+            "the disconnect made a request"
+        );
+        // Disabled on the node, so the tile asks the admin; enabled again, it is `connect`.
+        assert_eq!(bugwatch_state(&app).await, "askAdmin");
+        let (s, _) = call(
+            &app,
+            "PUT",
+            "/v1/connectors/keyed-bugwatch/node",
+            "orgadmin-secret",
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(bugwatch_state(&app).await, "connect");
+        let (s, _) = call(
+            &app,
+            "DELETE",
+            "/v1/connectors/keyed-bugwatch/connection",
+            "member-secret",
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
     }
 }

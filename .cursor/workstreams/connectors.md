@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: connectors
-current_phase: 5 released to main 2026-11-19 (VAM #52, 4f24c41; Squrell-App #12, bb4ee15), CN-5.7 (the team's Box real-tenant run) is a later manual check that does not block the next phase (playbook §6); 4 build done 2026-11-09 (8 scenarios active and green; waves 0–7 merged), real-tenant wave 9 and lane B wait for the owner; 2 and 3 released to main 2026-11-09, checklists out; Phase 1 released, checklist out
+current_phase: 7 (developer kit and API keys) breakdown approved 2026-11-20 (parent orchestrator), wave 0 in progress; 6 released to main 2026-11-20 (VAM #112, f016617; the app release Squrell-App #15 held for the owner), Zendesk tag and real-instance run with the team; 5 released to main 2026-11-19 (VAM #52, 4f24c41; Squrell-App #12, bb4ee15), CN-5.7 a later manual check; 4 build done 2026-11-09, real-tenant wave 9 and lane B wait for the owner; 1–3 released, checklists out
 design_docs:
   - design/connectors.md
   - docs/src/content/docs/runtime/tools.md
@@ -2675,7 +2675,7 @@ listing merged into `vam-marketplace` `main` after the release.
 **Goal:** a connector reaches a per-company host and a marketplace connector
 may be REST with skills (design §13, D30, D31).
 **Depends on:** Phase 5.
-**Status:** **build done 2026-11-20**: waves 0–5 merged (VAM #93, #95, #98, #103, #106; Squrell-App #14), all five Phase 6 scenarios `active` and green. **Not released yet**: release PRs open: VAM #112; Squrell-App #15 (held). They merge into `main` on the owner's word, VAM first, and the Squrell-App release only after the VAM one. CN-6.7: the Zendesk listing is on vam-marketplace `zendesk-connector` (52b0ed0); its tag and the real-instance run are the team's.
+**Status:** **build done 2026-11-20**: waves 0–5 merged (VAM #93, #95, #98, #103, #106; Squrell-App #14), all five Phase 6 scenarios `active` and green. **VAM released to `main` 2026-11-20** (#112, f016617). The app release (Squrell-App #15) is held for the owner and merges only after the VAM one. CN-6.7: the Zendesk listing is on vam-marketplace `zendesk-connector` (52b0ed0); its tag and the real-instance run are the team's.
 **Plan:** drafted 2026-11-19 by the phase-breakdown agent (below).
 **Scope:** `profile: "oauth"` with fixed `endpoints` for providers without
 metadata; one `tenant` parameter (`{subdomain}`, fixed suffix) entered at
@@ -3254,7 +3254,7 @@ release.
 
 #### Phase 6 close
 
-**Release (pending):** release PRs open: VAM #112; Squrell-App #15 (held). VAM `feat/connectors` (main merged in once by #110 after `v0.1.0-rc.2`) goes into `main` with `release: connectors Phase 6`, and Squrell-App `feature/connectors` into `main`; both merge on the owner's word, VAM first. **Deploy order: vamd before the app.** Between waves 3 and 5 the node refuses app-held tokens for org clients, and only the wave 5 app connects through the node exchange; an old app against a new node cannot connect an MCP org client with no secret. A new app against an old node has no exchange for REST connectors.
+**Release:** VAM done: #112 (`release: connectors Phase 6`; `feat/connectors` with `main` merged in once by #110 after `v0.1.0-rc.2`) merged into `main` as f016617 on 2026-11-20, after three review rounds merged into `feat/connectors` (#113, #116, #117). The app release is still pending: Squrell-App #15 (`feature/connectors` into `main`), held for the owner. **Deploy order: vamd before the app.** Between waves 3 and 5 the node refuses app-held tokens for org clients, and only the wave 5 app connects through the node exchange; an old app against a new node cannot connect an MCP org client with no secret. A new app against an old node has no exchange for REST connectors.
 
 **Scoreboard:** 5 of 5 Phase 6 scenarios green; the Phase 4–5 connector, Microsoft 365 and refresh regressions green; 2 fix cycles in all (wave 2: the runner's no-run `secret-absent` passed vacuously; wave 4: the time-window refresh dedupe replaced by a per-call mark).
 
@@ -3280,18 +3280,603 @@ release.
     - Harness absence check: an empty or invalid 200 listing body fails the check instead of counting as read.
     - Mutation responses (`entry_for`): resolve the template against the node row the response shows, as GET does.
     - Startup park recovery: a test that restarts vamd and sees the run resume (the startup pass and its selection are unit-tested; no vamd-restart harness yet).
+- **High priority (after the release):** static-connect self-race in `api/mcp_connections.rs` `connect`: the header credential is written to the vault (579-597) before the guarded row write (666-676), so when one member makes two first-time static connects of the same connection at once, the accepted row can hold the header value of the request that got a 409 (and a connect that fails after the write has already replaced a working header). Fix: stage the header credentials into `upsert_mcp_connection_guarded`'s transaction, as #117 did for the deletes. `Decide: NOW — Phase 7 wave 1 (CN-7.1)`.
 
 ### Phase 7 — Developer kit and API keys
 
 **Goal:** a third-party developer builds, checks and tests a connector without
 a Squrell release; API-token systems can be connected.
 **Depends on:** Phase 6.
-**Status:** defined 2026-11-18 (owner); not started.
+**Status:** VAM side built and reviewed (waves 0–5, the review round, `main` merged in by #137); the VAM release into `main` is opened on the owner's word (2026-11-21). Wave 6 (CN-7.8, the app) rides with the Squrell-App release; wave 7 (CN-7.9, marketplace CI) follows this release. See the Phase 7 close.
+**Plan:** drafted 2026-11-20 by the phase-breakdown agent (below).
 **Scope:** `vam connector init`, `validate`, `test` (mock provider world
-piece, also used by marketplace CI); the `api_key` connection flow (admin- or
-member-entered key, `connection` row, host-side inject only).
+piece, also used by marketplace CI); the `api_key` connection flow
+(member-entered key, `connection` row, host-side inject only).
+**Scope narrowed (parent orchestrator, owner's delegation, 2026-11-20):** the
+key is entered by the member only. A key the admin enters for everyone is an
+org-held connection, which stays under "Explicitly later"; `connection.holder`
+stays `user` and each member's calls run as their own account (locked
+decision 2).
 **Exit:** a connector built from nothing passes `validate` and `test` and
 installs from a test marketplace.
+**Rubric:** cost 3 (a CLI kit that runs the egress gate's rules offline, a new
+credential kind on the swap, three repos).
+
+- [x] CN-7.1 Static connect stages its header credentials in the guarded row write (Phase 6 release-review finding)
+- [x] CN-7.2 The connector file and the marketplace check: `api_key` with one field, `value: api_key`, REST or MCP
+- [x] CN-7.3 One listing check for `validate` and import (the import-only rules move to `vam-spec`; a skill's binding and host must be its connector's)
+- [x] CN-7.4 `vam connector init` and `vam connector validate`
+- [x] CN-7.5 `vam connector test`: the tools run against the declared mock through the egress gate's own rules, offline
+- [x] CN-7.6 The API-key connection for REST connectors: enter, swap, park, replace, disconnect
+- [x] CN-7.7 The API-key connection for MCP connectors (the node writes the static row)
+- [ ] CN-7.8 the VAM app: an API key at Connect, no client at Enable, the summary's "API key"
+- [ ] CN-7.9 vam-marketplace CI runs `vam connector validate` and `test` (team)
+
+#### Phase 7 breakdown (phase-breakdown agent, 2026-11-20; approved by the parent orchestrator 2026-11-20)
+
+Written against `docs/cn-7-breakdown`, cut from `feat/connectors` at f016617
+(equal to `main`, which carries the Phase 6 release). vam-marketplace and the
+VAM app were not read (named from the Phase 4–6 rows). No product code, build
+or test was run. Where the code and the design differ, the code is the fact
+(table at the end).
+
+**The plan in five lines.** Wave 1 fixes the static-connect self-race first
+(CN-7.1), because the MCP half of the API-key flow writes through the same
+guarded row write. Then the file learns `api_key` (CN-7.2). The developer kit
+is three CLI commands over code that already exists: `validate` is `vam catalog
+validate` plus the listing rules that today run only at import (CN-7.3, 7.4);
+`test` runs the listing's tools against a mock the publisher declares, through
+the egress gate's own screening code moved into `vam-spec`, with no node
+(CN-7.5). The key is a member's `connection` row attached by the existing swap,
+never a guest egress secret (CN-7.6, 7.7). The app and marketplace CI follow.
+
+**Code map (today, checked 2026-11-20).**
+
+- CLI: the command is `vam connectors` (plural, `crates/vam-cli/src/main.rs`
+  56-61) with `list`, `enable`, `disable`, `disconnect`, `check`
+  (`cmd/connectors.rs` 9-28); its help still says "your own Microsoft 365
+  connection". There is no `init`, `validate` or `test`. `vam catalog validate
+  <dir>` already checks a marketplace root offline with the node's package
+  checks (`cmd/catalog_validate.rs` 1-15 → `vam_spec::marketplace::check_marketplace_root`,
+  `marketplace.rs` 435-468), and a connector directory with the marketplace
+  limits (`package.rs` `check_connector_dir` 477-491 →
+  `parse_marketplace_connector`).
+- Import-only listing rules: `marketplace/import.rs` `prepare` (250-338) runs
+  `check_templated_skill_hosts` (753-796), `check_listing_placeholders`
+  (360-392) and `check_listing_connector_ids` (340-358) after the package
+  checks. None of them is in `vam-spec`, so a listing can pass `vam catalog
+  validate` and be refused at install. Nothing anywhere checks that a skill's
+  `egress[].binding` is a binding of its `requiresConnector`, or that the host
+  is one of that binding's hosts (`skill_egress.rs` 78-89 checks only that the
+  binding name is not empty); a mismatch shows up as a refused call at run time.
+- Connector file: `Provider::ApiKey(ApiKeyProvider { fields: [{ name, label }] })`
+  exists (`vam-spec/src/connector.rs` 60-65, 151-163) and validates (581-585);
+  `BindingValue` is `access_token` only (189-194); `Inject` has `bearer |
+  header | query` but `Binding` has no header name (180-202); `holder` must be
+  `user` (539).
+- Marketplace check: `api_key` is refused twice, "a node has no connection flow
+  for an API key" (`connector_listing.rs` module table 13, 342-344, 443-445);
+  bindings must be `inject: bearer` (237-242) and need profile `oauth`
+  (400-411).
+- REST connection: `PUT /v1/connectors/{id}/connection` takes only `{
+  accessToken, refreshToken, idToken[, expiresIn] }` (`api/connectors.rs`
+  337-389; `oauth` connectors refused at 353). `rest_connection_state`
+  (`connectors.rs` 1135-1162) is `needsReconnect` without a refresh token; the
+  vault rows are `connector/<id>/oauth/{access,refresh}-token` (882-889).
+  `ensure_fresh_for_call` (`connection_egress.rs` 406-460) returns `Fresh` when
+  `expires_at` is null (`token_due`, `connectors.rs` 1288-1291).
+- Swap: `token_for` (`connection_egress.rs` 642-790) attaches only `inject:
+  bearer` with `value: access_token` (686-690), from the member's own
+  `connection` row pinned to the grant's host (771-788). The envelope accepts
+  the placeholder only as the whole `Authorization` value
+  (`vam-network/src/connection.rs` 409-442) and `set_bearer` writes it (444-448).
+  The pure screening (`Envelope::screen` 245-350, `Target`, `normalize_path`,
+  `prefix_admits`, `exact_admits`, 473-600) uses only `std` and `vam-spec`.
+- Static secrets: a member can already store an API key as an `egress` secret
+  and have it injected for its destinations (`vam-network/src/secrets.rs`
+  `phase2_inject_secrets` 303; `session_egress_bindings_for_caller`,
+  `vam-orchestrator/src/secrets.rs` 794). No Enable gate, no tool shape, no
+  tile. Locked decision 7 keeps connector keys out of that path.
+- MCP connect (CN-7.1's file): `api/mcp_connections.rs` `connect` (394-744).
+  Detailed under CN-7.1.
+- e2e: mock providers are compiled into the runner per fictional service
+  (`vam-e2e/src/connectors.rs` `Kind` 387-393: login, Linear, Graph, filebox,
+  ticketdesk); a publisher cannot declare one. A `cli` step runs the built `vam`
+  on a scratch fixture tree (`e2e/README.md` 472-490). `git-tag` takes an
+  `overlay` (`vam-e2e/src/marketplace.rs` 29). The seam key `rest:<https
+  origin>` is accepted by a process-mode vamd since CN-6.4 (`process_mode.rs`
+  33, 193).
+- vam-marketplace CI (from the Phase 4 and 6 rows): `validate.yml` builds
+  `vam-cli` at a pinned `VAM_COMMIT`, runs `vam catalog validate . --json`
+  strict, a per-listing tag check and Bun tests. It builds no `vamd`, and the
+  process-mode `vamd` is test-only (never in a release).
+
+**Shared invariants** (every item holds them; the orchestrator checks in review):
+
+- **K1–K7, M1–M6, O1–O5 and T1–T5 hold.**
+- **A1** An API key is entered only by the member it belongs to, only through
+  `PUT /v1/connectors/{id}/connection`, only for an enabled connector (with its
+  company address filled, when it has one). It is stored as that member's
+  `connection`-kind vault row pinned to the connector's filled binding hosts
+  (REST) or its MCP host (MCP), in the same transaction as the connection row.
+  It is never an `egress` row, never returned by any route, never in an entry,
+  event, receipt, log or error text, and never reaches the guest.
+- **A2** The key is attached only as T2 says for tokens: a host that is one of
+  that connector's filled binding hosts, inside the calling tool's filled shape,
+  for an enabled connector, from the member's own row whose pin equals the
+  current hosts. A row pinned to other hosts reads `needsReconnect` and is never
+  sent.
+- **A3** A refused or failed connect (409, a refused tool list, a name clash)
+  changes no credential (CN-7.1 makes this true for the static MCP path too).
+- **A4** `vam connector validate` and the node's import apply the same listing
+  rules with the same words; a node may refuse more only for node state
+  (installed connectors, reserved domains, policy).
+- **A5** `vam connector test` sends nothing off the machine: every request goes
+  to the declared mock, through the gate's own screening code; the generated
+  key never appears in a tool's output or files.
+
+##### Scenario delta
+
+All process mode, mock model. One new runner-hosted provider kind,
+`provider: declared`: a mock built from a publisher's test file (the kit's
+format, `tests/connector-test.json` in a listing: hosts, routes with method,
+exact path or prefix, status and JSON body, and per-tool cases). The world
+piece `mock-notesdesk-server` (`kind: mock-provider`, `provider: declared`,
+`fixture: marketplace-community-connectors/listings/notesdesk-connector`) serves
+`https://api.notesdesk.example` (and `eu.api.notesdesk.example`) on one loopback
+listener per host through the existing `rest:` seam key. It answers 401 unless
+the bearer is the key the scenario entered, and logs `host=`, `method=`,
+`path=`, `bearer=current|stale|placeholder|unknown|none` and
+`query-key=present|none`, never a value; the key is runner-made, in the scrub
+list under the piece's alias. Fixture `marketplace-community-connectors` gains
+`notesdesk-connector` (connector `notesdesk`: `provider: { kind: api_key,
+fields: [{ name: key, label: "Notesdesk API key" }] }`, binding `api` /
+`vamsec_notesdesk_api`, `value: api_key`, `inject: bearer`, host
+`api.notesdesk.example`; skill `notesdesk-notes` in python3 with `note_search`
+(GET, prefix `/v1/notes`) and `note_create` (POST, exact `/v1/notes`, asks
+first); agent `notesdesk-assistant`; the test file),
+`keyed-bugwatch-connector` (connector `keyed-bugwatch`: `api_key`, MCP
+`https://mcp.bugwatch.example/mcp`, vetted `list_issues` and `get_issue`,
+served by `mock-linear-server`, whose bearer is entered as the key), and one
+refused listing `api-key-with-two-fields`. Overlay
+`marketplace-community-connectors-notesdesk-update/` (`notesdesk` 1.1.0 adds
+`eu.api.notesdesk.example` to binding `api` and a shape on it). Fixture trees
+for `cli` steps: `connector-kit/empty`, `connector-kit/broken-file` (two
+connectors whose placeholders overlap, and a skill whose egress names binding
+`files` and host `api.elsewhere.example`, neither its connector's),
+`connector-kit/broken-tool` (a valid listing whose `note_leak` puts the
+placeholder in the query string and whose `note_wander` calls a path outside its
+shape). Runner steps: `connector-connect: { id, apiKey: { piece, which:
+current | other }, as, refused, contains }` (`PUT
+/v1/connectors/{id}/connection` with `{ apiKey }`; the connection is removed at
+cleanup); `git-tag` gains `root: { same: true }` (commit the tree the previous
+`cli` step left as the tagged content); `api-call.absent` takes any provider
+piece alias.
+
+| Scenario | Change | Layer | Given | Why | Red point (today) |
+|---|---|---|---|---|---|
+| `connector-built-from-nothing-passes-validate-and-test-and-installs` | new | process (`cli` + marketplace) | `org-admin`, `org-member`, `marketplace-connector-kit` (`git-marketplace`, fixture `connector-kit/empty`, `https://kit.community.example/vam-marketplace`) | The phase exit. `vam connector init {{root}} --id notesdesk --auth api_key --host api.notesdesk.example --domain kit.community.example --runtime python3` writes `marketplace.json`, `listings/notesdesk/{connector,skills,agents,tests}`; `vam connector validate {{root}}` exits ok with `ok connector urn:vam:connector:kit.community.example/…` and `ok skill …`; `vam connector test {{root}}` exits ok with one `pass` per tool and `the key never reached a tool`; `git-tag` with `root: same`; the admin adds, refreshes and installs; the listing summary shows `provider: api_key`, the field label and `api.notesdesk.example`; the member sees `notesdesk` `askAdmin`, Unverified, `origin.ref: notesdesk-v1.0.0` | `when.0`: `vam` answers "unrecognized subcommand 'connector'" (exit fail where `ok` is expected; only `connectors` exists, `cmd/connectors.rs` 9-28), class `product` |
+| `connector-kit-names-what-the-node-would-refuse` | new | process (`cli` + marketplace) | `org-admin`, `marketplace-kit-broken` (fixture `connector-kit/broken-file`) | A4, A5. `validate` on `broken-file` exits fail and names all three problems ("cannot tell apart", "binding `files`", "api.elsewhere.example"); installing the same tree is refused with the first of those words; `test` on `broken-tool` exits fail with `pass note_search`, `fail note_leak` + "only valid as the Authorization value", `fail note_wander` + "declared shape"; the generated key is in no output and no file | `when.0`: "unrecognized subcommand 'connector'", class `product` |
+| `member-enters-an-api-key-and-a-listing-skill-uses-it-without-holding-it` | new | process (mock providers) | `org-admin`, `org-member`, `org-administrator`, `mock-notesdesk-server`, `marketplace-community-connectors` | A1, A2, the API-key half of the goal. Summary: `provider: api_key`, `fields.0.label`, binding host; `api-key-with-two-fields` refused ("one field"). A key before Enable is refused ("ask your admin"); Enable takes no client (a `client` is 400, "API key"); the member's entry reads `connect`, then `connected` after the key, with no key field. The read tool reaches `host=api` with `bearer=current`, never `bearer=placeholder` or `query-key=present`; a call aimed outside the shape is refused (`declared shape`, the mock saw nothing there); a replaced key is the one sent next; after `DELETE …/connection` the next call parks ("Connect Notesdesk to continue"). `secret-absent` in thread, events, receipt, listings and workspace | the `listings` expect on `notesdesk-connector` (its summary is an `error`: "api_key connectors are not supported yet", `connector_listing.rs` 443-445), class `product` |
+| `api-key-stays-pinned-to-the-hosts-it-was-entered-for` | new | process (mock providers) | as the third | A2 across an update. Connected and read at `api.notesdesk.example`; the marketplace tags 1.1.0 (overlay adds `eu.api.notesdesk.example`); after the update the connector is `askAdmin` (summary changed, existing reset); Enable again: the member reads `needsReconnect`; a call to the EU host parks ("Reconnect Notesdesk to continue") and the mock saw nothing at `host=eu`; the member enters the key again, the parked call resumes and reaches `host=eu` with `bearer=current` | the `listings` expect (summary `error`, as above), class `product` |
+| `mcp-connector-with-an-api-key-connects-through-the-node` | new | process (mock providers) | `org-admin`, `org-member`, `org-administrator`, `mock-linear-server`, `agent-plain`, `marketplace-community-connectors` | The MCP half. Install and enable `keyed-bugwatch`; the member enters the key (the Linear mock's bearer) at the connector route; the tile is `connected`; `GET /v1/mcp/connections` holds no form of it; a read runs and the mock saw `authorization`, `tool=list_issues`; the unvetted tool is not offered; a connect through `PUT /v1/mcp/connections` for this id is refused ("API key") | the `listings` expect (summary `error`), class `product` |
+
+**Existing scenarios whose `then` changes: none.** Checked from `guards`
+and `given`: no scenario asserts the `api_key` refusal (it is a `vam-spec` unit
+test, `connector_listing.rs` 552-555, which CN-7.2 changes); the three
+`community-connector-appears-unverified-and-connects` refusals (reserved id,
+profile `generic`, a secret) keep their words; listings are addressed by id, so
+three more fixture listings move no expectation. **Guards-only additions:**
+`vam:crates/vam-spec/src/connection_envelope.rs` on
+`skill-reads-microsoft-graph-as-the-member-without-holding-a-token`,
+`tool-declared-as-a-read-cannot-send-mail` and
+`skill-from-the-listing-reaches-only-the-company-host-inside-its-shape`;
+`vam:crates/vam-spec/src/marketplace.rs` on
+`listing-from-an-added-marketplace-installs-as-unverified-within-its-limits`
+and `rest-listing-with-a-company-address-installs-and-shows-its-hosts`;
+`vam:crates/vam-orchestrator/src/api/mcp_connections.rs` on
+`community-connector-appears-unverified-and-connects`.
+
+##### Benchmark delta
+
+None. The phase adds no task a model is measured on: the kit is a CLI, and the
+API-key path is the Phase 6 swap with another credential. The `secret-absent`
+checks in scenarios 3–5 are scenario assertions, not benchmark lines. (If the
+owner wants it, the P6 line "a marketplace skill uses an API-key connection as
+the member, 0 secret bytes" can be added to `design/benchmark.md` §1 at the
+close, docs only.)
+
+##### Items
+
+**CN-7.1 Static connect stages its header credentials in the guarded row write.**
+- **The bug.** In `connect` (`api/mcp_connections.rs`), the header values are
+  normalized at 579 and each is written to the vault at once by
+  `store_mcp_header_credential` (581-597 → `put_mcp_connection_secret`,
+  `mcp_registry.rs` 1237-1277: its own vault write and commit). A live
+  `tools/list` then reads them back from the vault by binding id (`snapshot`
+  354-378 → `fetch_tools_snapshot`, `mcp_registry.rs` 1436-1451 →
+  `resolve_mcp_headers` 1378). Only at 666-676 does the guarded row write check
+  that nothing changed (`McpAuthWrite::Replace { observed: None }` refuses when
+  a row now exists, `mcp_registry.rs` 2906-2930). The binding id is fixed per
+  header name (`{id}/auth-header`, `{id}/header/<name>`, `mcp_registry.rs`
+  760-778) and a first-time connect takes no credential gate (514-525 lock only
+  an existing OAuth row). So for two first-time static connects A and B of one
+  member: A writes the vault, B writes the vault, A's row commits (200), B gets
+  409, and A's row points at B's header value: the request the member was told
+  failed is the one in force. The same early write means a connect that fails
+  later (a refused tool list, drift refusal, name clash) has already replaced a
+  working header of an existing row.
+- **The fix** (as #117 did for the mode-change deletes). (1) In `connect`,
+  validate each normalized header (`validate_mcp_header_name`,
+  `validate_mcp_header_value`, `mcp_header_binding_id`), keep the org-write
+  check (`authorize_org_secret_write`), and seal it (`SecretsVault::seal`,
+  `secrets.rs` 459) instead of storing it. (2) Give the snapshot the plaintext
+  of the new headers in memory (a `fetch_tools_snapshot` variant that takes the
+  staged values and reads only the kept, unchanged bindings from the vault), so
+  nothing is written before the row check. (3) `upsert_mcp_connection_guarded`
+  (`mcp_registry.rs` 2883-2961) gains `staged: &[StagedHeader { binding_id,
+  sealed, host }]`, written with `crate::secrets::put_host_secret_in(&tx, …,
+  SecretKind::Connection, &[host], Some("{key}:{binding_id}"), scope, owner)`
+  after the `Replace` check and the mode-change deletes and before
+  `write_mcp_connection_row`, as `commit_connector_connection` does (2966-3040).
+  A 409 then writes nothing. An idempotent replay of a committed first connect
+  finds the row and takes the update path, as today. `store_mcp_header_credential`
+  stays for its other callers (`mcp_registry.rs` 1059 and tests).
+- **Files.** `crates/vam-orchestrator/src/api/mcp_connections.rs`,
+  `crates/vam-orchestrator/src/mcp_registry.rs`, unit tests.
+- **Acceptance.** No vault write in `connect` before the guarded row write; the
+  accepted row's header binding always decrypts to the accepted request's value;
+  a refused or failed connect leaves the vault as it was (A3).
+- **Tests.** (a) Route race test, red without the fix:
+  `test_signal::arm_pause("mcp-connect-write:<id>")`, send A and wait for it to
+  arrive, arm again, send B and wait, release A (200), release B (409); the
+  `{id}/auth-header` row decrypts to A's value (today B's). (b) Store test: a
+  refused guarded write with staged headers leaves no vault row; an accepted one
+  writes it in the same commit. (c) A connect to an existing static row whose
+  tool listing fails keeps the old header. The #117 tests stay green.
+- **Turns green.** None (unit); guards CN-7.7.
+
+**CN-7.2 The connector file and the marketplace check: `api_key`.**
+- **Scope.** `ApiKeyProvider.fields`: exactly one field in this phase (`name`
+  `[a-z][a-z0-9_]{0,31}`, `label` 1-64 characters, one line).
+  `BindingValue::ApiKey` (`value: api_key`) only with an `api_key` provider,
+  `access_token` only with `oauth2`. An `api_key` connector has REST `bindings`
+  (bearer, placeholder `vamsec_<id>_<name>`, the Phase 6 host rules, `tenant`
+  allowed) or `mcp` (the `discover` server rules, 1-64 vetted tools); never
+  both. `check_marketplace_connector` and `parse_marketplace_connector` accept
+  it (342-344, 443-445; module table row 13 rewritten). Summary
+  (`package.rs` `summarize_connector` 750-): `provider: api_key` and
+  `fields [{ label }]`, skipped when empty, so every existing summary and digest
+  is unchanged. `GET /v1/connectors` entries show `provider.kind` and
+  `provider.fields`. `PUT …/node` refuses `client` and `consent` for an
+  `api_key` connector (400, "API key").
+- **Files.** `crates/vam-spec/src/{connector.rs,connector_listing.rs,package.rs}`,
+  `crates/vam-orchestrator/src/{connectors.rs,marketplace/summary.rs}`, unit
+  tests.
+- **Acceptance / tests.** `vam-spec`: REST and MCP `api_key` files pass; two
+  fields, `access_token` with `api_key`, `api_key` with `oauth2`, `inject:
+  header` refused, each naming the field; existing digests unchanged (fixture
+  test). Scenarios 3–5 move from the `listings` expect to the key step.
+
+**CN-7.3 One listing check for `validate` and import.**
+- **Scope.** Move `check_templated_skill_hosts`, `check_listing_placeholders`
+  and `check_listing_connector_ids` (`import.rs` 340-392, 753-796) into
+  `vam-spec/src/marketplace.rs` as one `check_listing(&[CheckedPackage])`,
+  called by `check_marketplace_root` (435-468) and by `prepare` (`import.rs`
+  322-336) with the same words (A4). New rule in the same function: each tool's
+  `egress[].binding` names a binding of the skill's `requiresConnector`, and
+  `egress[].host` is one of that binding's hosts (a templated host:
+  `{subdomain}.<suffix>` of that connector), checked when that connector ships
+  in the listing or is built in; otherwise a warning offline and no check at
+  import (the gate decides at call time). Offline warning: a listing with a
+  connector and no `tests/connector-test.json`.
+- **Files.** `crates/vam-spec/src/marketplace.rs`,
+  `crates/vam-orchestrator/src/marketplace/import.rs`, tests.
+- **Acceptance / tests.** Unit per rule; every refused listing of the e2e
+  fixtures is refused offline with the import's words (one parity test over the
+  fixtures); import tests unchanged. The Squrell `m365-mail` (binding `graph`,
+  `graph.microsoft.com`) and Zendesk listings pass.
+
+**CN-7.4 `vam connector init` and `vam connector validate`.**
+- **Scope.** `connector` is a visible alias of `connectors` (open question 7);
+  new subcommands `init`, `validate`, `test` (CN-7.5); the stale Microsoft 365
+  help text (`main.rs` 56-57, `cmd/connectors.rs` 23-27) fixed. `init <dir>
+  --id <id> --auth api_key|oauth|discover (--host <h> | --mcp-url <u>)
+  [--tenant-suffix <s>] --domain <publisherDomain> [--runtime bun|python3]`
+  writes a marketplace root: `marketplace.json`, `listings/<id>/connector/connector.json`,
+  a skill with one read tool whose shape is the binding host (REST), an agent,
+  and `tests/connector-test.json`, all of which pass `validate` and `test`
+  unedited. It refuses a non-empty directory and a reserved or malformed id
+  (`check_marketplace_connector`). Default runtime Bun (the marketplace's).
+  `validate <dir>` (a marketplace root or one listing) runs
+  `check_marketplace_root` with `check_listing`, prints the `catalog validate`
+  format, exits 6 on an error (and on a warning with `--strict`), `--json`.
+- **Files.** `crates/vam-cli/src/main.rs`, `crates/vam-cli/src/cmd/{connectors.rs,connector_kit.rs}`
+  (new module), templates as `include_str!` files under
+  `crates/vam-cli/templates/connector/`.
+- **Acceptance / tests.** CLI unit: each `--auth` output passes
+  `check_marketplace_root` and `check_listing`; golden output. Scenarios 1–2
+  move to the `test` step.
+
+**CN-7.5 `vam connector test`.**
+- **Scope.** (a) Move the pure screening out of `vam-network/src/connection.rs`
+  (`Shape`, `BindingSpec`, `ActiveCall`, `CallWindow`, `ConnectionRequest`,
+  `ConnectionGrant`, `ConnectionRefusal`, `Envelope` and `screen`, `Target`,
+  `normalize_path`, `prefix_admits`, `exact_admits` and the placeholder-site
+  checks, about 600 lines of `std` and `vam-spec`) into
+  `vam-spec/src/connection_envelope.rs`, verbatim, re-exported from
+  `vam_network::connection` so no gate call site changes (the traits,
+  `set_bearer` and `scrub_secret` stay). (b) `vam_spec::connector_kit`: the test
+  file format (from wave 0) and the route matcher. (c) `test <dir>
+  [--listing <id>] [--subdomain <label>]`: for each case, runs the tool's
+  entrypoint as `vam-runtime/src/exec.rs` 543-605 does (cleared environment,
+  `PATH`, a scratch `HOME` and workspace, `VAM_EGRESS_ENDPOINT` on a loopback
+  stub, `.vam/connector.json` with the sample subdomain), the stub reads each
+  `X-Target-Url` request, screens it with `Envelope::screen` for that tool's
+  shapes, puts a generated key or token in place of the placeholder, answers
+  from the in-process declared mock (no network, A5), scrubs the credential from
+  the answer, then checks the case's expectation and that the credential is in
+  no tool output and no workspace file. Output: `pass <tool>` or `fail <tool>:
+  <the gate's words>`; exit 6 on any failure. MCP connectors: nothing runs
+  locally (the node is the client); `test` says so and checks the test file.
+- **Files.** `crates/vam-spec/src/{connection_envelope.rs,connector_kit.rs,lib.rs}`,
+  `crates/vam-network/src/connection.rs` (re-export),
+  `crates/vam-cli/src/cmd/connector_kit.rs`, tests.
+- **Acceptance / tests.** The moved code's unit tests move with it, same count,
+  green; `git diff --color-moved` shows the move verbatim (orchestrator reads it
+  before merge); CLI unit tests for each refusal word. **Turns green**
+  scenarios 1 and 2.
+
+**CN-7.6 The API-key connection for REST connectors.**
+- **Scope.** `PUT /v1/connectors/{id}/connection` for an `api_key` connector
+  takes `{ apiKey }` (`deny_unknown_fields`, a fixed error text that never
+  quotes the value; 8-4096 bytes, no whitespace or control characters). Member
+  only (`CONNECTION_SCOPE`, own row); refused before Enable or before the
+  company address (403/409, the Phase 6 words). Under `lock_connection`, ONE
+  transaction writes the `connector_connections` row (status `connected`,
+  `token_endpoint` "", `tenant_id` the filled address or "", `expires_at` null)
+  and the vault row `connector/<id>/api-key` (`connection` kind, sealed before
+  the transaction, pinned to the filled binding hosts) (A1); then
+  `reauth::resume_key` for this member's parks. `rest_connection_state` gains an
+  `api_key` branch: `connected` when the key row exists and its pin equals the
+  current filled binding hosts and the address is the node's; else
+  `needsReconnect` (A2). `ensure_fresh_for_call` never refreshes an `api_key`
+  connection; `connector_park` asks Connect or Reconnect without a refresher
+  call. `token_for` accepts `value: api_key` (686-690), reads
+  `connector/<id>/api-key` with the same pin check (771-788), `set_bearer`,
+  audits `secret.accessed` with that binding id, and keeps the key in the scrub
+  list. `DELETE …/connection` deletes the row and the key (no provider call);
+  `POST …/check` answers the stored state with no provider call. The code
+  exchange and every OAuth token route refuse an `api_key` connector.
+  **Folded from the Phase 6 close** (same files): `entry_for` resolves the
+  template against the node row the response shows (round 3 minor); in
+  `docs/api/openapi.yaml`, the summary's `tenant`, `bindings` and `endpoints`
+  (`Decide: NOW at the next docs pass`) and the two round 3 openapi minors,
+  with the new body and entry fields. Docs: `orchestrator/api.md`,
+  `runtime/tools.md` (the credential a binding carries).
+- **Files.** `crates/vam-orchestrator/src/api/connectors.rs` (put 337-389,
+  delete 391-445, check 446-505, exchange 506-, `entry_for` 134-),
+  `crates/vam-orchestrator/src/{connectors.rs,connection_egress.rs,connector_park.rs}`,
+  `docs/api/openapi.yaml`, the two docs pages, unit tests.
+- **Acceptance / tests.** Unit: each refusal; the key is attached only to a
+  pinned host inside the shape; a key replaced during a session is the one sent
+  next; a disabled connector refuses; no route answer holds the key. **Turns
+  green** scenarios 3 and 4.
+
+**CN-7.7 The API-key connection for MCP connectors.**
+- **Scope.** The same route for an `api_key` connector with `mcp`: the node
+  writes the member's static MCP row (`Authorization: Bearer <key>`, pinned to
+  the MCP host) through `upsert_mcp_connection_guarded` with staged headers
+  (CN-7.1), lists tools with the key in memory, keeps the vetted ones
+  (`keep_vetted`) and applies the connector policy. `PUT /v1/mcp/connections`
+  and `…/oauth/tokens` refuse an `api_key` connector id ("connect it with its
+  API key"). The caller state of an MCP `api_key` connector is `connected` when
+  that static row and its header row exist (today `mcp_connection_state` keys on
+  a refresh token, `api/connectors.rs` 116-128). Disconnect deletes the row and
+  the header row.
+- **Files.** `crates/vam-orchestrator/src/api/{connectors.rs,mcp_connections.rs}`,
+  `crates/vam-orchestrator/src/{connectors.rs,mcp_registry.rs}`, unit tests.
+- **Acceptance / tests.** Unit: refusals on the generic route; a failed tool
+  listing writes no key (A3); vetted tools only. **Turns green** scenario 5.
+
+**CN-7.8 the VAM app.** The member's Connect for an `api_key` connector: a
+masked one-field form with the file's label, the value sent once to `PUT
+/v1/connectors/{id}/connection` and never kept, echoed or logged; "Replace key";
+Disconnect. Admin Enable without a client for `api_key`. The Marketplace
+summary shows "API key" and the hosts. Unit tests only.
+
+**CN-7.9 vam-marketplace CI (team).** `validate.yml`: pin `VAM_COMMIT` to the
+Phase 7 merge on `main`; run `vam connector validate .` and `vam connector test`
+for each listing with a connector or connector skill; add
+`tests/connector-test.json` to `zendesk` and `microsoft-365` (the built-in
+connector's skill), and the MCP note for `box`. Coordinated with the team.
+
+##### Waves
+
+One wave at a time; branches `cn-7/wave-N` into `feat/connectors` (open
+question 13). The VM-path flag follows the Phase 6 rule; wave 3 also sets
+`lane=yes` because the egress gate's screening code moves (one lane run proves
+the VM path unchanged).
+
+| Wave | Items | Turns green | Repo | Model | Budget | Depends on | CI | VM path | Status | PR |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | scenarios: 5 files; `provider: declared` mock in the runner and the test-file format (`vam_spec::connector_kit`, types and matcher only, no I/O); the three listings and the overlay; the three `connector-kit` trees and `marketplace-connector-kit`; `connector-connect.apiKey`, `git-tag.root`, `api-call.absent` for any piece; README "Connectors" additions; guards-only edits. **Folded** (same files): the Ticketdesk mock accepts the access token only with the `Bearer` scheme (`vam-e2e/src/connectors.rs` 1412); the no-run absence check fails on an empty or invalid 200 listing body (`engine.rs` 3713-3760) | — (5 red, right reason, class `product`) | vam | Sonnet medium: a new mock kind whose format is shared with the CLI, in `vam-spec` | 150 min | — | `CI: scenarios=connector-built-from-nothing-passes-validate-and-test-and-installs,connector-kit-names-what-the-node-would-refuse,member-enters-an-api-key-and-a-listing-skill-uses-it-without-holding-it,api-key-stays-pinned-to-the-hosts-it-was-entered-for,mcp-connector-with-an-api-key-connects-through-the-node,rest-listing-with-a-company-address-installs-and-shows-its-hosts,skill-from-the-listing-reaches-only-the-company-host-inside-its-shape tests=workspace lane=no release-build=no` | no | [x] | #122 |
+| 1 | **CN-7.1 first**, then CN-7.2 | — (3–5 move to the key step) | vam | **Sonnet high**: credential write ordering in one transaction (CN-7.1) and a lifted marketplace trust refusal (CN-7.2). Orchestrator reads the staged write and the race test before merge | 150 min | 0 | `CI: scenarios=community-connector-appears-unverified-and-connects,connector-id-cannot-be-taken-by-a-hand-added-server,admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node,listing-from-an-added-marketplace-installs-as-unverified-within-its-limits,rest-listing-with-a-company-address-installs-and-shows-its-hosts,member-enters-an-api-key-and-a-listing-skill-uses-it-without-holding-it,api-key-stays-pinned-to-the-hosts-it-was-entered-for,mcp-connector-with-an-api-key-connects-through-the-node tests=workspace lane=no release-build=no` | no | [x] | #124 |
+| 2 | CN-7.3, CN-7.4 | — (1–2 move to the `test` step) | vam | Sonnet medium: import rules move to `vam-spec` (same words), plus a new import refusal | 120 min | 1 | `CI: scenarios=connector-built-from-nothing-passes-validate-and-test-and-installs,connector-kit-names-what-the-node-would-refuse,listing-from-an-added-marketplace-installs-as-unverified-within-its-limits,rest-listing-with-a-company-address-installs-and-shows-its-hosts,community-connector-appears-unverified-and-connects,admin-installs-the-squrell-listing-at-its-tag tests=workspace lane=no release-build=no` | no | [x] | #126 |
+| 3 | CN-7.5 | first, second | vam | **Sonnet high**: moves the egress gate's screening code (verbatim) and runs untrusted tool code locally behind it. Orchestrator reads the moved-code diff | 180 min | 2 | `CI: scenarios=connector-built-from-nothing-passes-validate-and-test-and-installs,connector-kit-names-what-the-node-would-refuse,skill-reads-microsoft-graph-as-the-member-without-holding-a-token,tool-declared-as-a-read-cannot-send-mail,skill-from-the-listing-reaches-only-the-company-host-inside-its-shape,guest-cannot-use-an-mcp-token-placeholder tests=workspace lane=yes release-build=no` | **yes** (the gate's code) | [x] | #128 |
+| 4 | CN-7.6 (+ the folded `entry_for` and openapi items) | third, fourth | vam | **Sonnet high**: a new credential attached to guest requests by the swap (A1, A2). Orchestrator reads `token_for`, the pin check and the connect transaction | 180 min | 3 | `CI: scenarios=member-enters-an-api-key-and-a-listing-skill-uses-it-without-holding-it,api-key-stays-pinned-to-the-hosts-it-was-entered-for,skill-from-the-listing-reaches-only-the-company-host-inside-its-shape,company-address-token-is-refreshed-at-the-filled-endpoint-before-the-call,skill-needing-microsoft-365-asks-the-member-to-connect-first,revoked-microsoft-connection-parks-the-call-and-tells-the-member tests=workspace lane=no release-build=no` | no | [x] | #130 |
+| 5 | CN-7.7 | fifth | vam | **Sonnet high** (orchestrator): reuses CN-7.1's staged write and the Phase 5 MCP path | 120 min | 4 | `CI: scenarios=mcp-connector-with-an-api-key-connects-through-the-node,community-connector-appears-unverified-and-connects,connector-id-cannot-be-taken-by-a-hand-added-server,admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node lane=no release-build=no` | no | [x] | #132 |
+| 6 | CN-7.8 | — (unit) | **The VAM app** (`squrell-inc/Squrell-App`, base `feature/connectors`; open question 14) | Sonnet medium: a member form that handles a secret | 120 min | 4 (5 for the MCP tile) | none (app unit only) | no | [ ] | |
+| 7 | CN-7.9 | — (marketplace CI) | **vam-marketplace** (+ vam close block) | Sonnet low (the session supports the team) | 60 min + the team's time | 5; the Phase 7 release on `main` for the pin | marketplace: its own CI; vam: none | no | [ ] | |
+
+**Release split (orchestrator, 2026-11-20).** The Phase 7 VAM release into
+`main` goes before wave 6: waves 1–5 and the review fixes are node and CLI only.
+Wave 6 (CN-7.8, Squrell-App) waits for Squrell-App #15 and rides with the app
+release. Wave 7 (CN-7.9, vam-marketplace CI) follows the VAM release, because it
+pins `VAM_COMMIT` to that release.
+
+Budget: 1080 min of agent time (18 h) plus the team's. Scoreboard
+expectation: 0 green after waves 0, 1 and 2 (they move scenarios to later
+steps); 2 after wave 3; 4 after wave 4; 5 after wave 5; flat in 6–7 (stated so
+they are not flagged). Waves 6 and 7 are coordinated separately (Squrell-App;
+vam-marketplace).
+
+**Phase rubric.** `Decide: SLICE — proof 3 (the exit: a third-party connector built from nothing; API-token systems connect), cost 3 (a CLI kit that runs the gate's rules offline, a new credential on the swap, three repos) → slice: member-entered key, one field, bearer inject, REST and MCP; init/validate/test offline with a declared mock. Backlog: admin-entered (org-held) keys, header and query inject, several fields (Basic auth), a key check at connect, Salesforce instance_url (CN-6.8)` (orchestrator, 2026-11-20: named-header inject moved into the slice, wave 4)
+
+##### Decisions on the open questions (parent orchestrator, 2026-11-20)
+
+All 14 defaults are approved, except question 3, which is widened:
+
+- **Q1 Who enters the key:** member only (scope narrowed, see Status).
+- **Q3 How the key is attached:** **bearer, plus a named header.** Wave 4 adds
+  `inject: header` with a required `headerName`; the value is the key with an
+  optional fixed `prefix`. Validate and import refuse hop-by-hop and sensitive
+  names (`Host`, `Cookie`, `Proxy-*`, `Connection`, `Content-Length`,
+  `Transfer-Encoding`). The named header touches the envelope's placeholder
+  rule (`vam-network/src/connection.rs` 409-442); if it grows wave 4 by more
+  than about 30%, the orchestrator is asked before it is built. `query` stays
+  refused.
+- **Q4 Checking the key at connect:** no provider call.
+- **Q14 The app wave (W6):** waits for Squrell-App #15 to merge; W7's
+  marketplace CI pin follows the Phase 7 release.
+- **Models:** W3 (the gate's screening code moves out of `vam-network`, a
+  security boundary) runs on Sonnet high with `lane=yes`; before merge the
+  orchestrator reads the moved code and shows the behaviour unchanged (every
+  existing egress and secret scenario green). W4 and W5 run on Sonnet high
+  (they attach a member's key to requests).
+- **Wave merges:** each green wave PR goes to the parent orchestrator, which
+  merges it into `feat/connectors` or says to merge it.
+
+New backlog lines:
+- Basic auth from several fields (`email/token:key`, as Zendesk and Freshdesk
+  use). `Decide: BACKLOG — proof 1, cost 2`; trigger: the first listing that
+  needs it.
+- An optional declared `verify` request the node calls once at connect.
+  `Decide: BACKLOG — proof 1, cost 1`.
+- The Squrell marketplace root has one existing `vam connector validate` warning: the `calendar_find_slots` tool is declared READ_ONLY but its egress declares POST, so `validate --strict` on that root exits 6 (found in wave 2, not caused by it). Fix the tool's side-effect class or its egress in the Squrell listing. `Decide: BACKLOG — proof 1, cost 1`.
+- Should an installed listing update move the workspace version pins of Spaces bound to that listing's released agent? Today a Space keeps the agent version of its first run (`catalog_resolve::apply_workspace_version_pin`), so an admin's update reaches new Spaces only, and a member keeps the old skill (and its old hosts) in an existing one until they start a new Space (found in wave 4; the pinned-host scenario uses a new Space). `Decide: OWNER — proof 2, cost 2`; touches the isolation workstream's version pin.
+- Startup recovery (`connected_park_keys`) checks only a connection's status, so an API-key park whose key pin no longer matches the filled hosts resumes and parks again at the next call (harmless, one extra resume). Check the key pin there as `rest_state_for` does. `Decide: BACKLOG — proof 1, cost 1`.
+- A named header for MCP API-key connectors (an `mcp.inject` with `headerName` and `prefix`): today a connector's `mcp` holds only `url` and `tools`, so an MCP API-key connector always sends `Authorization: Bearer` (approver's choice, wave 5). Trigger: the first MCP listing that needs another header. `Decide: BACKLOG — proof 1, cost 2`.
+- Replacing a hand-added static MCP row with an API-key connect leaves that row's other header credentials in the vault (only `auth-header` is rewritten). Delete the other `{id}/header-*` rows in the guarded transaction. `Decide: BACKLOG — proof 1, cost 1`.
+- The MCP API-key connect writes instructions, the creator note and the connector policy after the guarded transaction (as the other connect paths do), so a failure between them leaves a connected row briefly without its risk classes. Move them into the transaction or make the row unusable until the policy is written. `Decide: BACKLOG — proof 1, cost 2`.
+- From the Phase 7 review (R5): in `connector-kit-names-what-the-node-would-refuse` the word `api.elsewhere.example` appears only because the unknown-binding message quotes it, so the "host not listed by the connector" rule is not exercised on its own. Add a second broken tool whose binding is right and whose host is not, with a "does not list" assert. A new `then`, approved by the orchestrator for a later wave. `Decide: BACKLOG — proof 1, cost 1`.
+- From the Phase 7 review (R6): the "Connect/Reconnect Notesdesk to continue" text of the two API-key REST scenarios is proved by a unit test (`park_message`, wave 4), not by the scenarios. Add `approvalMessage` contains asserts to both. New `then` lines, approved by the orchestrator for a later wave. `Decide: BACKLOG — proof 1, cost 1`.
+- From the Phase 7 review (R10): on a timeout `vam connector test` skips the leak scan and kills only the tool's direct child, so a forked grandchild keeps running on the developer's machine. Run the tool in its own process group, kill the group, and scan what was written before the timeout. `Decide: BACKLOG — proof 1, cost 1`.
+- From the Phase 7 review (R12): `vam connector validate` prints `ok` lines for the artifacts of a listing that has listing-level errors. Print the listing errors first and no `ok` for that listing. `Decide: BACKLOG — proof 1, cost 1`.
+- From the Phase 7 review (R13): the orphan header rows on replace, already recorded above (wave 5). No new line.
+- The smoke suite runs close to `vam-e2e`'s 15-minute whole-run budget on a slow runner: on #134 (5623777) the last 14 scenarios failed at `when.0` in 0 ms when the budget ran out (the re-run on the next head passed). Raise the smoke budget in `rust.yml`, or split smoke into two jobs, before it flakes again. `Decide: BACKLOG — proof 1, cost 1`.
+- The shared cargo target fills the session disk (about 50 GB): two agents building in it at once ran the disk out three times in the review round (`cargo clean` each time; one false scenario failure when two worktrees overwrote `target/debug/vam-e2e`). Run fewer parallel builds, or give the environment more disk. `Decide: BACKLOG — proof 1, cost 1`.
+
+##### Open questions (each with a default)
+
+1. **Who enters the key.** The scope says "admin- or member-entered". Default
+   **the member only** in this phase: `connection.holder` stays `user`
+   (`connector.rs` 539), each member's calls run as their own account
+   (locked decision 2), and a key the admin enters for everyone is an org-held
+   connection, which this tracker lists under "Explicitly later". Alternative:
+   `holder: org` for `api_key` only (an org-scope `connection` row written by an
+   org admin at Enable, as the `org_vault` client secret is), one more item and
+   scenario, about one wave. Taking the default narrows the stated scope (owner's
+   word).
+2. **Names.** File: `provider: { kind: "api_key", fields: [{ name, label }] }`
+   (one field), binding `value: "api_key"`. Wire: `PUT
+   /v1/connectors/{id}/connection` with `{ apiKey }`; entry `provider.kind`,
+   `provider.fields[].label`; vault row `connector/<id>/api-key`. Alternative
+   for later multi-field providers: `{ fields: { <name>: value } }`.
+3. **How the key is attached.** Default **bearer only** (`Authorization:
+   Bearer <key>`, the gate's one placeholder site today). `inject: header` with
+   a declared header name (`X-Api-Key`) changes the envelope's placeholder rule
+   (`connection.rs` 409-442) and is backlog with trigger "the first listing
+   that needs it" (`Decide: BACKLOG — proof 1, cost 2`); `query` is refused
+   (keys in URLs end up in logs); Basic (`email/token:`) waits for several
+   fields.
+4. **Checking the key at connect.** Default **no provider call**: the tile
+   says connected once stored; a provider 401 reaches the tool and the member
+   replaces the key; `check` answers the stored state. Alternative: a declared
+   `check: { method: GET, path }` the node calls once at connect.
+5. **MCP connectors with a key.** Default **in scope** (CN-7.7, wave 5): bearer
+   to the MCP server, written by the node through the staged guarded write; the
+   generic MCP routes refuse an `api_key` connector id, so the header name and
+   host come from the file.
+6. **How `vam connector test` runs.** Default **(a)** offline in the CLI: the
+   gate's pure screening moves to `vam-spec` (verbatim, re-exported) and the
+   tools run against the declared mock, so a released `vam` works on a
+   publisher's laptop and in marketplace CI without a node. (b) A smaller copy of
+   the gate rules in the CLI (no move; drift risk). (c) Drive a process-mode
+   `vamd` through `vam-e2e` (full fidelity, but needs test-only binaries that are
+   never released, so not for third parties). With (a), the node path is still
+   proved by scenarios 3–5 in VAM's own CI.
+7. **CLI spelling.** Default: `connector` is a visible alias of the existing
+   `connectors`, so the design's `vam connector init` and today's `vam
+   connectors list` both work.
+8. **The test file.** Default `listings/<id>/tests/connector-test.json` (not an
+   artifact, so never imported to a node): `hosts`, `routes [{ method, path |
+   prefix, status, body }]`, `cases [{ tool, input, expect: ok | refused,
+   contains }]`. The runner's `provider: declared` reads the same file, so the
+   world piece and marketplace CI use one mock.
+9. **New import refusal (CN-7.3).** Default: a skill whose egress names a
+   binding or host its required connector does not declare is refused at import
+   when that connector ships in the listing or is built in (today it installs
+   and every call is refused). The two Squrell listings comply. Alternative:
+   warning only.
+10. **A host change by update.** Default: the members' keys are kept and read
+    `needsReconnect` (pinned to the old hosts) until re-entered (scenario 4);
+    nothing is sent to the new host first. Alternative: delete the keys on the
+    update.
+11. **Key limits.** Default 8-4096 bytes, no whitespace or control characters,
+    not trimmed; refusals never quote the value.
+12. **Marketplace CI.** Default: once Phase 7 is on `main`, the team pins
+    `VAM_COMMIT` there and runs `validate` and `test` per listing (wave 7,
+    coordinated separately); until then CI keeps `vam catalog validate`.
+13. **Base branch.** Default `feat/connectors` (= `main` f016617); waves 0–5
+    merge there; released to `main` at the phase close on the owner's word.
+14. **The app base.** Phase 6's app release (Squrell-App #15) is held. Default:
+    wave 6 starts after #15 merges and `feature/connectors` is re-cut from the
+    app's `main`; if #15 is still held then, it builds on `feature/connectors`
+    as it stands (which holds Phase 6) and the two releases go in order.
+
+**Risks.**
+
+- The screening move (CN-7.5) touches the security gate. Mitigation: a verbatim
+  move with a re-export, tests moved with it, the orchestrator reads the
+  moved-code diff, and wave 3 runs the microVM lane.
+- An API key does not expire, so a leak lasts. The key is in the scrub list
+  for every attach, is never an `egress` row, and scenario 3's `secret-absent`
+  covers thread, events, receipt, listings and workspace.
+- `test` runs the publisher's tool code on the developer's machine with a
+  cleared environment but no sandbox; it is the developer's own code, and the
+  CLI says so in its help.
+
+**Design vs code** (the code is the fact; the last column says what moves).
+
+| Design says | Code does | Moves |
+|---|---|---|
+| §13.4 "`vam connector init/validate/test`" | The CLI is `vam connectors` with list/enable/disable/disconnect/check (`main.rs` 56-61, `cmd/connectors.rs` 9-28); `vam catalog validate` already checks a connector offline with the marketplace limits (`package.rs` 477-491, `catalog_validate.rs` 1-15) | code (CN-7.4, alias, open question 7) |
+| §9.1 "CI validates every package with a pinned `vam` CLI" (validate = install) | Three listing rules run only at import (`import.rs` 340-392, 753-796), so an offline pass can be an install refusal; no rule ties a skill's binding and host to its connector (`skill_egress.rs` 78-89) | code (CN-7.3) |
+| Scope: "mock provider world piece, also used by marketplace CI" | Mocks are compiled into the runner per fictional service (`vam-e2e/src/connectors.rs` 387-393); marketplace CI has no `vamd`, and the process-mode `vamd` is never released | code (CN-7.5, a declared mock; open questions 6, 8) |
+| §4 `ApiKeyProvider { fields }`; D26 "API-key providers" for community connectors | The type exists and validates (`connector.rs` 151-163, 581-585), but marketplaces refuse it (`connector_listing.rs` 342-344, 443-445), `BindingValue` is `access_token` only (189-194), the swap attaches only that (`connection_egress.rs` 686-690), and a REST connection without a refresh token reads `needsReconnect` (`connectors.rs` 1157) | code (CN-7.2, 7.6, 7.7) |
+| §4 `inject: "bearer" \| "header" \| "query"` | `Binding` has no header name (`connector.rs` 181-187); the envelope takes the placeholder only as the `Authorization` value (`connection.rs` 409-442); marketplaces allow only `bearer` (`connector_listing.rs` 237-242) | open question 3 (backlog) |
+| §5 "Swap … the egress proxy does this today for static secrets" | Static API keys exist as member `egress` secrets injected for their destinations (`vam-network/src/secrets.rs` 303; `secrets.rs` 794): no Enable gate, no shape, no tile | nothing; recorded: connector keys are `connection` rows (locked 7), never this path |
+| Scope "admin- or member-entered key" | `holder` must be `user` (`connector.rs` 539); org-held connections are under "Explicitly later" | open question 1 |
+| `connector_listing.rs` module doc row 13 ("a node has no connection flow that stores an API key") | True today | rewritten in CN-7.2 |
+| `vam connectors` help: "check or disconnect your own Microsoft 365 connection" (`main.rs` 56-57) | Stale since Phase 5–6 (any connector) | fixed in CN-7.4 |
+
+**Phase close:** all five scenarios `active` and green; the app unit suites on
+the merged base; marketplace CI green with `validate` and `test` once pinned
+(team, may follow the release); release (the release PR runs the microVM lane
+once).
+
+#### Phase 7 close
+
+**Release:** VAM: `feat/connectors` into `main` (release PR `release: connectors Phase 7`) on the owner's word, given 2026-11-21. It carries waves 0–5 (#122, #124, #126, #128, #130, #132), the review fixes (#135), the tracker (#136) and `main` merged in once after the #134 hotfix (#137, full CI). The R1 hotfix itself reached `main` first as #134 (dc84121). Not in this release: wave 6 (CN-7.8, the member's API-key Connect in the app) waits for Squrell-App #15 and ships with the app release; wave 7 (CN-7.9, vam-marketplace CI) pins `VAM_COMMIT` to this release and follows it.
+
+**Scoreboard:** 5 of 5 Phase 7 scenarios `active` and green; the 40 connector-tagged and 15 MCP, API-key and OAuth-token scenarios green on #137; smoke 187 of 187. Fix cycles: W3 1, W4 1, W5 1 (scenario `when`, mock and CLI-test fixes, no `then` edited); review round: #134 3 (CodeRabbit round 1, the token pin, the revoke pin), #135 1 (unquoted openapi descriptions); #137 0 code fixes (one smoke re-run: the 15-minute budget). Agent wall time about 4.4 h for waves 1–5 (73, 20, 37, 81 and 54 min, from the progress rows), plus about 5 h for the review round and the merge, much of it rebuilds after the shared target filled the disk.
+
+**Locked decisions honoured:** decision 7 (an API key is never a guest egress secret: it is a `connection` row read only by the host swap, pinned to the filled hosts); decision 22 (no broker change).
+
+**Team checklist (CN-7.9, after this release):** pin `VAM_COMMIT` in vam-marketplace `validate.yml` to the release merge on `main`; run `vam connector validate --strict` and `vam connector test` on every listing root in CI; fix the Squrell root's one `validate` warning (`calendar_find_slots` READ_ONLY declares POST) before `--strict` gates it.
+
+**Findings and backlog:** recorded in the Phase 7 backlog lines above (review round R5, R6, R10, R12; the smoke budget; the shared cargo target filling the disk; workspace pins on listing update, `Decide: OWNER`). The smoke budget is raised in the close-out PR (below).
 
 ## Explicitly later
 
@@ -3378,3 +3963,14 @@ installs from a test marketplace.
 | 2026-11-20 | 6 | **Release review of #112 fixed** (branch `cn-6-review` into `feat/connectors`; CodeRabbit's 11 inline findings, 7 outside the diff, 15 minor, 6 nitpicks triaged). Each real fix has a failing-before test. Security and correctness: the connection row keeps the client id that issued the grant, and a disconnect after the admin replaced the client deletes locally, sends no credentials and answers `providerGrantMayRemain: true`; an explicit Check never refreshes an invalidated `oauth` grant; a refresh result (tokens, expiry and row, one transaction) is dropped if the client, the enable, the filled definition or the member's row moved while the provider answered; the code exchange re-reads the client and the connector once it holds the member's lock and sends nothing if they moved; an `oauth` connector with no `tenant` exchanges with no company address; the exchange worker resumes parked runs after the lock is released, whatever became of the request; a stale-URL row of an installed or company-address connector is not seeded; a connect that the connector refuses leaves the stale row and its grant alone; a placeholder shared by two installed connectors is refused at install and update; skill shapes and the binding table follow the node's address at the call, so a warm resume after Enable works; swap-time refreshes are recorded per call under the lock, enablement is checked again after a refresh, and the pin and the token come from one vault row; the Check route's worker owns the lock; seed skills that need a connector get their `.vam/connector.json`. Smaller: templated MCP hosts in summaries, the 253-character host bound, openapi and tools page wording, e2e harness fixes (conflicting `shortTokens` controls, unmatched Ticketdesk requests logged, secret absence read as every identity, no panicking locks). Deferred: a credential generation on the reduced refresh horizon, a non-retryable flag for ambiguous exchange failures (a product call), and style-only nits. CN-6.7 now states the staging pre-release tag exception and adds ticket creation to the real-instance run; the releases are marked pending. |
 | 2026-11-20 | 6 | **Third review of #112 fixed** (branch `cn-6-review-3` into `feat/connectors`; CodeRabbit's 10 inline findings, all fixed, none deferred). Each fix has a test that fails without it. `GET /v1/connectors` reads the definitions, node rows and clients under one store snapshot, so a release is never shown with the enablement of another save; startup recovery and the reconnect decision refuse a reauth park past its deadline (left for the expiry sweep), and unexpired parks are still recovered; a rotated Microsoft 365 refresh token is kept across a disable while the consent tenant is unchanged, and dropped when consent is withdrawn or moves; import refuses binding placeholders the egress gate cannot tell apart (one contains the other), within a listing and against installed connectors; the guarded connect write refuses a new connection when another connect created the row meanwhile, and a mode change deletes the previous mode's credentials in the same transaction, after the check, so a refused write leaves the row and its tokens. Runner: `secret-absent` screens a denied listing's body for the secret (the denial still is not a readable listing, a required 500 still fails); cleanup scrubs a failed answer before cutting it to 200 characters, and retries the complete node reset after a transport failure before falling back to an address-only reset. The exchange race test's signal is scoped to the request's idempotency key. |
 | 2026-11-20 | 3 | **Fix: tool cards lost on large results** (branch `fix/jig-cards-marketplace`, orchestrator-approved). Owner report: "yesterday's emails" via the marketplace Microsoft 365 skill showed text, no card. Diagnosis: the node emits cards for the installed skill's guest-run tools (proved in process mode), but a `mail_search` result over 16 KiB (about 28 real Graph messages) was `card.skipped result_too_large`; app-side build skew not yet checked (no repo access). Wave 0 (#114): `outbox.card` expects on `executive-assistant-triages-…`, new `yesterdays-mail-shows-as-the-mail-card` (red at then.0, right reason), Graph mock `mailbox: N`, `guest_tool_cards` unit tests (the guest path had none, contrary to open question 4). Fix: trim to the rows that fit, "and N more", `trimmed {path,total,kept}`; mock Graph list messages carry senders. Scoreboard: 1 new scenario green, 0 red, 0 fix cycles. |
+| 2026-11-20 | 6 | **Release review rounds of #112, then released.** Three rounds, each merged into `feat/connectors` before #112: #113 (release review of #112, CodeRabbit's findings, branch `cn-6-review`), #116 (CodeRabbit's second review, `cn-6-review-2`), #117 (third review, `cn-6-review-3`). Then #112 merged into `main` as f016617 (VAM released). The app release (Squrell-App #15) stays held for the owner; deploy vamd before the app. New high-priority finding recorded in the close block: the static-connect self-race (Phase 7 CN-7.1). |
+| 2026-11-20 | 7 | **Breakdown written** (phase-breakdown agent, branch `docs/cn-7-breakdown` from `feat/connectors` f016617), awaiting approval: 5 scenarios (process, mock model; a new `provider: declared` mock built from a publisher's test file), CN-7.1–7.9, waves 0–7 (wave 1 starts with CN-7.1, the static-connect self-race; W1, W3, W4 Sonnet high; W3 runs the microVM lane because the gate's screening code moves to `vam-spec`; W6 Squrell-App, W7 vam-marketplace), 14 open questions with defaults (member-entered key only, narrowing the stated scope; bearer inject only; `vam connector test` offline in the CLI). Folded backlog: Ticketdesk Bearer-only and the no-run absence check (W0), `entry_for` and the openapi items (W4). |
+| 2026-11-20 | 7 | **Breakdown approved** by the parent orchestrator (owner's delegation); #118 merged into `feat/connectors` (ff6fcc2). Decisions: member-entered key only (scope narrowed, org-held keys stay later); bearer **and** `inject: header` with a required `headerName` (refused names listed) in wave 4, Basic auth to backlog; no provider call at connect, a declared `verify` to backlog; W6 waits for Squrell-App #15; W3, W4, W5 on Sonnet high. Wave 0 started (branch `cn-7/wave-0`). |
+| 2026-11-20 | 7 | **Wave 0 landed** (#122, 8813e6e; decisions PR #119, 8b9c8fa): 5 scenarios pending and red for the right reason (class `product`), the `provider: declared` mock and `vam_spec::connector_kit`, the three listings, the overlay, the `connector-kit` trees, the world pieces and the README contract words; folded Ticketdesk Bearer-only and the no-run absence check. Scoreboard: 0 green / 5 red (right reason), 0 fix cycles. |
+| 2026-11-20 | 7 | **Wave 1 landed** (#124, merge 1777e50; CN-7.1 b40ee27, CN-7.2 d69bd77). CN-7.1: a static connect seals its headers and the guarded row write stores them in its own transaction after the check; the route race test and the failed-listing test fail on 8813e6e and pass with the fix (shown in #124). Behaviour change: a connect replay with the same Idempotency-Key and a new value writes the new value. CN-7.2: `api_key` with one field, `value: api_key`, REST or MCP; the marketplace check accepts it; the summary adds `fields` only for `api_key`; `PUT …/node` refuses client and consent. The three key scenarios' `expectFail.step` moved from `when.2` to `when.5` (no `then` edited). Scoreboard: 5 existing connector scenarios green, 3 Phase 7 scenarios red at the key step (right reason), 0 fix cycles, about 73 min agent wall time. |
+| 2026-11-20 | 7 | **Wave 2 landed** (#126, merge 4b57fd1; CN-7.3 d7861e9, CN-7.4 fa234e4). CN-7.3: the three import-only listing rules and the duplicate-URN check moved into `vam_spec::marketplace::check_listing(listing_id, …)` with the same words and order (import refuses on the first error); new import refusal: a tool's egress binding and host must be its required connector's (shipped or built in), otherwise an offline warning; offline warning for a connector listing without `tests/connector-test.json`; parity test over the e2e fixtures. CN-7.4: `connector` alias, `vam connector init` (api_key, oauth, discover; Bun or Python; refuses a non-empty directory) and `validate` (`--strict`, `--json`, exit 6); `test` registered only. Kit scenarios' `expectFail.step` moved to `when.2` and `when.4` (no `then` edited). Scoreboard: 4 existing scenarios green, 2 kit scenarios red at `vam connector test` (right reason), 0 fix cycles, about 20 min agent wall time plus a full local re-run after the shared target filled the disk (`cargo clean`). Backlog: the Squrell root's READ_ONLY-declares-POST warning. |
+| 2026-11-20 | 7 | **Wave 3 landed** (#128; move 29823ef, route matcher 30bdc58, `vam connector test` c373bb8). The egress envelope's pure screening moved verbatim from `vam-network/src/connection.rs` to `vam-spec/src/connection_envelope.rs`, re-exported so no gate call site changed (orchestrator read it with `--color-moved`; one non-move line, `reqwest::Url::parse` to `url::Url::parse`, the same crate version; the moved tests 19 before and after). `vam connector test` runs each case's tool with a cleared environment against a loopback stub that screens with `Envelope::screen`, swaps in a generated credential, answers from the declared mock and checks that the credential reaches no output or file. Scoreboard: both kit scenarios green (`active`), the four egress and secret scenarios and the microVM lane green, 1 fix cycle (two wave 2 CLI tests that pinned the old `test` stub), about 37 min agent wall time. |
+| 2026-11-20 | 7 | **Wave 4 landed** (#130; CN-7.6 37a4291, named header inject 5acdaa2, docs and openapi f214c10, scenario `when` fix 1424ace). A member enters an API key (`PUT …/connection {apiKey}`): one transaction re-checks the plan, writes the vault row `connector/<id>/api-key` pinned to the filled binding hosts and the `connected` row; `token_for` reads the key with the pin check, attaches it after `Envelope::screen` (bearer, or `set_header` into one named header from the connector file), audits `secret.accessed` and scrubs it. Named header: a fixed denylist (Host, Authorization, Cookie, Proxy-*, hop-by-hop) and RFC 9110 tokens only; the guest cannot pick or move the header (refuse in the screen, overwrite every case variant at the gate). The pinned-host scenario makes a member Space before the post-update chat (`create-space` gained `as`), because a Space keeps the agent version of its first run; the approver accepted this `when` change and the two `afterTool` mock rules. Scoreboard: both API-key REST scenarios green (`active`), the wave's other seven and the Space-rename scenario green, 1 fix cycle (the scenario `when`), about 81 min agent wall time plus orchestrator review. Backlog: workspace pins on listing update (owner), startup recovery key-pin check. |
+| 2026-11-20 | 7 | **Wave 5 landed** (#132; CN-7.7 7ac6928, scenario mock fix bbb6fbb). A member enters an API key for an MCP connector on the same route: the key is staged and sealed, the tool listing holds it in memory only, vetted tools and the connector policy apply, and `upsert_mcp_connection_guarded` writes the static row and its header in one transaction after the guard (CN-7.1); a failed listing, a refused guard or drift writes no key. `PUT /v1/mcp/connections` and `…/oauth/tokens` refuse an API-key connector id; state reads `connected` from the static row and its header; disconnect deletes both. An MCP connector cannot ask for a named header (`mcp` holds `url` and `tools` only; approver's choice (b), pinned by tests). The approver accepted the mock fix (tool names as the guest sees them, `-` written as `_`). Scoreboard: the MCP API-key scenario green (`active`), the five connector and API-key scenarios green, 1 fix cycle (the mock), about 54 min agent wall time. Backlog: a named header for MCP, stale header rows on replace, the post-transaction policy write. |
+| 2026-11-21 | 7 | **Review round.** Two Opus reviewers read waves 1–5; findings R1–R13 went to the orchestrator. **R1 (Critical)**: a static MCP connect could name any vault row as its header binding, and the resolver sent it to the connection's URL. Fixed on `main` as hotfix #134 (`fix/mcp-secret-binding`; 5623777, 6424602, 71375fd): a connection uses only its own binding ids, and every MCP credential is read in one checked read (kind `connection`, pinned to the exact host it is sent to). CodeRabbit round 1 added: cleanup deletes only `connection` rows; foreign bindings refused before any token write; the OAuth refresh reads the refresh token and client secret pinned to the current token-endpoint host; the disconnect revoke sends only to a revocation host pinned on the row (otherwise local delete only). Round 2 and 3: no actionable comments. #134 is green and waits for the owner's word. **R2, R3, R4, R9, R11 and docs R7, R8** merged into `feat/connectors` as #135 (`fix/cn-7-review`, merge 4f6a9d6): an api_key connect replaces the OAuth row an update left behind (409 for any other row); `headerName` refuses every header the egress filter strips (one list in `vam-spec`); where the key goes is part of the summary digest; a disconnect fails and keeps the row while the key survives; `vam connector test` exits 6 when no case ran; the kit, header-inject and connect-route docs. R2 and R9 tests fail before the fix and pass after. **Backlog:** R5, R6 (new `then` lines, approved for a later wave), R10, R12; R13 was already there. Scoreboard: all Phase 7 scenarios still green (35 connector-tagged, 182 and 186 smoke locally, Actions green on both PRs); 3 fix cycles on #134 (CodeRabbit round 1, the token pin, the revoke pin), 1 on #135 (unquoted openapi descriptions found by `local.sh`); about 5 h agent wall time, with three `cargo clean`s after the shared target filled the disk. Next: merge `main` into `feat/connectors` once #134 lands, then the Phase 7 release PR. |
+| 2026-11-21 | 7 | **Release prepared.** The owner gave the word; #134 merged into `main` (dc84121). `main` merged into `feat/connectors` once (#137, merge 54bfd08, full CI): CN-7.1's staged connect path now goes through #134's own-id and pinned-host rules (`resolve_mcp_headers_staged` takes the connection's target; non-staged bindings use the pinned decrypt); the CN-7.6 REST `token_for` and the CN-7.7 MCP key connect already met them. 0 code fix cycles; smoke passed on its one re-run after the 15-minute budget cut the first attempt (849 s of 900 s on the green run). Phase 7 close written; the smoke budget raised to 25m in the close-out PR; release PR into `main` next. |

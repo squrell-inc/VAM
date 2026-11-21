@@ -1,0 +1,55 @@
+id: connector-built-from-nothing-passes-validate-and-test-and-installs
+title: A third-party connector built from nothing passes the kit's validate and test and installs on a node
+description: >
+  A developer with an empty directory runs `vam connector init` for a Notesdesk connector (an API-key sign-in, one REST
+  host, a skill in Python, an assistant and a test file). The files it writes pass `vam connector validate`, which names
+  each connector and skill it checked, and `vam connector test`, which runs every tool of the skill against the mock the
+  test file declares and prints one `pass` per tool. The test sends nothing off the machine and its generated key is in no
+  output and no file in the tree. The developer tags the tree as it stands in a marketplace repository. An admin adds the
+  marketplace, refreshes it, and before installing sees what the listing asks for: an API key, the field's label and the
+  one host. A member cannot install it; the admin does. Installed, the connector is not enabled: it reads "ask your
+  admin" for a member and is marked Unverified, with the tag it came from.
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - marketplace-connector-kit
+when:
+  - cli:
+      args: [connector, init, "{{root}}", --id, notesdesk, --auth, api_key, --host, api.notesdesk.example, --domain, kit.community.example, --runtime, python3]
+      root: { from: connector-kit/empty }
+      exit: ok
+      files:
+        marketplace.json: { contains: kit.community.example }
+        listings/notesdesk/connector/connector.json: { contains: api.notesdesk.example }
+        listings/notesdesk/tests/connector-test.json: { exists: true }
+  - cli:
+      args: [connector, validate, "{{root}}"]
+      root: { same: true }
+      exit: ok
+      contains: ["ok connector urn:vam:connector:kit.community.example/", "ok skill "]
+  - cli:
+      args: [connector, test, "{{root}}"]
+      root: { same: true }
+      exit: ok
+      contains: ["the key never reached a tool"]
+      matches: ["(?m)^pass \\S+"]
+      absent: ["vamkey_"]
+  - git-tag: { piece: marketplace-connector-kit, tag: notesdesk-v1.0.0, root: { same: true } }
+  - marketplace-add: { piece: marketplace-connector-kit, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-connector-kit, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-connector-kit, listing: notesdesk, as: org-admin, fields: { installed: null, summary.connectors.0.provider: api_key, summary.connectors.0.fields.0.label: { present: true }, summary.connectors.0.bindings.0.hosts.0: api.notesdesk.example } } }
+  - marketplace-install: { marketplace: marketplace-connector-kit, listing: notesdesk, as: org-member, refused: true }
+  - marketplace-install: { marketplace: marketplace-connector-kit, listing: notesdesk, as: org-admin }
+  - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: askAdmin, source: marketplace, trust: unverified, origin.listing: notesdesk, origin.ref: notesdesk-v1.0.0, node.enabled: false } } }
+then:
+  - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: askAdmin, trust: unverified, node.enabled: false } } }
+  - expect: { catalog: { kind: skill, urnPrefix: "urn:vam:skill:kit.community.example/", as: org-admin, count: 1, fields: { tier: marketplace, readOnly: true, origin.listing: notesdesk } } }
+guards:
+  - vam:crates/vam-cli/src/main.rs
+  - vam:crates/vam-spec/src/connector_kit.rs
+  - vam:crates/vam-spec/src/connector_listing.rs
+  - vam:crates/vam-spec/src/marketplace.rs
+  - vam:crates/vam-orchestrator/src/marketplace/import.rs
+status: active

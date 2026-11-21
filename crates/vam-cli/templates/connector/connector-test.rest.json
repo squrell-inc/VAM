@@ -1,0 +1,30 @@
+{
+  "hosts": [
+    "{{testHost}}"
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "prefix": "/v1/items",
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "id": 1,
+            "name": "Example item"
+          }
+        ]
+      }
+    }
+  ],
+  "cases": [
+    {
+      "tool": "{{tool}}",
+      "input": {
+        "query": "example"
+      },
+      "expect": "ok",
+      "contains": "Example item"
+    }
+  ]
+}

@@ -54,7 +54,9 @@ enum Commands {
         command: cmd::node::NodeCmd,
     },
     /// Connectors this node offers: list them, (org admin) enable or disable one, and check or
-    /// disconnect your own Microsoft 365 connection.
+    /// disconnect your own connection to one. `init`, `validate` and `test` build a connector of
+    /// your own offline.
+    #[command(visible_alias = "connector")]
     Connectors {
         #[command(subcommand)]
         command: cmd::connectors::ConnectorsCmd,

@@ -1,0 +1,37 @@
+{
+  "urn": "urn:vam:connector:connectors.community.example/community/twofields",
+  "version": "1.0.0",
+  "displayName": "Twofields",
+  "publisher": "Community Tools Ltd",
+  "description": "A connector whose sign-in asks for two values, an account name and a key.",
+  "icon": "twofields",
+  "provider": {
+    "kind": "api_key",
+    "fields": [
+      {
+        "name": "account",
+        "label": "Twofields account"
+      },
+      {
+        "name": "key",
+        "label": "Twofields API key"
+      }
+    ]
+  },
+  "connection": {
+    "holder": "user",
+    "multiAccount": false,
+    "label": "none"
+  },
+  "bindings": [
+    {
+      "name": "api",
+      "placeholder": "vamsec_twofields_api",
+      "value": "api_key",
+      "inject": "bearer",
+      "hosts": [
+        "api.twofields.example"
+      ]
+    }
+  ]
+}

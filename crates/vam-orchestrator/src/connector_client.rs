@@ -253,6 +253,9 @@ pub fn check_request(
             }
             Ok(ClientIntent::Keep)
         }
+        Some(_) if crate::connectors::is_api_key(def) => Err(invalid(format!(
+            "`{id}` signs in with an API key each member enters: it takes no OAuth client"
+        ))),
         Some(_) if !org => Err(invalid(format!(
             "`{id}` uses the publisher's own OAuth client; it takes no client"
         ))),
@@ -1809,6 +1812,46 @@ pub(crate) mod test_support {
             "INSERT INTO catalog_origins (kind, urn, major, minor, patch, marketplace_id, listing_id,
                  git_ref, commit_sha, package_digest, installed_at)
              VALUES ('connector', ?1, 1, 0, 0, 'm-1', 'zendesk-connector', 'zendesk-v1', 'c', 'd', 1)",
+            [urn],
+        )
+        .unwrap();
+    }
+
+    /// The `notesdesk` connector (`provider: api_key`, one REST binding `api` on
+    /// `api.notesdesk.example`, `inject: bearer`) as a marketplace installs it.
+    pub(crate) fn install_api_key_rows(store: &SqliteWorkflowStore) {
+        install_api_key_variant(store, |_| {});
+    }
+
+    /// [`install_api_key_rows`] with the file edited by `edit` first.
+    pub(crate) fn install_api_key_variant(
+        store: &SqliteWorkflowStore,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) {
+        let mut json = serde_json::json!({
+            "urn": "urn:vam:connector:connectors.community.example/community/notesdesk",
+            "version": "1.0.0", "displayName": "Notesdesk", "publisher": "Community Tools Ltd",
+            "description": "Notes.", "icon": "notesdesk",
+            "provider": { "kind": "api_key",
+                          "fields": [{ "name": "key", "label": "Notesdesk API key" }] },
+            "connection": { "holder": "user", "multiAccount": false, "label": "none" },
+            "bindings": [{ "name": "api", "placeholder": "vamsec_notesdesk_api",
+                           "value": "api_key", "inject": "bearer",
+                           "hosts": ["api.notesdesk.example"] }]
+        });
+        edit(&mut json);
+        let urn = json["urn"].as_str().unwrap_or_default().to_string();
+        let c = store.connection.lock().unwrap();
+        c.execute(
+            "INSERT INTO connector_releases (urn, major, minor, patch, digest, spec_bytes, created_at,
+                 updated_at, owner_user_id) VALUES (?1, 1, 0, 0, 'd', ?2, 1, 1, 'system')",
+            params![urn, json.to_string().as_bytes()],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO catalog_origins (kind, urn, major, minor, patch, marketplace_id, listing_id,
+                 git_ref, commit_sha, package_digest, installed_at)
+             VALUES ('connector', ?1, 1, 0, 0, 'm-1', 'notesdesk-connector', 'notesdesk-v1', 'c', 'd', 1)",
             [urn],
         )
         .unwrap();

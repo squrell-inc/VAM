@@ -183,13 +183,24 @@ pub struct Binding {
     pub placeholder: String,
     pub value: BindingValue,
     pub inject: Inject,
+    /// `inject: header` only (and then required): the one header that carries the key. Never
+    /// chosen by a request: the node reads it from this file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_name: Option<String>,
+    /// `inject: header` only (optional): fixed text put before the key in that header
+    /// (`Token `). The header value is `prefix` followed by the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
     pub hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingValue {
+    /// The member's OAuth access token (`oauth2` providers).
     AccessToken,
+    /// The API key the member entered (the `api_key` provider).
+    ApiKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,6 +527,174 @@ fn check_tenant(c: &Connector) -> Result<(), ConnectorError> {
     }
 }
 
+/// Longest `headerName` and `prefix` of a header binding.
+const HEADER_NAME_MAX: usize = 64;
+const HEADER_PREFIX_MAX: usize = 32;
+
+/// The request headers the node's egress filter strips before it dispatches a guest request
+/// (framing, hop-by-hop, routing and `Content-Length`), besides every `Proxy-*` header. The one
+/// list: `vam-network`'s `HeaderFilter::STRIPPED_HEADERS` is this constant, and `headerName`
+/// refuses every entry, so a key can never be injected into a header the filter would drop. All
+/// lowercase; compare case-insensitively.
+pub const STRIPPED_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "x-target-url",
+    "content-length",
+];
+
+/// The prefix of the header names the egress filter strips whatever follows it.
+pub const STRIPPED_HEADER_PREFIX: &str = "proxy-";
+
+/// Header names an API key is never injected into besides the stripped ones: the ones other
+/// credentials and sessions live in (`Cookie`), and `Authorization` (a key there is
+/// `inject: bearer`, refused with its own words). Compared case-insensitively.
+const REFUSED_HEADER_NAMES: [&str; 2] = ["authorization", "cookie"];
+
+fn is_tchar(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
+/// The rules of a `headerName` (RFC 9110 field name): a non-empty token of `tchar` only, at most
+/// 64 characters, and none of the names an injected key must never land in (every
+/// [`STRIPPED_HEADERS`] entry, every `Proxy-*`, `Authorization`, `Cookie`). The same check runs at
+/// validation, at import and again where the node sets the header.
+pub fn check_header_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > HEADER_NAME_MAX || !name.bytes().all(is_tchar) {
+        return Err(format!(
+            "`headerName` must be 1 to {HEADER_NAME_MAX} characters of letters, digits and !#$%&'*+-.^_`|~ (an RFC 9110 header name)"
+        ));
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower == "authorization" {
+        return Err(
+            "`headerName` cannot be `Authorization`: a key sent there uses `inject: bearer`".into(),
+        );
+    }
+    if REFUSED_HEADER_NAMES.contains(&lower.as_str())
+        || STRIPPED_HEADERS.contains(&lower.as_str())
+        || lower.starts_with(STRIPPED_HEADER_PREFIX)
+    {
+        return Err(format!(
+            "`headerName` cannot be `{name}`: that header decides where or how a request is sent, or carries other credentials"
+        ));
+    }
+    Ok(())
+}
+
+/// A `prefix`: 1 to 32 printable ASCII characters (a trailing space is allowed: `Token `).
+fn check_header_prefix(prefix: &str) -> Result<(), String> {
+    if prefix.is_empty()
+        || prefix.len() > HEADER_PREFIX_MAX
+        || !prefix.bytes().all(|b| (0x20..=0x7e).contains(&b))
+    {
+        return Err(format!(
+            "`prefix` must be 1 to {HEADER_PREFIX_MAX} printable ASCII characters (omit it for none)"
+        ));
+    }
+    Ok(())
+}
+
+/// What a binding's `inject` needs: `headerName` (and an optional `prefix`) exactly for
+/// `inject: header`, and only an API key goes in a named header.
+fn check_binding_inject(b: &Binding) -> Result<(), ConnectorError> {
+    match b.inject {
+        Inject::Header => {
+            if b.value != BindingValue::ApiKey {
+                return bad(format!(
+                    "binding `{}`: `inject: header` carries an API key (`value: api_key`); an oauth2 connector's binding uses `inject: bearer`",
+                    b.name
+                ));
+            }
+            let Some(name) = &b.header_name else {
+                return bad(format!(
+                    "binding `{}`: `inject: header` needs a `headerName`",
+                    b.name
+                ));
+            };
+            if let Err(why) = check_header_name(name) {
+                return bad(format!("binding `{}`: {why}", b.name));
+            }
+            if let Some(p) = &b.prefix {
+                if let Err(why) = check_header_prefix(p) {
+                    return bad(format!("binding `{}`: {why}", b.name));
+                }
+            }
+        }
+        Inject::Bearer | Inject::Query => {
+            if b.header_name.is_some() || b.prefix.is_some() {
+                return bad(format!(
+                    "binding `{}`: `headerName` and `prefix` are only for `inject: header`",
+                    b.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Longest label of an API key field.
+const API_KEY_LABEL_MAX: usize = 64;
+
+/// The rules of the `api_key` provider: exactly one field (`provider.fields`), a name of
+/// `[a-z][a-z0-9_]{0,31}`, a one-line label of 1 to 64 characters, bindings that carry the key
+/// (`value: api_key`) as a bearer (`inject: bearer`) or in one named header (`inject: header`, with
+/// a `headerName`); `inject: query` is refused (a key in a URL ends up in logs).
+fn check_api_key_provider(p: &ApiKeyProvider, c: &Connector) -> Result<(), ConnectorError> {
+    if p.fields.len() != 1 {
+        return bad(format!(
+            "an api_key connector asks for one field: `provider.fields` lists {} (this version takes exactly one)",
+            p.fields.len()
+        ));
+    }
+    let f = &p.fields[0];
+    let name_ok = !f.name.is_empty()
+        && f.name.len() <= 32
+        && f.name.starts_with(|ch: char| ch.is_ascii_lowercase())
+        && f.name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if !name_ok {
+        return bad(format!(
+            "provider.fields[0].name `{}` must be 1 to 32 characters of a-z, 0-9 or '_', starting with a letter",
+            f.name
+        ));
+    }
+    let label_len = f.label.chars().count();
+    if f.label.trim().is_empty()
+        || label_len > API_KEY_LABEL_MAX
+        || f.label.chars().any(char::is_control)
+    {
+        return bad(format!(
+            "provider.fields[0].label must be 1 to {API_KEY_LABEL_MAX} characters, on one line"
+        ));
+    }
+    for b in c.bindings.iter().flatten() {
+        if b.value != BindingValue::ApiKey {
+            return bad(format!(
+                "binding `{}`: `value: access_token` is for an oauth2 provider; a binding of an api_key connector must use `value: api_key`",
+                b.name
+            ));
+        }
+        if b.inject == Inject::Query {
+            return bad(format!(
+                "binding `{}`: `inject` must be `bearer` or `header` for an api_key connector (`query` is not available: a key in a URL ends up in logs)",
+                b.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
     if !valid_urn(&c.urn) {
         return bad(format!("urn must be {URN_PREFIX}<host>/<publisher>/<name>"));
@@ -578,11 +757,7 @@ pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
                 }
             }
         }
-        Provider::ApiKey(p) => {
-            if p.fields.is_empty() || p.fields.iter().any(|f| f.name.trim().is_empty()) {
-                return bad("api_key needs named fields");
-            }
-        }
+        Provider::ApiKey(p) => check_api_key_provider(p, c)?,
     }
     if let Some(bs) = &c.bindings {
         if bs.is_empty() {
@@ -590,9 +765,16 @@ pub fn validate_connector(c: &Connector) -> Result<(), ConnectorError> {
         }
         let mut names = HashSet::new();
         for b in bs {
+            if b.value == BindingValue::ApiKey && !matches!(c.provider, Provider::ApiKey(_)) {
+                return bad(format!(
+                    "binding `{}`: `value: api_key` is only for an api_key provider; an oauth2 connector's binding uses `value: access_token`",
+                    b.name
+                ));
+            }
             if b.name.trim().is_empty() || b.placeholder.trim().is_empty() {
                 return bad("binding name and placeholder must not be empty");
             }
+            check_binding_inject(b)?;
             if !names.insert(b.name.as_str()) {
                 return bad(format!("duplicate binding name {}", b.name));
             }
@@ -878,6 +1060,273 @@ mod tests {
         let mut v = org_client();
         v["provider"]["clientSecret"] = json!("squrell_relay");
         assert!(err(v).contains("squrell_relay"));
+    }
+
+    fn api_key_file() -> Value {
+        let mut v = linear();
+        v["provider"] =
+            json!({ "kind": "api_key", "fields": [{ "name": "key", "label": "Linear API key" }] });
+        v
+    }
+
+    #[test]
+    fn an_api_key_file_round_trips_and_each_refusal_names_its_field() {
+        let c = parse_connector(&api_key_file().to_string()).unwrap();
+        assert!(matches!(&c.provider, Provider::ApiKey(p) if p.fields.len() == 1));
+        let again = parse_connector(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(c, again);
+        // Two fields, a bad name, an empty label.
+        let mut v = api_key_file();
+        v["provider"]["fields"] = json!([
+            { "name": "a", "label": "A" }, { "name": "b", "label": "B" }
+        ]);
+        assert!(err(v).contains("one field"));
+        let mut v = api_key_file();
+        v["provider"]["fields"] = json!([{ "name": "Key", "label": "Key" }]);
+        assert!(err(v).contains("provider.fields[0].name"));
+        let mut v = api_key_file();
+        v["provider"]["fields"] = json!([{ "name": "key", "label": "" }]);
+        assert!(err(v).contains("provider.fields[0].label"));
+    }
+
+    #[test]
+    fn an_api_key_mcp_connector_cannot_ask_for_a_header_or_carry_bindings() {
+        // The MCP connect always sends `Authorization: Bearer <key>`: the file has no way to ask
+        // for anything else, so no key is ever sent in a form the publisher did not mean.
+        for extra in [
+            json!({ "inject": "header" }),
+            json!({ "inject": "bearer" }),
+            json!({ "headerName": "X-Api-Key" }),
+            json!({ "inject": "header", "headerName": "X-Api-Key", "prefix": "Token " }),
+        ] {
+            let mut v = api_key_file();
+            for (k, val) in extra.as_object().unwrap() {
+                v["mcp"][k] = val.clone();
+            }
+            let e = err(v);
+            assert!(e.contains("unknown field"), "{extra}: {e}");
+        }
+        // Bindings next to `mcp`, with any `inject`, are refused: exactly one of the two.
+        for binding in [
+            json!({ "inject": "bearer" }),
+            json!({ "inject": "header", "headerName": "X-Api-Key" }),
+        ] {
+            let mut v = api_key_file();
+            let mut b = json!({ "name": "api", "placeholder": "vamsec_x_api", "value": "api_key",
+                "hosts": ["api.example.org"] });
+            for (k, val) in binding.as_object().unwrap() {
+                b[k] = val.clone();
+            }
+            v["bindings"] = json!([b]);
+            assert!(err(v).contains("exactly one"), "{binding}");
+        }
+    }
+
+    #[test]
+    fn the_binding_value_follows_the_provider() {
+        let rest = |provider: Value, value: &str, inject: &str| {
+            let mut v = linear();
+            v.as_object_mut().unwrap().remove("mcp");
+            v["provider"] = provider;
+            v["bindings"] = json!([{ "name": "api", "placeholder": "vamsec_x_api", "value": value,
+                "inject": inject, "hosts": ["api.example.org"] }]);
+            v
+        };
+        let key = json!({ "kind": "api_key", "fields": [{ "name": "key", "label": "Key" }] });
+        assert!(parse_connector(&rest(key.clone(), "api_key", "bearer").to_string()).is_ok());
+        let e = err(rest(key.clone(), "access_token", "bearer"));
+        assert!(e.contains("value: api_key") && e.contains("`api`"), "{e}");
+        // `inject: header` is available to an API key (its own rules below); `query` is not.
+        let e = err(rest(key, "api_key", "query"));
+        assert!(e.contains("`inject`") && e.contains("`api`"), "{e}");
+        let oauth = json!({ "kind": "oauth2", "profile": "discover", "clientSecret": "none",
+            "scopes": [], "orgConsent": "none" });
+        let e = err(rest(oauth, "api_key", "bearer"));
+        assert!(e.contains("only for an api_key provider"), "{e}");
+    }
+
+    /// An API key connector (REST) whose one binding is `binding`.
+    fn keyed(binding: Value) -> Value {
+        let mut v = linear();
+        v.as_object_mut().unwrap().remove("mcp");
+        v["provider"] = json!({ "kind": "api_key", "fields": [{ "name": "key", "label": "Key" }] });
+        let mut b = json!({ "name": "api", "placeholder": "vamsec_x_api", "value": "api_key",
+            "hosts": ["api.example.org"] });
+        for (k, val) in binding.as_object().unwrap() {
+            b[k] = val.clone();
+        }
+        v["bindings"] = json!([b]);
+        v
+    }
+
+    #[test]
+    fn a_named_header_binding_needs_a_header_name_and_takes_an_optional_prefix() {
+        let ok = |h: Value| parse_connector(&keyed(h).to_string());
+        let c = ok(json!({ "inject": "header", "headerName": "X-Api-Key" })).unwrap();
+        let b = &c.bindings.as_ref().unwrap()[0];
+        assert_eq!(b.inject, Inject::Header);
+        assert_eq!(b.header_name.as_deref(), Some("X-Api-Key"));
+        assert_eq!(b.prefix, None);
+        // It round-trips, and a bearer binding still serializes without either field.
+        assert_eq!(
+            parse_connector(&serde_json::to_string(&c).unwrap()).unwrap(),
+            c
+        );
+        let c =
+            ok(json!({ "inject": "header", "headerName": "X-Token", "prefix": "Token " })).unwrap();
+        assert_eq!(
+            c.bindings.as_ref().unwrap()[0].prefix.as_deref(),
+            Some("Token ")
+        );
+        let bearer = parse_connector(&keyed(json!({ "inject": "bearer" })).to_string()).unwrap();
+        let text = serde_json::to_string(&bearer).unwrap();
+        assert!(
+            !text.contains("headerName") && !text.contains("prefix"),
+            "{text}"
+        );
+        // A header binding needs its name.
+        let e = err(keyed(json!({ "inject": "header" })));
+        assert!(
+            e.contains("needs a `headerName`") && e.contains("`api`"),
+            "{e}"
+        );
+        // `headerName` and `prefix` are only for a header binding.
+        for extra in [
+            json!({ "headerName": "X-Api-Key" }),
+            json!({ "prefix": "Token " }),
+        ] {
+            let mut b = json!({ "inject": "bearer" });
+            b[extra.as_object().unwrap().keys().next().unwrap().as_str()] =
+                extra.as_object().unwrap().values().next().unwrap().clone();
+            let e = err(keyed(b));
+            assert!(e.contains("only for `inject: header`"), "{e}");
+        }
+        // Prefixes: empty, too long, control characters, non-ASCII.
+        let long_prefix = "p".repeat(33);
+        for bad in ["", long_prefix.as_str(), "a\nb", "tok\u{e9}n ", "a\u{7f}"] {
+            let e = err(keyed(
+                json!({ "inject": "header", "headerName": "X-Api-Key", "prefix": bad }),
+            ));
+            assert!(e.contains("`prefix`"), "{bad:?}: {e}");
+        }
+        // `query` stays refused, for a key.
+        let e = err(keyed(json!({ "inject": "query" })));
+        assert!(e.contains("`query`") && e.contains("`api`"), "{e}");
+        // A named header carries an API key only: an oauth2 connector's binding is a bearer.
+        let mut v = zendesk();
+        v["bindings"][0]["inject"] = json!("header");
+        v["bindings"][0]["headerName"] = json!("X-Api-Key");
+        assert!(err(v).contains("`inject: bearer`"));
+    }
+
+    #[test]
+    fn a_header_name_that_is_not_a_token_or_names_a_forbidden_header_is_refused() {
+        // Every refused name, in more than one letter case.
+        for name in [
+            "Host",
+            "Authorization",
+            "Cookie",
+            "Connection",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Keep-Alive",
+            "TE",
+            "Trailer",
+            "Upgrade",
+            "Proxy-Authorization",
+            "Proxy-Connection",
+            "Proxy-Anything",
+            "proxy-x",
+        ] {
+            for spelled in [
+                name.to_string(),
+                name.to_ascii_lowercase(),
+                name.to_ascii_uppercase(),
+            ] {
+                assert!(check_header_name(&spelled).is_err(), "{spelled}");
+                let e = err(keyed(json!({ "inject": "header", "headerName": spelled })));
+                assert!(
+                    e.contains("`headerName`") && e.contains("`api`"),
+                    "{spelled}: {e}"
+                );
+            }
+        }
+        let e = check_header_name("Authorization").unwrap_err();
+        assert!(e.contains("inject: bearer"), "{e}");
+        // Every name the egress filter strips is refused, in three spellings, and so is every
+        // `Proxy-*` form (the filter drops all of them).
+        for name in STRIPPED_HEADERS.iter().copied().chain([
+            "proxy-",
+            "proxy-cache",
+            "proxy-x-anything",
+            "x-target-url",
+            "trailers",
+        ]) {
+            for spelled in [
+                name.to_string(),
+                name.to_ascii_uppercase(),
+                name.split('-')
+                    .map(|p| {
+                        let mut c = p.chars();
+                        c.next()
+                            .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("-"),
+            ] {
+                assert!(check_header_name(&spelled).is_err(), "{spelled}");
+                let e = err(keyed(json!({ "inject": "header", "headerName": spelled })));
+                assert!(
+                    e.contains("`headerName`") && e.contains("`api`"),
+                    "{spelled}: {e}"
+                );
+            }
+        }
+        let long_name = "x".repeat(65);
+        // Not a token: empty, a space, a colon, CR or LF, non-ASCII, a separator, too long.
+        for bad in [
+            "",
+            " ",
+            "X Api",
+            "X-Api:",
+            "X-Api\r\nHost",
+            "X\nY",
+            "X-Ключ",
+            "X(Api)",
+            "X/Api",
+            "X=Api",
+            "X-Api-Key ",
+            long_name.as_str(),
+        ] {
+            assert!(check_header_name(bad).is_err(), "{bad:?}");
+            assert!(
+                parse_connector(
+                    &keyed(json!({ "inject": "header", "headerName": bad })).to_string()
+                )
+                .is_err(),
+                "{bad:?}"
+            );
+        }
+        // Valid tokens, including the punctuation tchar allows, and names that only resemble a refused one.
+        for ok in [
+            "X-Api-Key",
+            "x-api-key",
+            "Api-Key",
+            "X_Key",
+            "Ocp-Apim-Subscription-Key",
+            "X.Key",
+            "X~Key",
+            "Hostname",
+            "X-Host",
+            "Cookies",
+            "Proxy",
+            "Authorization-Token",
+            "TEA",
+            "Tr",
+        ] {
+            assert!(check_header_name(ok).is_ok(), "{ok}");
+        }
     }
 
     #[test]

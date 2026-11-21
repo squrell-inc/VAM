@@ -1,0 +1,41 @@
+id: connector-kit-names-what-the-node-would-refuse
+title: The connector kit names what the node would refuse, before the connector is published
+description: >
+  A listing whose files each pass their own checks but fail as a whole fails `vam connector validate`, and the report
+  names all three problems: two connectors whose binding placeholders the gate cannot tell apart, and a skill whose egress
+  names a binding and a host its connector does not declare. Installing the same tree on a node is refused with the first
+  of those words: the offline check and the install say the same thing. A second tree is a valid listing whose test
+  file runs three tools: `vam connector test` passes the one that stays inside its declared shape and fails the one that
+  puts the credential's placeholder in the query string (it is only valid as the Authorization value) and the one that
+  reads a path outside its declared shape, each with the gate's own words. The key the test generated is in no output and no
+  file in the tree.
+tags: [connectors, permissions]
+needs: process
+given:
+  - org-admin
+  - marketplace-kit-broken
+when:
+  - cli:
+      args: [connector, validate, "{{root}}"]
+      root: { from: connector-kit/broken-file }
+      exit: fail
+      contains: ["cannot tell apart", "binding `files`", "api.elsewhere.example"]
+  - marketplace-add: { piece: marketplace-kit-broken, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-kit-broken, as: org-admin }
+  - marketplace-install: { marketplace: marketplace-kit-broken, listing: kit-broken, as: org-admin, refused: true, contains: cannot tell apart }
+  - cli:
+      args: [connector, test, "{{root}}"]
+      root: { from: connector-kit/broken-tool }
+      exit: fail
+      contains: ["pass note_search", "fail note_leak", "only valid as the Authorization value", "fail note_wander", "declared shape"]
+      absent: ["vamkey_"]
+then:
+  - expect: { listings: { marketplace: marketplace-kit-broken, listing: kit-broken, as: org-admin, fields: { installed: null } } }
+  - expect: { catalog: { kind: skill, urnPrefix: "urn:vam:skill:kitbroken.community.example/", as: org-admin, count: 0 } }
+guards:
+  - vam:crates/vam-cli/src/main.rs
+  - vam:crates/vam-spec/src/connector_kit.rs
+  - vam:crates/vam-spec/src/marketplace.rs
+  - vam:crates/vam-spec/src/skill_egress.rs
+  - vam:crates/vam-orchestrator/src/marketplace/import.rs
+status: active

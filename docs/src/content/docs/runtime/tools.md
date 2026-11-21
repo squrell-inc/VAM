@@ -12,6 +12,7 @@ proves:
   - crates/vam-orchestrator/tests/mcp_connections_tests.rs
   - skill-cannot-send-a-secret-to-an-unpinned-host
   - guest-cannot-use-an-mcp-token-placeholder
+  - member-enters-an-api-key-and-a-listing-skill-uses-it-without-holding-it
   - broker-cannot-be-given-an-mcp-credential
   - crates/vam-orchestrator/tests/mcp_credentials_stay_host_side.rs
   - admin-supplied-client-lets-members-connect-without-the-secret-leaving-the-node
@@ -117,7 +118,8 @@ top-level `tenant { name: "subdomain", suffix, label }` names the one parameter 
 `{subdomain}` may stand only for the whole first label of a host, and every templated host (in `endpoints`,
 `mcp.url` and `bindings[].hosts`) is exactly `{subdomain}.<suffix>`, where the suffix has at least two labels on a
 public DNS name. A file with a template and no `tenant`, or the reverse, is refused. A marketplace connector may
-declare 1 to 8 REST `bindings` (1 to 4 hosts each, `value: access_token`, `inject: bearer`) whose placeholder is
+declare 1 to 8 REST `bindings` (1 to 4 hosts each; `value: access_token` with `inject: bearer`, or for an API key
+connector `value: api_key`, below) whose placeholder is
 exactly `vamsec_<connector id>_<binding name>`; a skill's `egress[].host` may be `{subdomain}.<dns name>` and a
 listing is refused when that is not the suffix of the connector it ships. The listing's capability summary shows
 the admin the sign-in endpoints, the bindings, the company address (label and suffix) and the templated hosts.
@@ -127,6 +129,33 @@ host is one of the binding's hosts as filled with the node's company address, an
 the calling skill tool declared in its manifest (method, path, `{subdomain}` filled from the connector, never from
 the skill); the token is read after those checks and never enters the guest. A placeholder anywhere else, on another
 company's host or outside the shape is refused.
+
+### The credential a binding carries: an OAuth token or an API key
+
+A binding's `value` says what the node attaches in place of its placeholder: `access_token` (the member's OAuth
+access token, `inject: bearer`) or `api_key` (the key the member entered, for a connector with
+`provider.kind: "api_key"` and one field; the file validates that the two match). `inject: bearer` sends
+`Authorization: Bearer <credential>`. For an API key, `inject: header` sends the key in the one header the binding
+names: `headerName` (required) and an optional `prefix` put before the key, for example `X-Api-Key`, or
+`Authorization`-style schemes such as `Token ` in a header that is not `Authorization`. The header name must be an
+RFC 9110 token and is refused, at validation and at import, when it is `Host`, `Authorization` (a key in
+`Authorization` is `inject: bearer`), `Cookie`, any `Proxy-*`, `Connection`, `Keep-Alive`, `TE`, `Trailer`,
+`Transfer-Encoding`, `Upgrade` or `Content-Length`. `inject: query` is refused: a key in a URL ends up in logs.
+`headerName` and `prefix` are only for `inject: header`.
+
+The guest holds only the placeholder. The node's egress gate screens the request first and only then reads the
+credential: the placeholder must be the whole value of `Authorization` (bearer) or of the named header (header,
+bare or with the prefix) and appear nowhere else (not in the URL, the body, another header or a header name), the
+host must be one of the binding's hosts, and the call must match a shape the calling tool declared. The node
+then sets that one header, removing every other spelling of it, and the guest cannot choose which header: the name
+comes only from the connector file. The key is read from the member's own `connector/<id>/api-key` vault row
+(`connection` kind, never an `egress` secret), only when that row is pinned to the request's host and to the
+connector's current hosts, for an enabled connector, at every request: a key the member replaced is the one sent
+next. An API key is never refreshed, and a call that needs the connector asks the member to "Connect <name>" (or
+"Reconnect <name>" when the connection is no longer valid) before it runs. The key, and the prefixed header value,
+are in the scrub list: a response that echoes either is scrubbed back to the placeholder.
+`PUT /v1/connectors/{id}/connection` with `{ apiKey }` connects a member (see
+[Host API](/orchestrator/api/)); `vam connector test` applies the same screening and the same injection offline.
 
 ### The admin's client: the node exchanges the code
 

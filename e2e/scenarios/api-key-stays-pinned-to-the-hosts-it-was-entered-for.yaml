@@ -1,0 +1,73 @@
+id: api-key-stays-pinned-to-the-hosts-it-was-entered-for
+title: An API key stays pinned to the hosts it was entered for, across a listing update that adds a host
+description: >
+  The member entered a Notesdesk key and the assistant read notes at `api.notesdesk.example`. The marketplace tags
+  1.1.0, whose connector and skill also name `eu.api.notesdesk.example`, and the admin updates the listing. The
+  summary changed, so the connector is back to "ask your admin" and the members' connections are kept but no longer
+  trusted: when the admin enables it again the member's entry reads "needs reconnect". The next call to the EU host parks
+  and asks the member to reconnect, and the EU service saw nothing: the key entered for one host is never sent to a
+  host nobody entered it for. When the member types the key again, the parked call resumes and the EU service sees the
+  member's key. No form of the key is in the thread, the events, the receipt or the node's listings.
+tags: [connectors, egress, members]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - org-administrator
+  - mock-notesdesk-server
+  - marketplace-community-connectors
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: notesdesk-connector, as: org-admin, fields: { installed: null, summary.connectors.0.provider: api_key, summary.connectors.0.bindings.0.hosts.0: api.notesdesk.example }, absent: [summary.connectors.0.bindings.0.hosts.1] } }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: notesdesk-connector, as: org-admin }
+  - connector-node: { id: notesdesk, enabled: true, as: org-administrator }
+  - connector-connect: { id: notesdesk, apiKey: { piece: mock-notesdesk-server, which: current }, as: org-member }
+  - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: connected } } }
+  - chat: { text: "e2e-step:read Find the printer notes", agent: "urn:vam:agent:connectors.community.example/community/notesdesk-assistant", as: org-member }
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-notesdesk-server, path: /v1/notes, method: GET, count: 1, has: ["host=api", "bearer=current"] } }
+  - git-tag: { piece: marketplace-community-connectors, tag: notesdesk-connector-v1.1.0, overlay: marketplace-community-connectors-notesdesk-update }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: notesdesk-connector, as: org-admin, fields: { installed.ref: notesdesk-connector-v1.0.0, updateAvailable: true, summary.connectors.0.bindings.0.hosts.1: eu.api.notesdesk.example } } }
+  - marketplace-update: { marketplace: marketplace-community-connectors, listing: notesdesk-connector, as: org-admin }
+  - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: askAdmin, node.enabled: false, origin.ref: notesdesk-connector-v1.1.0 } } }
+  - connector-node: { id: notesdesk, enabled: true, as: org-administrator }
+  - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: needsReconnect, bindings.0.hosts.1: eu.api.notesdesk.example } } }
+  - create-space: { label: "After the update", agent: "urn:vam:agent:connectors.community.example/community/notesdesk-assistant", as: org-member }
+  - chat: { text: "e2e-step:eu Find the printer notes in the EU region", agent: "urn:vam:agent:connectors.community.example/community/notesdesk-assistant", as: org-member, wait: false }
+  - expect: { run: paused }
+  - expect: { approval: pending, tool: note_search }
+  - expect: { mock-requests: { piece: mock-notesdesk-server, path: "*", with: "host=eu", count: 0 } }
+  - connector-connect: { id: notesdesk, apiKey: { piece: mock-notesdesk-server, which: current }, as: org-member }
+then:
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-notesdesk-server, path: /v1/notes, method: GET, with: "host=eu", count: 1, has: ["bearer=current"], lacks: ["bearer=none", "bearer=placeholder", "bearer=stale", "bearer=unknown"] } }
+  - expect: { mock-requests: { piece: mock-notesdesk-server, path: /v1/notes, with: "host=api", count: 1 } }
+  - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: connected } } }
+  - api-call: { path: /v1/connectors, as: org-member, absent: mock-notesdesk-server }
+  - expect: { secret-absent: { secret: mock-notesdesk-server } }
+guards:
+  - vam:crates/vam-orchestrator/src/connection_egress.rs
+  - vam:crates/vam-orchestrator/src/connector_park.rs
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-orchestrator/src/marketplace/import.rs
+  - vam:crates/vam-orchestrator/src/marketplace/summary.rs
+  - vam:crates/vam-spec/src/connector.rs
+  - vam:crates/vam-spec/src/connector_listing.rs
+mock:
+  - when: { step: read, toolName: note_search }
+    reply: { text: Found the note. }
+  - when: { step: read, toolName: load_skill }
+    reply: { toolCall: { name: note_search, args: { query: printer } } }
+  - when: { step: read, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: notesdesk-notes } } }
+  - when: { step: eu, toolName: note_search }
+    reply: { text: Found the note in the EU region. }
+  - when: { step: eu, toolName: load_skill }
+    reply: { toolCall: { name: note_search, args: { host: eu.api.notesdesk.example, query: printer } } }
+  - when: { step: eu, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: notesdesk-notes } } }
+  - when: { step: eu, afterTool: note_search }
+    reply: { text: Found the note in the EU region. }
+status: active

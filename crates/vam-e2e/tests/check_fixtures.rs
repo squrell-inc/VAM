@@ -777,6 +777,7 @@ fn a_second_filebox_piece_and_a_non_filebox_alias_for_a_filebox_secret_are_refus
         ("mock-filebox-server", "filebox"),
         ("mock-filebox-two", "filebox"),
         ("mock-linear-server", "linear-server"),
+        ("mock-graph-server", "microsoft-graph"),
     ] {
         fx.write(
             &format!("world/{piece}.yaml"),
@@ -786,11 +787,11 @@ fn a_second_filebox_piece_and_a_non_filebox_alias_for_a_filebox_secret_are_refus
     let scenario = SCENARIO
         .replace(
             "given: [org-admin, agent-plain]",
-            "given: [org-admin, agent-plain, mock-filebox-server, mock-filebox-two, mock-linear-server]",
+            "given: [org-admin, agent-plain, mock-filebox-server, mock-filebox-two, mock-linear-server, mock-graph-server]",
         )
         .replace(
             "when:\n  - chat: \"e2e-step:hello Hi\"\n",
-            "when:\n  - chat: \"e2e-step:hello Hi\"\n  - connector-node: { id: filebox, enabled: true, as: org-admin, client: { clientId: c, clientSecret: { piece: mock-linear-server, which: current } } }\n  - api-call: { path: /v1/connectors, as: org-admin, absent: mock-linear-server }\n",
+            "when:\n  - chat: \"e2e-step:hello Hi\"\n  - connector-node: { id: filebox, enabled: true, as: org-admin, client: { clientId: c, clientSecret: { piece: mock-linear-server, which: current } } }\n  - api-call: { path: /v1/connectors, as: org-admin, absent: mock-graph-server }\n",
         );
     fx.write("scenarios/chat-replies.yaml", &scenario);
     // One listener holds one filebox state: a second piece would reset it.
@@ -798,4 +799,120 @@ fn a_second_filebox_piece_and_a_non_filebox_alias_for_a_filebox_secret_are_refus
     // The secret and the tokens are kept under a filebox alias only.
     fx.expect_error("refs", "clientSecret.piece");
     fx.expect_error("refs", "api-call.absent");
+}
+
+const TEST_FILE: &str =
+    r#"{"hosts":["api.example"],"routes":[{"method":"GET","prefix":"/v1","status":200}]}"#;
+
+/// A catalog with a declared mock-provider piece (a listing directory with a test file) and the given
+/// steps in `when`.
+fn declared_fx(test_file: Option<&str>, when: &str) -> Fx {
+    let fx = Fx::new();
+    fs::create_dir_all(fx.root().join("world/fixtures/listing/tests")).unwrap();
+    if let Some(t) = test_file {
+        fx.write("world/fixtures/listing/tests/connector-test.json", t);
+    }
+    fx.write(
+        "world/mock-declared.yaml",
+        "piece: mock-declared\nkind: mock-provider\nprovider: declared\nfixture: listing\n",
+    );
+    fx.write(
+        "world/mock-declared-two.yaml",
+        "piece: mock-declared-two\nkind: mock-provider\nprovider: declared\nfixture: listing\n",
+    );
+    fx.write(
+        "world/mock-linear-server.yaml",
+        "piece: mock-linear-server\nkind: mock-provider\nprovider: linear-server\n",
+    );
+    fx.write(
+        "world/mock-login.yaml",
+        "piece: mock-login\nkind: mock-provider\nprovider: microsoft-login\n",
+    );
+    fx.write(
+        "world/marketplace-x.yaml",
+        "piece: marketplace-x\nkind: git-marketplace\nfixture: listing\nurl: https://x.example/m\npublisherDomain: x.example\n",
+    );
+    fx.write(
+        "scenarios/chat-replies.yaml",
+        &SCENARIO
+            .replace(
+                "given: [org-admin, agent-plain]",
+                "given: [org-admin, agent-plain, mock-declared, mock-linear-server, mock-login, marketplace-x]",
+            )
+            .replace(
+                "when:\n  - chat: \"e2e-step:hello Hi\"\n",
+                &format!("when:\n  - chat: \"e2e-step:hello Hi\"\n{when}"),
+            ),
+    );
+    fx
+}
+
+#[test]
+fn a_declared_piece_needs_a_valid_test_file() {
+    let f = declared_fx(Some(TEST_FILE), "");
+    assert_eq!(f.errors(), Vec::<String>::new());
+    let f = declared_fx(None, "");
+    f.expect_error("piece-body", "connector-test.json");
+    let f = declared_fx(Some(r#"{"hosts":[]}"#), "");
+    f.expect_error("piece-body", "hosts");
+    // One listener set holds one declared state.
+    let f = declared_fx(Some(TEST_FILE), "");
+    f.write(
+        "scenarios/chat-replies.yaml",
+        &SCENARIO.replace(
+            "given: [org-admin, agent-plain]",
+            "given: [org-admin, agent-plain, mock-declared, mock-declared-two]",
+        ),
+    );
+    f.expect_error("given", "second declared");
+}
+
+#[test]
+fn an_api_key_comes_from_a_declared_or_linear_piece_and_stands_alone() {
+    let ok = "  - connector-connect: { id: notesdesk, apiKey: { piece: mock-declared, which: other }, as: org-admin }\n  - connector-connect: { id: keyed-bugwatch, apiKey: { piece: mock-linear-server }, as: org-admin }\n  - api-call: { path: /v1/connectors, as: org-admin, absent: mock-declared }\n  - api-call: { path: /v1/connectors, as: org-admin, absent: mock-linear-server }\n";
+    let f = declared_fx(Some(TEST_FILE), ok);
+    assert_eq!(f.errors(), Vec::<String>::new());
+    let f = declared_fx(
+        Some(TEST_FILE),
+        "  - connector-connect: { id: notesdesk, apiKey: { piece: mock-login }, as: org-admin }\n",
+    );
+    f.expect_error("refs", "apiKey.piece");
+    let f = declared_fx(
+        Some(TEST_FILE),
+        "  - connector-connect: { id: notesdesk, apiKey: { piece: mock-declared }, piece: mock-declared, as: org-admin }\n",
+    );
+    f.expect_error("connector-connect", "`apiKey` stands alone");
+    let f = declared_fx(
+        Some(TEST_FILE),
+        "  - connector-connect: { id: notesdesk, apiKey: { piece: mock-declared, which: older }, as: org-admin }\n",
+    );
+    f.expect_error("schema", "older");
+    // A piece that keeps no secret under its alias cannot be judged by `api-call.absent`.
+    let f = declared_fx(
+        Some(TEST_FILE),
+        "  - api-call: { path: /v1/connectors, as: org-admin, absent: mock-login }\n",
+    );
+    f.expect_error("refs", "api-call.absent");
+}
+
+#[test]
+fn git_tag_root_needs_an_earlier_cli_step_and_is_not_an_overlay() {
+    let tag = "  - git-tag: { piece: marketplace-x, tag: x-v1, root: { same: true } }\n";
+    let f = declared_fx(Some(TEST_FILE), tag);
+    f.expect_error("git-tag", "needs an earlier `cli` step");
+    let cli = "  - cli: { args: [--version], root: { from: listing }, exit: ok }\n";
+    let f = declared_fx(Some(TEST_FILE), &format!("{cli}{tag}"));
+    assert_eq!(f.errors(), Vec::<String>::new());
+    let f = declared_fx(
+        Some(TEST_FILE),
+        &format!("{cli}  - git-tag: {{ piece: marketplace-x, tag: x-v1, root: {{ same: true }}, overlay: listing }}\n"),
+    );
+    f.expect_error("git-tag", "two sources");
+    let f = declared_fx(
+        Some(TEST_FILE),
+        &format!(
+            "{cli}  - git-tag: {{ piece: marketplace-x, tag: x-v1, root: {{ same: false }} }}\n"
+        ),
+    );
+    f.expect_error("git-tag", "`root` is `{ same: true }`");
 }

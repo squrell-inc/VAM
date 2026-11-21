@@ -1314,9 +1314,13 @@ mod tests {
             prost_types::Value {
                 kind: Some(prost_types::value::Kind::ListValue(
                     prost_types::ListValue {
-                        // `sh -c "sleep 2"`: a single "sleep 2" argument would make `sh` look for a
-                        // script of that name and exit 2 at once, racing the timeout.
-                        values: ["-c", "sleep 2"]
+                        // `sh -c "exec sleep 2"`: a single "sleep 2" argument would make `sh`
+                        // look for a script of that name. `exec` replaces `sh` with `sleep`
+                        // instead of forking it: the tool process runs under RLIMIT_NPROC, which
+                        // counts every thread of the host UID (root is exempt), so on a busy
+                        // non-root CI runner the fork failed and `sh` exited 2 at once, racing
+                        // the timeout.
+                        values: ["-c", "exec sleep 2"]
                             .into_iter()
                             .map(|a| prost_types::Value {
                                 kind: Some(prost_types::value::Kind::StringValue(a.to_string())),

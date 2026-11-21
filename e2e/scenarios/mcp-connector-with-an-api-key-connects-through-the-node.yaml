@@ -1,0 +1,56 @@
+id: mcp-connector-with-an-api-key-connects-through-the-node
+title: An MCP connector with an API key connects through the node, and the key never reaches the guest or a listing
+description: >
+  The admin installs a Bugwatch listing whose connector reaches a remote MCP server with an API key the member enters.
+  Before installing, the listing shows the sign-in kind, the field's label and the MCP host. The admin enables it
+  and the member types the key at the connector route: the entry reads "connected". The generic MCP connection route
+  refuses the same connector id and names the API key, so the only way in is the connector route; the node's MCP
+  connection listing holds no form of the key. A read tool runs and the MCP server saw the member's key as the bearer.
+  The connector's tool list is the vetted one: a tool the connector does not vet is not offered. No form of the key is in
+  the thread, the events, the receipt or any listing.
+tags: [connectors, members, permissions]
+needs: process
+given:
+  - org-admin
+  - org-member
+  - org-administrator
+  - mock-linear-server
+  - agent-plain
+  - marketplace-community-connectors
+when:
+  - marketplace-add: { piece: marketplace-community-connectors, as: org-admin }
+  - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
+  - expect: { listings: { marketplace: marketplace-community-connectors, listing: keyed-bugwatch-connector, as: org-admin, fields: { installed: null, summary.connectors.0.provider: api_key, summary.connectors.0.fields.0.label: Bugwatch API key, summary.connectors.0.mcpHost: mcp.bugwatch.example } } }
+  - marketplace-install: { marketplace: marketplace-community-connectors, listing: keyed-bugwatch-connector, as: org-admin }
+  - connector-node: { id: keyed-bugwatch, enabled: true, as: org-administrator }
+  - connector-connect: { id: keyed-bugwatch, url: "https://mcp.bugwatch.example/mcp", piece: mock-linear-server, as: org-member, refused: true, contains: API key }
+  - connector-connect: { id: keyed-bugwatch, apiKey: { piece: mock-linear-server, which: current }, as: org-member }
+  - expect: { connectors: { id: keyed-bugwatch, as: org-member, fields: { state: connected, mcp.url: "https://mcp.bugwatch.example/mcp" }, absent: [apiKey, accessToken, key] } }
+  - api-call: { path: /v1/mcp/connections, as: org-member, absent: mock-linear-server }
+  - api-call: { path: /v1/connectors, as: org-member, absent: mock-linear-server }
+  - chat: { text: "e2e-step:vendor Export the workspace", as: org-member }
+  - expect: { run: failed }
+  - expect: { event: mock.unmatched, fields: { reason: tool_not_offered } }
+  - chat: { text: "e2e-step:read Read my issues", as: org-member }
+then:
+  - expect: { run: succeeded }
+  - expect: { mock-requests: { piece: mock-linear-server, path: /mcp, has: [authorization, tool=list_issues], lacks: [authorization-wrong] } }
+  - expect: { connectors: { id: keyed-bugwatch, as: org-member, fields: { state: connected } } }
+  - expect: { secret-absent: { secret: mock-linear-server } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mcp_connections.rs
+  - vam:crates/vam-orchestrator/src/api/connectors.rs
+  - vam:crates/vam-orchestrator/src/mcp_registry.rs
+  - vam:crates/vam-orchestrator/src/connectors.rs
+  - vam:crates/vam-spec/src/connector.rs
+  - vam:crates/vam-spec/src/connector_listing.rs
+mock:
+  - when: { step: read, toolName: keyed_bugwatch__list_issues }
+    reply: { text: Read. }
+  - when: { step: read, stepStart: true }
+    reply: { toolCall: { name: keyed_bugwatch__list_issues, args: {} } }
+  - when: { step: vendor, toolName: keyed_bugwatch__export_workspace }
+    reply: { text: Exported. }
+  - when: { step: vendor, stepStart: true }
+    reply: { toolCall: { name: keyed_bugwatch__export_workspace, args: {} } }
+status: active

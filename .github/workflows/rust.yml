@@ -236,7 +236,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: ${{ !inputs.lane_only && github.event.pull_request.draft != true && needs.changes.outputs.scenarios != '' }}
-    timeout-minutes: 20
+    # The build (~1-2 min with the cache) plus the smoke budget below, plus the artifact upload.
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -261,7 +262,12 @@ jobs:
           SCENARIOS: ${{ needs.changes.outputs.scenarios }}
         run: |
           if [ "$SCENARIOS" = smoke ]; then
-            scripts/e2e/run.sh --smoke --out "$RUNNER_TEMP/e2e"
+            # vam-e2e's default 15m whole-run budget no longer fits the smoke set: green runs of
+            # 182 scenarios used 837-859 s of scenario time, and two runs on slower runners were cut
+            # at 900 s with 14 scenarios left (#134 5623777, #137 e26853d). 187 scenarios need
+            # ~880 s on a normal runner. 25m leaves room to grow; the per-scenario budgets are
+            # unchanged.
+            scripts/e2e/run.sh --smoke --budget 25m --out "$RUNNER_TEMP/e2e"
           else
             scripts/e2e/run.sh --scenarios "$SCENARIOS" --out "$RUNNER_TEMP/e2e"
           fi

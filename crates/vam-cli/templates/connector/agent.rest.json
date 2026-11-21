@@ -1,0 +1,39 @@
+{
+  "spec": {
+    "resourceId": {
+      "urn": "urn:vam:agent:{{domain}}/community/{{agent}}"
+    },
+    "displayName": "{{name}} assistant",
+    "description": "Lists the member's {{name}} items.",
+    "role": "{{name}} assistant",
+    "systemInstructions": "Load the {{skill}} skill before using its tool. Read freely. Be brief and finish with task_complete.",
+    "allowAnyPlaybook": true,
+    "skillRefs": [
+      {
+        "resourceId": {
+          "urn": "urn:vam:skill:{{domain}}/community/{{skill}}"
+        },
+        "version": {
+          "major": 1,
+          "minor": 0,
+          "patch": 0
+        }
+      }
+    ],
+    "permissions": {
+      "tools": {
+        "default": "deny",
+        "rules": [
+          {
+            "target": "builtin:load_skill",
+            "decision": "allow"
+          },
+          {
+            "target": "skill:{{skill}}/{{tool}}",
+            "decision": "allow"
+          }
+        ]
+      }
+    }
+  }
+}

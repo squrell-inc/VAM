@@ -126,6 +126,53 @@
       ],
       "ref": "rest-connector-with-a-foreign-placeholder-v1.0.0",
       "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "notesdesk-connector",
+      "displayName": "Notesdesk",
+      "description": "Notes in the member's own Notesdesk account, through its REST API and an API key: a connector, a skill and an assistant.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/notesdesk-connector/connectors/notesdesk"
+        },
+        {
+          "kind": "skill",
+          "path": "listings/notesdesk-connector/skills/notesdesk-notes"
+        },
+        {
+          "kind": "agent",
+          "path": "listings/notesdesk-connector/agents/notesdesk-assistant"
+        }
+      ],
+      "ref": "notesdesk-connector-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "keyed-bugwatch-connector",
+      "displayName": "Bugwatch (API key)",
+      "description": "Bugwatch issues through its remote MCP server, with an API key the member enters.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/keyed-bugwatch-connector/connectors/keyed-bugwatch"
+        }
+      ],
+      "ref": "keyed-bugwatch-connector-v1.0.0",
+      "requiresNode": ">=0.1.0"
+    },
+    {
+      "id": "api-key-with-two-fields",
+      "displayName": "Twofields",
+      "description": "A connector whose API-key sign-in asks for two values.",
+      "artifacts": [
+        {
+          "kind": "connector",
+          "path": "listings/api-key-with-two-fields/connectors/twofields"
+        }
+      ],
+      "ref": "api-key-with-two-fields-v1.0.0",
+      "requiresNode": ">=0.1.0"
     }
   ]
 }

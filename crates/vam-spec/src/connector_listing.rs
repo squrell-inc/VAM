@@ -10,7 +10,7 @@
 //! | the id (last URN segment) is a short slug and not Squrell's (`microsoft-365`, `linear`, any `spec/connectors/` file) | a fixed id must mean the same connector on every node |
 //! | provider `oauth2`, profile `discover`, `clientSecret: none` or (with `client: org`) `org_vault`, `orgConsent: none` | the only sign-ins a node can run for a marketplace connector: the publisher's public client, or the org's own client whose id and secret the node's admin enters at Enable (the file carries neither) |
 //! | `squrell_relay` | refused: Squrell's relay is for Squrell's own connectors |
-//! | `api_key` provider | refused: a node has no connection flow that stores an API key for a connector |
+//! | `api_key` provider | exactly one field; the member enters the key at the node, which keeps it pinned to the connector's hosts and attaches it as a bearer or in the one header the binding names: REST `bindings` (`value: api_key`, `inject: bearer`, or `inject: header` with a `headerName` that is a plain header name, never `Authorization`, `Host`, `Cookie`, `Proxy-*` or a framing header) or an `mcp` server, never both |
 //! | `entra`, `google`, `slack` | refused: `entra` needs REST bindings (tokens attached to requests the guest makes), the others need a client secret |
 //! | `mcp` with an `https` URL on a full DNS name, 1 to 64 vetted tools, no `bindings` | a tool list the admin can read; no token reaches the guest |
 //! | names that pass for Squrell or a built-in connector | an Unverified connector must not look verified |
@@ -22,8 +22,8 @@
 use serde_json::Value;
 
 use crate::connector::{
-    is_placeholder_client_id, parse_connector, url_host, ClientKind, ClientSecret, Connector,
-    ConnectorError, Inject, OAuthProfile, OrgConsent, Provider, BUILTIN_CONNECTOR_FILES,
+    is_placeholder_client_id, parse_connector, url_host, BindingValue, ClientKind, ClientSecret,
+    Connector, ConnectorError, Inject, OAuthProfile, OrgConsent, Provider, BUILTIN_CONNECTOR_FILES,
 };
 
 /// Ids only Squrell's built-in connectors may have (design decision D26). Every id of a file in
@@ -234,11 +234,24 @@ fn check_marketplace_bindings(c: &Connector, id: &str) -> Result<(), ConnectorEr
                 b.name
             ));
         }
-        if b.inject != Inject::Bearer {
-            return bad(format!(
-                "binding `{}`: only `inject: bearer` is available to a marketplace connector",
-                b.name
-            ));
+        // A key may also go in the one header the binding names (`headerName`, checked by the file
+        // validator); a token is a bearer, and nothing is ever put in a query string.
+        let allowed = match b.inject {
+            Inject::Bearer => true,
+            Inject::Header => b.value == BindingValue::ApiKey,
+            Inject::Query => false,
+        };
+        if !allowed {
+            return bad(match b.value {
+                BindingValue::ApiKey => format!(
+                    "binding `{}`: only `inject: bearer` or `inject: header` is available to a marketplace connector",
+                    b.name
+                ),
+                BindingValue::AccessToken => format!(
+                    "binding `{}`: only `inject: bearer` is available to a marketplace connector",
+                    b.name
+                ),
+            });
         }
         let want = format!("vamsec_{id}_{}", b.name);
         if b.placeholder != want {
@@ -339,9 +352,8 @@ pub fn check_marketplace_connector(c: &Connector) -> Result<(), ConnectorError> 
         return bad("events are reserved and not accepted from a marketplace");
     }
     match &c.provider {
-        Provider::ApiKey(_) => {
-            return bad("api_key connectors are not supported yet: a node has no connection flow for an API key")
-        }
+        // The provider's own rules (one field, `value: api_key`, bearer) ran in `validate_connector`.
+        Provider::ApiKey(_) => {}
         Provider::Oauth2(p) => {
             if !matches!(p.profile, OAuthProfile::Discover | OAuthProfile::Oauth) {
                 let name = match p.profile {
@@ -397,6 +409,10 @@ pub fn check_marketplace_connector(c: &Connector) -> Result<(), ConnectorError> 
             }
         }
     }
+    if matches!(&c.provider, Provider::ApiKey(_)) && c.bindings.is_some() {
+        // REST bindings carrying the member's key (an api_key connector with `mcp` is checked below).
+        return check_marketplace_bindings(c, id);
+    }
     let rest = matches!(&c.provider, Provider::Oauth2(p) if p.profile == OAuthProfile::Oauth);
     if rest {
         if c.mcp.is_some() {
@@ -440,10 +456,7 @@ pub fn parse_marketplace_connector(raw: &str) -> Result<Connector, ConnectorErro
     let v: Value = serde_json::from_str(raw).map_err(|e| ConnectorError::Parse(e.to_string()))?;
     if let Some(p) = v.get("provider") {
         match p.get("kind").and_then(Value::as_str) {
-            Some("api_key") => {
-                return bad("api_key connectors are not supported yet: a node has no connection flow for an API key")
-            }
-            Some("oauth2") | None => {}
+            Some("oauth2" | "api_key") | None => {}
             Some(other) => return bad(format!("unknown provider kind `{other}`")),
         }
         if let Some(secret) = p.get("clientSecret") {
@@ -549,10 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn profiles_and_providers_without_a_flow_are_refused() {
-        let mut v = good();
-        v["provider"] = json!({ "kind": "api_key", "fields": [{ "name": "key", "label": "Key" }] });
-        assert!(err(v).contains("api_key"));
+    fn profiles_without_a_flow_are_refused() {
         for profile in ["google", "slack"] {
             let mut v = good();
             v["provider"]["profile"] = json!(profile);
@@ -981,5 +991,314 @@ mod tests {
             e.contains("unknown OAuth profile") && e.contains("oauth"),
             "{e}"
         );
+    }
+
+    // ---- api_key (CN-7.2) -------------------------------------------------------------------
+
+    fn api_key_rest() -> Value {
+        json!({
+            "urn": "urn:vam:connector:market.example.org/acme/notesdesk",
+            "version": "1.0.0",
+            "displayName": "Notesdesk",
+            "publisher": "Acme Tools",
+            "description": "Notes in the member's Notesdesk.",
+            "icon": "notesdesk",
+            "provider": { "kind": "api_key", "fields": [{ "name": "key", "label": "Notesdesk API key" }] },
+            "connection": { "holder": "user", "multiAccount": false, "label": "none" },
+            "bindings": [{ "name": "api", "placeholder": "vamsec_notesdesk_api", "value": "api_key",
+                           "inject": "bearer", "hosts": ["api.notesdesk.example.org"] }]
+        })
+    }
+
+    fn api_key_mcp() -> Value {
+        let mut v = good();
+        v["urn"] = json!("urn:vam:connector:market.example.org/acme/keyed-bugwatch");
+        v["provider"] = json!({ "kind": "api_key", "fields": [{ "name": "key", "label": "Bugwatch API key" }] });
+        v
+    }
+
+    #[test]
+    fn rest_and_mcp_api_key_connectors_pass_and_are_summarized_with_the_field_label() {
+        for (v, host) in [
+            (api_key_rest(), "api.notesdesk.example.org"),
+            (api_key_mcp(), "mcp.bugwatch.example.org"),
+        ] {
+            let c = parse_marketplace_connector(&v.to_string()).unwrap();
+            let cs = crate::package::summarize_connector(&c).connector.unwrap();
+            assert_eq!(cs.provider, "api_key");
+            assert_eq!(cs.fields.len(), 1);
+            assert!(cs.fields[0].label.ends_with("API key"));
+            assert_eq!(cs.hosts, vec![host]);
+            let json = serde_json::to_value(&cs).unwrap();
+            assert_eq!(json["provider"], "api_key");
+            assert_eq!(json["fields"][0]["label"], cs.fields[0].label.as_str());
+            // The name of the field is internal: the summary shows the label only.
+            assert!(json["fields"][0].get("name").is_none());
+        }
+        // A company address works for a REST key connector as it does for an OAuth one.
+        let mut v = api_key_rest();
+        v["tenant"] = json!({ "name": "subdomain", "suffix": "notesdesk.example.org", "label": "Notesdesk address" });
+        v["bindings"][0]["hosts"] = json!(["{subdomain}.notesdesk.example.org"]);
+        assert!(parse_marketplace_connector(&v.to_string()).is_ok());
+    }
+
+    #[test]
+    fn an_api_key_connector_takes_exactly_one_field_and_names_it() {
+        for fields in [
+            json!([]),
+            json!([{ "name": "account", "label": "Account" }, { "name": "key", "label": "Key" }]),
+        ] {
+            let mut v = api_key_rest();
+            v["provider"]["fields"] = fields;
+            let e = err(v);
+            assert!(
+                e.contains("one field") && e.contains("provider.fields"),
+                "{e}"
+            );
+        }
+        for (name, label) in [
+            ("Key", "Key"),
+            ("1key", "Key"),
+            ("", "Key"),
+            ("key-1", "Key"),
+            (&"k".repeat(33), "Key"),
+            ("key", ""),
+            ("key", "   "),
+            ("key", &"x".repeat(65)),
+            ("key", "two\nlines"),
+        ] {
+            let mut v = api_key_rest();
+            v["provider"]["fields"] = json!([{ "name": name, "label": label }]);
+            let e = err(v);
+            assert!(e.contains("provider.fields[0]"), "{name:?} {label:?}: {e}");
+        }
+        let mut v = api_key_rest();
+        v["provider"]["fields"] = json!([{ "name": "k", "label": "x".repeat(64) }]);
+        assert!(parse_marketplace_connector(&v.to_string()).is_ok());
+    }
+
+    #[test]
+    fn a_binding_value_must_match_the_provider() {
+        let mut v = api_key_rest();
+        v["bindings"][0]["value"] = json!("access_token");
+        let e = err(v);
+        assert!(e.contains("value: api_key") && e.contains("`api`"), "{e}");
+        let mut v = good();
+        v.as_object_mut().unwrap().remove("mcp");
+        v["provider"] = json!({ "kind": "oauth2", "profile": "oauth", "client": "org",
+            "clientSecret": "none", "orgConsent": "none", "scopes": [],
+            "endpoints": { "authorize": "https://auth.example.org/a", "token": "https://auth.example.org/t" } });
+        v["bindings"] = json!([{ "name": "api", "placeholder": "vamsec_bugwatch_api",
+            "value": "api_key", "inject": "bearer", "hosts": ["api.bugwatch.example.org"] }]);
+        let e = err(v);
+        assert!(
+            e.contains("only for an api_key provider") && e.contains("`api`"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn an_api_key_binding_is_a_bearer_or_a_named_header_never_a_query() {
+        let mut v = api_key_rest();
+        v["bindings"][0]["inject"] = json!("query");
+        let e = err(v);
+        assert!(
+            e.contains("`inject`") && e.contains("bearer") && e.contains("`api`"),
+            "query: {e}"
+        );
+        // A header binding needs its name, which the file validator checks.
+        let mut v = api_key_rest();
+        v["bindings"][0]["inject"] = json!("header");
+        assert!(err(v).contains("needs a `headerName`"));
+        let mut v = api_key_rest();
+        v["bindings"][0]["inject"] = json!("header");
+        v["bindings"][0]["headerName"] = json!("X-Api-Key");
+        v["bindings"][0]["prefix"] = json!("Token ");
+        let c = parse_marketplace_connector(&v.to_string()).unwrap();
+        assert_eq!(
+            c.bindings.unwrap()[0].header_name.as_deref(),
+            Some("X-Api-Key")
+        );
+        // Each name a key is never put in is refused with the import's words, in any letter case.
+        for name in [
+            "Host",
+            "authorization",
+            "COOKIE",
+            "Proxy-Authorization",
+            "proxy-x",
+            "Connection",
+            "content-length",
+            "Transfer-Encoding",
+            "Keep-Alive",
+            "te",
+            "Trailer",
+            "Upgrade",
+        ] {
+            let mut v = api_key_rest();
+            v["bindings"][0]["inject"] = json!("header");
+            v["bindings"][0]["headerName"] = json!(name);
+            let e = err(v);
+            assert!(
+                e.contains("`headerName`") && e.contains("`api`"),
+                "{name}: {e}"
+            );
+        }
+        let mut v = api_key_rest();
+        v["bindings"][0]["inject"] = json!("header");
+        v["bindings"][0]["headerName"] = json!("X Api Key");
+        assert!(err(v).contains("RFC 9110"));
+        let mut v = api_key_rest();
+        v["bindings"][0]["placeholder"] = json!("vamsec_other_api");
+        assert!(err(v).contains("must be `vamsec_notesdesk_api`"));
+    }
+
+    #[test]
+    fn an_api_key_connector_has_bindings_or_an_mcp_server_never_both() {
+        let mut v = api_key_rest();
+        v["mcp"] = api_key_mcp()["mcp"].clone();
+        assert!(err(v).contains("exactly one of bindings and mcp"));
+        let mut v = api_key_rest();
+        v.as_object_mut().unwrap().remove("bindings");
+        assert!(err(v).contains("exactly one of bindings and mcp"));
+        // The MCP rules of a discover connector hold for a key connector's server.
+        let mut v = api_key_mcp();
+        v["mcp"]["url"] = json!("http://mcp.bugwatch.example.org/mcp");
+        assert!(err(v).contains("https"));
+        let mut v = api_key_mcp();
+        v["mcp"]["tools"] = json!([]);
+        assert!(err(v).contains("1 to 64 vetted tools"));
+        // Host rules of a REST connector hold too.
+        let mut v = api_key_rest();
+        v["bindings"][0]["hosts"] = json!(["localhost"]);
+        assert!(parse_marketplace_connector(&v.to_string()).is_err());
+        // A key connector has no OAuth knobs: the file refuses them as unknown.
+        let mut v = api_key_rest();
+        v["provider"]["clientSecret"] = json!("none");
+        assert!(parse_marketplace_connector(&v.to_string()).is_err());
+        let mut v = api_key_rest();
+        v["provider"]["clientSecret"] = json!("hunter2");
+        assert!(err(v).contains("client secret"));
+    }
+
+    #[test]
+    fn an_api_key_mcp_file_that_asks_for_a_header_or_adds_bindings_is_refused_at_import() {
+        // The MCP connect always sends `Authorization: Bearer <key>`; a file that asks for a
+        // header, or names bindings next to its `mcp` server, never reaches the node. Import reads
+        // a listing's connector with `parse_marketplace_connector` (file rules, then the limits).
+        for extra in [
+            json!({ "inject": "header" }),
+            json!({ "headerName": "X-Api-Key" }),
+        ] {
+            let mut v = api_key_mcp();
+            for (k, val) in extra.as_object().unwrap() {
+                v["mcp"][k] = val.clone();
+            }
+            assert!(err(v).contains("unknown field"), "{extra}");
+        }
+        for inject in [
+            json!({ "inject": "bearer" }),
+            json!({ "inject": "header", "headerName": "X-Api-Key" }),
+        ] {
+            let mut v = api_key_mcp();
+            let mut b = api_key_rest()["bindings"][0].clone();
+            for (k, val) in inject.as_object().unwrap() {
+                b[k] = val.clone();
+            }
+            v["bindings"] = json!([b]);
+            assert!(
+                err(v).contains("exactly one of bindings and mcp"),
+                "{inject}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_connector_summaries_do_not_gain_a_fields_key() {
+        // The summary of an installed release is digested: an OAuth connector's JSON is exactly
+        // what it was before `api_key` was accepted.
+        let golden_good = r#"{"kind":"connector","urn":"urn:vam:connector:market.example.org/acme/bugwatch","displayName":"Bugwatch","description":"Issues in Bugwatch.","connector":{"publisher":"Acme Tools","provider":"oauth2","profile":"discover","clientSecret":"none","orgConsent":"none","scopes":["read","write"],"mcpUrl":"https://mcp.bugwatch.example.org/mcp","mcpHost":"mcp.bugwatch.example.org","hosts":["mcp.bugwatch.example.org"],"tools":[{"remote":"list_issues","sideEffect":"read_only"},{"remote":"save_issue","sideEffect":"mutable_external","default":"ask"}]}}"#;
+        let golden_zendesk = r#"{"kind":"connector","urn":"urn:vam:connector:connectors.community.example/community/zendesk","displayName":"Zendesk Support","description":"Tickets in the company's own Zendesk, through its REST API and a client the org's admin registered.","connector":{"publisher":"Community Tools Ltd","provider":"oauth2","profile":"oauth","client":"org","clientText":"admin-supplied client","clientSecret":"none","orgConsent":"none","scopes":["read","write"],"hosts":["{subdomain}.zendesk.com"],"tools":[],"bindings":[{"name":"api","hosts":["{subdomain}.zendesk.com"]}],"endpoints":{"authorize":"https://{subdomain}.zendesk.com/oauth/authorizations/new","token":"https://{subdomain}.zendesk.com/oauth/tokens"},"tenant":{"label":"Zendesk address","suffix":"zendesk.com","text":"company address: Zendesk address (…zendesk.com)"}}}"#;
+        for (v, golden) in [(good(), golden_good), (zendesk(), golden_zendesk)] {
+            let c = parse_marketplace_connector(&v.to_string()).unwrap();
+            let got = serde_json::to_string(&crate::package::summarize_connector(&c)).unwrap();
+            assert_eq!(got, golden);
+        }
+        for c in crate::connector::builtin_connectors() {
+            let got = serde_json::to_value(crate::package::summarize_connector(&c)).unwrap();
+            assert!(got["connector"].get("fields").is_none(), "{}", c.urn);
+            // A built-in's bindings are the name and hosts they always were.
+            for b in got["connector"]["bindings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let mut keys: Vec<&str> =
+                    b.as_object().unwrap().keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                assert_eq!(keys, ["hosts", "name"], "{}: {b}", c.urn);
+            }
+        }
+        // A bearer API-key binding serializes as before the header form was summarized.
+        let c = parse_marketplace_connector(&api_key_rest().to_string()).unwrap();
+        let got = serde_json::to_value(crate::package::summarize_connector(&c)).unwrap();
+        assert_eq!(
+            got["connector"]["bindings"],
+            json!([{ "name": "api", "hosts": ["api.notesdesk.example.org"] }])
+        );
+    }
+
+    /// The summary digest in `marketplace/import.rs` is the SHA-256 of the summary JSON without
+    /// wording, so the JSON's difference is the digest's.
+    fn summary_json(v: &Value) -> String {
+        let c = parse_marketplace_connector(&v.to_string()).unwrap();
+        let mut j = serde_json::to_value(crate::package::summarize_connector(&c)).unwrap();
+        fn strip(v: &mut Value) {
+            match v {
+                Value::Object(m) => {
+                    m.remove("displayName");
+                    m.remove("description");
+                    m.values_mut().for_each(strip);
+                }
+                Value::Array(a) => a.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        strip(&mut j);
+        j.to_string()
+    }
+
+    #[test]
+    fn where_the_key_goes_is_part_of_the_summary_so_moving_it_resets_enable() {
+        let bearer = api_key_rest();
+        let named = |name: &str, prefix: Option<&str>| {
+            let mut v = api_key_rest();
+            v["bindings"][0]["inject"] = json!("header");
+            v["bindings"][0]["headerName"] = json!(name);
+            if let Some(p) = prefix {
+                v["bindings"][0]["prefix"] = json!(p);
+            }
+            v
+        };
+        let base = summary_json(&bearer);
+        let x_key = summary_json(&named("X-Api-Key", None));
+        // Bearer to a named header: a different summary.
+        assert_ne!(base, x_key);
+        assert!(
+            x_key.contains(r#""inject":"header""#) && x_key.contains(r#""headerName":"X-Api-Key""#)
+        );
+        // The header name and the prefix are each part of it.
+        let other_name = summary_json(&named("X-Token", None));
+        let prefixed = summary_json(&named("X-Api-Key", Some("Token ")));
+        let other_prefix = summary_json(&named("X-Api-Key", Some("Key ")));
+        let all = [&base, &x_key, &other_name, &prefixed, &other_prefix];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        // Wording is not capability: the same placement digests the same.
+        let mut reworded = named("X-Api-Key", None);
+        reworded["description"] = json!("Another sentence.");
+        assert_eq!(x_key, summary_json(&reworded));
     }
 }

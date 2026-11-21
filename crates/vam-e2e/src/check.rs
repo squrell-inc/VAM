@@ -136,14 +136,29 @@ pub fn check(root: &Path) -> Vec<CheckError> {
                 if !matches!(
                     w.provider.as_deref(),
                     Some(
-                        "microsoft-login" | "microsoft-graph" | "linear-server" | "filebox" | "ticketdesk"
+                        "microsoft-login"
+                            | "microsoft-graph"
+                            | "linear-server"
+                            | "filebox"
+                            | "ticketdesk"
+                            | "declared"
                     )
                 ) {
                     errors.push(CheckError::new(
                         &p,
                         "piece-body",
-                        "a mock-provider piece needs `provider: microsoft-login`, `microsoft-graph`, `linear-server`, `filebox` or `ticketdesk`",
+                        "a mock-provider piece needs `provider: microsoft-login`, `microsoft-graph`, `linear-server`, `filebox`, `ticketdesk` or `declared`",
                     ));
+                }
+                if w.provider.as_deref() == Some("declared") {
+                    // The publisher's test file is what the mock serves: it must be there and valid.
+                    if let Err(e) = crate::engine::connectors::declared_test_file(w) {
+                        errors.push(CheckError::new(
+                            &p,
+                            "piece-body",
+                            format!("a declared mock-provider piece needs `fixture`, a listing directory with a valid `tests/connector-test.json`: {e}"),
+                        ));
+                    }
                 }
             }
             PieceKind::McpConnection => {
@@ -337,8 +352,14 @@ fn check_scenario(
     let mut mock_aliases = BTreeSet::new();
     // Pieces that hold a client secret value and tokens of their own (filebox, ticketdesk).
     let mut filebox_aliases = BTreeSet::new();
+    // Pieces whose secrets are kept under their alias, so `api-call.absent` can judge them: the
+    // client-secret holders, a declared piece (its API key) and the Linear mock (its bearer).
+    let mut holder_aliases = BTreeSet::new();
+    // Pieces a member's API key comes from (`connector-connect.apiKey`): a declared piece or Linear.
+    let mut key_aliases = BTreeSet::new();
     let mut seen_filebox = false;
     let mut seen_ticketdesk = false;
+    let mut seen_declared = false;
     let mut mkt_aliases = BTreeSet::new();
     let mut kinds: std::collections::BTreeMap<String, PieceKind> = Default::default();
     for g in &s.given {
@@ -381,6 +402,7 @@ fn check_scenario(
                 }
                 seen_filebox = true;
                 filebox_aliases.insert(alias.to_string());
+                holder_aliases.insert(alias.to_string());
             }
             if cat
                 .piece(piece)
@@ -398,6 +420,35 @@ fn check_scenario(
                 seen_ticketdesk = true;
                 // Its alias names the client secret a test sends and every token it issues.
                 filebox_aliases.insert(alias.to_string());
+                holder_aliases.insert(alias.to_string());
+                secret_aliases.insert(alias.to_string());
+            }
+            if cat
+                .piece(piece)
+                .is_some_and(|w| w.provider.as_deref() == Some("declared"))
+            {
+                if seen_declared {
+                    errors.push(CheckError::new(
+                        p,
+                        "given",
+                        format!(
+                            "`{alias}` is a second declared mock-provider piece: its listeners hold one provider state"
+                        ),
+                    ));
+                }
+                seen_declared = true;
+                // Its alias names the API key it accepts and every key it replaced it with.
+                holder_aliases.insert(alias.to_string());
+                key_aliases.insert(alias.to_string());
+                secret_aliases.insert(alias.to_string());
+            }
+            // The Linear mock's bearer is what a member types as an API key for an MCP connector.
+            if cat
+                .piece(piece)
+                .is_some_and(|w| w.provider.as_deref() == Some("linear-server"))
+            {
+                holder_aliases.insert(alias.to_string());
+                key_aliases.insert(alias.to_string());
                 secret_aliases.insert(alias.to_string());
             }
             // A connection to Microsoft 365 made with the login mock holds tokens the runner made.
@@ -436,6 +487,7 @@ fn check_scenario(
     let mut chat_labels = BTreeSet::new();
     // (piece, identity) pairs an earlier `put-draft` wrote, for `urnOf`.
     let mut put_drafts: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut seen_cli_step = false;
     for (pos, step) in s.steps() {
         match step {
             Step::Chat(c) => {
@@ -778,6 +830,7 @@ fn check_scenario(
                 }
             }
             Step::Cli(x) => {
+                seen_cli_step = true;
                 if x.args.is_empty() {
                     errors.push(CheckError::new(
                         p,
@@ -915,6 +968,28 @@ fn check_scenario(
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
                 check_connector_id(errors, p, &pos, &x.id);
                 refer_mock(errors, p, &pos, &mock_aliases, x.piece.as_deref());
+                if let Some(k) = &x.api_key {
+                    if !key_aliases.contains(&k.piece) {
+                        errors.push(CheckError::new(
+                            p,
+                            "refs",
+                            format!("{pos}: `apiKey.piece` names `{}`, which is not a declared or linear-server mock-provider piece in `given`", k.piece),
+                        ));
+                    }
+                    if x.piece.is_some()
+                        || x.url.is_some()
+                        || x.via.is_some()
+                        || x.tenant.is_some()
+                        || x.upn.is_some()
+                        || x.expires_in.is_some()
+                    {
+                        errors.push(CheckError::new(
+                            p,
+                            "connector-connect",
+                            format!("{pos}: `apiKey` stands alone (no `piece`, `url`, `via`, `tenant`, `upn` or `expiresIn`)"),
+                        ));
+                    }
+                }
             }
             Step::ApiCall(x) => {
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
@@ -933,7 +1008,13 @@ fn check_scenario(
                     ));
                 }
                 if let Some(a) = x.absent.as_deref() {
-                    refer_filebox(errors, p, &pos, &filebox_aliases, a, "api-call.absent");
+                    if !holder_aliases.contains(a) {
+                        errors.push(CheckError::new(
+                            p,
+                            "refs",
+                            format!("{pos}: `api-call.absent` names `{a}`, which is not a filebox, ticketdesk, declared or linear-server mock-provider piece in `given`"),
+                        ));
+                    }
                 }
             }
             Step::ConnectorCheck(x) => {
@@ -946,6 +1027,29 @@ fn check_scenario(
             Step::GitTag(x) => {
                 refer_mkt(errors, p, &pos, &mkt_aliases, Some(&x.piece));
                 lint(errors, p, "tag", &x.tag);
+                if let Some(r) = &x.root {
+                    if !r.same {
+                        errors.push(CheckError::new(
+                            p,
+                            "git-tag",
+                            format!("{pos}: `root` is `{{ same: true }}`"),
+                        ));
+                    }
+                    if x.overlay.is_some() {
+                        errors.push(CheckError::new(
+                            p,
+                            "git-tag",
+                            format!("{pos}: `root` and `overlay` are two sources: use one"),
+                        ));
+                    }
+                    if !seen_cli_step {
+                        errors.push(CheckError::new(
+                            p,
+                            "git-tag",
+                            format!("{pos}: `root: {{ same: true }}` needs an earlier `cli` step"),
+                        ));
+                    }
+                }
             }
             Step::MarketplaceAdd(x) => {
                 refer_mkt(errors, p, &pos, &mkt_aliases, Some(&x.piece));
@@ -1105,7 +1209,17 @@ fn check_scenario(
             }
             Step::CreateSpace(c) => {
                 lint(errors, p, "label", &c.label);
-                refer(errors, p, &pos, &aliases, c.agent.as_deref())
+                // A literal URN names an agent a marketplace installed, as for `chat`.
+                refer(
+                    errors,
+                    p,
+                    &pos,
+                    &aliases,
+                    c.agent
+                        .as_deref()
+                        .filter(|a| !a.starts_with("urn:vam:agent:")),
+                );
+                refer_org(errors, p, &pos, &org_aliases, c.as_.as_deref());
             }
             Step::RenameSpace(x) => lint(errors, p, "label", &x.label),
             Step::RenameThread(x) => lint(errors, p, "label", &x.label),

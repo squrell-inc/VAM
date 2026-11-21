@@ -1455,7 +1455,7 @@ fn a_listing_whose_own_connectors_share_a_binding_placeholder_is_refused() {
         prepared_connector(placeholder_connector("zen", "desk_api")),
         prepared_connector(placeholder_connector("zen_desk", "api")),
     ];
-    let e = check_listing_placeholders(&both, "two-connectors").unwrap_err();
+    let e = check_listing_rules(&both, "two-connectors").unwrap_err();
     assert!(
         matches!(e, E::InvalidContract(_)) && e.to_string().contains("vamsec_zen_desk_api"),
         "{e:?}"
@@ -1465,7 +1465,7 @@ fn a_listing_whose_own_connectors_share_a_binding_placeholder_is_refused() {
         prepared_connector(placeholder_connector("zen", "desk_api")),
         prepared_connector(placeholder_connector("zen_other", "api")),
     ];
-    check_listing_placeholders(&fine, "two-connectors").unwrap();
+    check_listing_rules(&fine, "two-connectors").unwrap();
 }
 
 #[test]
@@ -1476,7 +1476,7 @@ fn placeholders_the_gate_cannot_tell_apart_are_refused_in_a_listing_and_against_
         prepared_connector(placeholder_connector("zen", "desk")),
         prepared_connector(placeholder_connector("zen_desk", "api")),
     ];
-    let e = check_listing_placeholders(&both, "two-connectors").unwrap_err();
+    let e = check_listing_rules(&both, "two-connectors").unwrap_err();
     assert!(
         matches!(e, E::InvalidContract(_)) && e.to_string().contains("vamsec_zen_desk"),
         "{e:?}"
@@ -1486,7 +1486,7 @@ fn placeholders_the_gate_cannot_tell_apart_are_refused_in_a_listing_and_against_
         prepared_connector(placeholder_connector("zen_desk", "api")),
         prepared_connector(placeholder_connector("zen", "desk")),
     ];
-    assert!(check_listing_placeholders(&both, "two-connectors").is_err());
+    assert!(check_listing_rules(&both, "two-connectors").is_err());
 
     // Installed `zen` with `desk`: the longer `zen_desk` + `api` is refused, and the shorter one
     // against an installed longer one too.
@@ -1524,11 +1524,13 @@ fn a_listing_whose_connectors_share_an_id_is_refused_before_any_write() {
     // Two URNs, one id: the second would replace the first's node row, client and connections.
     let mut other = placeholder_connector("zen", "desk_api");
     other.urn = "urn:vam:connector:connectors.community.example/elsewhere/zen".into();
+    // (A different placeholder: the same one would be refused first, as its own rule.)
+    other.bindings.as_mut().unwrap()[0].placeholder = "vamsec_elsewhere_zen_x".into();
     let both = [
         prepared_connector(placeholder_connector("zen", "desk_api")),
         prepared_connector(other),
     ];
-    let e = check_listing_connector_ids(&both, "two-connectors").unwrap_err();
+    let e = check_listing_rules(&both, "two-connectors").unwrap_err();
     assert!(
         matches!(e, E::InvalidContract(_)) && e.to_string().contains("`zen`"),
         "{e:?}"
@@ -1537,7 +1539,7 @@ fn a_listing_whose_connectors_share_an_id_is_refused_before_any_write() {
         prepared_connector(placeholder_connector("zen", "desk_api")),
         prepared_connector(placeholder_connector("zen_other", "api")),
     ];
-    check_listing_connector_ids(&fine, "two-connectors").unwrap();
+    check_listing_rules(&fine, "two-connectors").unwrap();
 }
 
 #[test]
