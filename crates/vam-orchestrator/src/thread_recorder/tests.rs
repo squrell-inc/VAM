@@ -2731,6 +2731,51 @@ mod guest_tool_cards {
     }
 
     #[tokio::test]
+    async fn the_same_call_and_result_asked_again_in_a_later_turn_gets_its_own_card() {
+        // "latest 5 mails" twice with no new mail: the provider's `call_0`, the arguments and the
+        // result are byte-identical in both turns.
+        let id = ids("repeat-ask");
+        let (_s, _d) = crate::skill_cards::tests_support::seeded(&id.session, true);
+        let f = fixture();
+        let store = store(&id, &[entry("mail_list", "bun")]);
+        let rec = recorder(&f, &id, &store);
+        let tools = vec![tool_spec("mail_list", "a mail tool")];
+        let c = call("call_0", "mail_list", r#"{"top":5}"#);
+        let a = assistant_calls("", vec![c.clone()]);
+        let t = tool_msg("call_0", FIT);
+        let u1 = msg("user", "latest 5 mails");
+        let u2 = msg("user", "latest 5 mails");
+        let mut h = vec![u1];
+        rec.on_request(request(1, "SYS", h.clone(), tools.clone()))
+            .await;
+        rec.on_response(response(1, "", vec![c.clone()])).await;
+        h.extend([a.clone(), t.clone()]);
+        rec.on_request(request(2, "SYS", h.clone(), tools.clone()))
+            .await;
+        rec.on_response(response(2, "Five mails.", vec![])).await;
+        h.extend([msg("assistant", "Five mails."), u2]);
+        rec.on_request(request(3, "SYS", h.clone(), tools.clone()))
+            .await;
+        rec.on_response(response(3, "", vec![c])).await;
+        h.extend([a, t]);
+        rec.on_request(request(4, "SYS", h.clone(), tools.clone()))
+            .await;
+        assert_eq!(
+            events(&store, &id, TYPE_OUTBOX_CARD).len(),
+            2,
+            "one card per ask"
+        );
+        assert!(events(&store, &id, TYPE_CARD_SKIPPED).is_empty());
+        // Sending the same history again adds nothing.
+        rec.on_response(response(4, "Five mails.", vec![])).await;
+        let mut replay = h;
+        replay[0] = msg("user", "latest 5 mails, please");
+        rec.on_request(request(5, "SYS", replay, tools)).await;
+        assert_eq!(events(&store, &id, TYPE_OUTBOX_CARD).len(), 2);
+        crate::skill_cards::forget_session(&id.session);
+    }
+
+    #[tokio::test]
     async fn a_reused_call_id_is_matched_to_the_call_just_before_its_result() {
         // Turn 1's `call_0` ran another tool; turn 2's `call_0` is the mail tool.
         let id = ids("reused-other-tool");

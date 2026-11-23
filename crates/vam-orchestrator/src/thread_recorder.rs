@@ -269,8 +269,10 @@ fn spec_wire(m: &vam_spec::v1::ChatMessage) -> vam_spec::thread_context::WireMes
 /// The tool results first seen in this request (`rest[start..]`) as (tool name, call id, text).
 /// The name comes from the assistant message that made the call.
 /// A tool result new in this request: the call's tool, id and result, and `occurrence`, which
-/// tells it apart from an earlier call with the same id (digests of the call message and of the
-/// result message; a replayed history repeats both).
+/// tells it apart from an earlier call with the same id. It is the digests of the call message
+/// and of the result message plus how many identical call/result pairs come before it in the
+/// history: a replayed history repeats all three, while the same call asked again in a later
+/// turn (same id, arguments and result) is the next of its kind.
 struct NewToolResult {
     tool: String,
     call_id: String,
@@ -282,26 +284,44 @@ struct NewToolResult {
 /// assistant message before it that made a call with its id (a provider may reuse an id, e.g.
 /// `call_0`, in a later reply of the same run).
 fn new_tool_results(rest: &[vam_spec::v1::ChatMessage], start: usize) -> Vec<NewToolResult> {
+    // The asking message of the tool result at `i`, and the call's tool name.
+    let asked = |i: usize| {
+        let m = &rest[i];
+        rest[..i].iter().rev().find_map(|a| {
+            a.tool_calls
+                .iter()
+                .find(|c| c.id == m.tool_call_id)
+                .map(|c| (a, c.name.clone()))
+        })
+    };
+    let digests = |i: usize, a: &vam_spec::v1::ChatMessage| {
+        format!(
+            "{}:{}",
+            wire_sha256(&to_wire(a)),
+            wire_sha256(&to_wire(&rest[i]))
+        )
+    };
     rest.iter()
         .enumerate()
         .skip(start)
         .filter(|(_, m)| m.role == "tool")
         .filter_map(|(i, m)| {
-            let (asked_by, name) = rest[..i].iter().rev().find_map(|a| {
-                a.tool_calls
-                    .iter()
-                    .find(|c| c.id == m.tool_call_id)
-                    .map(|c| (a, c.name.clone()))
-            })?;
+            let (asked_by, name) = asked(i)?;
+            let pair = digests(i, asked_by);
+            // Earlier identical pairs: same id and result text first (cheap), then the digests.
+            let before = rest[..i]
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    e.role == "tool" && e.tool_call_id == m.tool_call_id && e.content == m.content
+                })
+                .filter(|(j, _)| asked(*j).is_some_and(|(a, _)| digests(*j, a) == pair))
+                .count();
             Some(NewToolResult {
                 tool: name,
                 call_id: m.tool_call_id.clone(),
                 content: m.content.clone(),
-                occurrence: format!(
-                    "{}:{}",
-                    wire_sha256(&to_wire(asked_by)),
-                    wire_sha256(&to_wire(m))
-                ),
+                occurrence: format!("{pair}#{before}"),
             })
         })
         .collect()
