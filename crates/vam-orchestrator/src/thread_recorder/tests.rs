@@ -2500,15 +2500,17 @@ fn new_tool_results_name_the_tool_from_the_call_and_skip_seen_messages() {
         tool_msg("c1", "{\"a\":1}"),
         tool_msg("c2", "x"),
     ];
+    let triple = |r: &NewToolResult| (r.tool.clone(), r.call_id.clone(), r.content.clone());
     let all = new_tool_results(&rest, 0);
     assert_eq!(
-        all[0],
+        triple(&all[0]),
         ("mail_list".into(), "c1".into(), "{\"a\":1}".into())
     );
     assert_eq!(all.len(), 2);
+    assert_ne!(all[0].occurrence, all[1].occurrence);
     let later = new_tool_results(&rest, 3);
     assert_eq!(
-        later,
+        later.iter().map(triple).collect::<Vec<_>>(),
         vec![("other".to_string(), "c2".to_string(), "x".to_string())]
     );
 }
@@ -2663,5 +2665,136 @@ mod guest_tool_cards {
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0]["data"]["reason"], "result_does_not_fit");
         crate::skill_cards::forget_session(&guest.session);
+    }
+
+    /// Two turns of one run in which the provider gives both calls the id `call_0`; turn 1
+    /// calls `first`, turn 2 calls `mail_list`. Returns the history after turn 2.
+    async fn two_turns_with_one_id(
+        rec: &ThreadRecorder,
+        first: &str,
+        first_result: &str,
+        second_result: &str,
+    ) -> Vec<vam_spec::v1::ChatMessage> {
+        let tools = vec![
+            tool_spec(first, "a tool"),
+            tool_spec("mail_list", "a mail tool"),
+        ];
+        let u1 = msg("user", "Get me the latest 5 mails");
+        let c1 = call("call_0", first, r#"{"top":5}"#);
+        let a1 = assistant_calls("", vec![c1.clone()]);
+        let t1 = tool_msg("call_0", first_result);
+        let r1 = msg("assistant", "Here they are.");
+        let u2 = msg("user", "get me all the mails since yesterday");
+        let c2 = call("call_0", "mail_list", r#"{"since":"2026-11-22T00:00:00Z"}"#);
+        let a2 = assistant_calls("", vec![c2.clone()]);
+        let t2 = tool_msg("call_0", second_result);
+        rec.on_request(request(1, "SYS", vec![u1.clone()], tools.clone()))
+            .await;
+        rec.on_response(response(1, "", vec![c1])).await;
+        let turn1 = vec![u1, a1, t1];
+        rec.on_request(request(2, "SYS", turn1.clone(), tools.clone()))
+            .await;
+        rec.on_response(response(2, "Here they are.", vec![])).await;
+        let mut both = turn1;
+        both.extend([r1, u2]);
+        rec.on_request(request(3, "SYS", both.clone(), tools.clone()))
+            .await;
+        rec.on_response(response(3, "", vec![c2])).await;
+        both.extend([a2, t2]);
+        rec.on_request(request(4, "SYS", both.clone(), tools)).await;
+        both
+    }
+
+    const FIT_2: &str = r#"{"messages":[{"from":"bo@e2e.example","subject":"Since yesterday"}]}"#;
+
+    #[tokio::test]
+    async fn a_call_id_the_provider_reuses_in_a_later_turn_still_gets_its_card() {
+        let id = ids("reused-id");
+        let (_s, _d) = crate::skill_cards::tests_support::seeded(&id.session, true);
+        let f = fixture();
+        let store = store(&id, &[entry("mail_list", "bun")]);
+        let rec = recorder(&f, &id, &store);
+        two_turns_with_one_id(&rec, "mail_list", FIT, FIT_2).await;
+        let cards = events(&store, &id, TYPE_OUTBOX_CARD);
+        let subjects: Vec<_> = cards
+            .iter()
+            .map(|c| c["data"]["data"]["messages"][0]["subject"].clone())
+            .collect();
+        assert_eq!(
+            subjects,
+            vec!["Plan", "Since yesterday"],
+            "one card per turn"
+        );
+        assert!(cards.iter().all(|c| c["data"]["callId"] == "call_0"));
+        assert!(events(&store, &id, TYPE_CARD_SKIPPED).is_empty());
+        crate::skill_cards::forget_session(&id.session);
+    }
+
+    #[tokio::test]
+    async fn a_reused_call_id_is_matched_to_the_call_just_before_its_result() {
+        // Turn 1's `call_0` ran another tool; turn 2's `call_0` is the mail tool.
+        let id = ids("reused-other-tool");
+        let (_s, _d) = crate::skill_cards::tests_support::seeded(&id.session, true);
+        let f = fixture();
+        let store = store(&id, &[entry("mail_list", "bun"), entry("mail_read", "bun")]);
+        let rec = recorder(&f, &id, &store);
+        two_turns_with_one_id(&rec, "mail_read", r#"{"body":"hi"}"#, FIT_2).await;
+        let cards = events(&store, &id, TYPE_OUTBOX_CARD);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0]["data"]["tool"], "mail_list");
+        assert_eq!(
+            cards[0]["data"]["data"]["messages"][0]["subject"],
+            "Since yesterday"
+        );
+        crate::skill_cards::forget_session(&id.session);
+    }
+
+    #[tokio::test]
+    async fn a_replayed_history_gets_no_second_card_and_says_why() {
+        let id = ids("replay");
+        let (_s, _d) = crate::skill_cards::tests_support::seeded(&id.session, true);
+        let f = fixture();
+        let store = store(&id, &[entry("mail_list", "bun")]);
+        let rec = recorder(&f, &id, &store);
+        let history = two_turns_with_one_id(&rec, "mail_list", FIT, FIT_2).await;
+        // The guest sends the history again from an earlier point (a changed first message
+        // rolls the log back): every tool result is appended again.
+        let mut replay = history;
+        replay[0] = msg("user", "Get me the latest 5 mails, please");
+        rec.on_response(response(4, "Three since yesterday.", vec![]))
+            .await;
+        rec.on_request(request(
+            5,
+            "SYS",
+            replay,
+            vec![tool_spec("mail_list", "a mail tool")],
+        ))
+        .await;
+        assert_eq!(events(&store, &id, TYPE_OUTBOX_CARD).len(), 2);
+        let skipped = events(&store, &id, TYPE_CARD_SKIPPED);
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        assert!(skipped
+            .iter()
+            .all(|e| e["data"]["reason"] == "duplicate_call"));
+        crate::skill_cards::forget_session(&id.session);
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_cards_are_not_loaded_says_so() {
+        // No `seeded(..)`: the in-memory cards of this session are gone (vamd restarted, or the
+        // map was cleared). A guest-run tool result is reported, not dropped in silence.
+        let id = ids("unseeded");
+        crate::skill_cards::forget_session(&id.session);
+        let f = fixture();
+        let store = store(
+            &id,
+            &[entry("mail_list", "bun"), entry("load_skill", "builtin")],
+        );
+        round_trip(&recorder(&f, &id, &store), "mail_list", FIT).await;
+        assert!(events(&store, &id, TYPE_OUTBOX_CARD).is_empty());
+        let skipped = events(&store, &id, TYPE_CARD_SKIPPED);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0]["data"]["reason"], "card_unavailable");
+        assert_eq!(skipped[0]["data"]["tool"], "mail_list");
     }
 }

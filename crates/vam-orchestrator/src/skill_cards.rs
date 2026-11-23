@@ -106,6 +106,15 @@ pub fn submit_fields(ir: &Value) -> Vec<String> {
     out
 }
 
+/// Whether the session's cards were loaded at its start (and not dropped since). A session that
+/// is not seeded cannot attach a card for any tool.
+pub fn is_seeded(session_id: &str) -> bool {
+    SESSIONS
+        .lock()
+        .map(|m| m.contains_key(session_id))
+        .unwrap_or(false)
+}
+
 /// The checked cards of a tool, as kept at session start.
 pub fn cards_for(session_id: &str, tool: &str) -> Option<ToolCards> {
     SESSIONS
