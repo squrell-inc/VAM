@@ -397,7 +397,10 @@ static CARD_CALLS: LazyLock<Mutex<std::collections::HashSet<(String, String)>>> 
     LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 const MAX_CARD_CALLS: usize = 4096;
 
-fn first_sight_of_call(run_id: &str, call_id: &str) -> bool {
+/// Whether this is the first time a card is attached for this call. `occurrence` tells apart two
+/// calls that share an id: some providers number calls per reply (`call_0`), so one run can hold
+/// several calls with the same id. Empty for a caller that has nothing better than the id.
+fn first_sight_of_call(run_id: &str, call_id: &str, occurrence: &str) -> bool {
     if call_id.is_empty() {
         return true;
     }
@@ -407,7 +410,29 @@ fn first_sight_of_call(run_id: &str, call_id: &str) -> bool {
     if seen.len() >= MAX_CARD_CALLS {
         seen.clear();
     }
-    seen.insert((run_id.to_string(), call_id.to_string()))
+    let key = if occurrence.is_empty() {
+        call_id.to_string()
+    } else {
+        format!("{call_id}\u{1f}{occurrence}")
+    };
+    seen.insert((run_id.to_string(), key))
+}
+
+/// `card.skipped {tool, callId, reason}`, for a caller that finds the card cannot be attached
+/// before it gets here (the recorder, when the session's cards are not loaded).
+pub fn skip_card(
+    store: &SqliteWorkflowStore,
+    run_id: &str,
+    tool: &str,
+    call_id: &str,
+    reason: &str,
+) {
+    append_card_event(
+        store,
+        run_id,
+        TYPE_CARD_SKIPPED,
+        serde_json::json!({ "tool": tool, "callId": call_id, "reason": reason }),
+    );
 }
 
 fn append_card_event(
@@ -441,36 +466,61 @@ pub fn attach_show_card(
         store,
         session_id,
         run_id,
-        tool,
-        call_id,
+        Call {
+            tool,
+            id: call_id,
+            occurrence: "",
+        },
         result_text,
         Instant::now(),
     )
+}
+
+/// [`attach_show_card`] for a call whose id may repeat within the run: `occurrence` (for example
+/// digests of the call and of its result) tells this call apart from an earlier one with the same
+/// id, while the same call seen again (a replayed history) still gets one card.
+pub fn attach_show_card_for(
+    store: &SqliteWorkflowStore,
+    session_id: &str,
+    run_id: &str,
+    call: Call<'_>,
+    result_text: &str,
+) {
+    attach_show_card_at(store, session_id, run_id, call, result_text, Instant::now())
+}
+
+/// The tool call a card is for.
+#[derive(Debug, Clone, Copy)]
+pub struct Call<'a> {
+    pub tool: &'a str,
+    pub id: &'a str,
+    pub occurrence: &'a str,
 }
 
 fn attach_show_card_at(
     store: &SqliteWorkflowStore,
     session_id: &str,
     run_id: &str,
-    tool: &str,
-    call_id: &str,
+    call: Call<'_>,
     result_text: &str,
     now: Instant,
 ) {
+    let Call {
+        tool,
+        id: call_id,
+        occurrence,
+    } = call;
     let Some(cards) = crate::skill_cards::cards_for(session_id, tool) else {
         return;
     };
-    if !cards.declares_show || run_id.is_empty() || !first_sight_of_call(run_id, call_id) {
+    if !cards.declares_show || run_id.is_empty() {
         return;
     }
-    let skip = |reason: &str| {
-        append_card_event(
-            store,
-            run_id,
-            TYPE_CARD_SKIPPED,
-            serde_json::json!({ "tool": tool, "callId": call_id, "reason": reason }),
-        );
-    };
+    let skip = |reason: &str| skip_card(store, run_id, tool, call_id, reason);
+    if !first_sight_of_call(run_id, call_id, occurrence) {
+        // The same call again (a replayed history): it already has its card or its skip.
+        return skip("duplicate_call");
+    }
     let Some(card) = cards.show else {
         return skip("card_unavailable");
     };

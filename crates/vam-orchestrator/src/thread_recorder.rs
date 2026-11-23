@@ -268,21 +268,61 @@ fn spec_wire(m: &vam_spec::v1::ChatMessage) -> vam_spec::thread_context::WireMes
 
 /// The tool results first seen in this request (`rest[start..]`) as (tool name, call id, text).
 /// The name comes from the assistant message that made the call.
-fn new_tool_results(
-    rest: &[vam_spec::v1::ChatMessage],
-    start: usize,
-) -> Vec<(String, String, String)> {
+/// A tool result new in this request: the call's tool, id and result, and `occurrence`, which
+/// tells it apart from an earlier call with the same id. It is the digests of the call message
+/// and of the result message plus how many identical call/result pairs come before it in the
+/// history: a replayed history repeats all three, while the same call asked again in a later
+/// turn (same id, arguments and result) is the next of its kind.
+struct NewToolResult {
+    tool: String,
+    call_id: String,
+    content: String,
+    occurrence: String,
+}
+
+/// The tool results among `rest[start..]`, each with the call that asked for it: the nearest
+/// assistant message before it that made a call with its id (a provider may reuse an id, e.g.
+/// `call_0`, in a later reply of the same run).
+fn new_tool_results(rest: &[vam_spec::v1::ChatMessage], start: usize) -> Vec<NewToolResult> {
+    // The asking message of the tool result at `i`, and the call's tool name.
+    let asked = |i: usize| {
+        let m = &rest[i];
+        rest[..i].iter().rev().find_map(|a| {
+            a.tool_calls
+                .iter()
+                .find(|c| c.id == m.tool_call_id)
+                .map(|c| (a, c.name.clone()))
+        })
+    };
+    let digests = |i: usize, a: &vam_spec::v1::ChatMessage| {
+        format!(
+            "{}:{}",
+            wire_sha256(&to_wire(a)),
+            wire_sha256(&to_wire(&rest[i]))
+        )
+    };
     rest.iter()
+        .enumerate()
         .skip(start)
-        .filter(|m| m.role == "tool")
-        .filter_map(|m| {
-            let name = rest.iter().find_map(|a| {
-                a.tool_calls
-                    .iter()
-                    .find(|c| c.id == m.tool_call_id)
-                    .map(|c| c.name.clone())
-            })?;
-            Some((name, m.tool_call_id.clone(), m.content.clone()))
+        .filter(|(_, m)| m.role == "tool")
+        .filter_map(|(i, m)| {
+            let (asked_by, name) = asked(i)?;
+            let pair = digests(i, asked_by);
+            // Earlier identical pairs: same id and result text first (cheap), then the digests.
+            let before = rest[..i]
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    e.role == "tool" && e.tool_call_id == m.tool_call_id && e.content == m.content
+                })
+                .filter(|(j, _)| asked(*j).is_some_and(|(a, _)| digests(*j, a) == pair))
+                .count();
+            Some(NewToolResult {
+                tool: name,
+                call_id: m.tool_call_id.clone(),
+                content: m.content.clone(),
+                occurrence: format!("{pair}#{before}"),
+            })
         })
         .collect()
 }
@@ -862,31 +902,51 @@ impl ThreadRecorder {
         let Some(store) = self.commits.as_ref() else {
             return;
         };
+        let seeded = crate::skill_cards::is_seeded(&self.session_id);
         let mut run_id: Option<Option<String>> = None;
-        for (name, call_id, content) in new_tool_results(rest, start) {
-            if crate::skill_cards::cards_for(&self.session_id, &name).is_none() {
+        for r in new_tool_results(rest, start) {
+            if seeded && crate::skill_cards::cards_for(&self.session_id, &r.tool).is_none() {
+                continue; // a tool without a card
+            }
+            let guest_run = match store.get_tool(&self.session_id, &r.tool) {
+                Ok(Some(entry)) => entry.command != "host" && entry.command != "builtin",
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!("tool card for {}: tool catalog not read: {e}", r.tool);
+                    false
+                }
+            };
+            if !guest_run {
+                continue; // a host-run tool gets its card where the host runs it
+            }
+            let Some(run) = run_id
+                .get_or_insert_with(|| {
+                    store
+                        .find_run_id_for_session(&self.session_id)
+                        .ok()
+                        .flatten()
+                })
+                .as_deref()
+            else {
+                continue;
+            };
+            if !seeded {
+                // The cards are kept in memory from the session's start; without them no tool of
+                // this session can have a card. Say so rather than show nothing.
+                crate::outbox::skip_card(store, run, &r.tool, &r.call_id, "card_unavailable");
                 continue;
             }
-            match store.get_tool(&self.session_id, &name) {
-                Ok(Some(entry)) if entry.command != "host" && entry.command != "builtin" => {}
-                _ => continue,
-            }
-            let run = run_id.get_or_insert_with(|| {
-                store
-                    .find_run_id_for_session(&self.session_id)
-                    .ok()
-                    .flatten()
-            });
-            if let Some(run) = run {
-                crate::outbox::attach_show_card(
-                    store,
-                    &self.session_id,
-                    run,
-                    &name,
-                    &call_id,
-                    &content,
-                );
-            }
+            crate::outbox::attach_show_card_for(
+                store,
+                &self.session_id,
+                run,
+                crate::outbox::Call {
+                    tool: &r.tool,
+                    id: &r.call_id,
+                    occurrence: &r.occurrence,
+                },
+                &r.content,
+            );
         }
     }
 
