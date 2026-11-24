@@ -79,7 +79,8 @@ flows `design doc → phase tracker → plan → build`.
 | Location | Contains | When to read |
 |---|---|---|
 | [`.cursor/workstreams/README.md`](.cursor/workstreams/README.md) | Index of every workstream with status and current phase | **First**, to find the relevant tracker |
-| `.cursor/workstreams/<slug>.md` | Goal, out-of-scope, **locked decisions**, phases with checkboxes and exit criteria | **Every session** working on that slug |
+| `.cursor/workstreams/<slug>.md` | Goal, out-of-scope, **locked decisions**, phases with checkboxes and exit criteria, the open backlog | **Every session** working on that slug |
+| `.cursor/workstreams/archive/<slug>-phases-*.md` | Finished phases' breakdowns, closes and older progress-log rows, moved out unedited | **Only** when a task needs that detail |
 | [`design/README.md`](design/README.md) | Index of design plans of record | When you need the rationale |
 | `design/<slug>.md` | The reasoning: evidence, file/line citations, tradeoffs, rejected options | Once for context — read **only the section** for the phase in hand, these files are large |
 | `.cursor/skills/phased-workstream/SKILL.md` | The procedure for running a workstream | When opening or advancing a workstream |
@@ -100,6 +101,15 @@ Rules for agents:
   `e2e/README.md`.
 - **Tick the checkbox and add a Progress log row** (with the scoreboard:
   scenarios green/red, fix cycles, wall time) when work lands.
+- **Keep token cost down** (owner, 2026-11-24; full rules: `phase-playbook.md`
+  §13). About 95% of a long session's cost is re-reading its own context each
+  turn, so: orchestrators run on Sonnet medium, stay thin (tracker and short
+  agent reports, no code or whole diffs), wait for CI with one scheduled
+  check-in instead of a PR subscription, and restart in a new session at about
+  300K tokens of context; reading and building happen in background agents
+  briefed by pointer, which report in at most 15 lines; read with `Grep` and
+  line ranges, not whole files; keep a tracker's active file under about 40K
+  tokens by moving finished phases to `.cursor/workstreams/archive/`.
 - Do not create planning or tracking markdown in the repo root or in the
   Starlight docs site. Trackers live in `.cursor/workstreams/`, design plans in
   `design/`.

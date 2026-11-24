@@ -22,9 +22,9 @@ the tracker (current phase and progress log).
 | Role | Runs where | Model | Does | Never |
 |---|---|---|---|---|
 | Owner | — | — | Scope and product calls, approves each phase plan, does the manual check at the phase close, approves releases | — |
-| Orchestrator | A local or cloud agent session (owner, 2026-10-18) | Sonnet 5.5 medium | Starts the phase-breakdown agent, brings its result to the owner, starts one wave session at a time, validates each wave plan, verifies and merges, cleans up, keeps the tracker current. In a cloud session: background agents in worktrees, `gh` or the GitHub tools for PRs and merges; the git proxy may refuse remote branch deletes (ask the owner) | Write product code. Merge into `main` or release without the owner's word |
-| Phase-breakdown agent | Background agent started by the orchestrator (Agent tool, `run_in_background: true`) | Opus 5.5 high | High-level evaluation of the phase against the design and the code; writes the **Scenario delta** first, then splits it into items, groups them into waves, suggests the model per wave; writes all of it into the tracker | Write product code. Plan or build a wave in detail (the wave session does that) |
-| Wave session | An agent session (local or cloud), in its own worktree | From the wave's row in the tracker (§2) | One wave: plan mode first, then code and tests, one PR per repo | Merge. Touch the main checkouts. Change scope outside its wave |
+| Orchestrator (the phase session) | One cloud or local session per phase, started from the tracker (owner, 2026-10-18; cost rules §13, 2026-11-24) | Sonnet 5.5 medium | Starts the phase-breakdown agent, brings its result to the owner, runs each wave as a background agent (or a wave session when the work needs its own session), validates each wave plan, verifies and merges, cleans up, keeps the tracker current. Stays thin: reads the tracker and short agent reports, not code or whole diffs (§13). In a cloud session: background agents in worktrees, `gh api` for PRs and merges; the git proxy may refuse remote branch deletes (ask the owner) | Write product code. Merge into `main` or release without the owner's word |
+| Phase-breakdown agent | Background agent started by the orchestrator (Agent tool, `run_in_background: true`) | Opus 5.5 high | High-level evaluation of the phase against the design and the code; writes the **Scenario delta** first, then splits it into items, groups them into waves, suggests the model per wave; writes all of it into the tracker and replies with a short summary only (the orchestrator reads the plan from the tracker) | Write product code. Plan or build a wave in detail (the wave agent does that) |
+| Wave agent | A background agent started by the phase session (Agent tool, `run_in_background: true`), in its own worktree; a separate wave session only when the wave needs one | From the wave's row in the tracker (§2) | One wave: reads its tracker section, plans, then code and tests, one PR per repo; reports back in at most 15 lines (PR, checks, fails-before and passes-after evidence, deviations) | Merge. Touch the main checkouts. Change scope outside its wave |
 
 Any model outside §2, or a tool outside this table: tell the owner first.
 
@@ -391,8 +391,10 @@ orchestrator and wave brief carries:
 - **Fast checks, then a ready PR.** Before pushing: `scripts/ci/local.sh
   --fast --base origin/<base>` (or `--scenarios a,b` for the wave's own).
   Then open the PR ready for review with its `CI:` line; a draft runs no CI.
-- **Actions is the gate.** The orchestrator subscribes to the PR, waits for
-  the CI event, reviews the diff and merges only on green. `--full` locally
+- **Actions is the gate.** The orchestrator waits for CI with one scheduled
+  check-in at the expected CI time (or the wave agent's "green" report), not
+  a PR subscription (§13); it checks the check runs once, reads the wave
+  agent's report and the risky files the plan names, and merges only on green. `--full` locally
   is only for reproducing a failure. No `[skip ci]`.
 - **One target dir, one command.** `CARGO_TARGET_DIR=/home/user/vam/target`
   for every build in every worktree; the script sets the rest
@@ -408,3 +410,55 @@ orchestrator and wave brief carries:
   agent marks each wave `lane: yes | no` from the files it touches, so the
   orchestrator knows which PRs will also run the microVM lane (about 10
   more minutes).
+
+## 13. Token cost rules (owner, 2026-11-24)
+
+Measured on the connectors Phases 6 and 7 (about $150 and $220 each) and the
+cross-workstream orchestrator (about $290): **about 95% of the cost was
+re-reading context on every turn** (cache reads and cache rewrites); what the
+models wrote, thinking included, was 3–8%. Effort level changes only that
+small share. Cost is driven by **how big a session's context is times how
+many turns it takes**, and by cache rewrites after idle gaps. A short session
+that reads, acts and stops costs cents; a session that carries 700K tokens for
+hundreds of wake-ups costs hundreds of dollars. So:
+
+**Orchestrator (one per phase; the owner's cross-workstream orchestrator, if any, follows the same rules)**
+
+1. **Sonnet 5.5 medium**, never Opus. Opus high is for the phase-breakdown
+   agent and, when the plan names one, a review agent.
+2. **Thin context.** Read the tracker's active file and short agent reports.
+   Do not read code, whole diffs or logs yourself; when a question needs
+   reading, start a background agent and act on its summary. Spot-check only
+   the risky lines the plan names (secrets, egress, auth).
+3. **Few wake-ups.** No PR subscriptions for waiting on CI or bot reviews.
+   Use one scheduled check-in at the expected CI time, or the wave agent's
+   report. Let one background agent answer a CodeRabbit round in one batch,
+   instead of waking for each comment.
+4. **Short lifetime.** Around 300K tokens of context, at a wave boundary:
+   write the state into the tracker and continue in a **new session** from
+   the start message (§9). Archive the session the day its release merges.
+   A cross-workstream orchestrator starts fresh each week.
+
+**Background agents (breakdown and waves)**
+
+5. **Brief by pointer, not by paste.** The brief names the tracker section,
+   the files and the acceptance test; the agent reads them itself.
+6. **Short reports.** At most 15 lines: PR, checks, fails-before and
+   passes-after evidence, deviations, open questions. The plan goes into the
+   tracker, not into the reply.
+7. **Targeted reading.** `Grep` and `Read` with line ranges, not whole files;
+   the Explore agent for "where is X" searches.
+
+**Trackers**
+
+8. **Active file under about 40K tokens** (about 160 KB). A finished phase
+   keeps its heading, goal, status, scope and checklist in the active file;
+   its breakdown, close and older progress-log rows move to
+   `.cursor/workstreams/archive/<slug>-phases-<range>.md`, unedited. Agents
+   read the archive only when a task needs that detail. Done 2026-11-24 for
+   `connectors` (400 KB → 44 KB) and `agent-runtime` (416 KB → 95 KB).
+
+**CI**
+
+9. Batch fixes into one push; one re-run at most for an infrastructure
+   failure; no pushes to kick CI (§12 and the working agreement).
