@@ -2,7 +2,7 @@
 
 Phase trackers for design → plan → build. Procedure: `.cursor/skills/phased-workstream/SKILL.md`. How an epic phase runs from plan to close (roles, merges, microVM lanes, phase close): `phase-playbook.md`.
 
-New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms and CI hygiene: `working-agreement.md`. Finished phases and trackers are deleted; git history keeps them.
+New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms and CI hygiene: `working-agreement.md`. Finished phases and trackers are deleted; git history keeps them. A large tracker instead moves its finished phases' breakdowns, closes and older progress-log rows to `archive/<slug>-phases-<range>.md`, unedited, so the active file stays under about 40K tokens (`phase-playbook.md` §13); read the archive only when a task needs it.
 
 | Slug | Title | Status | Current phase |
 |---|---|---|---|
