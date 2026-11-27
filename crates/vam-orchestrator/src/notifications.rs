@@ -564,22 +564,30 @@ pub fn resolve_connection_needs_reauth(
 
 /// The agent as a notification names it: its display name, else the last URN segment.
 fn access_agent_label(tx: &Connection, urn: &str) -> String {
-    crate::agent_access::agent_display_name_on(tx, urn).unwrap_or_else(|| {
-        urn.rsplit('/')
-            .next()
-            .unwrap_or(urn)
-            .rsplit(':')
-            .next()
-            .unwrap_or(urn)
-            .to_string()
-    })
+    crate::agent_access::agent_display_name_on(tx, urn).unwrap_or_else(|| access_urn_tail(urn))
+}
+
+/// The last URN segment: what names an agent the reader may not see.
+fn access_urn_tail(urn: &str) -> String {
+    urn.rsplit('/')
+        .next()
+        .unwrap_or(urn)
+        .rsplit(':')
+        .next()
+        .unwrap_or(urn)
+        .to_string()
 }
 
 /// Who is told of a new request for `urn`: its active agent admins, and when it has none, the
 /// active users with role `org_admin` or `operator`. Never a member, never a deactivated user.
-/// A user added as admin after the request was raised is not told (the queue and the `/v1/me`
-/// count still show it).
-fn access_request_recipients(tx: &Connection, urn: &str) -> Result<Vec<String>, OrchestratorError> {
+/// The requester is never a recipient. When the admin list changes, [`reconcile_access_requested`]
+/// brings the copies of the pending requests back to this set.
+fn access_request_recipients(
+    tx: &Connection,
+    urn: &str,
+    requester: &str,
+) -> Result<Vec<String>, OrchestratorError> {
+    let requester = crate::owner::resolved_owner(requester).to_string();
     let collect =
         |sql: &str, p: &[&dyn rusqlite::ToSql]| -> Result<Vec<String>, OrchestratorError> {
             let mut stmt = tx.prepare(sql)?;
@@ -593,14 +601,16 @@ fn access_request_recipients(tx: &Connection, urn: &str) -> Result<Vec<String>, 
          WHERE a.urn = ?1 AND u.deactivated_at IS NULL ORDER BY a.user_id",
         &[&urn],
     )?;
-    if !admins.is_empty() {
-        return Ok(admins);
-    }
-    collect(
-        "SELECT user_id FROM users
-         WHERE role IN ('org_admin', 'operator') AND deactivated_at IS NULL ORDER BY user_id",
-        &[],
-    )
+    let people = if admins.is_empty() {
+        collect(
+            "SELECT user_id FROM users
+             WHERE role IN ('org_admin', 'operator') AND deactivated_at IS NULL ORDER BY user_id",
+            &[],
+        )?
+    } else {
+        admins
+    };
+    Ok(people.into_iter().filter(|id| *id != requester).collect())
 }
 
 /// `access.requested` for a request that was just inserted `pending`: `action`, verb `decide`,
@@ -613,41 +623,130 @@ pub(crate) fn record_access_requested(
     urn: &str,
     requester: &str,
 ) -> Result<usize, OrchestratorError> {
+    let recipients = access_request_recipients(tx, urn, requester)?;
+    for user_id in &recipients {
+        record_access_requested_copy(tx, request_id, urn, requester, user_id)?;
+    }
+    Ok(recipients.len())
+}
+
+fn record_access_requested_copy(
+    tx: &Connection,
+    request_id: &str,
+    urn: &str,
+    requester: &str,
+    user_id: &str,
+) -> Result<RecordOutcome, OrchestratorError> {
     let kind = Kind::AccessRequested;
     let username = crate::users::get_user_on(tx, requester)
         .map(|u| u.username)
         .unwrap_or_else(|_| requester.to_string());
     let agent_label = access_agent_label(tx, urn);
     let (title, body) = render(kind, &agent_label, &username, None);
-    let recipients = access_request_recipients(tx, urn)?;
-    for user_id in &recipients {
-        record(
-            tx,
-            &NewNotification {
-                user_id: user_id.clone(),
-                kind,
-                severity: kind.severity(),
-                subject_key: request_id.to_string(),
-                run_id: None,
-                space_id: None,
-                thread_id: None,
-                approval_id: None,
-                grant_id: None,
-                receipt_digest: None,
-                agent_urn: urn.to_string(),
-                agent_label: agent_label.clone(),
-                via: None,
-                title: title.clone(),
-                body: body.clone(),
-                action: json!({
-                    "verb": kind.action_verb(),
-                    "target": { "kind": "access_request", "id": request_id },
-                    "api": format!("POST /v1/access-requests/{request_id}/decide"),
-                }),
-            },
+    record(
+        tx,
+        &NewNotification {
+            user_id: user_id.to_string(),
+            kind,
+            severity: kind.severity(),
+            subject_key: request_id.to_string(),
+            run_id: None,
+            space_id: None,
+            thread_id: None,
+            approval_id: None,
+            grant_id: None,
+            receipt_digest: None,
+            agent_urn: urn.to_string(),
+            agent_label,
+            via: None,
+            title,
+            body,
+            action: json!({
+                "verb": kind.action_verb(),
+                "target": { "kind": "access_request", "id": request_id },
+                "api": format!("POST /v1/access-requests/{request_id}/decide"),
+            }),
+        },
+    )
+}
+
+/// Brings the `access.requested` copies of every pending request on `urn` in line with who can
+/// decide now, after the admin list changed: a copy held by a user who is no longer a recipient
+/// closes as `expired` (delivery rows follow), and a recipient with no open copy gets one. With
+/// no active admin left the recipients are the org admins and operators. Idempotent, so a PUT
+/// that changes nothing emits nothing. Runs on the caller's transaction.
+pub(crate) fn reconcile_access_requested(
+    tx: &Connection,
+    urn: &str,
+) -> Result<(), OrchestratorError> {
+    let pending: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT request_id, user_id FROM agent_access
+             WHERE urn = ?1 AND state = 'pending' ORDER BY requested_at, request_id",
         )?;
+        let rows = stmt
+            .query_map([urn], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (request_id, requester) in pending {
+        let recipients = access_request_recipients(tx, urn, &requester)?;
+        let open: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, user_id FROM notifications
+                 WHERE kind = 'access.requested' AND subject_key = ?1 AND resolved_at IS NULL",
+            )?;
+            let rows = stmt
+                .query_map([&request_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (id, holder) in &open {
+            if !recipients.contains(holder) {
+                close_access_requested_row(tx, id, "expired")?;
+            }
+        }
+        for user_id in &recipients {
+            if !open.iter().any(|(_, holder)| holder == user_id) {
+                record_access_requested_copy(tx, &request_id, urn, &requester, user_id)?;
+            }
+        }
     }
-    Ok(recipients.len())
+    Ok(())
+}
+
+/// Closes one `access.requested` copy without an actor and ends its delivery.
+fn close_access_requested_row(
+    tx: &Connection,
+    id: &str,
+    reason: &str,
+) -> Result<(), OrchestratorError> {
+    let ts = now();
+    tx.execute(
+        "UPDATE notifications SET resolved_at = ?2, resolved_reason = ?3, updated_at = ?2
+         WHERE id = ?1 AND resolved_at IS NULL",
+        params![id, ts, reason],
+    )?;
+    crate::notify_delivery::on_resolved(tx, crate::notify_delivery::Resolved::Notification(id))?;
+    Ok(())
+}
+
+/// Whether the user can still decide requests for `urn`: active, and an agent admin of it or an
+/// `org_admin`/`operator` (the roles whose keys can hold `users:admin`).
+fn can_still_decide(tx: &Connection, urn: &str, user_id: &str) -> Result<bool, OrchestratorError> {
+    let active_role: Option<String> = tx
+        .query_row(
+            "SELECT role FROM users WHERE user_id = ?1 AND deactivated_at IS NULL",
+            [user_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(role) = active_role else {
+        return Ok(false);
+    };
+    Ok(role == "org_admin"
+        || role == "operator"
+        || crate::agent_access::is_admin_on(tx, urn, user_id)?)
 }
 
 /// Closes every open `access.requested` record of a request, whoever holds it: `acted` when an
@@ -699,7 +798,17 @@ pub(crate) fn record_access_decided(
     outcome: &str,
 ) -> Result<RecordOutcome, OrchestratorError> {
     let kind = Kind::AccessDecided;
-    let agent_label = access_agent_label(tx, &row.urn);
+    // Match `/v1/me/access`: a denied or revoked member on a restricted agent no longer sees it,
+    // so the notice carries the URN tail and not the current display name.
+    let hidden = matches!(outcome, "denied" | "revoked")
+        && crate::agent_access::read_policy(tx, &row.urn)
+            .map(|p| p.is_some_and(|p| p.visibility == crate::agent_access::Visibility::Restricted))
+            .unwrap_or(false);
+    let agent_label = if hidden {
+        access_urn_tail(&row.urn)
+    } else {
+        access_agent_label(tx, &row.urn)
+    };
     let (title, body) = render(kind, &agent_label, outcome, None);
     record(
         tx,
@@ -1464,6 +1573,24 @@ impl SqliteWorkflowStore {
         surface: &str,
     ) -> Result<Row, OrchestratorError> {
         let row = self.get_notification(user_id, id)?;
+        if row.kind == "access.requested" && row.resolved_at.is_none() {
+            // A copy the holder can no longer decide (removed admin, demoted org admin) is
+            // theirs to clear; one they still can decide stays until the decision.
+            let mut connection = self
+                .connection
+                .lock()
+                .map_err(|_| OrchestratorError::StorageUnavailable)?;
+            let tx = connection.transaction()?;
+            let closed = !can_still_decide(&tx, &row.agent_urn, user_id)?;
+            if closed {
+                close_access_requested_row(&tx, &row.id, "expired")?;
+            }
+            tx.commit()?;
+            drop(connection);
+            if closed {
+                return self.get_notification(user_id, id);
+            }
+        }
         if row.is_decision() {
             let hint = match (&row.approval_id, row.kind.as_str()) {
                 (Some(approval), _) => {

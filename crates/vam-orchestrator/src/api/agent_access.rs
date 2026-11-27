@@ -597,6 +597,9 @@ fn put_admins(
         |c| admin_precheck(c, auth, urn).map(|_| ()),
         |c, ()| {
             replace_admins_on(c, urn, &ids, auth.owner_user_id())?;
+            // Pending requests follow the new list: removed admins' copies close, new
+            // recipients get one. Replays never reach here.
+            notifications::reconcile_access_requested(c, urn)?;
             Ok((200, admins_json(&list_admins_on(c, urn)?).to_string()))
         },
     )

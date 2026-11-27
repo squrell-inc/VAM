@@ -13100,6 +13100,46 @@ async fn withdraw_and_leave_answer_by_the_callers_own_row() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replacing_the_admins_moves_the_copies_of_pending_requests() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/admin-copies");
+    w.policy("org", "approval", "pol").await;
+    let open = |user: &str| {
+        w.store
+            .list_notifications(
+                user,
+                &vam_orchestrator::notifications::ListFilter {
+                    open_only: true,
+                    kind: Some("access.requested".into()),
+                    ..Default::default()
+                },
+                None,
+                50,
+            )
+            .unwrap()
+    };
+    w.request(&w.alice, "req").await;
+    assert_eq!(open("carol").len(), 1);
+
+    // carol hands the agent to bob: her copy closes, bob is told, and the same list again (a
+    // new key, so not a replay) adds nothing.
+    for (who, key) in [(&w.carol, "swap"), (&w.admin, "again")] {
+        let (status, body) = w.put_admins(who, key, serde_json::json!(["bob"])).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    assert!(open("carol").is_empty());
+    assert_eq!(open("bob").len(), 1);
+    assert_eq!(open("bob")[0].count, 1);
+
+    // An empty list leaves the org admins to decide, and tells them.
+    let (status, body) = w.put_admins(&w.admin, "none", serde_json::json!([])).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(open("bob").is_empty());
+    assert_eq!(open("boss").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_admins_are_read_and_replaced_by_admins_only() {
     let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _state = isolate_state();

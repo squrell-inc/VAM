@@ -348,7 +348,7 @@ pub fn usable_predicate_sql(urn_column: &str, user_param: &str) -> String {
     )
 }
 
-fn read_policy(
+pub(crate) fn read_policy(
     connection: &Connection,
     urn: &str,
 ) -> Result<Option<AgentAccessPolicy>, OrchestratorError> {
@@ -380,7 +380,11 @@ fn read_policy(
     .transpose()
 }
 
-fn is_admin_on(connection: &Connection, urn: &str, user: &str) -> Result<bool, OrchestratorError> {
+pub(crate) fn is_admin_on(
+    connection: &Connection,
+    urn: &str,
+    user: &str,
+) -> Result<bool, OrchestratorError> {
     Ok(connection
         .query_row(
             "SELECT 1 FROM agent_admins WHERE urn = ?1 AND user_id = ?2",
@@ -2916,6 +2920,126 @@ mod notification_tests {
             .find(|r| r.resolved_reason.as_deref() == Some("withdrawn"))
             .expect("withdrawn row");
         assert!(w.acted_at.is_none());
+    }
+
+    fn set_admins(s: &SqliteWorkflowStore, ids: &[&str]) {
+        let ids: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+        s.with_access_connection(|c| {
+            replace_admins_on(c, URN, &ids, "oa")?;
+            notifications::reconcile_access_requested(c, URN)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn reason_of(s: &SqliteWorkflowStore, user: &str) -> Vec<Option<String>> {
+        s.list_notifications(
+            user,
+            &ListFilter {
+                kind: Some("access.requested".into()),
+                ..Default::default()
+            },
+            None,
+            10,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| r.resolved_reason)
+        .collect()
+    }
+
+    #[test]
+    fn changing_the_admins_moves_the_copies_of_pending_requests() {
+        let s = store();
+        approval_agent(&s);
+        raise(&s, "x");
+        assert_eq!(open(&s, "owner", "access.requested").len(), 1);
+
+        // A new admin is told of the request already pending; the old one keeps hers.
+        set_admins(&s, &["owner", "u3"]);
+        assert_eq!(open(&s, "u3", "access.requested").len(), 1);
+        assert_eq!(open(&s, "owner", "access.requested").len(), 1);
+
+        // A removed admin's copy closes `expired`, and a repeat changes nothing.
+        set_admins(&s, &["u3"]);
+        assert!(open(&s, "owner", "access.requested").is_empty());
+        assert_eq!(reason_of(&s, "owner"), vec![Some("expired".to_string())]);
+        set_admins(&s, &["u3"]);
+        let again = open(&s, "u3", "access.requested");
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].count, 1);
+        assert_eq!(reason_of(&s, "owner").len(), 1);
+    }
+
+    #[test]
+    fn an_empty_admin_list_falls_back_to_the_org_admins() {
+        let s = store();
+        approval_agent(&s);
+        raise(&s, "x");
+        set_admins(&s, &[]);
+        assert!(open(&s, "owner", "access.requested").is_empty());
+        assert_eq!(open(&s, "oa", "access.requested").len(), 1);
+        assert_eq!(
+            open(&s, crate::users::OPERATOR_USER_ID, "access.requested").len(),
+            1
+        );
+        // Naming an admin again closes the fallback copies.
+        set_admins(&s, &["u3"]);
+        assert!(open(&s, "oa", "access.requested").is_empty());
+        assert_eq!(open(&s, "u3", "access.requested").len(), 1);
+    }
+
+    #[test]
+    fn the_requester_is_never_a_recipient() {
+        let s = store();
+        approval_agent(&s);
+        s.with_access_connection(|c| {
+            let AccessAttempt::Inserted(row) = request_access_on(c, URN, "oa", false, false, None)?
+            else {
+                panic!("not inserted")
+            };
+            replace_admins_on(c, URN, &[], "oa")?;
+            notifications::record_access_requested(c, &row.request_id, URN, "oa")?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(open(&s, "oa", "access.requested").is_empty());
+        assert_eq!(
+            open(&s, crate::users::OPERATOR_USER_ID, "access.requested").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_holder_who_can_no_longer_decide_may_clear_the_copy() {
+        let s = store();
+        approval_agent(&s);
+        set_admins(&s, &[]);
+        raise(&s, "x");
+        let copy = open(&s, "oa", "access.requested").remove(0);
+        // Still an org admin: the copy stays a decision.
+        assert!(s.mark_notification_acted("oa", &copy.id, "web").is_err());
+        s.set_user_role("oa", UserRole::Member).unwrap();
+        let done = s.mark_notification_acted("oa", &copy.id, "web").unwrap();
+        assert_eq!(done.resolved_reason.as_deref(), Some("expired"));
+        assert!(open(&s, "oa", "access.requested").is_empty());
+    }
+
+    #[test]
+    fn a_denial_on_a_restricted_agent_names_the_agent_by_its_urn_tail() {
+        let s = store();
+        approval_agent(&s);
+        let row = raise(&s, "x");
+        s.put_agent_access_policy(URN, Visibility::Restricted, AccessMode::Approval, "oa")
+            .unwrap();
+        s.with_access_connection(|c| {
+            let decided = decide_on(c, &row.request_id, Decision::Deny, "owner", None)?;
+            notifications::record_access_decided(c, &decided, "denied")?;
+            Ok(())
+        })
+        .unwrap();
+        let told = open(&s, "u2", "access.decided");
+        assert_eq!(told[0].title, "Your access to notified was denied");
     }
 
     #[test]
