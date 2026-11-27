@@ -89,7 +89,7 @@ recommended answers (Q1-Q6) on 2026-11-27. The frozen contracts are in design §
 `GET`/`PUT /v1/agents/{urn}/admins` and the `/v1/me` additions. On top of them: Idempotency-Key
 replay on all six access writes, the four Phase 1 writes included (Phase 1 backlog), and
 `access.requested` and `access.decided` with their producers. Then OpenAPI, proto, baseline, the docs
-page and the catalog.md amendment. Design §6 is frozen with the amendments in section 2.
+page and the catalog.md amendment. Design §6 is frozen with its "Amendments frozen by Phase 2".
 
 **Phase rubric.** `Decide: NOW — proof 3 (owner goal; P1 override: browse, admins or lists leak a
 hidden agent), cost 2 (six routes, one table, two notification kinds, proto)`. `lane: no` for every
@@ -154,7 +154,7 @@ visibility='restricted') OR usable_predicate_sql(…)`, with a unit test that mi
 for every policy × caller (pattern `sql_predicate_matches_rule`, `agent_access.rs:1131`). For each
 row:
 - `visibility`/`mode` come from the policy, default `org`/`everyone`.
-- `access` follows design §6 and section 2 below: the caller's latest row by `requested_at DESC`.
+- `access` follows design §6 and its amendments: the caller's latest row by `ORDER BY state IN ('pending','approved') DESC, requested_at DESC, rowid DESC` (the one-second `requested_at` can tie after a withdraw and a re-request).
   Usable → `approved`; `withdrawn` or no row → `none`.
 - `canAdmin` = `is_agent_or_org_admin`.
 - `displayName`, `description` and `latestVersion` come from the decoded spec.
@@ -221,6 +221,15 @@ re-Add after leave works; the `marketplaces_tests.rs:514-549` DELETE cases stay 
 `Decide: NOW — proof 3, cost 0`.
 
 **AA-2.5 Idempotent replay** (W1, sec).
+
+> **W1 plan review (Opus, 2026-11-27) overrides the bullets below where they differ.** Order per
+> write: key (`require_replay_key`: 1..=255 bytes of 0x21-0x7E) → parse body (a 400 is never stored)
+> → fingerprint (length-prefixed fields) → one lock and transaction → prune rows older than 24 h →
+> precheck (Hidden 404, §2.3 admin 403, via `_on` reads) → lookup → state checks, write, render,
+> insert → commit. So a retry replays the first answer, never one to a caller who lost the right
+> to ask. Every store call in the lock is an `_on(&Connection)` variant. `DELETE …/access` has no
+> rule precheck (keyed on the caller's own row). `PUT …/admins`: only new ids must exist and be
+> active, 0..=50 distinct non-empty strings. Browse state ties break on `rowid DESC`.
 - Table (`agent_access::initialize_schema`): `agent_access_replays(owner_user_id, idempotency_key,
   fingerprint, status INTEGER, body TEXT, created_at INTEGER, PRIMARY KEY(owner_user_id,
   idempotency_key))`.
@@ -318,7 +327,7 @@ Both are absent when empty (Q2). `Decide: NOW — proof 2, cost 0`.
 
 `Decide: NOW — proof 2, cost 0`.
 
-**The phase session at approval (docs only, not a wave):** add the section 2 amendments to design
+**The phase session at approval (docs only, not a wave):** add the amendments to design
 §6, mark it **Frozen (2026-11-xx, Phase 2 breakdown)**, and correct §4's table (`/v1/me/access`
 paged, admins shape, DELETE 204). Commit with the breakdown.
 
@@ -403,7 +412,7 @@ Build waves run one at a time. Only the two Opus reviews read in parallel with n
 
 **Stop-after-W1 shortcut.** After W1 the base has every route and the replay, with N1–N6 green. The
 owner can try browse, queue, admins, withdraw and retries with `curl`. Notifications, `/v1/me`
-badges, OpenAPI and docs wait for W2. Conditions hold: routes and JSON are final (section 2), and
+badges, OpenAPI and docs wait for W2. Conditions hold: routes and JSON are final (design §6 amendments), and
 W2 only adds producers inside closures W1 already built. Not a separate release.
 
 **Opus reviews.**
@@ -421,7 +430,7 @@ W2 only adds producers inside closures W1 already built. Not a separate release.
 
 **Conflicts between the design and the code** (beyond the issues table)
 1. Design §4 shows `GET /v1/me/access → {requests}` unpaged, and gives no admins JSON in §6.
-   Section 2 adds both.
+   The design §6 amendments add both.
 2. Design §4: "`access.requested` … `is_decision`, cleared by the decide". In code, decision kinds
    are approval-bound in three places (`notifications.rs:878-901,1283-1288`, `notify_delivery.rs:87`).
    AA-2.6 extends each.
@@ -625,3 +634,4 @@ worth it: an extra close, checklist and full-suite release PR for files W3 edits
 | 2026-11-26 | — | Tracker and `design/agent-access.md` opened on `feat/agent-access` |
 | 2026-11-27 | 0 | A1–A9 approved by the owner with the recommended answers and locked (decisions 3–11); `connectors.md` D4 and D27 amended; design §2.4 marked approved. Docs only: no scenarios. |
 | 2026-11-27 | 1 | Tables, rule, enforcement at every admission site, Space bound after admission, and the write routes (access-policy, access, decide, revoke) landed via PR #144. Frozen: tables per design §2.2; rule outcomes per §2.3; Hidden = the route's own missing-URN text; Visible = 403 `agent_access_required: request access to '<urn>'`; A5 default `(org, approval)` on first marketplace install only; A6 first releaser seeded; admitted sessions keep running after a revoke (A7). Opus review: no Critical or High; found and fixed a missing check on `POST /v1/runs/{id}/messages`. Scoreboard: 7 new scenarios green, 10 adjusted, `cargo test -p vam-orchestrator` green, Actions green on 1edebe5, 1 fix wave. Backlog: Idempotency-Key replay on the four write routes (Phase 2); `PUT /v1/agents` and `POST …/release` name leaks (Phase 5). |
+| 2026-11-27 | 2 W1 | Browse, `/v1/me/access`, `/v1/access-requests`, admins GET/PUT, DELETE access and Idempotency-Key replay on all six access writes (the four Phase 1 writes included) landed on `feat/agent-access-p2`, with the Opus plan review's 10 changes. N1–N6 `active` and green; N7, N8 pending (W2). Scoreboard: N1–N6, P1 S1–S7 and the 10 marketplace scenarios 23/23 green, `cargo test -p vam-orchestrator` green, 0 fix cycles. |
