@@ -151,6 +151,7 @@ export default defineConfig({
 									{ label: 'Sessions and runs', slug: 'orchestrator/session' },
 									{ label: 'Catalog', slug: 'orchestrator/catalog' },
 									{ label: 'Member agents', slug: 'orchestrator/member-agents' },
+									{ label: 'Agent access', slug: 'orchestrator/agent-access' },
 									{ label: 'Users, keys and ownership', slug: 'orchestrator/user-isolation' },
 									{ label: 'Notifications', slug: 'orchestrator/notifications' },
 								],

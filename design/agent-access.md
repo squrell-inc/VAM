@@ -200,12 +200,12 @@ parsed inside the `/v1/agents/{*rest}` wildcard (`api/mod.rs:174`), like `/versi
 |---|---|---|
 | `GET /v1/catalog/agents?pageSize&pageToken` | any `catalog:read` | browse stubs (§6) for Visible and Usable agents |
 | `POST /v1/agents/{urn}/access {message?}` | caller | `open`: 200 approved; `approval`: 202 pending; 409 if a live row exists; 404 if Hidden |
-| `DELETE /v1/agents/{urn}/access` | caller | withdraw pending or leave approved; 204 |
-| `GET /v1/me/access` | caller | own rows, all states |
+| `DELETE /v1/agents/{urn}/access` | caller | withdraw pending or leave approved; 204, no body |
+| `GET /v1/me/access?pageSize&pageToken` | caller | own rows, all states, paged |
 | `GET /v1/access-requests?state=pending&adminOf=me&pageSize&pageToken` | agent admin, org admin | requests for agents the caller administers |
 | `POST /v1/access-requests/{id}/decide {decision: approve\|deny, reason}` | agent admin, org admin | 200; `reason` required on deny (400); 409 if not pending |
 | `POST /v1/agents/{urn}/access/{userId}/revoke {reason}` | agent admin, org admin | 200 |
-| `GET`, `PUT /v1/agents/{urn}/admins` | read: admins; write: admins, org admin | list of `{userId, username, addedBy, addedAt}` |
+| `GET`, `PUT /v1/agents/{urn}/admins` | read: admins; write: admins, org admin | `{admins: [{userId, username, addedBy, addedAt, deactivated?}]}` (§6) |
 | `PUT /v1/agents/{urn}/access-policy {visibility, mode}` | agent admin, org admin | 200 |
 | `GET /v1/me` | caller | adds `adminOfAgents: string[]`, `pendingAccessRequests: number` |
 
@@ -249,7 +249,7 @@ already 403→3, 404→4, 409→5 (`output.rs:110-114`).
 
 ## 6. Phase 4: Squrell-App, and the frontend contract
 
-Can start once Phase 2's contract is frozen, against mocks. Today (Squrell-App `main`):
+**Frozen (2026-11-27, Phase 2 breakdown approved by Roshan).** The shapes below, with the amendments at the end of this section, are the contract; changing one needs the owner. Phase 4 can start against mocks. Today (Squrell-App `main`):
 `services/apiClient.ts` is hand-rolled, no react-query or generated client, polling only;
 `MarketplaceAgentsList` renders `GET /v1/agents` (`services/agents.ts:564` `fetchLiveAgents`);
 `openAgentChat` (`context/WorkspaceChatContext.tsx:1171`) has no access gate; `MeInfo`
@@ -294,6 +294,34 @@ admin queue; `openAgentChat` and run errors map 403 `agent_access_required:` to 
 
 UI `status` from `access.state`: `none` → `available`, `approved` or `mode=everyone` →
 `approved`; a 404 for a URN the app knew → `hidden`.
+
+**Amendments frozen by Phase 2 (2026-11-27).** Where they differ from the sketches above, these win.
+
+- Conventions: camelCase, RFC3339 UTC with seconds. Unset optionals are omitted. Booleans and
+  `access.state` are always present. `pagination.nextPageToken` is `""` on the last page.
+- **Browse** `GET /v1/catalog/agents?pageSize&pageToken` returns released agents only, sorted by URN.
+  `access.state` is one of `none|pending|approved|denied|revoked`. An agent usable for any reason
+  shows `approved`; `withdrawn` or no row shows `none`. `requestId`, `decidedAt` and `reason` appear
+  only when a row backs the state.
+- **AccessRequest**: as above; `agentDisplayName` is omitted when the agent is now hidden from the
+  reader.
+- `GET /v1/me/access` returns `{requests, pagination}` (paged, newest first).
+  `GET /v1/access-requests?state=pending|approved|denied|revoked|withdrawn|all&adminOf=me` returns
+  `{requests, pagination}`, newest first.
+- `DELETE /v1/agents/{urn}/access` returns 204 with no body.
+- **Admins**: `GET /v1/agents/{urn}/admins` returns
+  `{admins: [{userId, username, addedBy, addedAt, deactivated?}]}`; `PUT` with
+  `{userIds: [...]}` replaces the list and returns the same shape.
+- **`/v1/me`**: `adminOfAgents` (explicit admin rows only) and `pendingAccessRequests` (requests the
+  caller can decide). Both are absent when empty or zero.
+- **Replay**: the same `Idempotency-Key` and the same request return the first 2xx answer byte for
+  byte. The same key with another request returns 409 `Conflict`, `Idempotency-Key was already used
+  for a different request`.
+- **Notifications**: `access.requested` (action, decision, subject = request id,
+  `action.target = {kind: access_request, id}`, `api: "POST /v1/access-requests/<id>/decide"`) and
+  `access.decided` (info). `resolvedReason` gains `withdrawn`.
+- Unchanged from Phase 1: the 403 body, Hidden = the route's missing-URN text, the policy and
+  request bodies.
 
 ---
 

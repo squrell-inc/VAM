@@ -84,7 +84,8 @@ pub const BOT_TOKEN_KEY: &str = "bot_token";
 const PERMANENT_CODES: [&str; 3] = ["user_not_found", "account_inactive", "invalid_auth"];
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const BATCH: usize = 50;
-const DECISION_KINDS_SQL: &str = "('approval.pending', 'question.asked', 'gate.opened')";
+const DECISION_KINDS_SQL: &str =
+    "('approval.pending', 'question.asked', 'gate.opened', 'access.requested')";
 
 fn now() -> i64 {
     crate::catalog::unix_timestamp()

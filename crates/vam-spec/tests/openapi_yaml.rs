@@ -247,3 +247,89 @@ fn openapi_refresh_drift_lists_every_value_the_route_answers() {
         assert!(values.contains(&v), "drift enum lacks {v}: {values:?}");
     }
 }
+
+#[test]
+fn openapi_has_agent_access_routes() {
+    let doc = load();
+    let paths = &doc["paths"];
+    // (path, methods): the Phase 1 writes and the Phase 2 routes of design/agent-access.md.
+    for (path, methods) in [
+        ("/v1/catalog/agents", &["get"][..]),
+        ("/v1/agents/{urn}/access-policy", &["put"]),
+        ("/v1/agents/{urn}/access", &["post", "delete"]),
+        ("/v1/agents/{urn}/access/{userId}/revoke", &["post"]),
+        ("/v1/agents/{urn}/admins", &["get", "put"]),
+        ("/v1/me/access", &["get"]),
+        ("/v1/access-requests", &["get"]),
+        ("/v1/access-requests/{id}/decide", &["post"]),
+    ] {
+        assert!(paths[path].is_mapping(), "missing path {path}");
+        for method in methods {
+            assert!(paths[path][*method].is_mapping(), "missing {method} {path}");
+        }
+    }
+    // Every access write takes the replay key and names the replay 409.
+    for (path, method) in [
+        ("/v1/agents/{urn}/access-policy", "put"),
+        ("/v1/agents/{urn}/access", "post"),
+        ("/v1/agents/{urn}/access", "delete"),
+        ("/v1/agents/{urn}/access/{userId}/revoke", "post"),
+        ("/v1/agents/{urn}/admins", "put"),
+        ("/v1/access-requests/{id}/decide", "post"),
+    ] {
+        let op = &paths[path][method];
+        let params = op["parameters"].as_sequence().expect("parameters");
+        assert!(
+            params.iter().any(|p| p["$ref"]
+                .as_str()
+                .is_some_and(|r| r.ends_with("ReplayKeyHeader"))),
+            "{method} {path} lacks the replay key"
+        );
+        assert!(
+            op["responses"]["409"].is_mapping(),
+            "{method} {path} lacks the 409"
+        );
+    }
+    // The routes behind `catalog:read` answer 403 for a key without it.
+    for (path, method) in [
+        ("/v1/catalog/agents", "get"),
+        ("/v1/agents/{urn}/access", "post"),
+        ("/v1/agents/{urn}/access", "delete"),
+        ("/v1/agents/{urn}/admins", "get"),
+        ("/v1/me/access", "get"),
+        ("/v1/access-requests", "get"),
+    ] {
+        assert!(
+            paths[path][method]["responses"]["403"].is_mapping(),
+            "{method} {path} lacks the 403"
+        );
+    }
+    let schemas = &doc["components"]["schemas"];
+    for s in [
+        "AgentAccessPolicy",
+        "AccessRequest",
+        "AccessState",
+        "CatalogAgent",
+        "ListCatalogAgentsResponse",
+        "ListAccessRequestsResponse",
+        "AgentAdmin",
+        "ListAgentAdminsResponse",
+        "PutAgentAdminsRequest",
+        "PutAgentAccessPolicyRequest",
+        "PutAgentAccessPolicyResponse",
+        "RequestAgentAccessRequest",
+        "RequestAgentAccessResponse",
+        "DecideAccessRequestRequest",
+        "DecideAccessRequestResponse",
+        "RevokeAgentAccessRequest",
+        "RevokeAgentAccessResponse",
+    ] {
+        assert!(schemas[s].is_mapping(), "missing schema {s}");
+    }
+    let me = &schemas["GetMeResponse"]["properties"];
+    assert!(me["adminOfAgents"].is_mapping());
+    assert!(me["pendingAccessRequests"].is_mapping());
+    let responses = &doc["components"]["responses"];
+    assert!(responses["AgentNotFound"].is_mapping());
+    assert!(responses["ReplayConflict"].is_mapping());
+}

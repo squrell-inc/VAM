@@ -185,6 +185,43 @@ mod tests {
     };
     use crate::users::UserRole;
 
+    #[test]
+    fn replay_key_is_1_to_255_printable_ascii_bytes() {
+        use axum::http::HeaderValue;
+        let with = |value: &[u8]| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "Idempotency-Key",
+                HeaderValue::from_bytes(value).expect("header value"),
+            );
+            require_replay_key(&headers)
+        };
+        assert_eq!(with(b"abc-123_~!").unwrap(), "abc-123_~!");
+        assert_eq!(with(b"  padded  ").unwrap(), "padded", "trimmed");
+        assert_eq!(with(&[b'k'; 255]).unwrap().len(), 255);
+        for bad in [
+            &[b'k'; 256][..],
+            b"has space",
+            b"tab\there",
+            "caf\u{e9}".as_bytes(),
+        ] {
+            assert!(
+                matches!(with(bad), Err(OrchestratorError::InvalidContract(_))),
+                "{bad:?}"
+            );
+        }
+        for blank in [&b""[..], b"   "] {
+            assert!(matches!(
+                with(blank),
+                Err(OrchestratorError::MissingIdempotencyKey)
+            ));
+        }
+        assert!(matches!(
+            require_replay_key(&HeaderMap::new()),
+            Err(OrchestratorError::MissingIdempotencyKey)
+        ));
+    }
+
     fn auth_with_scopes(scopes: &[&str]) -> AuthContext {
         AuthContext {
             key: AuthenticatedKey {
@@ -265,6 +302,29 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Longest `Idempotency-Key` the access writes accept, in bytes.
+pub const REPLAY_KEY_MAX_BYTES: usize = 255;
+
+/// The `Idempotency-Key` of an access write, which is stored and replayed: trimmed, 1..=255 bytes,
+/// each a printable ASCII character (0x21-0x7E). A missing or blank header is
+/// `MissingIdempotencyKey`; anything else out of range is a 400.
+pub fn require_replay_key(headers: &HeaderMap) -> Result<String, OrchestratorError> {
+    let raw = headers
+        .get("Idempotency-Key")
+        .or_else(|| headers.get("idempotency-key"))
+        .ok_or(OrchestratorError::MissingIdempotencyKey)?;
+    let key = raw.as_bytes().trim_ascii();
+    if key.is_empty() {
+        return Err(OrchestratorError::MissingIdempotencyKey);
+    }
+    if key.len() > REPLAY_KEY_MAX_BYTES || !key.iter().all(|b| (0x21..=0x7e).contains(b)) {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "Idempotency-Key must be 1 to {REPLAY_KEY_MAX_BYTES} printable ASCII characters"
+        )));
+    }
+    Ok(String::from_utf8_lossy(key).into_owned())
 }
 
 pub fn require_idempotency_key(headers: &HeaderMap) -> Result<String, OrchestratorError> {

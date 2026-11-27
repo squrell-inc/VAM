@@ -2530,7 +2530,7 @@ impl Engine {
             Step::CatalogWrite(x) => self.catalog_write(x),
             Step::Login(x) => self.login(x),
             Step::ChangePassword(x) => self.change_password(x),
-            Step::IdentityRequest(x) => self.identity_request(x),
+            Step::IdentityRequest(x) => self.identity_request(x, &s.id),
             Step::PutDraft(x) => self.put_draft(x, &s.id),
             Step::SetRole(x) => self.set_role(x),
             Step::CreateUser(x) => self.create_user(x, &s.id),

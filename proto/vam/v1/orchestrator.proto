@@ -715,6 +715,11 @@ message GetMeResponse {
   string default_namespace = 6;
   // Squrell marketplace domain. Empty (omitted in JSON) when none is set.
   string marketplace_domain = 7;
+  // URNs of the agents the caller administers by an explicit admin row (never by `users:admin`)
+  // that still have a released version, sorted. Omitted when empty.
+  repeated string admin_of_agents = 8;
+  // Pending access requests the caller can decide (every one for an org admin). Omitted when zero.
+  int32 pending_access_requests = 9;
 }
 
 // Org-admin mint/list/revoke API keys for a given user (Phase 8). Distinct
@@ -1200,6 +1205,119 @@ message ListSpacesRequest {
 message ListSpacesResponse {
   repeated Space spaces = 1;
   string next_page_token = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Agent access (design/agent-access.md section 6; routes in docs/api/openapi.yaml)
+// ---------------------------------------------------------------------------
+
+// Who may see and use one agent. A missing row means `org` + `everyone`.
+message AgentAccessPolicy {
+  string urn = 1;
+  string visibility = 2;             // org | restricted
+  string mode = 3;                   // everyone | open | approval
+  string updated_by = 4;
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+message PutAgentAccessPolicyRequest {
+  string visibility = 1;             // org | restricted
+  string mode = 2;                   // everyone | open | approval; restricted cannot be everyone
+}
+
+message PutAgentAccessPolicyResponse {
+  AgentAccessPolicy policy = 1;
+}
+
+// One request for access to an agent, in any state.
+message AccessRequest {
+  string request_id = 1;             // acr_...
+  string urn = 2;
+  // Left out when the agent is hidden from the reader now.
+  string agent_display_name = 3;
+  string user_id = 4;
+  string username = 5;
+  string state = 6;                  // pending | approved | denied | revoked | withdrawn
+  string message = 7;                // the member's own words; never copied into a notification
+  google.protobuf.Timestamp requested_at = 8;
+  string decided_by = 9;
+  google.protobuf.Timestamp decided_at = 10;
+  string reason = 11;
+}
+
+// The caller's standing on one agent in the browse list.
+message AccessState {
+  string state = 1;                  // none | pending | approved | denied | revoked
+  string request_id = 2;             // only when a row backs the state
+  google.protobuf.Timestamp decided_at = 3;
+  string reason = 4;
+}
+
+// One agent in `GET /v1/catalog/agents` (released agents the caller may ask for or use).
+message CatalogAgent {
+  string urn = 1;
+  string display_name = 2;
+  string description = 3;
+  string catalog_tier = 4;           // user | platform | marketplace
+  string latest_version = 5;
+  string visibility = 6;             // org | restricted
+  string mode = 7;                   // everyone | open | approval
+  AccessState access = 8;
+  bool can_admin = 9;
+}
+
+message ListCatalogAgentsResponse {
+  repeated CatalogAgent agents = 1;
+  PaginationResponse pagination = 2;
+}
+
+message RequestAgentAccessRequest {
+  string message = 1;                // up to 1000 characters
+}
+
+// 200 when granted at once (`open`), 202 when pending (`approval`).
+message RequestAgentAccessResponse {
+  AccessRequest request = 1;
+}
+
+message DecideAccessRequestRequest {
+  string decision = 1;               // approve | deny
+  string reason = 2;                 // required on deny
+}
+
+message DecideAccessRequestResponse {
+  AccessRequest request = 1;
+}
+
+message RevokeAgentAccessRequest {
+  string reason = 1;                 // required
+}
+
+message RevokeAgentAccessResponse {
+  AccessRequest request = 1;
+}
+
+// `GET /v1/me/access` and `GET /v1/access-requests`.
+message ListAccessRequestsResponse {
+  repeated AccessRequest requests = 1;
+  PaginationResponse pagination = 2;
+}
+
+message AgentAdmin {
+  string user_id = 1;
+  string username = 2;
+  string added_by = 3;
+  google.protobuf.Timestamp added_at = 4;
+  bool deactivated = 5;              // present only when true
+}
+
+message ListAgentAdminsResponse {
+  repeated AgentAdmin admins = 1;
+}
+
+// Replaces the whole list: 0..50 distinct active user ids.
+message PutAgentAdminsRequest {
+  repeated string user_ids = 1;
 }
 
 // ---------------------------------------------------------------------------

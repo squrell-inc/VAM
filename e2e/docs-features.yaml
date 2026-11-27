@@ -883,3 +883,20 @@ features:
       - a-run-with-an-inline-agent-is-refused-and-writes-nothing
       - a-run-with-an-inline-playbook-is-refused-and-writes-nothing
       - a-publisher-saves-a-draft-agent-and-runs-it-by-ref
+  - id: agent-access
+    area: "Agents and specs"
+    surface: "API GET /v1/catalog/agents; POST, DELETE /v1/agents/{urn}/access; GET /v1/me/access; GET /v1/access-requests; POST /v1/access-requests/{id}/decide; POST /v1/agents/{urn}/access/{userId}/revoke; GET, PUT /v1/agents/{urn}/admins; PUT /v1/agents/{urn}/access-policy; GET /v1/me adminOfAgents, pendingAccessRequests; notifications access.requested, access.decided"
+    dev: [cli/agent-access]
+    arch: [orchestrator/agent-access, orchestrator/catalog, orchestrator/notifications]
+    proves:
+      - a-member-browses-the-agents-they-may-ask-for
+      - a-member-requests-an-agent-an-admin-approves-and-the-member-runs-it
+      - a-member-cannot-see-or-run-a-restricted-agent
+      - an-agent-admin-sees-only-requests-for-agents-they-administer
+      - an-agent-admin-adds-a-second-admin-who-can-then-decide
+      - a-member-withdraws-a-request-and-leaves-an-agent
+      - hidden-agents-stay-hidden-on-every-new-access-route
+      - a-retried-access-write-replays-the-first-answer
+      - an-access-request-notifies-the-agents-admins-and-the-decision-notifies-the-member
+      - a-request-for-an-agent-with-no-admin-goes-to-the-org-admins
+    pending_page: true

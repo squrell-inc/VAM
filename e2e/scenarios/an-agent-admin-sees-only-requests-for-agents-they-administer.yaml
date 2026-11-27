@@ -1,0 +1,34 @@
+id: an-agent-admin-sees-only-requests-for-agents-they-administer
+title: An agent admin sees only the requests for agents they administer
+description: >
+  A publisher who released an agent sees the requests for it and not the requests for another agent. An org admin sees both, a member sees none in the queue and both of their own in My requests. A state the queue does not know is refused.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - agent-plain
+  - agent-inline-probe
+when:
+  - put-draft: { piece: agent-inline-probe, as: pub, status: 200 }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 200, body: { version: { major: 1, minor: 0, patch: 0 } } }
+  - identity-request: { as: pub, credential: key, method: put, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr1 } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr2 } }
+then:
+  - identity-request: { as: pub, credential: key, path: "/v1/access-requests?state=pending&adminOf=me", status: 200, contains: "{{acr2}}", lacks: "{{acr1}}" }
+  - identity-request: { as: admin, credential: key, path: "/v1/access-requests?state=pending&pageSize=1000", status: 200, contains: "{{acr1}}" }
+  - identity-request: { as: admin, credential: key, path: "/v1/access-requests?state=pending&pageSize=1000", status: 200, contains: "{{acr2}}" }
+  - identity-request: { as: member, credential: key, path: "/v1/access-requests", status: 200, lacks: "{{acr1}}" }
+  - identity-request: { as: member, credential: key, path: "/v1/access-requests", status: 200, lacks: "{{acr2}}" }
+  - identity-request: { as: member, credential: key, path: "/v1/me/access", status: 200, contains: "{{acr1}}" }
+  - identity-request: { as: member, credential: key, path: "/v1/me/access", status: 200, contains: "{{acr2}}" }
+  - identity-request: { as: pub, credential: key, path: "/v1/access-requests?state=bogus", status: 400 }
+guards:
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/paging.rs
+status: active

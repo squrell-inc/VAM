@@ -435,6 +435,92 @@ fn agent_record_from_listing(listing: CatalogListingRow) -> Result<AgentRecord, 
     })
 }
 
+fn query_catalog_listing_on(
+    connection: &rusqlite::Connection,
+    table: &str,
+    urn: &str,
+    where_sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<CatalogListingRow, OrchestratorError> {
+    assert_catalog_table(table)?;
+    connection
+        .query_row(
+            &format!(
+                "SELECT spec_bytes, COALESCE(NULLIF(owner_user_id, ''), 'local'),
+                        channel, catalog_tier, major, minor, patch, prerelease
+                 FROM {table} WHERE {where_sql}"
+            ),
+            params,
+            catalog_listing_from_row,
+        )
+        .map_err(|e| {
+            if e == rusqlite::Error::QueryReturnedNoRows {
+                OrchestratorError::NotFound(format!("{table} '{urn}' not found in catalog"))
+            } else {
+                OrchestratorError::Database(e)
+            }
+        })
+}
+
+/// The record read behind [`SqliteWorkflowStore::get_agent_record_admitted`], on a connection
+/// the caller already holds (the agent access routes run inside one lock, and a
+/// `std::sync::Mutex` is not reentrant).
+fn catalog_record_visible_on(
+    connection: &rusqlite::Connection,
+    kind: CatalogKind,
+    urn: &str,
+    owner_user_id: &str,
+    include_foreign_drafts: bool,
+) -> Result<AgentRecord, OrchestratorError> {
+    let table = kind.table();
+    match query_catalog_listing_on(
+        connection,
+        table,
+        urn,
+        latest_released_where_sql(),
+        params![urn],
+    ) {
+        Ok(listing) => agent_record_from_listing(listing),
+        Err(OrchestratorError::NotFound(_)) => {
+            let listing = if include_foreign_drafts {
+                query_catalog_listing_on(
+                    connection,
+                    table,
+                    urn,
+                    latest_draft_any_where_sql(),
+                    params![urn],
+                )?
+            } else {
+                query_catalog_listing_on(
+                    connection,
+                    table,
+                    urn,
+                    latest_draft_owned_where_sql(),
+                    params![urn, crate::owner::resolved_owner(owner_user_id)],
+                )?
+            };
+            agent_record_from_listing(listing)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// [`SqliteWorkflowStore::get_agent_record_admitted`] on a held connection.
+pub(crate) fn agent_record_admitted_on(
+    connection: &rusqlite::Connection,
+    urn: &str,
+    owner_user_id: &str,
+    include_foreign_drafts: bool,
+) -> Result<AgentRecord, OrchestratorError> {
+    catalog_record_visible_on(
+        connection,
+        CatalogKind::Agent,
+        urn,
+        owner_user_id,
+        include_foreign_drafts,
+    )
+}
+
 /// Version + digest of a released catalog row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogPin {
@@ -1638,18 +1724,17 @@ impl SqliteWorkflowStore {
         owner_user_id: &str,
         include_foreign_drafts: bool,
     ) -> Result<AgentRecord, OrchestratorError> {
-        match self.query_latest_released_listing(kind.table(), urn) {
-            Ok(listing) => agent_record_from_listing(listing),
-            Err(OrchestratorError::NotFound(_)) => {
-                let listing = if include_foreign_drafts {
-                    self.query_latest_draft_listing(kind.table(), urn)?
-                } else {
-                    self.query_latest_draft_owned_listing(kind.table(), urn, owner_user_id)?
-                };
-                agent_record_from_listing(listing)
-            }
-            Err(e) => Err(e),
-        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        catalog_record_visible_on(
+            &connection,
+            kind,
+            urn,
+            owner_user_id,
+            include_foreign_drafts,
+        )
     }
 
     fn get_catalog_message_at_version<T: Message + Default>(
@@ -1750,35 +1835,12 @@ impl SqliteWorkflowStore {
             })
     }
 
-    fn query_latest_released_listing(
-        &self,
-        table: &str,
-        urn: &str,
-    ) -> Result<CatalogListingRow, OrchestratorError> {
-        self.query_catalog_listing(table, urn, latest_released_where_sql(), params![urn])
-    }
-
     fn query_latest_draft_listing(
         &self,
         table: &str,
         urn: &str,
     ) -> Result<CatalogListingRow, OrchestratorError> {
         self.query_catalog_listing(table, urn, latest_draft_any_where_sql(), params![urn])
-    }
-
-    fn query_latest_draft_owned_listing(
-        &self,
-        table: &str,
-        urn: &str,
-        owner_user_id: &str,
-    ) -> Result<CatalogListingRow, OrchestratorError> {
-        let owner = crate::owner::resolved_owner(owner_user_id);
-        self.query_catalog_listing(
-            table,
-            urn,
-            latest_draft_owned_where_sql(),
-            params![urn, owner],
-        )
     }
 
     fn query_catalog_listing(
@@ -1788,28 +1850,11 @@ impl SqliteWorkflowStore {
         where_sql: &str,
         params: impl rusqlite::Params,
     ) -> Result<CatalogListingRow, OrchestratorError> {
-        assert_catalog_table(table)?;
         let connection = self
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        connection
-            .query_row(
-                &format!(
-                    "SELECT spec_bytes, COALESCE(NULLIF(owner_user_id, ''), 'local'),
-                            channel, catalog_tier, major, minor, patch, prerelease
-                     FROM {table} WHERE {where_sql}"
-                ),
-                params,
-                catalog_listing_from_row,
-            )
-            .map_err(|e| {
-                if e == rusqlite::Error::QueryReturnedNoRows {
-                    OrchestratorError::NotFound(format!("{table} '{urn}' not found in catalog"))
-                } else {
-                    OrchestratorError::Database(e)
-                }
-            })
+        query_catalog_listing_on(&connection, table, urn, where_sql, params)
     }
 
     fn query_spec_at_version(

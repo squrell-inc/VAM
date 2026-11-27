@@ -1,0 +1,28 @@
+id: hidden-agents-stay-hidden-on-every-new-access-route
+title: Hidden agents stay hidden on every new access route
+description: >
+  An agent restricted to others is missing for a member on browse, the admins routes, the leave route and both request lists, with the very text of an agent that does not exist.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: member }
+  - agent-plain
+when:
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: restricted, mode: approval } }
+then:
+  - identity-request: { as: member, credential: key, path: "/v1/catalog/agents?pageSize=1000", status: 200, lacks: "{{urn:agent-plain}}" }
+  - identity-request: { as: member, credential: key, path: "/v1/agents/{{urn:agent-plain}}/admins", status: 404, contains: "agents '{{urn:agent-plain}}' not found in catalog" }
+  - identity-request: { as: member, credential: key, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/admins", status: 404, contains: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' not found in catalog" }
+  - identity-request: { as: member, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/admins", status: 404, body: { userIds: [] }, contains: "agents '{{urn:agent-plain}}' not found in catalog" }
+  - identity-request: { as: member, credential: key, method: put, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/admins", status: 404, body: { userIds: [] }, contains: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' not found in catalog" }
+  - identity-request: { as: member, credential: key, method: delete, path: "/v1/agents/{{urn:agent-plain}}/access", status: 404, contains: "agents '{{urn:agent-plain}}' not found in catalog" }
+  - identity-request: { as: member, credential: key, method: delete, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/access", status: 404, contains: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' not found in catalog" }
+  - identity-request: { as: member, credential: key, path: "/v1/me/access", status: 200, lacks: "{{urn:agent-plain}}" }
+  - identity-request: { as: member, credential: key, path: "/v1/access-requests", status: 200, lacks: "{{urn:agent-plain}}" }
+guards:
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/paging.rs
+status: active

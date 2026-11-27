@@ -460,6 +460,10 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   `fields` values and `body` (a remembered word is percent-encoded in a `path`). `{{urn:<agent piece>}}` (no `:<as>`)
   is the URN of a given agent piece, in the same places. `check` refuses a `{{urn:<piece>}}` whose piece is not in
   `given`, and a `remember` with an empty `field` or `as`.
+- `identity-request: { idempotencyKey: <string> }` (writes only): sends the `Idempotency-Key` header as
+  `e2e-<runTag>-<scenario>-<string>`, unique per run on a shared node and the same everywhere in one scenario, so a
+  second step with the same string is a retry of the first. Without it every write gets a fresh key, as before.
+  `check` refuses an empty or odd string (1 to 100 of letters, digits, `-`, `_`, `.`) and the field on a `get`.
 
 ## Receipt expectations and offline verify
 
