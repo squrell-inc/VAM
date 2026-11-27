@@ -67,7 +67,7 @@ Done phase sections are deleted; git history keeps them.
 **Goal:** the three tables, the one rule (design §2.3) in the store's agent `*_visible` reads, and
 every admission site refusing Hidden (404) and not-granted (403).  
 **Depends on:** Phase 0  
-**Plan:** not drafted  
+**Plan:** `design/agent-access-p1-breakdown.md` (approved by the owner 2026-11-27)  
 **Exit:** design §3 scenarios active and green (member cannot see or run; request, approve, run;
 add open and run; revoked scheduled run refused; existing agents unchanged on upgrade);
 `cargo test -p vam-orchestrator` green.
