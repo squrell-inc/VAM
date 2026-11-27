@@ -1,0 +1,33 @@
+id: a-member-adds-an-open-agent-and-runs-it-at-once
+title: A member adds an open agent and runs it at once
+description: >
+  The agent is org-visible and open. The member is refused with a request hint, adds it with no approval step, then runs it and finds it listed.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: member }
+  - agent-plain
+when:
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: org, mode: open } }
+  - chat: { text: "e2e-step:hi Hello", agent: agent-plain, as: member, refused: true }
+  - expect: { refused: true, status: 403, contains: "agent_access_required:" }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 200, body: {}, fields: { request.state: approved } }
+then:
+  - chat: { text: "e2e-step:hi Hello", agent: agent-plain, as: member }
+  - expect: { run: succeeded }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents", status: 200, contains: "{{urn:agent-plain}}" }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+mock:
+  - when: { step: hi, stepStart: true }
+    reply: { text: Hello. }
+status: pending
+expectFail: { step: when.0, class: product }

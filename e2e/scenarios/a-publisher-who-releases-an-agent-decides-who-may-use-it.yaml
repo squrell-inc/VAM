@@ -1,0 +1,34 @@
+id: a-publisher-who-releases-an-agent-decides-who-may-use-it
+title: A publisher who releases an agent decides who may use it, and a catalog key is not an admin
+description: >
+  The publisher saves and releases an agent of their own and sets it to approval. A member with a catalog key cannot set the policy or decide a request. The publisher approves the member, who then reads and lists the agent.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - { piece: org-member-with-a-catalog-key, as: ckey }
+  - agent-inline-probe
+when:
+  - put-draft: { piece: agent-inline-probe, as: pub, status: 200 }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 200, body: { version: { major: 1, minor: 0, patch: 0 } } }
+  - identity-request: { as: pub, credential: key, method: put, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - identity-request: { as: ckey, credential: key, method: put, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access-policy", status: 403, body: { visibility: org, mode: open } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr } }
+  - identity-request: { as: ckey, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 404, body: { decision: approve } }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 200, body: { decision: approve } }
+then:
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/{{urn:agent-inline-probe:pub}}", status: 200 }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents", status: 200, contains: "{{urn:agent-inline-probe:pub}}" }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+status: pending
+expectFail: { step: when.2, class: product }

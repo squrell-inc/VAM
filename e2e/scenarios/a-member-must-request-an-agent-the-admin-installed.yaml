@@ -1,0 +1,35 @@
+id: a-member-must-request-an-agent-the-admin-installed
+title: A member must request an agent the admin installed from a marketplace before using it
+description: >
+  An install by the admin leaves the agent org-visible and approval-gated. The member is refused with a request hint, requests access, the admin approves, and the member then chats with it.
+tags: [members, permissions, connectors]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: member }
+  - marketplace-squrell
+when:
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: admin }
+  - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: admin }
+  - chat: { text: "e2e-step:hi Hello", agent: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", as: member, refused: true }
+  - expect: { refused: true, status: 403, contains: "agent_access_required:" }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/urn%3Avam%3Aagent%3Ahub.squrell.cloud%2Fsqurell%2Fexecutive-assistant/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr } }
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 200, body: { decision: approve } }
+then:
+  - chat: { text: "e2e-step:hi Hello", agent: "urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant", as: member }
+  - expect: { run: succeeded }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/marketplace/import.rs
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+mock:
+  - when: { step: hi, stepStart: true }
+    reply: { text: Hello. }
+status: pending
+expectFail: { step: when.3, class: product }

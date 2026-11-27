@@ -1,0 +1,32 @@
+id: existing-agents-stay-usable-after-upgrade
+title: Agents that existed before access rules stay usable by every member, with no row written
+description: >
+  No policy is written. The member runs the agent, lists and reads it, creates a Space on it, and an access request answers that the agent is already usable.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: member }
+  - agent-plain
+when:
+  - chat: { text: "e2e-step:hi Hello", agent: agent-plain, as: member }
+  - expect: { run: succeeded }
+then:
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents", status: 200, contains: "{{urn:agent-plain}}" }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/{{urn:agent-plain}}", status: 200 }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/spaces", status: 200, body: { agentUrn: "{{urn:agent-plain}}" } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 409, body: {}, contains: "already usable" }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+mock:
+  - when: { step: hi, stepStart: true }
+    reply: { text: Hello. }
+status: pending
+expectFail: { step: then.3, class: product }

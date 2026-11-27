@@ -3056,7 +3056,7 @@ impl Engine {
     /// tried for `<piece>` (`encode`: percent-encoded for a path). One that no step produced is
     /// class `scenario`.
     pub(super) fn expand_draft_urns(&self, text: &str, encode: bool) -> Result<String, Fail> {
-        identity::expand_urns(text, encode, |piece, who| {
+        let mut out = identity::expand_urns(text, encode, |piece, who| {
             self.draft_urn(piece, Some(who)).map(String::from)
         })
         .map_err(|inner| {
@@ -3065,7 +3065,32 @@ impl Engine {
                 format!("a `put-draft` or inline `chat` as the identity named by `{{{{urn:{inner}}}}}` before this step"),
                 "none yet",
             )
-        })
+        })?;
+        // `{{urn:<piece>}}` (no identity): the URN of a given agent piece.
+        for (alias, rec) in &self.ctx.pieces {
+            let key = format!("{{{{urn:{alias}}}}}");
+            if out.contains(&key) && !rec.urn.is_empty() {
+                let urn = if encode {
+                    crate::api::seg(&rec.urn)
+                } else {
+                    rec.urn.clone()
+                };
+                out = out.replace(&key, &urn);
+            }
+        }
+        // `{{<as>}}`: a word an `identity-request` kept with `remember`.
+        for (name, value) in &self.ctx.cli_vars {
+            let key = format!("{{{{{name}}}}}");
+            if out.contains(&key) {
+                let v = if encode {
+                    crate::api::seg(value)
+                } else {
+                    value.clone()
+                };
+                out = out.replace(&key, &v);
+            }
+        }
+        Ok(out)
     }
 
     /// The value never leaves `Secret`; an error text from vamd is scrubbed of it.

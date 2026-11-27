@@ -1110,10 +1110,47 @@ fn check_scenario(
                         Some(String::new())
                     });
                     refer_placeholders(errors, p, &pos, &org_aliases, text);
+                    for piece in crate::engine::identity::bare_urn_pieces(text) {
+                        refer(errors, p, &pos, &aliases, Some(piece));
+                    }
                 }
-                if let Some(f) = &x.fields {
-                    for ph in crate::engine::identity::field_placeholders(f) {
-                        refer_placeholders(errors, p, &pos, &org_aliases, &format!("{{{ph}}}"));
+                let mut texts: Vec<String> = Vec::new();
+                let mut collect = |v: &serde_yaml::Value| {
+                    fn walk(v: &serde_yaml::Value, out: &mut Vec<String>) {
+                        match v {
+                            serde_yaml::Value::String(s) => out.push(s.clone()),
+                            serde_yaml::Value::Mapping(m) => m.values().for_each(|v| walk(v, out)),
+                            serde_yaml::Value::Sequence(q) => q.iter().for_each(|v| walk(v, out)),
+                            _ => {}
+                        }
+                    }
+                    walk(v, &mut texts);
+                };
+                x.fields
+                    .iter()
+                    .flat_map(|f| f.values())
+                    .for_each(&mut collect);
+                if let Some(b) = &x.body {
+                    collect(b);
+                }
+                for text in &texts {
+                    let _ = crate::engine::identity::expand_urns(text, false, |piece, who| {
+                        refer(errors, p, &pos, &aliases, Some(piece));
+                        refer_org(errors, p, &pos, &org_aliases, Some(who));
+                        Some(String::new())
+                    });
+                    refer_placeholders(errors, p, &pos, &org_aliases, text);
+                    for piece in crate::engine::identity::bare_urn_pieces(text) {
+                        refer(errors, p, &pos, &aliases, Some(piece));
+                    }
+                }
+                if let Some(r) = &x.remember {
+                    if r.field.trim().is_empty() || r.as_.trim().is_empty() {
+                        errors.push(CheckError::new(
+                            p,
+                            "identity-request",
+                            format!("{pos}: `remember` needs a `field` and an `as`"),
+                        ));
                     }
                 }
                 if x.contains.as_deref() == Some("") || x.lacks.as_deref() == Some("") {

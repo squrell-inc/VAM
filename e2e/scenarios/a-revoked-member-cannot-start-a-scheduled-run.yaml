@@ -1,0 +1,53 @@
+id: a-revoked-member-cannot-start-a-scheduled-run
+title: A revoked member cannot start a scheduled run, and a new chat is refused
+description: >
+  The member gets access through a request, arms a trigger and the first fire runs. After the admin revokes the access with a reason, the next fire is denied as agent unavailable and starts no run, and the member is refused when chatting.
+tags: [members, permissions, triggers]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: member }
+  - agent-with-trigger-tool
+  - trigger-test-broker
+when:
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-with-trigger-tool}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-with-trigger-tool}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr } }
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 200, body: { decision: approve } }
+  - chat: { text: "e2e-step:arm Arm the trigger", agent: agent-with-trigger-tool, as: member }
+  - approve: { as: member }
+  - expect: { run: succeeded }
+  - expect: { grant: { tool: echo_arm_trigger, count: 1 } }
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/agents/{{urn:agent-with-trigger-tool}}/access/{member.userId}/revoke", status: 200, body: { reason: "left the team" }, fields: { request.state: revoked } }
+  - fire-trigger: { key: fire-1, label: fired }
+then:
+  - expect: { fire: { outcomes: [DENIED], reason: AGENT_UNAVAILABLE } }
+  - expect: { runs: { count: 1 } }
+  - chat: { text: "e2e-step:hi Hello", agent: agent-with-trigger-tool, as: member, refused: true }
+  - expect: { refused: true, status: 403, contains: "agent_access_required:" }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+mock:
+  - when: { afterTool: echo_arm_trigger }
+    reply: { text: Armed. }
+  - when: { step: arm, stepStart: true }
+    reply:
+      toolCall:
+        name: echo_arm_trigger
+        args:
+          run:
+            message: "e2e-step:fired Write fired.txt mock-script:a-revoked-member-cannot-start-a-scheduled-run"
+            workspace: { mode: SAME }
+            thread: { mode: SAME }
+  - when: { step: fired, stepStart: true }
+    reply: { text: done }
+  - when: { step: hi, stepStart: true }
+    reply: { text: Hello. }
+status: pending
+expectFail: { step: when.0, class: product }

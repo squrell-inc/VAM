@@ -1,0 +1,41 @@
+id: a-member-requests-an-agent-an-admin-approves-and-the-member-runs-it
+title: A member requests an approval agent, an admin approves, and the member then runs it
+description: >
+  The agent is org-visible and needs approval. The member is refused with a request hint and the agent is not in their lists. The request is pending, a second one conflicts, a publisher who is not an admin of the agent cannot decide it, a denial needs a reason, the approval grants. After that the member runs the agent and sees it listed.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - agent-plain
+when:
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - chat: { text: "e2e-step:hi Hello", agent: agent-plain, as: member, refused: true }
+  - expect: { refused: true, status: 403, contains: "agent_access_required: request access to '" }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents", status: 200, lacks: "{{urn:agent-plain}}" }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/spaces", status: 200, lacks: "{{urn:agent-plain}}" }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 202, body: { message: "please" }, fields: { request.state: pending }, remember: { field: request.requestId, as: acr } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 409, body: { message: "again" } }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 404, body: { decision: approve } }
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 400, body: { decision: deny } }
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 200, body: { decision: approve }, fields: { request.state: approved } }
+then:
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 409, body: { decision: approve } }
+  - chat: { text: "e2e-step:hi Hello", agent: agent-plain, as: member }
+  - expect: { run: succeeded }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents", status: 200, contains: "{{urn:agent-plain}}" }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+mock:
+  - when: { step: hi, stepStart: true }
+    reply: { text: Hello. }
+status: pending
+expectFail: { step: when.0, class: product }

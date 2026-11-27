@@ -453,6 +453,13 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
 - `set-role: { as, role: publisher | member }`: as the bootstrap key, `POST` (publisher) or `DELETE` (member)
   `/v1/users/{id}/publish-grant` for the identity. A non-2xx answer is class `harness`, because the role change is
   arrangement, not the behaviour under test.
+- `identity-request` also takes `body` and `remember`. `body` is a YAML mapping sent as the JSON request body, every
+  string expanded with the placeholders below; without it a POST sends `{}` and the other methods send no body.
+  `remember: { field, as }` keeps the string, number or bool at the dotted `field` of the JSON answer (after the status
+  and the matchers pass; a missing field is class `product`) as `{{<as>}}`, for later `path`, `contains`, `lacks`,
+  `fields` values and `body` (a remembered word is percent-encoded in a `path`). `{{urn:<agent piece>}}` (no `:<as>`)
+  is the URN of a given agent piece, in the same places. `check` refuses a `{{urn:<piece>}}` whose piece is not in
+  `given`, and a `remember` with an empty `field` or `as`.
 
 ## Receipt expectations and offline verify
 
