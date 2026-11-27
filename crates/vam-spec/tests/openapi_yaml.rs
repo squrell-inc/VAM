@@ -290,6 +290,20 @@ fn openapi_has_agent_access_routes() {
             "{method} {path} lacks the 409"
         );
     }
+    // The routes behind `catalog:read` answer 403 for a key without it.
+    for (path, method) in [
+        ("/v1/catalog/agents", "get"),
+        ("/v1/agents/{urn}/access", "post"),
+        ("/v1/agents/{urn}/access", "delete"),
+        ("/v1/agents/{urn}/admins", "get"),
+        ("/v1/me/access", "get"),
+        ("/v1/access-requests", "get"),
+    ] {
+        assert!(
+            paths[path][method]["responses"]["403"].is_mapping(),
+            "{method} {path} lacks the 403"
+        );
+    }
     let schemas = &doc["components"]["schemas"];
     for s in [
         "AgentAccessPolicy",

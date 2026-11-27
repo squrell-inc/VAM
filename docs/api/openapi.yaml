@@ -1897,6 +1897,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The key lacks `catalog:read`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "404":
           $ref: "#/components/responses/AgentNotFound"
         "409":
@@ -1922,8 +1928,15 @@ paths:
       responses:
         "204":
           description: Withdrawn or left. No body.
+        "403":
+          description: The key lacks `catalog:read`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "404":
-          description: No live row, or a missing or hidden agent.
+          description: |
+            No live row, or a missing or hidden agent.
           content:
             application/json:
               schema:
@@ -1972,7 +1985,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "404":
-          $ref: "#/components/responses/AgentNotFound"
+          description: |
+            A missing or hidden agent (`agents '<urn>' not found in catalog`), or the user has no
+            approved access (`user '<id>' has no approved access to agent '<urn>'`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "409":
           $ref: "#/components/responses/ReplayConflict"
 
@@ -1993,7 +2012,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/ListAgentAdminsResponse"
         "403":
-          description: The caller is not an admin of the agent and not an org admin.
+          description: |
+            The key lacks `catalog:read`, or the caller is not an admin of the agent and not an
+            org admin.
           content:
             application/json:
               schema:
@@ -2006,7 +2027,9 @@ paths:
         Needs an admin of the agent or an org admin. `userIds` is the whole new list: 0 to 50
         distinct ids; each id new to the list must be an existing, active user (400 `user '<id>'
         cannot be an agent admin`, the same text for unknown and deactivated). An empty list
-        leaves org admins deciding. Answers the `GET` shape. The last write wins; read, change,
+        leaves org admins deciding. Open `access.requested` notifications of the pending requests
+        follow the new list: a removed admin's copy closes (`expired`), a new admin gets one, and
+        with no admin left the org admins do. Answers the `GET` shape. The last write wins; read, change,
         write is not atomic across two editors.
       parameters:
         - $ref: "#/components/parameters/AgentUrnPath"
@@ -2063,6 +2086,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The key lacks `catalog:read`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 
   /v1/access-requests:
     get:
@@ -2095,6 +2124,12 @@ paths:
                 $ref: "#/components/schemas/ListAccessRequestsResponse"
         "400":
           description: A bad `state`, `adminOf` or `pageToken`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The key lacks `catalog:read`.
           content:
             application/json:
               schema:
