@@ -148,6 +148,11 @@ pub struct IdentityRequest {
     pub body: Option<serde_yaml::Value>,
     /// Keeps a field of the JSON answer (dotted path) as `{{<as>}}` for later paths and bodies.
     pub remember: Option<RememberField>,
+    /// A fixed `Idempotency-Key` on a write: the runner sends `e2e-<runTag>-<scenario>-<string>`
+    /// (unique per run on a shared node, the same everywhere in one scenario), so a second step
+    /// with the same string is a retry. Without it each write gets a fresh key.
+    #[serde(default, rename = "idempotencyKey")]
+    pub idempotency_key: Option<String>,
 }
 
 /// `remember: { field, as }` of `identity-request`.
@@ -570,7 +575,11 @@ impl Engine {
         })
     }
 
-    pub(super) fn identity_request(&mut self, x: &IdentityRequest) -> Result<(), Fail> {
+    pub(super) fn identity_request(
+        &mut self,
+        x: &IdentityRequest,
+        scenario_id: &str,
+    ) -> Result<(), Fail> {
         // An `org` piece of role Owner is no second identity: it has no account, and its key is
         // the bootstrap key. `credential: key` as such a piece acts as the bootstrap key (an
         // admin's read of every draft).
@@ -660,9 +669,14 @@ impl Engine {
             },
             x.status
         );
+        let idem = match (&x.idempotency_key, write) {
+            (Some(k), true) => Some(format!("e2e-{}-{}-{}", self.eff_tag().0, scenario_id, k)),
+            (None, true) => Some(self.api.fresh_key()),
+            _ => None,
+        };
         let r = self
             .api
-            .call(method, &path, body.as_ref(), Some(&bearer), write)
+            .call_keyed(method, &path, body.as_ref(), Some(&bearer), idem.as_deref())
             .map_err(conn)?;
         let seen = scrub(&format!("{} {}", r.status, r.body), &[&bearer]);
         if r.status != x.status {
@@ -901,6 +915,17 @@ mod tests {
             "{ as: m, credential: key, path: /v1/x, status: 200, remember: { field: a } }"
         )
         .is_err());
+        let x: IdentityRequest = serde_yaml::from_str(
+            "{ as: m, credential: key, method: post, path: /v1/x, status: 200, idempotencyKey: req }",
+        )
+        .unwrap();
+        assert_eq!(x.idempotency_key.as_deref(), Some("req"));
+        assert!(serde_yaml::from_str::<IdentityRequest>(
+            "{ as: m, credential: key, path: /v1/x, status: 200 }"
+        )
+        .unwrap()
+        .idempotency_key
+        .is_none());
     }
 
     #[test]

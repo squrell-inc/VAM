@@ -1,0 +1,33 @@
+id: a-member-browses-the-agents-they-may-ask-for
+title: A member browses the agents they may ask for, with the state of each request
+description: >
+  The browse list shows the agents a member may ask for or use, never one restricted to others, and each row carries the member's state. A denial shows its reason. An admin sees the restricted agent too. Pages are keyed by the last URN and a token from another list is refused.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - agent-plain
+  - agent-inline-probe
+when:
+  - put-draft: { piece: agent-inline-probe, as: pub, status: 200 }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 200, body: { version: { major: 1, minor: 0, patch: 0 } } }
+  - identity-request: { as: pub, credential: key, method: put, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access-policy", status: 200, body: { visibility: restricted, mode: approval } }
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - identity-request: { as: member, credential: key, path: "/v1/catalog/agents?pageSize=1000", status: 200, contains: "{{urn:agent-plain}}", lacks: "{{urn:agent-inline-probe:pub}}" }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr } }
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 200, body: { decision: deny, reason: "not now" } }
+then:
+  - identity-request: { as: member, credential: key, path: "/v1/catalog/agents?pageSize=1000", status: 200, contains: "denied" }
+  - identity-request: { as: member, credential: key, path: "/v1/catalog/agents?pageSize=1000", status: 200, contains: "not now" }
+  - identity-request: { as: admin, credential: key, path: "/v1/catalog/agents?pageSize=1000", status: 200, contains: "{{urn:agent-inline-probe:pub}}" }
+  - identity-request: { as: member, credential: key, path: "/v1/catalog/agents?pageSize=1", status: 200, fields: { pagination.nextPageToken: { present: true } } }
+  - identity-request: { as: member, credential: key, path: "/v1/catalog/agents?pageToken=bogus", status: 400 }
+guards:
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/paging.rs
+status: pending
+expectFail: { step: when.4, class: product }

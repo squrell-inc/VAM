@@ -1153,6 +1153,27 @@ fn check_scenario(
                         ));
                     }
                 }
+                if let Some(k) = &x.idempotency_key {
+                    if k.trim().is_empty()
+                        || k.len() > 100
+                        || !k
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+                    {
+                        errors.push(CheckError::new(
+                            p,
+                            "identity-request",
+                            format!("{pos}: `idempotencyKey` is 1 to 100 letters, digits, `-`, `_` or `.`"),
+                        ));
+                    }
+                    if x.method.eq_ignore_ascii_case("get") {
+                        errors.push(CheckError::new(
+                            p,
+                            "identity-request",
+                            format!("{pos}: `idempotencyKey` is for writes; a get sends no key"),
+                        ));
+                    }
+                }
                 if x.contains.as_deref() == Some("") || x.lacks.as_deref() == Some("") {
                     errors.push(CheckError::new(
                         p,

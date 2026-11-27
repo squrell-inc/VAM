@@ -1,0 +1,36 @@
+id: an-access-request-notifies-the-agents-admins-and-the-decision-notifies-the-member
+title: An access request notifies the agent's admins and the decision notifies the member
+description: >
+  The request reaches the publisher who administers the agent, not an org administrator, not the member, and its text never carries the member's message. The publisher's badge counts it. Deciding clears the publisher's copy and tells the member.
+tags: [members, permissions, notifications]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-administrator, as: oadm }
+  - { piece: org-member, as: member }
+  - agent-inline-probe
+when:
+  - put-draft: { piece: agent-inline-probe, as: pub, status: 200 }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 200, body: { version: { major: 1, minor: 0, patch: 0 } } }
+  - identity-request: { as: pub, credential: key, method: put, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 202, body: { message: "secret-words-e2e" }, remember: { field: request.requestId, as: acr } }
+  - identity-request: { as: pub, credential: key, path: "/v1/notifications?kind=access.requested&state=open", status: 200, contains: "{{acr}}", lacks: "secret-words-e2e" }
+  - identity-request: { as: oadm, credential: key, path: "/v1/notifications?kind=access.requested&state=open", status: 200, lacks: "{{acr}}" }
+  - identity-request: { as: member, credential: key, path: "/v1/notifications?kind=access.requested&state=open", status: 200, lacks: "{{acr}}" }
+  - identity-request: { as: pub, credential: key, path: "/v1/me", status: 200, contains: "{{urn:agent-inline-probe:pub}}", fields: { pendingAccessRequests: 1 } }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 200, body: { decision: approve } }
+then:
+  - identity-request: { as: pub, credential: key, path: "/v1/notifications?kind=access.requested&state=open", status: 200, lacks: "{{acr}}" }
+  - identity-request: { as: member, credential: key, path: "/v1/notifications?kind=access.decided", status: 200, contains: "{{acr}}" }
+  - identity-request: { as: pub, credential: key, path: "/v1/me", status: 200, fields: { pendingAccessRequests: { absent: true } } }
+guards:
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/paging.rs
+  - vam:crates/vam-orchestrator/src/notifications.rs
+  - vam:crates/vam-orchestrator/src/notify_delivery.rs
+  - vam:crates/vam-orchestrator/src/api/me.rs
+status: pending
+expectFail: { step: when.4, class: product }

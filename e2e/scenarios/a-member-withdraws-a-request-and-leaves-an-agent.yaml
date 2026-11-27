@@ -1,0 +1,36 @@
+id: a-member-withdraws-a-request-and-leaves-an-agent
+title: A member withdraws a request and leaves an agent
+description: >
+  A member withdraws a pending request, and an admin can no longer decide it. With the agent open the member adds it, runs it, and leaves; the next start is refused. Leaving twice is a 404, My requests shows the withdrawn row, and the member can add the agent again.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: member }
+  - agent-plain
+when:
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr } }
+  - identity-request: { as: member, credential: key, method: delete, path: "/v1/agents/{{urn:agent-plain}}/access", status: 204 }
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 409, body: { decision: approve } }
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: org, mode: open } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 200, body: { message: "please" } }
+  - chat: { text: "e2e-step:hi Hello", agent: agent-plain, as: member }
+  - expect: { run: succeeded }
+  - identity-request: { as: member, credential: key, method: delete, path: "/v1/agents/{{urn:agent-plain}}/access", status: 204 }
+then:
+  - chat: { text: "e2e-step:hi Hello", agent: agent-plain, as: member, refused: true }
+  - expect: { refused: true, status: 403, contains: "agent_access_required:" }
+  - identity-request: { as: member, credential: key, method: delete, path: "/v1/agents/{{urn:agent-plain}}/access", status: 404 }
+  - identity-request: { as: member, credential: key, path: "/v1/me/access", status: 200, contains: "withdrawn" }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 200, body: { message: "please" } }
+guards:
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/paging.rs
+mock:
+  - when: { step: hi, stepStart: true }
+    reply: { text: Hello. }
+status: pending
+expectFail: { step: when.2, class: product }

@@ -109,6 +109,11 @@ impl Api {
         self.ca_path.as_deref()
     }
 
+    /// A fresh `Idempotency-Key` value.
+    pub fn fresh_key(&self) -> String {
+        self.idem()
+    }
+
     fn idem(&self) -> String {
         self.n.set(self.n.get() + 1);
         format!("e2e-{}-{}", self.tag, self.n.get())
@@ -164,14 +169,28 @@ impl Api {
         bearer: Option<&str>,
         idempotency: bool,
     ) -> Result<Reply, ConnError> {
+        let key = idempotency.then(|| self.idem());
+        self.call_keyed(method, path, body, bearer, key.as_deref())
+    }
+
+    /// Like `call`, with the `Idempotency-Key` header given: `Some(key)` sends exactly that value
+    /// (a retry under the same key), `None` sends none.
+    pub fn call_keyed(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        bearer: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<Reply, ConnError> {
         let mut rb = self
             .client()?
             .request(method, format!("{}{path}", self.base));
         if let Some(b) = bearer {
             rb = rb.header("Authorization", format!("Bearer {b}"));
         }
-        if idempotency {
-            rb = rb.header("Idempotency-Key", self.idem());
+        if let Some(k) = idempotency_key {
+            rb = rb.header("Idempotency-Key", k);
         }
         if let Some(b) = body {
             rb = rb.json(b);

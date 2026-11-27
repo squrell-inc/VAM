@@ -1,0 +1,32 @@
+id: a-request-for-an-agent-with-no-admin-goes-to-the-org-admins
+title: A request for an agent with no admin goes to the org admins
+description: >
+  An agent installed from a marketplace has no agent admin, so its request reaches the org administrator and the operator. A retry under the same key notifies nobody twice. When the member withdraws, the open records clear.
+tags: [members, permissions, notifications]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-administrator, as: oadm }
+  - { piece: org-member, as: member }
+  - marketplace-squrell
+when:
+  - marketplace-refresh: { marketplace: marketplace-squrell, as: admin }
+  - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: admin }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/urn%3Avam%3Aagent%3Ahub.squrell.cloud%2Fsqurell%2Fexecutive-assistant/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr }, idempotencyKey: ea }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/urn%3Avam%3Aagent%3Ahub.squrell.cloud%2Fsqurell%2Fexecutive-assistant/access", status: 202, body: { message: "please" }, idempotencyKey: ea }
+then:
+  - identity-request: { as: oadm, credential: key, path: "/v1/notifications?kind=access.requested&state=open", status: 200, contains: "{{acr}}" }
+  - identity-request: { as: admin, credential: key, path: "/v1/notifications?kind=access.requested&state=open", status: 200, contains: "{{acr}}" }
+  - identity-request: { as: member, credential: key, method: delete, path: "/v1/agents/urn%3Avam%3Aagent%3Ahub.squrell.cloud%2Fsqurell%2Fexecutive-assistant/access", status: 204 }
+  - identity-request: { as: oadm, credential: key, path: "/v1/notifications?kind=access.requested&state=open", status: 200, lacks: "{{acr}}" }
+guards:
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/paging.rs
+  - vam:crates/vam-orchestrator/src/notifications.rs
+  - vam:crates/vam-orchestrator/src/notify_delivery.rs
+  - vam:crates/vam-orchestrator/src/api/me.rs
+  - vam:crates/vam-orchestrator/src/marketplace/import.rs
+status: pending
+expectFail: { step: when.3, class: product }
