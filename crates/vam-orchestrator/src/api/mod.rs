@@ -182,6 +182,12 @@ pub fn router(state: AppState) -> Router {
             "/v1/access-requests/{id}/decide",
             post(agent_access::post_decide),
         )
+        .route(
+            "/v1/access-requests",
+            get(agent_access::get_access_requests),
+        )
+        .route("/v1/me/access", get(agent_access::get_my_access))
+        .route("/v1/catalog/agents", get(agent_access::get_catalog_agents))
         .route("/v1/policies", put(put_policy).get(list_policies))
         .route(
             "/v1/policies/{*rest}",
@@ -656,6 +662,9 @@ async fn get_agent_wildcard(
         return permissions::get_agent_permissions(state, auth, kind, &rest, query).await;
     }
     require_catalog_read(&auth)?;
+    if let Some(urn) = agent_access::admins_urn(&rest) {
+        return agent_access::get_admins(&state, &auth, &urn);
+    }
     let rest = rest.trim_start_matches('/');
     if let Some(urn_raw) = rest.strip_suffix("/versions") {
         return catalog_release::versions_response(&state, &auth, "agents", urn_raw);
@@ -721,7 +730,12 @@ async fn delete_agent_wildcard(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(rest): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    // `DELETE …/access` withdraws or leaves, before the catalog's refusal to delete.
+    if let Some(urn) = agent_access::access_urn(&rest) {
+        return agent_access::delete_access(&state, &auth, &urn, &headers);
+    }
     refuse_catalog_delete(&state, &auth, &rest, "agent").await
 }
 

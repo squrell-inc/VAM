@@ -84,6 +84,16 @@ pub fn int_cursor(c: Option<Vec<String>>) -> Result<Option<i64>, OrchestratorErr
     }
 }
 
+/// A cursor of one string part (the last row's key, such as a URN). Any other part count is
+/// refused, so a token of a two-part list cannot be replayed here.
+pub fn str_cursor(c: Option<Vec<String>>) -> Result<Option<String>, OrchestratorError> {
+    match c {
+        None => Ok(None),
+        Some(mut p) if p.len() == 1 => Ok(p.pop()),
+        Some(_) => Err(bad("pageToken is not a token this list returned")),
+    }
+}
+
 /// A cursor of an integer and a string part.
 pub fn pair_cursor(c: Option<Vec<String>>) -> Result<Option<(i64, String)>, OrchestratorError> {
     match c {
@@ -148,6 +158,18 @@ mod tests {
         assert_eq!(pair_cursor(c).unwrap(), Some((17, "sess-a".to_string())));
         assert_eq!(q(None, None).cursor("runs").unwrap(), None);
         assert_eq!(q(None, Some("")).cursor("runs").unwrap(), None);
+    }
+
+    #[test]
+    fn a_string_cursor_has_exactly_one_part() {
+        let t = token("catalog-agents", &["urn:vam:agent:a/b".into()]);
+        let c = q(None, Some(&t)).cursor("catalog-agents").unwrap();
+        assert_eq!(str_cursor(c).unwrap().as_deref(), Some("urn:vam:agent:a/b"));
+        assert_eq!(str_cursor(None).unwrap(), None);
+        let t = token("catalog-agents", &["a".into(), "b".into()]);
+        assert!(str_cursor(q(None, Some(&t)).cursor("catalog-agents").unwrap()).is_err());
+        let t = token("my-access", &["a".into()]);
+        assert!(q(None, Some(&t)).cursor("catalog-agents").is_err());
     }
 
     #[test]
