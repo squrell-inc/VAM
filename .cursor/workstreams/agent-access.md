@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: agent-access
-current_phase: 0
+current_phase: 1
 branch: feat/agent-access
 design_docs:
   - design/agent-access.md
@@ -34,12 +34,17 @@ Do not re-litigate without editing this list.
 1. Access is enforced in `vamd` (`crates/vam-orchestrator`), never in an HSP broker.
 2. Access is checked once, at agent admission; never per dependency.
 
-Proposed, waiting for the owner (design §2.4; each has a recommended answer there): A1 scope agents
-only; A2 amend `connectors.md` D4 and D27; A3 install stays node-wide, grant on top; A4 agent admins
-as a table, not a `UserRole`; A5 defaults (no policy row = `(org, everyone)`, installs
-`(org, approval)`); A6 first releaser seeded as admin; A7 revoke stops future scheduled and
-triggered starts; A8 403 `PermissionDenied` with message prefix `agent_access_required:`; A9
-manifest carries `access.default` only, no admins. Phase 0 moves the answers into this list.
+Owner-approved 2026-11-27 (design §2.4, recommended answers):
+
+3. A1: gate agents only; dependencies inherit; connectors, org MCP, models, secrets and brokers stay org-admin.
+4. A2: `design/connectors.md` D4 and D27 amended (done in Phase 0): admin installs, then each agent's policy decides who sees and uses it; org releases are visible to the whole org unless their access policy restricts it.
+5. A3: install stays node-wide (`/v1/marketplaces/…/install`, `users:admin`); the per-user grant sits on top.
+6. A4: agent admins are rows in `agent_admins`, not a `UserRole`; org admins are implicitly admins of every agent.
+7. A5: no policy row means `(org, everyone)`; new marketplace installs default `(org, approval)`; the org's own releases default `(org, everyone)`.
+8. A6: the user who first releases a URN is seeded as its admin; installs have none (org admins only).
+9. A7: a revoked grant stops future scheduled and triggered starts (checked at each `start_run`); a running session is not killed.
+10. A8: visible-but-not-granted returns 403 `PermissionDenied` with message prefix `agent_access_required:`; no new `VamErrorCode`.
+11. A9: the marketplace manifest carries `access.default {visibility, mode}` only, no admins.
 
 ## Status legend
 
@@ -55,17 +60,7 @@ Done phase sections are deleted; git history keeps them.
 
 | Phase | Name | Done |
 |---|---|---|
-
-### Phase 0 — Owner decisions
-
-**Goal:** A1–A9 answered and locked; D4 and D27 amended in `design/connectors.md`.  
-**Depends on:** none  
-**Plan:** not needed (docs only)  
-**Exit:** Locked decisions list holds A1–A9 as answered; `design/agent-access.md` §2.4 trimmed to
-the answers; `connectors.md` D4 and D27 rows edited.
-
-- [ ] Owner answers A1–A9
-- [ ] Lock them here; amend `connectors.md` D4, D27
+| 0 | Owner decisions | 2026-11-27 |
 
 ### Phase 1 — Storage, the rule, enforcement at agent admission
 
@@ -268,3 +263,4 @@ worth it: an extra close, checklist and full-suite release PR for files W3 edits
 | Date | Phase | What landed (end with the scoreboard: scenarios green, red, fix cycles, wall time) |
 |---|---|---|
 | 2026-11-26 | — | Tracker and `design/agent-access.md` opened on `feat/agent-access` |
+| 2026-11-27 | 0 | A1–A9 approved by the owner with the recommended answers and locked (decisions 3–11); `connectors.md` D4 and D27 amended; design §2.4 marked approved. Docs only: no scenarios. |

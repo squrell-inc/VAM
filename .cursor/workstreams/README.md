@@ -21,7 +21,7 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | `user-identity` | User identity: self-service password change, opaque user IDs and email usernames, then one namespace per user | active | 3 (one namespace per user): W0–W2 done on `claude/wizardly-feynman-d5ch88`, phase close next; 1 and 2 released to `main` |
 | `release-artifacts` | Release artifacts: one workspace version chosen at release time, manual owner-approved release workflow, immutable `v*` tags, an x86_64 node bundle and `vam` for Linux/macOS with SHA256SUMS and attestations, `vam dock` and `vam upgrade`. Phases A, B, Final; Lima and Windows in the next release (`v0.2.0`) | active | B (rc.1 published 2026-11-19; B waves merged; rc.2 close waits for the B release PR) |
 | `skill-list` | Skill list: paged `GET /v1/skills` for the member skill picker (`design/skill-list.md`) | active | 0 |
-| `agent-access` | Agent access: hidden-by-default agents, Add or Request, per-agent admins, enforced at agent admission in vamd (`design/agent-access.md`); branch `feat/agent-access` | active | 0 (owner decisions A1–A9) |
+| `agent-access` | Agent access: hidden-by-default agents, Add or Request, per-agent admins, enforced at agent admission in vamd (`design/agent-access.md`); branch `feat/agent-access` | active | 1 (Phase 0 done: A1–A9 locked) |
 
 ## Backlog (no tracker)
 

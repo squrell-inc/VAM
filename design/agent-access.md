@@ -1,7 +1,7 @@
 # Agent access: per-agent visibility, Add and Request, agent admins
 
-Proposal for open work, 2026-11-26; nothing built. Decisions A1–A9 are **proposed, waiting for the
-owner** (§2). Tracker: `.cursor/workstreams/agent-access.md`. Branch: `feat/agent-access`. What the
+Proposal for open work, 2026-11-26; nothing built. Decisions A1–A9 were **approved by the owner on
+2026-11-27 with the recommended answers** (§2.4). Tracker: `.cursor/workstreams/agent-access.md`. Branch: `feat/agent-access`. What the
 node does today is in `docs/src/content/docs/orchestrator/catalog.md`, `orchestrator/member-agents.md`
 and `orchestrator/user-isolation.md`.
 
@@ -114,9 +114,9 @@ Hidden must be indistinguishable from "no such agent": same status, same message
 (the `not_released` / `grants.rs` style). The 403 machine marker is a message prefix, as grants
 already do (`grants.rs:130`), because the error envelope has no custom codes (A8).
 
-### 2.4 Decisions awaiting the owner
+### 2.4 Decisions (approved by the owner, 2026-11-27)
 
-| # | Question | Recommended |
+| # | Question | Answer (locked) |
 |---|---|---|
 | A1 | Gate agents only; dependencies inherit; connectors, org MCP, models, secrets, brokers stay org-admin | Yes (§2.1) |
 | A2 | Amend `connectors.md` D4 (admin enables marketplace items) and D27 (org releases visible to the whole org) | Amend both: D4 "admin installs, then each agent's policy decides who sees and uses it"; D27 "visible to the whole org unless its access policy restricts it" |
