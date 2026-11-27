@@ -763,7 +763,7 @@ pub(crate) fn standing_on(
 
 /// The display name of an agent, from its latest released row, else its draft; `None` when the
 /// agent has no row or no name.
-fn agent_display_name_on(c: &Connection, urn: &str) -> Option<String> {
+pub(crate) fn agent_display_name_on(c: &Connection, urn: &str) -> Option<String> {
     crate::catalog::agent_record_admitted_on(c, urn, "", true)
         .ok()
         .and_then(|record| record.spec)
@@ -1336,6 +1336,39 @@ impl SqliteWorkflowStore {
     ) -> Result<Vec<AccessView>, OrchestratorError> {
         self.with_access_connection(|c| {
             list_access_on(c, caller, org_admin, scope, state, after, limit)
+        })
+    }
+
+    /// `GET /v1/me`: the URNs the user administers by an explicit `agent_admins` row (never by
+    /// `users:admin`) that still have a released row, sorted, and the number of `pending` requests
+    /// the user can decide (every one for an org admin).
+    pub fn access_me_summary(
+        &self,
+        user: &str,
+        org_admin: bool,
+    ) -> Result<(Vec<String>, i64), OrchestratorError> {
+        let user = resolved_owner(user);
+        self.with_access_connection(|c| {
+            let mut stmt = c.prepare(
+                "SELECT a.urn FROM agent_admins a
+                 WHERE a.user_id = ?1
+                   AND EXISTS (SELECT 1 FROM agents ag WHERE ag.urn = a.urn
+                               AND ag.channel = 'released')
+                 ORDER BY a.urn",
+            )?;
+            let urns = stmt
+                .query_map([user], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let scope = admin_scope_sql("ar.urn", "?1", org_admin);
+            let pending: i64 = c.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM agent_access ar
+                     WHERE ar.state = 'pending' AND ?1 IS NOT NULL AND {scope}"
+                ),
+                [user],
+                |r| r.get(0),
+            )?;
+            Ok((urns, pending))
         })
     }
 
@@ -2704,5 +2737,233 @@ mod phase2_tests {
             "userIds order counts"
         );
         assert_eq!(replay_fingerprint(&["a"]), replay_fingerprint(&["a"]));
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    use crate::notifications::{self, Acted, Kind, ListFilter};
+    use crate::users::UserRole;
+    use vam_spec::v1::{AgentSpec, ResourceId, Version};
+
+    const URN: &str = "urn:vam:agent:local.vam.dev/acme/notified";
+
+    /// `URN` released by `owner` (its admin by A6); users u2, u3, `oa` (org_admin), `gone`.
+    fn store() -> SqliteWorkflowStore {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store.initialize_catalog_schema().expect("catalog schema");
+        for user in ["u2", "u3", "owner", "gone"] {
+            store.create_user(user, user).expect("user");
+        }
+        store
+            .create_user_with_role("oa", "oa", UserRole::OrgAdmin)
+            .expect("org admin");
+        let spec = AgentSpec {
+            resource_id: Some(ResourceId { urn: URN.into() }),
+            display_name: "Notified".into(),
+            role: "assistant".into(),
+            instruction_source: Some(
+                vam_spec::v1::agent_spec::InstructionSource::SystemInstructions("x".into()),
+            ),
+            ..Default::default()
+        };
+        store
+            .publish_agent_draft_with_owner(&spec, "owner")
+            .expect("draft");
+        store
+            .release_agent(
+                URN,
+                &Version {
+                    major: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("release");
+        store
+    }
+
+    fn open(store: &SqliteWorkflowStore, user: &str, kind: &str) -> Vec<notifications::Row> {
+        let filter = ListFilter {
+            open_only: true,
+            kind: Some(kind.to_string()),
+            ..Default::default()
+        };
+        store
+            .list_notifications(user, &filter, None, 50)
+            .expect("list")
+    }
+
+    fn raise(store: &SqliteWorkflowStore, message: &str) -> AccessRow {
+        store
+            .with_access_connection(|c| {
+                let AccessAttempt::Inserted(row) =
+                    request_access_on(c, URN, "u2", false, false, Some(message))?
+                else {
+                    panic!("not inserted")
+                };
+                crate::notifications::record_access_requested(c, &row.request_id, URN, "u2")?;
+                Ok(row)
+            })
+            .expect("raise")
+    }
+
+    fn approval_agent(store: &SqliteWorkflowStore) {
+        store
+            .put_agent_access_policy(URN, Visibility::Org, AccessMode::Approval, "oa")
+            .unwrap();
+    }
+
+    #[test]
+    fn a_request_reaches_the_agents_admins_only_with_a_fixed_text() {
+        let s = store();
+        approval_agent(&s);
+        let row = raise(&s, "secret-words-unit");
+        let admin = open(&s, "owner", "access.requested");
+        assert_eq!(admin.len(), 1);
+        let n = &admin[0];
+        assert_eq!(n.title, "u2 asks to use Notified");
+        assert_eq!(n.severity, "action");
+        assert_eq!(n.agent_urn, URN);
+        let json = n.to_json().to_string();
+        assert!(!json.contains("secret-words-unit"), "{json}");
+        assert!(json.contains(&row.request_id));
+        assert!(json.contains("POST /v1/access-requests/"));
+        // The agent has an admin, so org admins, members and the requester hear nothing.
+        for user in ["oa", "u2", "u3", "gone", crate::users::OPERATOR_USER_ID] {
+            assert!(open(&s, user, "access.requested").is_empty(), "{user}");
+        }
+    }
+
+    #[test]
+    fn with_no_active_admin_the_org_admins_and_the_operator_are_told() {
+        let s = store();
+        approval_agent(&s);
+        s.deactivate_user("owner").unwrap();
+        raise(&s, "hi");
+        assert_eq!(open(&s, "oa", "access.requested").len(), 1);
+        assert_eq!(
+            open(&s, crate::users::OPERATOR_USER_ID, "access.requested").len(),
+            1
+        );
+        for user in ["owner", "u2", "u3", "gone"] {
+            assert!(open(&s, user, "access.requested").is_empty(), "{user}");
+        }
+    }
+
+    #[test]
+    fn a_decide_closes_acted_a_withdraw_closes_withdrawn_and_each_notifies_correctly() {
+        let s = store();
+        approval_agent(&s);
+        let first = raise(&s, "a");
+        s.with_access_connection(|c| {
+            let decided = decide_on(c, &first.request_id, Decision::Deny, "owner", Some("no"))?;
+            notifications::resolve_access_requested(
+                c,
+                &decided.request_id,
+                "acted",
+                Some(Acted {
+                    surface: "api",
+                    by_user_id: "owner",
+                }),
+            )?;
+            notifications::record_access_decided(c, &decided, "denied")?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(open(&s, "owner", "access.requested").is_empty());
+        let all = s
+            .list_notifications(
+                "owner",
+                &ListFilter {
+                    kind: Some("access.requested".into()),
+                    ..Default::default()
+                },
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(all[0].resolved_reason.as_deref(), Some("acted"));
+        assert_eq!(all[0].acted_by_user_id.as_deref(), Some("owner"));
+        let told = open(&s, "u2", "access.decided");
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].title, "Your access to Notified was denied");
+        assert_eq!(told[0].severity, "info");
+
+        // A new request, withdrawn by the member: closed `withdrawn`, with no actor.
+        let second = raise(&s, "b");
+        assert_eq!(open(&s, "owner", "access.requested").len(), 1);
+        s.with_access_connection(|c| {
+            let row = withdraw_on(c, URN, "u2", false)?;
+            assert_eq!(row.request_id, second.request_id);
+            notifications::resolve_access_requested(c, &row.request_id, "withdrawn", None)?;
+            Ok(())
+        })
+        .unwrap();
+        let all = s
+            .list_notifications(
+                "owner",
+                &ListFilter {
+                    kind: Some("access.requested".into()),
+                    ..Default::default()
+                },
+                None,
+                10,
+            )
+            .unwrap();
+        let w = all
+            .iter()
+            .find(|r| r.resolved_reason.as_deref() == Some("withdrawn"))
+            .expect("withdrawn row");
+        assert!(w.acted_at.is_none());
+    }
+
+    #[test]
+    fn a_replayed_request_notifies_once() {
+        let s = store();
+        approval_agent(&s);
+        let run = || {
+            with_replay_at(
+                &s,
+                1_000,
+                "u2",
+                "k",
+                "fp",
+                |_| Ok(()),
+                |c, ()| {
+                    let AccessAttempt::Inserted(row) =
+                        request_access_on(c, URN, "u2", false, false, None)?
+                    else {
+                        panic!("not inserted")
+                    };
+                    notifications::record_access_requested(c, &row.request_id, URN, "u2")?;
+                    Ok((202, row.request_id))
+                },
+            )
+            .unwrap()
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second);
+        let rows = open(&s, "owner", "access.requested");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].count, 1);
+    }
+
+    #[test]
+    fn me_summary_counts_explicit_admin_rows_and_pending_requests() {
+        let s = store();
+        approval_agent(&s);
+        assert_eq!(
+            s.access_me_summary("owner", false).unwrap(),
+            (vec![URN.to_string()], 0)
+        );
+        raise(&s, "x");
+        assert_eq!(s.access_me_summary("owner", false).unwrap().1, 1);
+        // An org admin decides every request but administers no agent by an explicit row.
+        assert_eq!(s.access_me_summary("oa", true).unwrap(), (vec![], 1));
+        assert_eq!(s.access_me_summary("u3", false).unwrap(), (vec![], 0));
+        // Kinds are closed: the new two parse.
+        assert_eq!(Kind::parse("access.decided"), Some(Kind::AccessDecided));
     }
 }

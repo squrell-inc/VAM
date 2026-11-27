@@ -32,6 +32,7 @@ use crate::api::paging::{self, PageQuery};
 use crate::api::{ensure_ready, json_http_response, percent_decode_path, permissions, AppState};
 use crate::catalog::catalog_not_found;
 use crate::error::OrchestratorError;
+use crate::notifications::{self, Acted};
 use crate::owner::resolved_owner;
 
 const POLICY_SUFFIX: &str = "/access-policy";
@@ -306,6 +307,8 @@ pub(crate) fn post_access(
             let status = if row.state == RequestState::Approved {
                 200
             } else {
+                // A pending request tells the agent's admins, on this same transaction.
+                notifications::record_access_requested(c, &row.request_id, &row.urn, &row.user_id)?;
                 202
             };
             let out = json!({ "request": request_json(&access_view_on(c, row, true)) });
@@ -337,7 +340,9 @@ pub(crate) fn delete_access(
     .run(
         |_| Ok(()),
         |c, ()| {
-            crate::agent_access::withdraw_on(c, urn, caller, org_admin)?;
+            let row = crate::agent_access::withdraw_on(c, urn, caller, org_admin)?;
+            // Every admin's copy closes, as `withdrawn` (nobody acted on it).
+            notifications::resolve_access_requested(c, &row.request_id, "withdrawn", None)?;
             Ok((204, String::new()))
         },
     )
@@ -434,6 +439,21 @@ pub(crate) async fn post_decide(
         },
         |c, ()| {
             let decided = decide_on(c, &request_id, decision, caller, reason.as_deref())?;
+            // One decision closes every admin's copy and tells the member.
+            notifications::resolve_access_requested(
+                c,
+                &decided.request_id,
+                "acted",
+                Some(Acted {
+                    surface: "api",
+                    by_user_id: resolved_owner(caller),
+                }),
+            )?;
+            let outcome = match decision {
+                Decision::Approve => "approved",
+                Decision::Deny => "denied",
+            };
+            notifications::record_access_decided(c, &decided, outcome)?;
             let out = json!({ "request": request_json(&access_view_on(c, decided, true)) });
             Ok((200, out.to_string()))
         },
@@ -476,6 +496,7 @@ pub(crate) fn post_revoke(
                 )));
             }
             let row = revoke_on(c, urn, user_id, auth.owner_user_id(), reason.as_deref())?;
+            notifications::record_access_decided(c, &row, "revoked")?;
             let out = json!({ "request": request_json(&access_view_on(c, row, true)) });
             Ok((200, out.to_string()))
         },
@@ -864,5 +885,122 @@ mod tests {
             Err(OrchestratorError::InvalidContract(_))
         ));
         assert!(parse_message(r#"{"message":3}"#).is_err());
+    }
+
+    /// Handlers build their JSON by hand (booleans such as `canAdmin` must be present), so this
+    /// guard parses each shape, every optional filled, as the proto message the contract names:
+    /// a field renamed on one side only fails here.
+    #[test]
+    fn handler_json_parses_as_its_proto_message() {
+        use crate::agent_access::AccessRow;
+        use vam_spec::encoding::json_to_proto;
+        use vam_spec::v1;
+
+        fn parse<T: prost::Message + Default>(name: &str, value: &Value) {
+            json_to_proto::<T>(name, &value.to_string())
+                .unwrap_or_else(|e| panic!("{name}: {e}\n{value}"));
+        }
+
+        let policy = AgentAccessPolicy {
+            urn: "urn:vam:agent:local.vam.dev/acme/gated".into(),
+            visibility: Visibility::Restricted,
+            mode: AccessMode::Approval,
+            updated_by: "u1".into(),
+            updated_at: 1_700_000_000,
+        };
+        let policy = policy_json(&policy);
+        parse::<v1::AgentAccessPolicy>("vam.v1.AgentAccessPolicy", &policy);
+        parse::<v1::PutAgentAccessPolicyResponse>(
+            "vam.v1.PutAgentAccessPolicyResponse",
+            &json!({ "policy": policy }),
+        );
+
+        let view = AccessView {
+            row: AccessRow {
+                request_id: "acr_1".into(),
+                urn: "urn:vam:agent:local.vam.dev/acme/gated".into(),
+                user_id: "u2".into(),
+                state: RequestState::Denied,
+                message: Some("please".into()),
+                requested_at: 1_700_000_000,
+                decided_by: Some("u1".into()),
+                decided_at: Some(1_700_000_100),
+                reason: Some("not now".into()),
+            },
+            agent_display_name: Some("Gated".into()),
+            username: Some("member".into()),
+        };
+        let request = request_json(&view);
+        parse::<v1::AccessRequest>("vam.v1.AccessRequest", &request);
+        for name in [
+            "vam.v1.RequestAgentAccessResponse",
+            "vam.v1.DecideAccessRequestResponse",
+            "vam.v1.RevokeAgentAccessResponse",
+        ] {
+            let body = json!({ "request": request });
+            match name {
+                "vam.v1.RequestAgentAccessResponse" => {
+                    parse::<v1::RequestAgentAccessResponse>(name, &body)
+                }
+                "vam.v1.DecideAccessRequestResponse" => {
+                    parse::<v1::DecideAccessRequestResponse>(name, &body)
+                }
+                _ => parse::<v1::RevokeAgentAccessResponse>(name, &body),
+            }
+        }
+        parse::<v1::ListAccessRequestsResponse>(
+            "vam.v1.ListAccessRequestsResponse",
+            &json!({ "requests": [request], "pagination": { "nextPageToken": "t" } }),
+        );
+
+        let agent = BrowseAgent {
+            urn: "urn:vam:agent:local.vam.dev/acme/gated".into(),
+            display_name: "Gated".into(),
+            description: "d".into(),
+            catalog_tier: "user".into(),
+            latest_version: "1.0.0".into(),
+            visibility: Visibility::Org,
+            mode: AccessMode::Approval,
+            state: "denied",
+            request_id: Some("acr_1".into()),
+            decided_at: Some(1_700_000_100),
+            reason: Some("not now".into()),
+            can_admin: false,
+        };
+        parse::<v1::ListCatalogAgentsResponse>(
+            "vam.v1.ListCatalogAgentsResponse",
+            &json!({ "agents": [browse_json(&agent)], "pagination": { "nextPageToken": "" } }),
+        );
+
+        let admins = admins_json(&[AdminEntry {
+            user_id: "u1".into(),
+            username: Some("pub".into()),
+            added_by: "u0".into(),
+            added_at: 1_700_000_000,
+            deactivated: true,
+        }]);
+        parse::<v1::ListAgentAdminsResponse>("vam.v1.ListAgentAdminsResponse", &admins);
+
+        // The request bodies the routes accept.
+        parse::<v1::PutAgentAccessPolicyRequest>(
+            "vam.v1.PutAgentAccessPolicyRequest",
+            &json!({ "visibility": "org", "mode": "open" }),
+        );
+        parse::<v1::RequestAgentAccessRequest>(
+            "vam.v1.RequestAgentAccessRequest",
+            &json!({ "message": "please" }),
+        );
+        parse::<v1::DecideAccessRequestRequest>(
+            "vam.v1.DecideAccessRequestRequest",
+            &json!({ "decision": "deny", "reason": "no" }),
+        );
+        parse::<v1::RevokeAgentAccessRequest>(
+            "vam.v1.RevokeAgentAccessRequest",
+            &json!({ "reason": "left" }),
+        );
+        parse::<v1::PutAgentAdminsRequest>(
+            "vam.v1.PutAgentAdminsRequest",
+            &json!({ "userIds": ["u1", "u2"] }),
+        );
     }
 }
