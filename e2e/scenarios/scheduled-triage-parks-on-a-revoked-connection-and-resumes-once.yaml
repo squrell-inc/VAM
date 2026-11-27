@@ -17,6 +17,7 @@ given:
 when:
   - marketplace-refresh: { marketplace: marketplace-squrell, as: org-admin }
   - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin }
+  - identity-request: { as: org-admin, credential: key, method: put, path: "/v1/agents/urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant/access-policy", status: 200, body: { visibility: org, mode: everyone } }
   - connector-node: { id: microsoft-365, enabled: true, consent: { tenant: 11111111-1111-4111-8111-111111111111 }, as: org-admin }
   - connector-connect: { id: microsoft-365, piece: mock-microsoft-login, tenant: 11111111-1111-4111-8111-111111111111, upn: member@e2e.example, expiresIn: 0, as: org-member }
   - mock-provider: { piece: mock-microsoft-login, revoke: true }

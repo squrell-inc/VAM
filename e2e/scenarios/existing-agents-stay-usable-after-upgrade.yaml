@@ -28,5 +28,4 @@ guards:
 mock:
   - when: { step: hi, stepStart: true }
     reply: { text: Hello. }
-status: pending
-expectFail: { step: then.3, class: product }
+status: active

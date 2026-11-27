@@ -20,6 +20,7 @@ when:
   - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-member, refused: true }
   - expect: { catalog: { kind: agent, urnPrefix: "urn:vam:agent:hub.squrell.cloud/squrell/", as: org-admin, count: 0 } }
   - marketplace-install: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin }
+  - identity-request: { as: org-admin, credential: key, method: put, path: "/v1/agents/urn:vam:agent:hub.squrell.cloud/squrell/executive-assistant/access-policy", status: 200, body: { visibility: org, mode: everyone } }
 then:
   - expect: { listings: { marketplace: marketplace-squrell, listing: microsoft-365, as: org-admin, fields: { installed.ref: microsoft-365-v1.0.0 } } }
   - expect: { catalog: { kind: skill, urnPrefix: "urn:vam:skill:hub.squrell.cloud/squrell/", as: org-admin, count: 1, fields: { tier: marketplace, readOnly: true, origin.marketplace: squrell, origin.listing: microsoft-365, origin.ref: microsoft-365-v1.0.0 } } }

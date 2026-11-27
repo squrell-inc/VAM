@@ -261,6 +261,53 @@ pub(crate) fn agent_access_on(
     ))
 }
 
+/// The error a refused outcome answers: Hidden is the route's own missing-URN error (built by
+/// the caller from the same constructor a missing URN uses, so the text is equal by
+/// construction), Visible is [`OrchestratorError::AgentAccessRequired`]. There is no
+/// `AgentHidden` variant on purpose. `Usable` is a caller bug and answers like Hidden.
+pub(crate) fn refusal(
+    access: AgentAccess,
+    urn: &str,
+    hidden: impl FnOnce() -> OrchestratorError,
+) -> OrchestratorError {
+    match access {
+        AgentAccess::Visible { .. } => OrchestratorError::AgentAccessRequired {
+            urn: urn.to_string(),
+        },
+        AgentAccess::Hidden | AgentAccess::Usable => hidden(),
+    }
+}
+
+/// Apply the rule at an admission site: `Ok` when `Usable`, else the [`refusal`].
+pub(crate) fn require_usable(
+    store: &SqliteWorkflowStore,
+    urn: &str,
+    caller: &str,
+    org_admin: bool,
+    row_is_own_draft: bool,
+    hidden: impl FnOnce() -> OrchestratorError,
+) -> Result<(), OrchestratorError> {
+    match agent_access(store, urn, caller, org_admin, row_is_own_draft)? {
+        AgentAccess::Usable => Ok(()),
+        denied => Err(refusal(denied, urn, hidden)),
+    }
+}
+
+/// The admin rule of design §2.3 for the policy, add and revoke routes: `users:admin` on the
+/// key, or an `agent_admins` row. Deliberately not `pdp.authorize`, `catalog:write`,
+/// `publish:grant` or `keys:admin`.
+pub fn is_agent_or_org_admin(
+    store: &SqliteWorkflowStore,
+    urn: &str,
+    user: &str,
+    has_users_admin: bool,
+) -> Result<bool, OrchestratorError> {
+    if has_users_admin {
+        return Ok(true);
+    }
+    store.is_agent_admin(urn, user)
+}
+
 /// SQL boolean expression: the agent whose URN is `urn_column` is `Usable` to the user bound as
 /// `user_param` (for example `?3`), for a caller that is not an org admin and reads no own draft.
 /// Mirrors [`decide_access`]: no policy row or `(org, everyone)`, or an agent admin, or an
@@ -1051,5 +1098,277 @@ mod tests {
                 assert_eq!(via_sql == 1, via_rule, "{urn} as {user}");
             }
         }
+    }
+}
+
+/// Phase 1 wave 2: the rule at the admission reads (design/agent-access.md §3, breakdown 1.1).
+#[cfg(test)]
+mod enforcement_tests {
+    use super::*;
+    use vam_spec::v1::{AgentSpec, ResourceId, Version};
+
+    const URN: &str = "urn:vam:agent:local.vam.dev/acme/gated";
+    const MISSING: &str = "urn:vam:agent:local.vam.dev/acme/no-such-agent";
+    const DRAFT_ONLY: &str = "urn:vam:agent:local.vam.dev/acme/draft-only";
+
+    fn spec(urn: &str) -> AgentSpec {
+        AgentSpec {
+            resource_id: Some(ResourceId {
+                urn: urn.to_string(),
+            }),
+            display_name: "Gated".to_string(),
+            description: "enforcement test".to_string(),
+            role: "assistant".to_string(),
+            instruction_source: Some(
+                vam_spec::v1::agent_spec::InstructionSource::SystemInstructions("x".to_string()),
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn v1() -> Version {
+        Version {
+            major: 1,
+            ..Default::default()
+        }
+    }
+
+    fn draft() -> Version {
+        Version {
+            major: 1,
+            prerelease: "draft".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// `URN` released by `owner` (an agent admin by A6); `DRAFT_ONLY` is `u1`'s unreleased draft.
+    fn store() -> SqliteWorkflowStore {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store.initialize_catalog_schema().expect("catalog schema");
+        for user in ["u1", "u2", "u3", "owner", "adm"] {
+            store.create_user(user, user).expect("user");
+        }
+        store
+            .publish_agent_draft_with_owner(&spec(URN), "owner")
+            .expect("draft");
+        store.release_agent(URN, &v1()).expect("release");
+        store
+            .publish_agent_draft_with_owner(&spec(DRAFT_ONLY), "u1")
+            .expect("draft only");
+        assert!(store.is_agent_admin(URN, "owner").unwrap(), "A6 seeding");
+        store
+    }
+
+    fn restrict(store: &SqliteWorkflowStore, visibility: Visibility, mode: AccessMode) {
+        store
+            .put_agent_access_policy(URN, visibility, mode, "adm")
+            .unwrap();
+        store
+            .put_agent_access_policy(DRAFT_ONLY, visibility, mode, "adm")
+            .unwrap();
+    }
+
+    /// The text with the URN replaced, so a hidden agent's answer and a missing URN's compare.
+    fn text(err: OrchestratorError, urn: &str) -> String {
+        err.to_string().replace(urn, "<urn>")
+    }
+
+    #[test]
+    fn hidden_answers_are_the_missing_urn_text_byte_for_byte() {
+        let s = store();
+        restrict(&s, Visibility::Restricted, AccessMode::Approval);
+        let caller = "u2";
+        let get = |urn: &str| {
+            text(
+                s.get_agent_record_visible(urn, caller, false).unwrap_err(),
+                urn,
+            )
+        };
+        assert_eq!(get(URN), get(MISSING));
+        assert_eq!(get(URN), "not found: agents '<urn>' not found in catalog");
+        let spec_get = |urn: &str| text(s.get_agent_visible(urn, caller, false).unwrap_err(), urn);
+        assert_eq!(spec_get(URN), spec_get(MISSING));
+        let at = |urn: &str, v: &Version| {
+            text(
+                s.get_agent_at_version_visible(urn, v, caller, false)
+                    .unwrap_err(),
+                urn,
+            )
+        };
+        assert_eq!(at(URN, &v1()), at(MISSING, &v1()));
+        assert!(at(URN, &v1()).contains("1.0.0 not found in catalog"));
+        assert_eq!(at(URN, &draft()), at(MISSING, &draft()));
+        let versions = |urn: &str| {
+            text(
+                s.list_catalog_versions("agents", urn, caller, false)
+                    .unwrap_err(),
+                urn,
+            )
+        };
+        assert_eq!(versions(URN), versions(MISSING));
+        assert!(versions(URN).contains("has no versions visible to this caller"));
+        // The list leaves it out.
+        let listed = s.list_agent_records_visible(caller, false).unwrap();
+        assert!(listed
+            .iter()
+            .all(|r| r.spec.as_ref().unwrap().resource_id.as_ref().unwrap().urn != URN));
+    }
+
+    #[test]
+    fn visible_answers_agent_access_required_and_is_not_listed() {
+        let s = store();
+        restrict(&s, Visibility::Org, AccessMode::Approval);
+        let caller = "u2";
+        let required = |e: OrchestratorError| {
+            assert!(
+                matches!(&e, OrchestratorError::AgentAccessRequired { urn } if urn == URN),
+                "{e:?}"
+            );
+            assert_eq!(
+                e.to_string(),
+                format!("agent_access_required: request access to '{URN}'")
+            );
+        };
+        required(s.get_agent_record_visible(URN, caller, false).unwrap_err());
+        required(s.get_agent_visible(URN, caller, false).unwrap_err());
+        required(
+            s.get_agent_at_version_visible(URN, &v1(), caller, false)
+                .unwrap_err(),
+        );
+        required(
+            s.list_catalog_versions("agents", URN, caller, false)
+                .unwrap_err(),
+        );
+        let listed = s.list_agent_records_visible(caller, false).unwrap();
+        assert!(listed
+            .iter()
+            .all(|r| r.spec.as_ref().unwrap().resource_id.as_ref().unwrap().urn != URN));
+        // A pending request does not change that.
+        s.insert_access_request(URN, caller, None, RequestState::Pending)
+            .unwrap();
+        required(s.get_agent_visible(URN, caller, false).unwrap_err());
+    }
+
+    #[test]
+    fn usable_callers_read_and_list_the_agent() {
+        let s = store();
+        restrict(&s, Visibility::Restricted, AccessMode::Approval);
+        s.insert_access_request(URN, "u3", None, RequestState::Approved)
+            .unwrap();
+        let listed_by = |user: &str, admin: bool| -> Vec<String> {
+            s.list_agent_records_visible(user, admin)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.spec.unwrap().resource_id.unwrap().urn)
+                .collect()
+        };
+        // The agent admin (first releaser), an approved user and an org admin: usable.
+        for (user, org_admin) in [("owner", false), ("u3", false), ("adm", true)] {
+            s.get_agent_visible(URN, user, org_admin).expect(user);
+            s.get_agent_at_version_visible(URN, &v1(), user, org_admin)
+                .expect(user);
+            s.list_catalog_versions("agents", URN, user, org_admin)
+                .expect(user);
+            assert!(
+                listed_by(user, org_admin).iter().any(|u| u == URN),
+                "{user}"
+            );
+        }
+        assert!(!listed_by("u2", false).iter().any(|u| u == URN));
+        // Opening the agent to everyone makes it usable for all again.
+        s.put_agent_access_policy(URN, Visibility::Org, AccessMode::Everyone, "adm")
+            .unwrap();
+        s.get_agent_visible(URN, "u2", false).expect("everyone");
+        assert!(listed_by("u2", false).iter().any(|u| u == URN));
+    }
+
+    #[test]
+    fn an_owners_own_draft_stays_usable_and_a_foreign_draft_stays_not_found() {
+        let s = store();
+        restrict(&s, Visibility::Restricted, AccessMode::Approval);
+        // u1 owns the unreleased draft.
+        s.get_agent_visible(DRAFT_ONLY, "u1", false)
+            .expect("own draft");
+        s.get_agent_at_version_visible(DRAFT_ONLY, &draft(), "u1", false)
+            .expect("own draft pin");
+        s.list_catalog_versions("agents", DRAFT_ONLY, "u1", false)
+            .expect("own draft versions");
+        assert!(s
+            .list_agent_records_visible("u1", false)
+            .unwrap()
+            .iter()
+            .any(|r| r.spec.as_ref().unwrap().resource_id.as_ref().unwrap().urn == DRAFT_ONLY));
+        // Another user gets the draft text, the same as for a draft that does not exist.
+        let foreign = s
+            .get_agent_at_version_visible(DRAFT_ONLY, &draft(), "u2", false)
+            .unwrap_err();
+        assert_eq!(
+            text(foreign, DRAFT_ONLY),
+            "not found: no draft of agent '<urn>' for this user"
+        );
+        assert!(matches!(
+            s.get_agent_visible(DRAFT_ONLY, "u2", false).unwrap_err(),
+            OrchestratorError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn an_admitted_session_still_loads_its_agent_after_a_revoke() {
+        let s = store();
+        restrict(&s, Visibility::Org, AccessMode::Approval);
+        let row = s
+            .insert_access_request(URN, "u2", None, RequestState::Pending)
+            .unwrap();
+        s.decide_access_request(&row.request_id, Decision::Approve, "owner", None)
+            .unwrap();
+        s.get_agent_visible(URN, "u2", false).expect("approved");
+        s.revoke_access(URN, "u2", "owner", Some("left the team"))
+            .unwrap();
+        // A new admission is refused ...
+        assert!(matches!(
+            s.get_agent_visible(URN, "u2", false).unwrap_err(),
+            OrchestratorError::AgentAccessRequired { .. }
+        ));
+        // ... the admitted twins (boot, resume, per-tool-call policy read) are not.
+        s.get_agent_admitted(URN, "u2", false).expect("admitted");
+        s.get_agent_record_admitted(URN, "u2", false)
+            .expect("record admitted");
+        s.get_agent_at_version_admitted(URN, &v1(), "u2", false)
+            .expect("at version admitted");
+        let run = vam_spec::v1::RunSpec::default();
+        crate::catalog_resolve::load_admitted_agent(&s, &run, URN, "u2", false)
+            .expect("load admitted");
+        assert!(crate::catalog_resolve::load_agent_for_run(&s, &run, URN, "u2", false).is_err());
+    }
+
+    #[test]
+    fn existing_agents_with_no_policy_row_behave_as_before() {
+        let s = store();
+        s.get_agent_visible(URN, "u2", false)
+            .expect("no policy row");
+        s.get_agent_at_version_visible(URN, &v1(), "u2", false)
+            .expect("at version");
+        s.list_catalog_versions("agents", URN, "u2", false)
+            .expect("versions");
+        assert!(s
+            .list_agent_records_visible("u2", false)
+            .unwrap()
+            .iter()
+            .any(|r| r.spec.as_ref().unwrap().resource_id.as_ref().unwrap().urn == URN));
+    }
+
+    #[test]
+    fn the_403_body_is_permission_denied_with_the_marker_message_and_not_retryable() {
+        let api: crate::api::error::ApiError = OrchestratorError::AgentAccessRequired {
+            urn: URN.to_string(),
+        }
+        .into();
+        assert_eq!(api.status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(api.code, vam_spec::v1::VamErrorCode::PermissionDenied);
+        assert_eq!(
+            api.message,
+            format!("agent_access_required: request access to '{URN}'")
+        );
+        assert!(!api.retryable);
     }
 }

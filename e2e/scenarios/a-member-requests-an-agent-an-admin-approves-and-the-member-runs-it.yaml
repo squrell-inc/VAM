@@ -38,4 +38,4 @@ mock:
   - when: { step: hi, stepStart: true }
     reply: { text: Hello. }
 status: pending
-expectFail: { step: when.0, class: product }
+expectFail: { step: when.8, class: product }

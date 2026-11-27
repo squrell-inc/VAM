@@ -55,6 +55,24 @@ pub fn load_agent_for_run(
     }
 }
 
+/// [`load_agent_for_run`] for a session that was already admitted (boot, resume, the per-tool-call
+/// policy read): same pin handling, but the agent access rule is not applied, so a revoke never
+/// breaks a running session (A7). Admission sites use [`load_agent_for_run`].
+pub fn load_admitted_agent(
+    store: &SqliteWorkflowStore,
+    spec: &RunSpec,
+    urn: &str,
+    owner_user_id: &str,
+    include_foreign_drafts: bool,
+) -> Result<AgentSpec, OrchestratorError> {
+    match spec.agent_ref.as_ref().and_then(|r| r.version.as_ref()) {
+        Some(version) => {
+            store.get_agent_at_version_admitted(urn, version, owner_user_id, include_foreign_drafts)
+        }
+        None => store.get_agent_admitted(urn, owner_user_id, include_foreign_drafts),
+    }
+}
+
 /// If the workspace already pins a catalog version, require CreateRun to match
 /// it (or apply it when the run omitted version).
 ///

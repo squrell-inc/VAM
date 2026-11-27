@@ -75,6 +75,13 @@ impl From<OrchestratorError> for ApiError {
                 message: msg,
                 retryable: false,
             },
+            // The message is the Display exactly, without the `permission denied: ` prefix.
+            err @ OrchestratorError::AgentAccessRequired { .. } => ApiError {
+                status: StatusCode::FORBIDDEN,
+                code: VamErrorCode::PermissionDenied,
+                message: err.to_string(),
+                retryable: false,
+            },
             OrchestratorError::NodeDraining => ApiError {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 code: VamErrorCode::FailedPrecondition,

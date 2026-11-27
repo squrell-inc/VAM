@@ -154,6 +154,10 @@ pub enum OrchestratorError {
     Unauthenticated,
     #[error("permission denied: {0}")]
     PermissionDenied(String),
+    /// The agent is listed for the org but the caller has no access to it yet
+    /// (design/agent-access.md §2.3, Visible). The Display is the 403 message byte for byte.
+    #[error("agent_access_required: request access to '{urn}'")]
+    AgentAccessRequired { urn: String },
     #[error("node is draining; new admissions blocked")]
     NodeDraining,
     #[error("missing idempotency key")]
