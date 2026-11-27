@@ -88,10 +88,10 @@ Two [notification](/orchestrator/notifications/) kinds follow the requests.
 
 | Kind | To | When |
 |---|---|---|
-| `access.requested` | The agent's active admins. With none, the active org admins and the operator. | A request is raised. |
+| `access.requested` | The agent's active admins. With none, the active org admins and the operator. Never the requester. | A request is raised, or the admin list changes while it is pending. |
 | `access.decided` | The member | An admin approves, denies or revokes. |
 
-The title is fixed, `<username> asks to use <agent>`. The member's `message` is shown on the request in the queue and is never copied into a notification or a Slack post. One decision closes every admin's copy of `access.requested` as `acted`; a withdraw closes them as `withdrawn`. Slack gets a link and no buttons. An admin added after a request was raised gets no notification for it, though the request still shows in their queue and their `pendingAccessRequests`. Proved by `an-access-request-notifies-the-agents-admins-and-the-decision-notifies-the-member` and `a-request-for-an-agent-with-no-admin-goes-to-the-org-admins`.
+The title is fixed, `<username> asks to use <agent>`. The member's `message` is shown on the request in the queue and is never copied into a notification or a Slack post. One decision closes every admin's copy of `access.requested` as `acted`; a withdraw closes them as `withdrawn`. Slack gets a link and no buttons. `PUT /v1/agents/{urn}/admins` brings the copies of the pending requests on that agent in line with the new list, in the same transaction: a removed admin's copy closes as `expired`, a new admin gets a copy, and with no active admin left the org admins and the operator get copies and any copy held by someone who is no longer a recipient closes. A holder who can no longer decide a copy (removed admin, demoted org admin) may clear it with `POST /v1/notifications/{id}/acted`; a holder who still can decide gets `decide_required`. A PUT that changes nothing, and a replayed PUT, emit nothing. When a denial or revoke leaves a restricted agent hidden from the member, `access.decided` names the agent by the last segment of its URN, as `/v1/me/access` leaves out its name. Proved by `an-access-request-notifies-the-agents-admins-and-the-decision-notifies-the-member` and `a-request-for-an-agent-with-no-admin-goes-to-the-org-admins`.
 
 ## Not proved here
 
