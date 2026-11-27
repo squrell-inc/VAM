@@ -14,6 +14,8 @@ proves:
   - revoked-microsoft-connection-parks-the-call-and-tells-the-member
   - gate-decided-from-slack-names-slack-on-the-receipt
   - quiet-hours-hold-slack-until-morning
+  - an-access-request-notifies-the-agents-admins-and-the-decision-notifies-the-member
+  - a-request-for-an-agent-with-no-admin-goes-to-the-org-admins
   - unverified-contact-receives-nothing
 description: The per-user notification record that vamd writes when something needs a person or something they left running is done, with its API, CLI, agent tool, preferences and contacts.
 ---
@@ -37,7 +39,7 @@ One row per event and recipient user, in the workflow store beside `approvals`.
 | `count` | How many times the same subject recurred while the record was open. |
 | `createdAt`, `updatedAt`, `firstShownAt`, `readAt` | Times in unix seconds. `readAt` is per user, not per channel. |
 | `actedAt`, `actedByUserId`, `actedSurface` | Who closed it and from where (`app`, `cli`, `api`, `slack`). |
-| `resolvedAt`, `resolvedReason` | Closed: `acted`, `expired`, `timed_out`, `stopped` or `run_ended`. |
+| `resolvedAt`, `resolvedReason` | Closed: `acted`, `expired`, `timed_out`, `stopped`, `run_ended` or `withdrawn`. |
 
 Two trust tiers apply, as in the [run receipt](/security/run-receipt/). The row holds host facts only. Text an agent wrote (a tool's argument preview, a question, a gate prompt) is never copied into the row. `GET /v1/notifications/{id}` attaches it at read time as `agentText {label, text}`, at most 500 characters, labelled "written by <agent>, not verified by the host" (or "from the playbook" for a gate). Show it fenced.
 
@@ -54,8 +56,10 @@ Two trust tiers apply, as in the [run receipt](/security/run-receipt/). The row 
 | `trigger.fired` | info | A trigger fire was queued behind a live task. | `open` | The grant owner. |
 | `trigger.skipped` | warn | A fire was skipped: workspace busy, Space or thread gone, agent unavailable, grant expired. | `open` | The grant owner. |
 | `connection.needs_reauth` | action | A connector connection moves to needs-reconnect. | `open` the connector | The connection owner. |
+| `access.requested` | action | A member asks to use an agent whose access is by approval. | `decide` the access request | The agent's active admins; with none, the active org admins and the operator. |
+| `access.decided` | info | An admin approves or denies the member's request, or revokes their access. | `open` | The member. |
 
-`approval.pending`, `question.asked` and `gate.opened` are the **decision kinds**. A `reauth` park (a run waiting for a connection, not for a decision) writes none; it gets `connection.needs_reauth` instead.
+`approval.pending`, `question.asked`, `gate.opened` and `access.requested` are the **decision kinds**. A `reauth` park (a run waiting for a connection, not for a decision) writes none; it gets `connection.needs_reauth` instead.
 
 `run.finished` is not written for every run. A chat turn that succeeds without waiting leaves none. A run gets one when any of these holds:
 
@@ -71,24 +75,30 @@ Each record has a subject key, unique per user and kind. The key is the run, too
 
 If the same subject recurs while its record is open, the record's `count` goes up and its text is refreshed. A resolved record never reopens: the next occurrence gets a new record. So a parked approval keeps one record across a vamd restart, and two skipped fires on one day are one record with `count` 2. A repeated call after a denial has a different argument digest or a new run, so it gets its own record.
 
+### Access requests
+
+`access.requested` is written in the same transaction that stores the pending request (see [Agent access](/orchestrator/agent-access/)), one record per recipient. Its subject is the request id. The title is fixed, `<username> asks to use <agent>`, so the member's request message is never copied into a record or into a Slack post. An admin added after the request was raised gets no record; the request still shows in their `GET /v1/access-requests` queue and in the `pendingAccessRequests` count on `GET /v1/me`. `access.decided` is written to the member on approve, deny and revoke, with a subject of the request id and the outcome, so a revoke after an approve is its own record. A retried write under the same `Idempotency-Key` returns the stored answer and writes no second record. Slack gets a link to the record and no buttons for `access.requested`: it is decided with `POST /v1/access-requests/{id}/decide`. Proved by `an-access-request-notifies-the-agents-admins-and-the-decision-notifies-the-member` and `a-request-for-an-agent-with-no-admin-goes-to-the-org-admins`.
+
 ### Not built yet
 
 The kinds `report.arrived`, `delegation.stopped` and `delegation.expired` exist in the kind list and the preference tables, and the functions that write them exist, but no code path calls them yet. No such record appears today.
 
 ## Clearing: acted on anywhere clears everywhere
 
-A decision kind is closed only by deciding the approval it names, from any surface. All surfaces go through the same decision code, so a gate decided from Slack clears the record for the app and the CLI, and a gate decided in the app updates the Slack message.
+A decision kind is closed only by deciding what it names (the approval, or the access request), from any surface. All surfaces go through the same decision code, so a gate decided from Slack clears the record for the app and the CLI, and a gate decided in the app updates the Slack message.
 
 | Kind | Closed by | `resolvedReason` |
 |---|---|---|
 | Decision kinds | A decision from any surface (`actedSurface` says which). | `acted` |
 | Decision kinds | The approval expires, the gate times out, or the run is stopped. Nobody acted. | `expired`, `timed_out`, `stopped` |
 | Decision kinds | The run ended with the record still open. | `run_ended` |
+| `access.requested` | An admin decides the request: every recipient's copy closes at once (`actedByUserId` is the decider, `actedSurface` is `api`). | `acted` |
+| `access.requested` | The member withdraws the request or leaves the agent. | `withdrawn` |
 | `grant.expiring` | The grant is renewed or revoked, or it expires. | `acted` or `expired` |
 | `connection.needs_reauth` | The user connects the connector again. | `acted` |
 | `run.finished`, `budget.hit`, `trigger.*` | `POST /v1/notifications/{id}/acted`. | `acted` |
 
-Read and acted are different. Reading marks the record seen for that user and does not close it. An unresolved `action` record stays in the badge count even when read. A decision kind can never be marked acted through the notification API: that answers `409` with `decide_required` and the approval endpoint to use. No surface can clear a pending approval without deciding it.
+Read and acted are different. Reading marks the record seen for that user and does not close it. An unresolved `action` record stays in the badge count even when read. A decision kind can never be marked acted through the notification API: that answers `409` with `decide_required` and the endpoint to use (`POST /v1/approvals/{id}/decide`, or `POST /v1/access-requests/{id}/decide` for `access.requested`). No surface can clear a pending approval without deciding it.
 
 ## API
 

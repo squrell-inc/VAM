@@ -32,5 +32,4 @@ guards:
   - vam:crates/vam-orchestrator/src/notifications.rs
   - vam:crates/vam-orchestrator/src/notify_delivery.rs
   - vam:crates/vam-orchestrator/src/api/me.rs
-status: pending
-expectFail: { step: when.4, class: product }
+status: active
