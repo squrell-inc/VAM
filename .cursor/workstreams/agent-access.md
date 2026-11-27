@@ -73,9 +73,9 @@ contract frozen for the frontend.
 page `orchestrator/agent-access.md` (`status: shipped`, `proves` its scenarios); notification
 scenarios green; frontend JSON shapes (design §6) marked frozen.
 
-- [ ] Routes and `GET /v1/me` additions
-- [ ] Notifications kinds and producers
-- [ ] OpenAPI, proto, baseline, docs page
+- [x] Routes and `GET /v1/me` additions
+- [x] Notifications kinds and producers
+- [x] OpenAPI, proto, baseline, docs page
 
 **Plan (breakdown approved by Roshan, 2026-11-27).**
 
@@ -635,3 +635,4 @@ worth it: an extra close, checklist and full-suite release PR for files W3 edits
 | 2026-11-27 | 0 | A1–A9 approved by the owner with the recommended answers and locked (decisions 3–11); `connectors.md` D4 and D27 amended; design §2.4 marked approved. Docs only: no scenarios. |
 | 2026-11-27 | 1 | Tables, rule, enforcement at every admission site, Space bound after admission, and the write routes (access-policy, access, decide, revoke) landed via PR #144. Frozen: tables per design §2.2; rule outcomes per §2.3; Hidden = the route's own missing-URN text; Visible = 403 `agent_access_required: request access to '<urn>'`; A5 default `(org, approval)` on first marketplace install only; A6 first releaser seeded; admitted sessions keep running after a revoke (A7). Opus review: no Critical or High; found and fixed a missing check on `POST /v1/runs/{id}/messages`. Scoreboard: 7 new scenarios green, 10 adjusted, `cargo test -p vam-orchestrator` green, Actions green on 1edebe5, 1 fix wave. Backlog: Idempotency-Key replay on the four write routes (Phase 2); `PUT /v1/agents` and `POST …/release` name leaks (Phase 5). |
 | 2026-11-27 | 2 W1 | Browse, `/v1/me/access`, `/v1/access-requests`, admins GET/PUT, DELETE access and Idempotency-Key replay on all six access writes (the four Phase 1 writes included) landed on `feat/agent-access-p2`, with the Opus plan review's 10 changes. N1–N6 `active` and green; N7, N8 pending (W2). Scoreboard: N1–N6, P1 S1–S7 and the 10 marketplace scenarios 23/23 green, `cargo test -p vam-orchestrator` green, 0 fix cycles. |
+| 2026-11-27 | 2 W2 | `access.requested` (admins, else org admins and the operator; fixed title, the member's message never copied; decide clears every copy as `acted`, withdraw as `withdrawn`) and `access.decided` (approve, deny, revoke) written inside the replay transaction, so a replay emits nothing; `/v1/me` `adminOfAgents` and `pendingAccessRequests`; proto messages and baseline; OpenAPI for all 10 access routes; the Agent access docs page, catalog, notifications and api amendments, sidebar and feature row. N7, N8 `active`. An admin added after a request was raised gets no notification (queue and badge still show it). Scoreboard: N1–N8, P1 S1–S7 and the 10 marketplace scenarios 25/25 green (N1–N8 8/8), `cargo test --workspace` green, `vam-spec` green, `vam-e2e check` ok, `pnpm build` ok, clippy and fmt clean, 0 fix cycles; `local.sh --fast` stops at `install.test.sh` (environmental as root). Phase not closed: the phase-close review is next. |
