@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: agent-access
-current_phase: 1
+current_phase: 2
 branch: feat/agent-access
 design_docs:
   - design/agent-access.md
@@ -61,28 +61,13 @@ Done phase sections are deleted; git history keeps them.
 | Phase | Name | Done |
 |---|---|---|
 | 0 | Owner decisions | 2026-11-27 |
-
-### Phase 1 — Storage, the rule, enforcement at agent admission
-
-**Goal:** the three tables, the one rule (design §2.3) in the store's agent `*_visible` reads, and
-every admission site refusing Hidden (404) and not-granted (403).  
-**Depends on:** Phase 0  
-**Plan:** not drafted  
-**Exit:** design §3 scenarios active and green (member cannot see or run; request, approve, run;
-add open and run; revoked scheduled run refused; existing agents unchanged on upgrade);
-`cargo test -p vam-orchestrator` green.
-
-- [ ] Wave 0: scenarios pending, red for the right reason
-- [ ] Schema and store API (`agent_access_policy`, `agent_admins`, `agent_access`)
-- [ ] Rule in `get_agent_record_visible`, `get_agent_at_version_visible`, `list_agent_records_visible`
-- [ ] Version history, outcomes, release suggestion checked; Space bind moved after admission
-- [ ] `AgentAccessRequired` → 403; Hidden → existing 404 text
+| 1 | Storage, the rule, enforcement at agent admission (closed in base: PR #144; contracts frozen below) | 2026-11-27 |
 
 ### Phase 2 — Routes, OpenAPI, proto, notifications
 
 **Goal:** the HTTP API of design §4, `access.requested` and `access.decided` notifications, the
 contract frozen for the frontend.  
-**Depends on:** Phase 1  
+**Depends on:** Phase 1 (done)  
 **Plan:** not drafted  
 **Exit:** routes in `docs/api/openapi.yaml` and `orchestrator.proto`, baseline regenerated; docs
 page `orchestrator/agent-access.md` (`status: shipped`, `proves` its scenarios); notification
@@ -264,3 +249,4 @@ worth it: an extra close, checklist and full-suite release PR for files W3 edits
 |---|---|---|
 | 2026-11-26 | — | Tracker and `design/agent-access.md` opened on `feat/agent-access` |
 | 2026-11-27 | 0 | A1–A9 approved by the owner with the recommended answers and locked (decisions 3–11); `connectors.md` D4 and D27 amended; design §2.4 marked approved. Docs only: no scenarios. |
+| 2026-11-27 | 1 | Tables, rule, enforcement at every admission site, Space bound after admission, and the write routes (access-policy, access, decide, revoke) landed via PR #144. Frozen: tables per design §2.2; rule outcomes per §2.3; Hidden = the route's own missing-URN text; Visible = 403 `agent_access_required: request access to '<urn>'`; A5 default `(org, approval)` on first marketplace install only; A6 first releaser seeded; admitted sessions keep running after a revoke (A7). Opus review: no Critical or High; found and fixed a missing check on `POST /v1/runs/{id}/messages`. Scoreboard: 7 new scenarios green, 10 adjusted, `cargo test -p vam-orchestrator` green, Actions green on 1edebe5, 1 fix wave. Backlog: Idempotency-Key replay on the four write routes (Phase 2); `PUT /v1/agents` and `POST …/release` name leaks (Phase 5). |

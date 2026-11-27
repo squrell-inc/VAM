@@ -143,6 +143,20 @@ pub struct IdentityRequest {
     /// Dotted paths into the JSON body, matched as in other `fields` (exact, `contains`,
     /// `matches`, `present`, `absent`).
     pub fields: Option<std::collections::BTreeMap<String, serde_yaml::Value>>,
+    /// The JSON request body (YAML mapped to JSON, placeholders expanded in every string). Without
+    /// it a POST sends `{}` and other methods send no body.
+    pub body: Option<serde_yaml::Value>,
+    /// Keeps a field of the JSON answer (dotted path) as `{{<as>}}` for later paths and bodies.
+    pub remember: Option<RememberField>,
+}
+
+/// `remember: { field, as }` of `identity-request`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RememberField {
+    pub field: String,
+    #[serde(rename = "as")]
+    pub as_: String,
 }
 
 /// `put-draft: { piece, as, status, contains }`
@@ -251,6 +265,21 @@ pub fn field_placeholders(
     }
     let mut out = Vec::new();
     fields.values().for_each(|v| walk(v, &mut out));
+    out
+}
+
+/// The piece aliases of every `{{urn:<piece>}}` (no identity) in `text`.
+pub fn bare_urn_pieces(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("{{urn:") {
+        let after = &rest[i + 6..];
+        let Some(j) = after.find("}}") else { break };
+        if !after[..j].contains(':') {
+            out.push(&after[..j]);
+        }
+        rest = &after[j + 2..];
+    }
     out
 }
 
@@ -524,7 +553,7 @@ impl Engine {
     fn expand_value(&self, v: &serde_yaml::Value) -> Result<serde_yaml::Value, Fail> {
         use serde_yaml::Value as Y;
         Ok(match v {
-            Y::String(s) => Y::String(self.expand(s, false)?),
+            Y::String(s) => Y::String(self.expand_draft_urns(&self.expand(s, false)?, false)?),
             Y::Mapping(m) => {
                 let mut out = serde_yaml::Mapping::new();
                 for (k, v) in m {
@@ -593,7 +622,13 @@ impl Engine {
             None => None,
         };
         let write = method != reqwest::Method::GET;
-        let body = (method == reqwest::Method::POST).then(|| json!({}));
+        let body = match &x.body {
+            Some(b) => Some(
+                serde_json::to_value(self.expand_value(b)?)
+                    .map_err(|e| scenario("a body that maps to JSON", e.to_string()))?,
+            ),
+            None => (method == reqwest::Method::POST).then(|| json!({})),
+        };
         // `{<alias>.userId}` placeholders first, then `{{urn:<piece>:<as>}}`.
         let path = self.expand(&x.path, true)?;
         let path = self.expand_draft_urns(&path, true)?;
@@ -650,6 +685,25 @@ impl Engine {
                     format!("{want} with the expected fields"),
                     scrub(&bad.join("; "), &[&bearer]),
                 ));
+            }
+        }
+        if let Some(rem) = &x.remember {
+            let found = super::get_path(&r.json(), &rem.field).and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                serde_json::Value::Bool(b) => Some(b.to_string()),
+                _ => None,
+            });
+            match found {
+                Some(v) => {
+                    self.ctx.cli_vars.insert(rem.as_.clone(), v);
+                }
+                None => {
+                    return Err(product(
+                        format!("{want} with a string, number or bool at `{}`", rem.field),
+                        scrub(&seen, &[&bearer]),
+                    ))
+                }
             }
         }
         Ok(())
@@ -834,6 +888,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(x.fields.map(|f| f.len()), Some(1));
+        let x: IdentityRequest = serde_yaml::from_str(
+            "{ as: m, credential: key, method: put, path: /v1/x, status: 200, body: { a: 1 }, remember: { field: request.requestId, as: acr } }",
+        )
+        .unwrap();
+        assert!(x.body.is_some());
+        assert_eq!(
+            x.remember.map(|r| (r.field, r.as_)),
+            Some(("request.requestId".into(), "acr".into()))
+        );
+        assert!(serde_yaml::from_str::<IdentityRequest>(
+            "{ as: m, credential: key, path: /v1/x, status: 200, remember: { field: a } }"
+        )
+        .is_err());
     }
 
     #[test]

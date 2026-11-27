@@ -1,0 +1,36 @@
+id: a-member-cannot-see-or-run-a-restricted-agent
+title: A member cannot see or run an agent restricted to others, and every route answers as if it did not exist
+description: >
+  The admin restricts the agent. For the member it is as if the agent were not in the catalog: the run is refused, the list, the read, the versions, the Space create, the access request and the Space list all say so with the text of a missing agent. The admin still reads it.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: member }
+  - agent-plain
+when:
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: restricted, mode: approval } }
+  - chat: { text: "e2e-step:hi Hello", agent: agent-plain, as: member, refused: true }
+  - expect: { refused: true, status: 404, contains: "not found in catalog" }
+then:
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents", status: 200, lacks: "{{urn:agent-plain}}" }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/{{urn:agent-plain}}", status: 404, contains: "agents '{{urn:agent-plain}}' not found in catalog" }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent", status: 404, contains: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' not found in catalog" }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/{{urn:agent-plain}}/versions", status: 404, contains: "has no versions visible to this caller" }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/spaces", status: 404, body: { agentUrn: "{{urn:agent-plain}}" } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 404, contains: "agents '{{urn:agent-plain}}' not found in catalog" }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/spaces", status: 200, lacks: "{{urn:agent-plain}}" }
+  - identity-request: { as: admin, credential: key, method: get, path: "/v1/agents/{{urn:agent-plain}}", status: 200 }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/grants.rs
+  - vam:crates/vam-orchestrator/src/gateway.rs
+mock:
+  - when: { step: hi, stepStart: true }
+    reply: { text: Hello. }
+status: active

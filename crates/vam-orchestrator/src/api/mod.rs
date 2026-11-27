@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+pub mod agent_access;
 pub mod allowed_models;
 pub mod auth;
 pub mod catalog_auth;
@@ -173,9 +174,13 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/agents/{*rest}",
             get(get_agent_wildcard)
-                .put(permissions::put_draft_permissions)
+                .put(agent_access::put_agent_wildcard)
                 .post(post_agent_wildcard)
                 .delete(delete_agent_wildcard),
+        )
+        .route(
+            "/v1/access-requests/{id}/decide",
+            post(agent_access::post_decide),
         )
         .route("/v1/policies", put(put_policy).get(list_policies))
         .route(
@@ -629,6 +634,14 @@ async fn post_agent_wildcard(
         let force = permissions_migrate::force_requested(query.force.as_deref());
         return permissions_migrate::migrate_legacy_draft(state, auth, path, headers, force, body)
             .await;
+    }
+    // `…/access/{userId}/revoke` before `…/access` (Add or Request), both before the release.
+    if let Some(target) = agent_access::revoke_target(&path) {
+        let (urn, user_id) = target?;
+        return agent_access::post_revoke(&state, &auth, &urn, &user_id, &headers, &body);
+    }
+    if let Some(urn) = agent_access::access_urn(&path) {
+        return agent_access::post_access(&state, &auth, &urn, &headers, &body);
     }
     catalog_release::release_agent_wildcard(state, auth, path, headers, body).await
 }
@@ -1088,6 +1101,21 @@ async fn create_session(
         };
         let (code, json) = json_response("vam.v1.CreateSessionResponse", &resp)?;
         return Ok(json_http_response(code, json));
+    }
+
+    // Agent access: a new session on a Space bound to an agent is an admission. The boot that
+    // follows reads the agent without the rule (an admitted session is never killed by a
+    // revoke), so the check lives here. A replayed idempotency key returned above.
+    if let Some(bound) = state
+        .store
+        .get_space(auth.owner_user_id(), &workspace_id)
+        .ok()
+        .and_then(|space| space.agent_urn)
+        .filter(|urn| !urn.is_empty())
+    {
+        state
+            .store
+            .get_agent_visible(&bound, auth.owner_user_id(), auth.has_users_admin())?;
     }
 
     state
@@ -3824,7 +3852,7 @@ fn remerge_catalog_agent_into_inputs(
     let agent = store
         .run_owner_user_id(run_id)
         .ok()
-        .and_then(|owner| store.get_agent_visible(&agent_urn, &owner, false).ok())
+        .and_then(|owner| store.get_agent_admitted(&agent_urn, &owner, false).ok())
         .or_else(|| store.get_agent(&agent_urn).ok());
     let Some(agent) = agent else {
         return inputs;

@@ -516,6 +516,19 @@ fn catalog_version_not_found(
     ))
 }
 
+/// The answer for a URN that is not in the catalog. A Hidden agent answers with exactly this
+/// (agent access, design/agent-access.md §2.3), so both come from this one constructor.
+pub(crate) fn catalog_not_found(table: &str, urn: &str) -> OrchestratorError {
+    OrchestratorError::NotFound(format!("{table} '{urn}' not found in catalog"))
+}
+
+/// The answer for a URN with no version the caller may see (same single-source rule).
+pub(crate) fn catalog_no_visible_versions(table: &str, urn: &str) -> OrchestratorError {
+    OrchestratorError::NotFound(format!(
+        "{table} '{urn}' has no versions visible to this caller"
+    ))
+}
+
 fn catalog_pin(
     major: i32,
     minor: i32,
@@ -608,10 +621,29 @@ fn query_catalog_versions(
             versions.push(entry);
         }
     }
+    if table == "agents" && !versions.is_empty() {
+        // Agent access: a caller who is not Usable keeps only their own draft; with nothing
+        // left, Hidden answers like a URN with no versions and Visible asks for access.
+        match crate::agent_access::agent_access_on(
+            connection,
+            urn,
+            caller,
+            include_foreign_drafts,
+            false,
+        )? {
+            crate::agent_access::AgentAccess::Usable => {}
+            denied => {
+                versions.retain(|v| v.channel == SkillChannel::Draft);
+                if versions.is_empty() {
+                    return Err(crate::agent_access::refusal(denied, urn, || {
+                        catalog_no_visible_versions(table, urn)
+                    }));
+                }
+            }
+        }
+    }
     if versions.is_empty() {
-        return Err(OrchestratorError::NotFound(format!(
-            "{table} '{urn}' has no versions visible to this caller"
-        )));
+        return Err(catalog_no_visible_versions(table, urn));
     }
     Ok(versions)
 }
@@ -817,7 +849,10 @@ impl SqliteWorkflowStore {
     }
 
     /// Latest **released** spec, else the caller's own draft. Foreign drafts are NotFound
-    /// unless `include_foreign_drafts` (org admin / `users:admin`).
+    /// unless `include_foreign_drafts` (org admin / `users:admin`). This is an admission read:
+    /// it also applies the agent access rule (a Hidden agent is NotFound with the missing-URN
+    /// text, a Visible one is `AgentAccessRequired`). Callers that serve an already admitted
+    /// session use [`Self::get_agent_admitted`].
     pub fn get_agent_visible(
         &self,
         urn: &str,
@@ -831,8 +866,45 @@ impl SqliteWorkflowStore {
             })
     }
 
+    /// [`Self::get_agent_visible`] without the access rule, for a session that was admitted
+    /// earlier: a revoke must not break a running or resuming session (A7).
+    pub fn get_agent_admitted(
+        &self,
+        urn: &str,
+        owner_user_id: &str,
+        include_foreign_drafts: bool,
+    ) -> Result<AgentSpec, OrchestratorError> {
+        self.get_agent_record_admitted(urn, owner_user_id, include_foreign_drafts)?
+            .spec
+            .ok_or_else(|| {
+                OrchestratorError::CorruptState(format!("agent '{urn}' listing missing spec"))
+            })
+    }
+
     /// Same visibility as [`Self::get_agent_visible`], with owner / channel / tier.
     pub fn get_agent_record_visible(
+        &self,
+        urn: &str,
+        owner_user_id: &str,
+        include_foreign_drafts: bool,
+    ) -> Result<AgentRecord, OrchestratorError> {
+        let record = self.get_agent_record_admitted(urn, owner_user_id, include_foreign_drafts)?;
+        let own_draft = record.channel == SkillChannel::Draft as i32
+            && crate::owner::resolved_owner(&record.owner_user_id)
+                == crate::owner::resolved_owner(owner_user_id);
+        crate::agent_access::require_usable(
+            self,
+            urn,
+            owner_user_id,
+            include_foreign_drafts,
+            own_draft,
+            || catalog_not_found("agents", urn),
+        )?;
+        Ok(record)
+    }
+
+    /// The record read of [`Self::get_agent_record_visible`] without the access rule.
+    pub fn get_agent_record_admitted(
         &self,
         urn: &str,
         owner_user_id: &str,
@@ -874,12 +946,44 @@ impl SqliteWorkflowStore {
     /// Released rows are tenant-visible. Draft pins load the owner draft (or a
     /// foreign draft when `include_foreign_drafts`). Other callers get NotFound
     /// using the same missing-version message so a foreign draft is not leaked.
+    ///
+    /// An admission read: the agent access rule applies after the draft check (Hidden is the
+    /// missing-version text). Admitted sessions use [`Self::get_agent_at_version_admitted`].
     pub fn get_agent_at_version_visible(
         &self,
         urn: &str,
         version: &vam_spec::v1::Version,
         owner_user_id: &str,
         include_foreign_drafts: bool,
+    ) -> Result<AgentSpec, OrchestratorError> {
+        self.get_agent_at_version_checked(urn, version, owner_user_id, include_foreign_drafts, true)
+    }
+
+    /// [`Self::get_agent_at_version_visible`] without the access rule, for a session that was
+    /// admitted earlier (A7).
+    pub fn get_agent_at_version_admitted(
+        &self,
+        urn: &str,
+        version: &vam_spec::v1::Version,
+        owner_user_id: &str,
+        include_foreign_drafts: bool,
+    ) -> Result<AgentSpec, OrchestratorError> {
+        self.get_agent_at_version_checked(
+            urn,
+            version,
+            owner_user_id,
+            include_foreign_drafts,
+            false,
+        )
+    }
+
+    fn get_agent_at_version_checked(
+        &self,
+        urn: &str,
+        version: &vam_spec::v1::Version,
+        owner_user_id: &str,
+        include_foreign_drafts: bool,
+        apply_access_rule: bool,
     ) -> Result<AgentSpec, OrchestratorError> {
         let (bytes, _pin, row_owner, channel) =
             self.query_spec_at_version_with_owner("agents", urn, version)?;
@@ -891,6 +995,19 @@ impl SqliteWorkflowStore {
             owner_user_id,
             include_foreign_drafts,
         )?;
+        if apply_access_rule {
+            let own_draft = channel == CATALOG_CHANNEL_DRAFT
+                && crate::owner::resolved_owner(&row_owner)
+                    == crate::owner::resolved_owner(owner_user_id);
+            crate::agent_access::require_usable(
+                self,
+                urn,
+                owner_user_id,
+                include_foreign_drafts,
+                own_draft,
+                || catalog_version_not_found("agents", urn, version),
+            )?;
+        }
         AgentSpec::decode(&*bytes).map_err(|e| OrchestratorError::Core(e.to_string()))
     }
 
@@ -967,10 +1084,15 @@ impl SqliteWorkflowStore {
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         let visible = catalog_visible_where_sql();
         let sql = if owner_user_id.is_some() {
+            // Agent access: a released agent lists only when it is Usable to the caller (no
+            // policy row, `(org, everyone)`, an agent admin, or an approved row). The caller's
+            // own drafts always list. The org-admin path (`None`) is unchanged.
+            let usable = crate::agent_access::usable_predicate_sql("agents.urn", "?1");
             format!(
                 "SELECT spec_bytes, COALESCE(NULLIF(owner_user_id, ''), 'local'),
                         channel, catalog_tier, major, minor, patch, prerelease
-                 FROM agents WHERE {visible} ORDER BY created_at DESC"
+                 FROM agents WHERE ({visible}) AND (channel = 'draft' OR {usable})
+                 ORDER BY created_at DESC"
             )
         } else {
             "SELECT spec_bytes, COALESCE(NULLIF(owner_user_id, ''), 'local'),
@@ -1582,7 +1704,7 @@ impl SqliteWorkflowStore {
             )
             .map_err(|e| {
                 if e == rusqlite::Error::QueryReturnedNoRows {
-                    OrchestratorError::NotFound(format!("{table} '{urn}' not found in catalog"))
+                    catalog_not_found(table, urn)
                 } else {
                     OrchestratorError::Database(e)
                 }

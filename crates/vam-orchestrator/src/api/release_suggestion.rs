@@ -9,7 +9,8 @@ use axum::response::Response;
 
 use crate::api::auth::AuthContext;
 use crate::api::catalog_auth::{
-    require_release_authorization, require_skill_package_release_authorization,
+    require_publish_grant, require_release_authorization,
+    require_skill_package_release_authorization,
 };
 use crate::api::error::{json_response, ApiError};
 use crate::api::{json_http_response, percent_decode_path, AppState};
@@ -32,6 +33,17 @@ pub(crate) fn release_suggestion(
 ) -> Result<Response, ApiError> {
     match kind {
         SuggestKind::Agent => {
+            // Agent access: after the publish grant and before the owner check, which would
+            // otherwise answer a Hidden agent with 403 "only the artifact owner" and leak it.
+            require_publish_grant(auth)?;
+            crate::agent_access::require_usable(
+                &state.store,
+                urn,
+                auth.owner_user_id(),
+                auth.has_users_admin(),
+                false,
+                || crate::owner::catalog_owner_not_found("agent", urn),
+            )?;
             require_release_authorization(&state.store, auth, "agents", urn, "agent")?
         }
         SuggestKind::Playbook => {

@@ -1050,6 +1050,11 @@ fn write(
     let mut artifacts = Vec::new();
     for pl in &plan {
         if let Some(new) = &pl.row {
+            // A5: a first install of an agent starts as (org, approval); an update never does.
+            // This has to read `agents` before the release below is written.
+            if pl.kind == ArtifactKind::Agent {
+                crate::agent_access::write_install_default_on(&tx, &pl.urn, by, at)?;
+            }
             insert_release(&tx, pl, new, &owner, &note, by, at)?;
         }
         installs::write_origin(

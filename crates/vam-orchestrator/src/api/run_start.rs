@@ -232,6 +232,50 @@ fn refuse_inline_parts(req: &CreateRunRequest) -> Result<(), OrchestratorError> 
     Ok(())
 }
 
+/// The agent access check of a start (AA-1.5): a pure read through the same load the run makes
+/// later (`load_agent_for_run`), run first. With a requested agent that is the agent; with only
+/// a Space id it is the Space's bound agent: the Space row's, else the workspace file's (as the
+/// later load reads it), so a Space whose row has no agent cannot skip the check. A Space the
+/// caller does not own (NotFound) is left to `resolve_place`, which answers as before.
+fn require_agent_admission(
+    state: &AppState,
+    caller: &RunCaller,
+    spec: &vam_spec::v1::RunSpec,
+    requested_urn: Option<&str>,
+) -> Result<(), OrchestratorError> {
+    let owner = caller.owner_user_id.as_str();
+    let bound;
+    let urn = match requested_urn {
+        Some(urn) => urn,
+        None => {
+            let space_id = spec.space_id.trim();
+            if space_id.is_empty() {
+                return Ok(());
+            }
+            let row_urn = match state.store.get_space(owner, space_id) {
+                Ok(space) => space.agent_urn.filter(|u| !u.is_empty()),
+                Err(OrchestratorError::NotFound(_)) => return Ok(()),
+                Err(other) => return Err(other),
+            };
+            let from_meta = match row_urn {
+                Some(urn) => Some(urn),
+                None => read_bound_workspace_meta(space_id)?
+                    .and_then(|m| m.agent_urn)
+                    .filter(|u| !u.is_empty()),
+            };
+            match from_meta {
+                Some(urn) => {
+                    bound = urn;
+                    bound.as_str()
+                }
+                None => return Ok(()),
+            }
+        }
+    };
+    crate::catalog_resolve::load_agent_for_run(&state.store, spec, urn, owner, caller.users_admin)
+        .map(|_| ())
+}
+
 /// Starts a run for `caller` from `req`, or hands the message to the live run / the queue.
 pub async fn start_run(
     state: &AppState,
@@ -258,6 +302,10 @@ pub async fn start_run(
     }
 
     let requested_urn = crate::run_context::requested_agent_urn(&spec);
+    // Agent access: admit the agent before any Space, thread, binding or inbox admission, so a
+    // refused run (404 for a Hidden agent, 403 `agent_access_required:` for a Visible one)
+    // leaves nothing behind. Steers and queued messages are refused the same way.
+    require_agent_admission(state, caller, &spec, requested_urn.as_deref())?;
     // Ids are the identity (locked decision 10): a Space id (owner checked) or the agent's
     // default Space, a thread id (inside that Space) or a new thread. Names are labels only.
     let kind = if spec

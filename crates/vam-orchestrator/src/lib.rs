@@ -7,6 +7,7 @@
 // with a one-line message. Tests may still unwrap.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod agent_access;
 pub mod allowed_models;
 pub mod api;
 pub mod brokers;
