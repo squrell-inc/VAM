@@ -17,8 +17,8 @@ use axum::response::Response;
 use serde_json::{json, Map, Value};
 
 use crate::agent_access::{
-    is_agent_or_org_admin, AccessMode, AccessRow, AgentAccess, AgentAccessPolicy, Decision,
-    LiveState, RequestState, Visibility,
+    is_agent_or_org_admin, AccessAttempt, AccessMode, AccessRow, AgentAccess, AgentAccessPolicy,
+    Decision, RequestState, Visibility,
 };
 use crate::api::auth::{require_idempotency_key, AuthContext};
 use crate::api::catalog_auth::require_catalog_read;
@@ -89,8 +89,8 @@ pub(crate) async fn put_agent_wildcard(
 
 /// What the caller is to the agent, after the agent was read.
 struct Standing {
-    access: AgentAccess,
     admin: bool,
+    own_draft: bool,
 }
 
 /// Read the agent as the route's own missing-URN answer and classify the caller. A missing URN
@@ -108,7 +108,7 @@ fn stand(state: &AppState, auth: &AuthContext, urn: &str) -> Result<Standing, Or
         return Err(catalog_not_found("agents", urn));
     }
     let admin = is_agent_or_org_admin(store, urn, caller, org_admin)?;
-    Ok(Standing { access, admin })
+    Ok(Standing { admin, own_draft })
 }
 
 fn put_access_policy(
@@ -120,6 +120,7 @@ fn put_access_policy(
 ) -> Result<Response, ApiError> {
     ensure_ready(state, true)?;
     require_catalog_read(auth)?;
+    // TODO(agent-access phase 2): the Idempotency-Key is required but not yet used to replay; add replay.
     let _idempotency = require_idempotency_key(headers).map_err(ApiError::from)?;
     let standing = stand(state, auth, urn)?;
     if !standing.admin {
@@ -199,38 +200,40 @@ pub(crate) fn post_access(
 ) -> Result<Response, ApiError> {
     ensure_ready(state, true)?;
     require_catalog_read(auth)?;
+    // TODO(agent-access phase 2): the Idempotency-Key is required but not yet used to replay; add replay.
     let _idempotency = require_idempotency_key(headers).map_err(ApiError::from)?;
+    // `stand` answers a missing or Hidden URN first (before the message is looked at); the rule,
+    // the policy read and the insert then run again under one lock in the store, so a concurrent
+    // switch to restricted cannot slip between them.
     let standing = stand(state, auth, urn)?;
-    match standing.access {
-        AgentAccess::Hidden => return Err(catalog_not_found("agents", urn).into()),
-        AgentAccess::Usable => {
+    let own_draft = standing.own_draft;
+    let message = parse_message(body)?;
+    let row = match state.store.request_agent_access(
+        urn,
+        auth.owner_user_id(),
+        auth.has_users_admin(),
+        own_draft,
+        message.as_deref(),
+    )? {
+        AccessAttempt::Hidden => return Err(catalog_not_found("agents", urn).into()),
+        AccessAttempt::Usable => {
             return Err(
                 OrchestratorError::Conflict(format!("agent '{urn}' is already usable")).into(),
             )
         }
-        AgentAccess::Visible {
-            state: Some(LiveState::Pending),
-        } => {
+        AccessAttempt::AlreadyPending => {
             return Err(OrchestratorError::Conflict(format!(
                 "agent '{urn}' already has a pending access request"
             ))
             .into())
         }
-        AgentAccess::Visible { .. } => {}
-    }
-    let message = parse_message(body)?;
-    // A `(restricted, everyone)` row cannot be written; the rule reads one as approval.
-    let policy = state.store.agent_access_policy(urn)?;
-    let (initial, status) = match policy.map(|p| p.mode) {
-        Some(AccessMode::Open) => (RequestState::Approved, StatusCode::OK),
-        _ => (RequestState::Pending, StatusCode::ACCEPTED),
+        AccessAttempt::Inserted(row) => row,
     };
-    let row = state.store.insert_access_request(
-        urn,
-        auth.owner_user_id(),
-        message.as_deref(),
-        initial,
-    )?;
+    let status = if row.state == RequestState::Approved {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
     let out = json!({ "request": request_json(state.store.as_ref(), &row) });
     Ok(json_http_response(status, out.to_string()))
 }
@@ -298,6 +301,7 @@ pub(crate) async fn post_decide(
 ) -> Result<Response, ApiError> {
     ensure_ready(&state, true)?;
     require_catalog_read(&auth)?;
+    // TODO(agent-access phase 2): the Idempotency-Key is required but not yet used to replay; add replay.
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let not_found =
         || OrchestratorError::NotFound(format!("access request '{request_id}' not found"));
@@ -327,6 +331,7 @@ pub(crate) fn post_revoke(
 ) -> Result<Response, ApiError> {
     ensure_ready(state, true)?;
     require_catalog_read(auth)?;
+    // TODO(agent-access phase 2): the Idempotency-Key is required but not yet used to replay; add replay.
     let _idempotency = require_idempotency_key(headers).map_err(ApiError::from)?;
     let standing = stand(state, auth, urn)?;
     if !standing.admin {

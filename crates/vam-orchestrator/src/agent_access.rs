@@ -460,9 +460,11 @@ pub(crate) fn seed_first_admin_on(
 }
 
 /// A5: the default of a marketplace install. Writes `(org, approval)` for `urn` only when the
-/// agent has no row in `agents` yet, so it runs before the install's own write. An update (or a
-/// pre-upgrade install getting its first update) finds the row and writes nothing, and an
-/// existing policy is never replaced. Returns whether a policy row was added. Runs in the
+/// agent has no released row in `agents` yet, so it runs before the install's own write. An
+/// update (or a pre-upgrade install getting its first update) finds its released row and writes
+/// nothing, and an existing policy is never replaced. A draft is not an install: marketplace
+/// import refuses a URN that has a local draft (`catalog_tier != marketplace`), and a stray draft
+/// row must not suppress the default of a first install. Returns whether a policy row was added. Runs in the
 /// install's transaction.
 pub(crate) fn write_install_default_on(
     connection: &Connection,
@@ -471,7 +473,7 @@ pub(crate) fn write_install_default_on(
     at: i64,
 ) -> Result<bool, OrchestratorError> {
     let known: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM agents WHERE urn = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE urn = ?1 AND channel = 'released')",
         params![urn],
         |r| r.get(0),
     )?;
@@ -484,6 +486,55 @@ pub(crate) fn write_install_default_on(
         params![urn, resolved_owner(by), at],
     )?;
     Ok(added > 0)
+}
+
+/// What [`SqliteWorkflowStore::request_agent_access`] did.
+#[derive(Debug)]
+pub enum AccessAttempt {
+    Hidden,
+    Usable,
+    AlreadyPending,
+    Inserted(AccessRow),
+}
+
+fn insert_access_request_on(
+    c: &Connection,
+    urn: &str,
+    user: &str,
+    message: Option<&str>,
+    initial: RequestState,
+) -> Result<AccessRow, OrchestratorError> {
+    if !initial.is_live() {
+        return Err(OrchestratorError::InvalidContract(
+            "an access request starts pending or approved".to_string(),
+        ));
+    }
+    let user = resolved_owner(user);
+    let now = unix_timestamp();
+    let (decided_by, decided_at) = match initial {
+        RequestState::Approved => (Some(user), Some(now)),
+        _ => (None, None),
+    };
+    let id = mint_id(REQUEST_ID_PREFIX);
+    c.execute(
+        "INSERT INTO agent_access
+           (request_id, urn, user_id, state, message, requested_at, decided_by, decided_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            id,
+            urn,
+            user,
+            initial.as_str(),
+            message,
+            now,
+            decided_by,
+            decided_at
+        ],
+    )
+    .map_err(|e| map_unique(e, urn, user))?;
+    read_request(c, &id)?.ok_or_else(|| {
+        OrchestratorError::CorruptState(format!("access request '{id}' missing after write"))
+    })
 }
 
 fn map_unique(error: rusqlite::Error, urn: &str, user: &str) -> OrchestratorError {
@@ -571,40 +622,35 @@ impl SqliteWorkflowStore {
         message: Option<&str>,
         initial: RequestState,
     ) -> Result<AccessRow, OrchestratorError> {
-        if !initial.is_live() {
-            return Err(OrchestratorError::InvalidContract(
-                "an access request starts pending or approved".to_string(),
-            ));
-        }
-        let user = resolved_owner(user);
-        let now = unix_timestamp();
-        let (decided_by, decided_at) = match initial {
-            RequestState::Approved => (Some(user), Some(now)),
-            _ => (None, None),
-        };
+        self.with_access_connection(|c| insert_access_request_on(c, urn, user, message, initial))
+    }
+
+    /// The Add / Request of a caller, decided in one lock: the rule, the policy read and the
+    /// insert see the same state, so a concurrent switch to restricted cannot leave an approved
+    /// row behind. `open` mode inserts `Approved` (decided by the user), anything else `Pending`.
+    pub fn request_agent_access(
+        &self,
+        urn: &str,
+        user: &str,
+        org_admin: bool,
+        row_is_own_draft: bool,
+        message: Option<&str>,
+    ) -> Result<AccessAttempt, OrchestratorError> {
         self.with_access_connection(|c| {
-            let id = mint_id(REQUEST_ID_PREFIX);
-            c.execute(
-                "INSERT INTO agent_access
-                   (request_id, urn, user_id, state, message, requested_at, decided_by, decided_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    id,
-                    urn,
-                    user,
-                    initial.as_str(),
-                    message,
-                    now,
-                    decided_by,
-                    decided_at
-                ],
-            )
-            .map_err(|e| map_unique(e, urn, user))?;
-            read_request(c, &id)?.ok_or_else(|| {
-                OrchestratorError::CorruptState(format!(
-                    "access request '{id}' missing after write"
-                ))
-            })
+            match agent_access_on(c, urn, user, org_admin, row_is_own_draft)? {
+                AgentAccess::Hidden => return Ok(AccessAttempt::Hidden),
+                AgentAccess::Usable => return Ok(AccessAttempt::Usable),
+                AgentAccess::Visible {
+                    state: Some(LiveState::Pending),
+                } => return Ok(AccessAttempt::AlreadyPending),
+                AgentAccess::Visible { .. } => {}
+            }
+            // A `(restricted, everyone)` row cannot be written; the rule reads one as approval.
+            let initial = match read_policy(c, urn)?.map(|p| p.mode) {
+                Some(AccessMode::Open) => RequestState::Approved,
+                _ => RequestState::Pending,
+            };
+            insert_access_request_on(c, urn, user, message, initial).map(AccessAttempt::Inserted)
         })
     }
 
@@ -1198,6 +1244,58 @@ mod enforcement_tests {
     /// The text with the URN replaced, so a hidden agent's answer and a missing URN's compare.
     fn text(err: OrchestratorError, urn: &str) -> String {
         err.to_string().replace(urn, "<urn>")
+    }
+
+    #[test]
+    fn install_default_ignores_a_draft_but_not_a_released_row() {
+        let s = store();
+        let c = s.connection.lock().unwrap();
+        // `DRAFT_ONLY` has only a draft row: a first install still gets `(org, approval)`.
+        assert!(write_install_default_on(&c, DRAFT_ONLY, "adm", 1).unwrap());
+        let p = read_policy(&c, DRAFT_ONLY).unwrap().unwrap();
+        assert_eq!(
+            (p.visibility, p.mode),
+            (Visibility::Org, AccessMode::Approval)
+        );
+        // `URN` has a released row: an update or pre-upgrade install gets nothing.
+        assert!(!write_install_default_on(&c, URN, "adm", 1).unwrap());
+        assert!(read_policy(&c, URN).unwrap().is_none());
+    }
+
+    #[test]
+    fn request_agent_access_decides_under_the_current_policy() {
+        let s = store();
+        let put = |v, m| s.put_agent_access_policy(URN, v, m, "adm").unwrap();
+        let rows = |s: &SqliteWorkflowStore| {
+            let c = s.connection.lock().unwrap();
+            c.query_row("SELECT COUNT(*) FROM agent_access", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        let ask = |user: &str| {
+            s.request_agent_access(URN, user, false, false, None)
+                .unwrap()
+        };
+        // A switch to restricted (after any earlier read) leaves no row: Hidden, nothing written.
+        put(Visibility::Restricted, AccessMode::Open);
+        assert!(matches!(ask("u2"), AccessAttempt::Hidden));
+        assert_eq!(rows(&s), 0);
+        // (org, everyone) is already usable.
+        put(Visibility::Org, AccessMode::Everyone);
+        assert!(matches!(ask("u2"), AccessAttempt::Usable));
+        // (org, approval) is pending; a second ask is refused as pending.
+        put(Visibility::Org, AccessMode::Approval);
+        assert!(
+            matches!(ask("u2"), AccessAttempt::Inserted(r) if r.state == RequestState::Pending)
+        );
+        assert!(matches!(ask("u2"), AccessAttempt::AlreadyPending));
+        // (org, open) is approved at once.
+        put(Visibility::Org, AccessMode::Open);
+        assert!(
+            matches!(ask("u3"), AccessAttempt::Inserted(r) if r.state == RequestState::Approved)
+        );
+        assert_eq!(rows(&s), 2);
     }
 
     #[test]

@@ -11911,8 +11911,8 @@ async fn a_restricted_agent_is_hidden_and_a_visible_one_asks_for_access_at_every
         spaces_before,
         "no Space was created"
     );
-    // The release suggestion needs the owner; a Visible agent is no longer a leak, so the
-    // publisher (not the owner) gets the owner refusal, not the access one.
+    // The release suggestion needs the owner, but access is checked first: a publisher who is
+    // not the owner and cannot use the Visible agent gets the access refusal, not an owner one.
     let (status, body) = get(&publisher, format!("/v1/agents/{urn}/release-suggestion")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body.contains("agent_access_required:"), "{body}");
@@ -12162,6 +12162,117 @@ async fn a_legacy_session_on_a_bound_space_is_an_admission_and_a_refused_run_bin
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(body.contains("agent_access_required:"), "{body}");
+}
+
+/// Q2, site 13: a revoke ends the user's right to steer or queue into a run that is still live.
+#[tokio::test]
+async fn a_revoked_user_cannot_steer_or_queue_into_a_live_run() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    store.initialize_catalog_schema().unwrap();
+    let admin = mint_user_key(&store, "boss", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let alice = mint_user_key(&store, "alice", UserRole::Member, MEMBER_SCOPES);
+    seed_released_agent(&store, INBOX_AGENT);
+    let app = test_app(app_state_http_only(store.clone()));
+    let policy = |mode: &str, idem: &str| {
+        let (mode, idem, admin, app) = (
+            mode.to_string(),
+            idem.to_string(),
+            admin.clone(),
+            app.clone(),
+        );
+        async move {
+            access_call(
+                &app,
+                "PUT",
+                &format!("/v1/agents/{INBOX_AGENT}/access-policy"),
+                &admin,
+                Some(&idem),
+                Some(serde_json::json!({ "visibility": "org", "mode": mode })),
+            )
+            .await
+        }
+    };
+    // Alice has access (open mode, she adds herself) and a run of hers is live.
+    assert_eq!(policy("open", "pol-open").await.0, StatusCode::OK);
+    let (status, body) = access_call(
+        &app,
+        "POST",
+        &format!("/v1/agents/{INBOX_AGENT}/access"),
+        &alice,
+        Some("add-alice"),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    live_task(&store, "revoked-ws", "main", "alice");
+    let steer = |key: &str, mode: Option<&str>| {
+        let mut body = steer_body(
+            "revoked-ws",
+            "main",
+            key,
+            serde_json::json!({"prompt": "more"}),
+        );
+        if let Some(mode) = mode {
+            body["spec"]["inboxMode"] = serde_json::json!(mode);
+        }
+        let (key, alice, app) = (key.to_string(), alice.clone(), app.clone());
+        async move { post_json(&app, "/v1/runs", &alice, &key, body).await }
+    };
+    let (status, body) = steer("steer-before", None).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(store.list_inbox_messages(INBOX_RUN).unwrap().len(), 1);
+    let runs_before = store.list_runs_for_owner("alice").unwrap().len();
+
+    // An admin revokes her access while the run is still live.
+    let (status, body) = access_call(
+        &app,
+        "POST",
+        &format!("/v1/agents/{INBOX_AGENT}/access/alice/revoke"),
+        &admin,
+        Some("revoke-alice"),
+        Some(serde_json::json!({ "reason": "left the team" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(policy("approval", "pol-approval").await.0, StatusCode::OK);
+
+    // Steer and queue (on /v1/runs and by run id) are refused, and nothing is written.
+    let by_id = format!("/v1/runs/{}/messages", encode_run_path(INBOX_RUN));
+    let mut refused = vec![
+        ("steer", steer("steer-after", None).await),
+        ("queue", steer("queue-after", Some("QUEUE")).await),
+    ];
+    for (key, mode) in [("msg-steer", "STEER"), ("msg-queue", "QUEUE")] {
+        let answer = post_json(
+            &app,
+            &by_id,
+            &alice,
+            key,
+            serde_json::json!({ "text": "still there?", "mode": mode }),
+        )
+        .await;
+        refused.push((key, answer));
+    }
+    for (what, (status, body)) in refused {
+        assert_eq!(status, StatusCode::FORBIDDEN, "{what}: {body}");
+        assert!(
+            body.to_string().contains("agent_access_required:"),
+            "{what}: {body}"
+        );
+    }
+    assert_eq!(
+        store.list_inbox_messages(INBOX_RUN).unwrap().len(),
+        1,
+        "only the message from before the revoke exists"
+    );
+    assert!(store.list_queued().unwrap().is_empty(), "nothing queued");
+    assert_eq!(
+        store.list_runs_for_owner("alice").unwrap().len(),
+        runs_before,
+        "no run started"
+    );
 }
 
 // ---- Agent access, Phase 1 wave 3: decide and revoke ----

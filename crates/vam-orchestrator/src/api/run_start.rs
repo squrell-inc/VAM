@@ -234,8 +234,9 @@ fn refuse_inline_parts(req: &CreateRunRequest) -> Result<(), OrchestratorError> 
 
 /// The agent access check of a start (AA-1.5): a pure read through the same load the run makes
 /// later (`load_agent_for_run`), run first. With a requested agent that is the agent; with only
-/// a Space id it is the Space's bound agent. A Space that cannot be read, or has no agent, is
-/// left to `resolve_place` and the later load, which answer as before.
+/// a Space id it is the Space's bound agent: the Space row's, else the workspace file's (as the
+/// later load reads it), so a Space whose row has no agent cannot skip the check. A Space the
+/// caller does not own (NotFound) is left to `resolve_place`, which answers as before.
 fn require_agent_admission(
     state: &AppState,
     caller: &RunCaller,
@@ -251,10 +252,18 @@ fn require_agent_admission(
             if space_id.is_empty() {
                 return Ok(());
             }
-            let Ok(space) = state.store.get_space(owner, space_id) else {
-                return Ok(());
+            let row_urn = match state.store.get_space(owner, space_id) {
+                Ok(space) => space.agent_urn.filter(|u| !u.is_empty()),
+                Err(OrchestratorError::NotFound(_)) => return Ok(()),
+                Err(other) => return Err(other),
             };
-            match space.agent_urn.filter(|u| !u.is_empty()) {
+            let from_meta = match row_urn {
+                Some(urn) => Some(urn),
+                None => read_bound_workspace_meta(space_id)?
+                    .and_then(|m| m.agent_urn)
+                    .filter(|u| !u.is_empty()),
+            };
+            match from_meta {
                 Some(urn) => {
                     bound = urn;
                     bound.as_str()
