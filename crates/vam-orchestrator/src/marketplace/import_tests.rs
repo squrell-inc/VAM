@@ -203,6 +203,27 @@ fn the_squrell_listing_installs_as_released_read_only_rows_with_their_origin() {
     // It runs in permissions mode.
     assert!(agent.permissions.is_some());
 
+    // A5: a fresh install is (org, approval), so members do not list it until an admin opens it.
+    assert!(w
+        .store
+        .list_agent_records_visible("local", false)
+        .unwrap()
+        .iter()
+        .all(|r| r
+            .spec
+            .as_ref()
+            .and_then(|s| s.resource_id.as_ref())
+            .map(|i| i.urn.as_str())
+            != Some(AGENT)));
+    w.store
+        .put_agent_access_policy(
+            AGENT,
+            crate::agent_access::Visibility::Org,
+            crate::agent_access::AccessMode::Everyone,
+            "admin",
+        )
+        .unwrap();
+
     // The origin is recorded and shows on the records; the install is recorded.
     let mut records = w.store.list_agent_records_visible("local", false).unwrap();
     w.store.attach_agent_origins(&mut records).unwrap();
@@ -512,6 +533,117 @@ fn an_update_names_the_artifacts_whose_capabilities_changed() {
     let out = w.install("squrell", "microsoft-365", Mode::Update).unwrap();
     assert_eq!(out.capabilities_changed, [AGENT]);
     assert_eq!(w.versions("agents", AGENT), ["1.0.0", "1.0.1"]);
+}
+
+/// Tags a release that rewrites the installed agent (it gets 1.0.1), as the capability test does.
+fn tag_an_agent_update(w: &mut World) {
+    let agent_path = "listings/microsoft-365/agents/executive-assistant/agent.json";
+    let agent_json = std::fs::read_to_string(w.repo.work_dir().join(agent_path))
+        .unwrap()
+        .replace(
+            "\"target\": \"builtin:load_skill\"",
+            "\"target\": \"builtin:write_file\"",
+        );
+    w.repo.write(&[(agent_path, &agent_json)]);
+    let index = std::fs::read_to_string(w.repo.work_dir().join("marketplace.json"))
+        .unwrap()
+        .replace(SQ_TAG, "microsoft-365-v1.3.0");
+    w.repo.write(&[("marketplace.json", &index)]);
+    w.repo.tag("microsoft-365-v1.3.0");
+    refresh_blocking(&w.store, &w.cfg, "squrell").unwrap();
+}
+
+fn policy_of(w: &World, urn: &str) -> Option<(String, String, String)> {
+    w.store.agent_access_policy(urn).unwrap().map(|p| {
+        (
+            p.visibility.as_str().to_string(),
+            p.mode.as_str().to_string(),
+            p.updated_by,
+        )
+    })
+}
+
+#[test]
+fn a_first_install_of_an_agent_starts_org_approval_and_nothing_else_gets_a_policy() {
+    let Some(w) = squrell(|_| {}) else { return };
+    assert_eq!(policy_of(&w, AGENT), None);
+    w.install("squrell", "microsoft-365", Mode::Install)
+        .unwrap();
+    assert_eq!(
+        policy_of(&w, AGENT),
+        Some(("org".into(), "approval".into(), "admin".into()))
+    );
+    // Only the agent: a skill or a playbook has no access policy.
+    let c = w.store.connection.lock().unwrap();
+    let n: i64 = c
+        .query_row("SELECT COUNT(*) FROM agent_access_policy", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
+    // The installer is not made an agent admin by installing (A6 seeds the first releaser only).
+    let admins: i64 = c
+        .query_row("SELECT COUNT(*) FROM agent_admins", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(admins, 0);
+}
+
+#[test]
+fn an_update_never_writes_or_replaces_the_agents_policy() {
+    let Some(mut w) = squrell(|_| {}) else { return };
+    w.install("squrell", "microsoft-365", Mode::Install)
+        .unwrap();
+    // The admin opens the agent to everyone, then an update rewrites the agent (1.0.1).
+    w.store
+        .put_agent_access_policy(
+            AGENT,
+            crate::agent_access::Visibility::Org,
+            crate::agent_access::AccessMode::Everyone,
+            "boss",
+        )
+        .unwrap();
+    tag_an_agent_update(&mut w);
+    w.install("squrell", "microsoft-365", Mode::Update).unwrap();
+    assert_eq!(w.versions("agents", AGENT), ["1.0.0", "1.0.1"]);
+    assert_eq!(
+        policy_of(&w, AGENT),
+        Some(("org".into(), "everyone".into(), "boss".into()))
+    );
+}
+
+#[test]
+fn an_install_from_before_the_upgrade_gets_no_policy_at_its_first_update() {
+    let Some(mut w) = squrell(|_| {}) else { return };
+    w.install("squrell", "microsoft-365", Mode::Install)
+        .unwrap();
+    // A pre-upgrade install has its agent row but never had a policy row.
+    w.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM agent_access_policy", [])
+        .unwrap();
+    tag_an_agent_update(&mut w);
+    w.install("squrell", "microsoft-365", Mode::Update).unwrap();
+    assert_eq!(w.versions("agents", AGENT), ["1.0.0", "1.0.1"]);
+    assert_eq!(policy_of(&w, AGENT), None, "the agent did not disappear");
+}
+
+#[test]
+fn a_first_install_keeps_a_policy_row_that_is_already_there() {
+    let Some(w) = squrell(|_| {}) else { return };
+    w.store
+        .put_agent_access_policy(
+            AGENT,
+            crate::agent_access::Visibility::Org,
+            crate::agent_access::AccessMode::Open,
+            "boss",
+        )
+        .unwrap();
+    w.install("squrell", "microsoft-365", Mode::Install)
+        .unwrap();
+    assert_eq!(
+        policy_of(&w, AGENT),
+        Some(("org".into(), "open".into(), "boss".into()))
+    );
 }
 
 #[test]

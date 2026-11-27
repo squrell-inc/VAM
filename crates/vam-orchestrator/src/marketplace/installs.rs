@@ -327,7 +327,8 @@ impl SqliteWorkflowStore {
     /// marketplace state to its boot state, so scenarios give the same result alone, in a batch
     /// and in any order. It deletes every catalog row of tier `marketplace` (and the origin and
     /// install records), the read state of the preconfigured marketplace, and re-enables it. It
-    /// does not touch the pins or the cache, and it never runs in a default `vamd`.
+    /// does not touch the pins or the cache, and it never runs in a default `vamd`. Access policy
+    /// rows (agent access, A5) are not catalog rows and are left as they are.
     #[cfg(feature = "process-guest")]
     pub fn reset_marketplace_installs(&self) -> Result<usize, OrchestratorError> {
         let mut c = self

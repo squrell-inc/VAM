@@ -459,6 +459,33 @@ pub(crate) fn seed_first_admin_on(
     Ok(added > 0)
 }
 
+/// A5: the default of a marketplace install. Writes `(org, approval)` for `urn` only when the
+/// agent has no row in `agents` yet, so it runs before the install's own write. An update (or a
+/// pre-upgrade install getting its first update) finds the row and writes nothing, and an
+/// existing policy is never replaced. Returns whether a policy row was added. Runs in the
+/// install's transaction.
+pub(crate) fn write_install_default_on(
+    connection: &Connection,
+    urn: &str,
+    by: &str,
+    at: i64,
+) -> Result<bool, OrchestratorError> {
+    let known: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE urn = ?1)",
+        params![urn],
+        |r| r.get(0),
+    )?;
+    if known {
+        return Ok(false);
+    }
+    let added = connection.execute(
+        "INSERT OR IGNORE INTO agent_access_policy (urn, visibility, access_mode, updated_by, updated_at)
+         VALUES (?1, 'org', 'approval', ?2, ?3)",
+        params![urn, resolved_owner(by), at],
+    )?;
+    Ok(added > 0)
+}
+
 fn map_unique(error: rusqlite::Error, urn: &str, user: &str) -> OrchestratorError {
     if let rusqlite::Error::SqliteFailure(failure, _) = &error {
         if failure.code == rusqlite::ErrorCode::ConstraintViolation {

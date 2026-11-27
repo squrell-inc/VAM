@@ -30,5 +30,4 @@ guards:
   - vam:crates/vam-orchestrator/src/agent_access.rs
   - vam:crates/vam-orchestrator/src/grants.rs
   - vam:crates/vam-orchestrator/src/gateway.rs
-status: pending
-expectFail: { step: when.6, class: product }
+status: active

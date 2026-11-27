@@ -178,6 +178,10 @@ pub fn router(state: AppState) -> Router {
                 .post(post_agent_wildcard)
                 .delete(delete_agent_wildcard),
         )
+        .route(
+            "/v1/access-requests/{id}/decide",
+            post(agent_access::post_decide),
+        )
         .route("/v1/policies", put(put_policy).get(list_policies))
         .route(
             "/v1/policies/{*rest}",
@@ -631,7 +635,11 @@ async fn post_agent_wildcard(
         return permissions_migrate::migrate_legacy_draft(state, auth, path, headers, force, body)
             .await;
     }
-    // `…/access` (Add or Request); `…/access/{userId}/revoke` joins in wave 3, before this.
+    // `…/access/{userId}/revoke` before `…/access` (Add or Request), both before the release.
+    if let Some(target) = agent_access::revoke_target(&path) {
+        let (urn, user_id) = target?;
+        return agent_access::post_revoke(&state, &auth, &urn, &user_id, &headers, &body);
+    }
     if let Some(urn) = agent_access::access_urn(&path) {
         return agent_access::post_access(&state, &auth, &urn, &headers, &body);
     }

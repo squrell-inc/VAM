@@ -49,5 +49,4 @@ mock:
     reply: { text: done }
   - when: { step: hi, stepStart: true }
     reply: { text: Hello. }
-status: pending
-expectFail: { step: when.2, class: product }
+status: active

@@ -3,8 +3,10 @@
 //! - `PUT  /v1/agents/{urn}/access-policy {visibility, mode}`: set who may see and use an agent.
 //! - `POST /v1/agents/{urn}/access {message?}`: Add (`open`, granted at once, 200) or Request
 //!   (`approval`, pending, 202).
+//! - `POST /v1/access-requests/{id}/decide {decision, reason?}` (wave 3): approve or deny.
+//! - `POST /v1/agents/{urn}/access/{userId}/revoke {reason}` (wave 3): end an approved access.
 //!
-//! Both are parsed from the `/v1/agents/{*rest}` wildcard by suffix. The admin check is the
+//! The agent routes are parsed from the `/v1/agents/{*rest}` wildcard by suffix. The admin check is the
 //! design §2.3 rule (`users:admin` on the key, or an `agent_admins` row), never `pdp.authorize`,
 //! `catalog:write`, `publish:grant` or `keys:admin`. A Hidden agent answers 404 with the text of
 //! a missing URN, built by the same constructor, so the two are equal byte for byte.
@@ -15,8 +17,8 @@ use axum::response::Response;
 use serde_json::{json, Map, Value};
 
 use crate::agent_access::{
-    is_agent_or_org_admin, AccessMode, AccessRow, AgentAccess, AgentAccessPolicy, LiveState,
-    RequestState, Visibility,
+    is_agent_or_org_admin, AccessMode, AccessRow, AgentAccess, AgentAccessPolicy, Decision,
+    LiveState, RequestState, Visibility,
 };
 use crate::api::auth::{require_idempotency_key, AuthContext};
 use crate::api::catalog_auth::require_catalog_read;
@@ -28,8 +30,12 @@ use crate::workflow::SqliteWorkflowStore;
 
 const POLICY_SUFFIX: &str = "/access-policy";
 const ACCESS_SUFFIX: &str = "/access";
+const REVOKE_SUFFIX: &str = "/revoke";
+const ACCESS_INFIX: &str = "/access/";
 /// Longest `message` on an access request, in characters.
 const MESSAGE_MAX_CHARS: usize = 1000;
+/// Longest `reason` on a decision or a revoke, in characters.
+const REASON_MAX_CHARS: usize = 1000;
 
 /// The URN in `rest` when it names `…/access-policy`.
 pub(crate) fn policy_urn(rest: &str) -> Option<String> {
@@ -39,6 +45,22 @@ pub(crate) fn policy_urn(rest: &str) -> Option<String> {
 /// The URN in `rest` when it names `…/access` (and not a longer `…/access/…` path).
 pub(crate) fn access_urn(rest: &str) -> Option<String> {
     suffix_urn(rest, ACCESS_SUFFIX)
+}
+
+/// `(urn, userId)` when `rest` names `…/access/{userId}/revoke`. A user id holding a `/` cannot
+/// be told from part of the URN, so it is refused with a 400 rather than mis-parsed.
+pub(crate) fn revoke_target(rest: &str) -> Option<Result<(String, String), OrchestratorError>> {
+    let head = rest.trim_start_matches('/').strip_suffix(REVOKE_SUFFIX)?;
+    let (urn, user) = head.rsplit_once(ACCESS_INFIX)?;
+    if urn.is_empty() || user.is_empty() {
+        return None;
+    }
+    if user.contains('/') {
+        return Some(Err(OrchestratorError::InvalidContract(
+            "user id must not contain '/'".to_string(),
+        )));
+    }
+    Some(Ok((percent_decode_path(urn), percent_decode_path(user))))
 }
 
 fn suffix_urn(rest: &str, suffix: &str) -> Option<String> {
@@ -211,6 +233,122 @@ pub(crate) fn post_access(
     )?;
     let out = json!({ "request": request_json(state.store.as_ref(), &row) });
     Ok(json_http_response(status, out.to_string()))
+}
+
+/// The caller's `reason`: required when `required`, trimmed, never longer than the cap.
+fn parse_reason(
+    map: &Map<String, Value>,
+    required: bool,
+) -> Result<Option<String>, OrchestratorError> {
+    let reason = match map.get("reason") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.trim().to_string()).filter(|t| !t.is_empty()),
+        Some(_) => {
+            return Err(OrchestratorError::InvalidContract(
+                "reason must be a string".to_string(),
+            ))
+        }
+    };
+    if required && reason.is_none() {
+        return Err(OrchestratorError::InvalidContract(
+            "reason is required".to_string(),
+        ));
+    }
+    if reason
+        .as_deref()
+        .is_some_and(|r| r.chars().count() > REASON_MAX_CHARS)
+    {
+        return Err(OrchestratorError::InvalidContract(format!(
+            "reason is longer than {REASON_MAX_CHARS} characters"
+        )));
+    }
+    Ok(reason)
+}
+
+fn parse_decision(body: &str) -> Result<(Decision, Option<String>), OrchestratorError> {
+    let map = parse_object(body)?;
+    let decision = match map.get("decision").and_then(Value::as_str) {
+        Some("approve") => Decision::Approve,
+        Some("deny") => Decision::Deny,
+        Some(other) => {
+            return Err(OrchestratorError::InvalidContract(format!(
+                "decision must be 'approve' or 'deny', got '{other}'"
+            )))
+        }
+        None => {
+            return Err(OrchestratorError::InvalidContract(
+                "'decision' is required".to_string(),
+            ))
+        }
+    };
+    let reason = parse_reason(&map, decision == Decision::Deny)?;
+    Ok((decision, reason))
+}
+
+/// `POST /v1/access-requests/{id}/decide {decision, reason?}`. The caller must be an admin of
+/// the request's agent by the design §2.3 rule (`users:admin` on the key, or an `agent_admins`
+/// row), never `pdp.authorize` or a scope. Anyone else, and an unknown id, gets the same 404, so
+/// request ids reveal nothing about hidden agents.
+pub(crate) async fn post_decide(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(request_id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, ApiError> {
+    ensure_ready(&state, true)?;
+    require_catalog_read(&auth)?;
+    let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
+    let not_found =
+        || OrchestratorError::NotFound(format!("access request '{request_id}' not found"));
+    let store = state.store.as_ref();
+    let row = store
+        .get_access_request(&request_id)?
+        .ok_or_else(not_found)?;
+    let caller = auth.owner_user_id();
+    if !is_agent_or_org_admin(store, &row.urn, caller, auth.has_users_admin())? {
+        return Err(not_found().into());
+    }
+    let (decision, reason) = parse_decision(&body)?;
+    let decided = store.decide_access_request(&request_id, decision, caller, reason.as_deref())?;
+    let out = json!({ "request": request_json(store, &decided) });
+    Ok(json_http_response(StatusCode::OK, out.to_string()))
+}
+
+/// `POST /v1/agents/{urn}/access/{userId}/revoke {reason}`: end the user's approved access. It
+/// takes effect at the next admission; a session admitted before keeps running (A7).
+pub(crate) fn post_revoke(
+    state: &AppState,
+    auth: &AuthContext,
+    urn: &str,
+    user_id: &str,
+    headers: &HeaderMap,
+    body: &str,
+) -> Result<Response, ApiError> {
+    ensure_ready(state, true)?;
+    require_catalog_read(auth)?;
+    let _idempotency = require_idempotency_key(headers).map_err(ApiError::from)?;
+    let standing = stand(state, auth, urn)?;
+    if !standing.admin {
+        return Err(OrchestratorError::PermissionDenied(format!(
+            "only an agent admin or org admin may change access to '{urn}'"
+        ))
+        .into());
+    }
+    let reason = parse_reason(&parse_object(body)?, true)?;
+    let store = state.store.as_ref();
+    let approved = store
+        .live_access_row(urn, user_id)?
+        .filter(|row| row.state == RequestState::Approved);
+    if approved.is_none() {
+        return Err(OrchestratorError::NotFound(format!(
+            "user '{user_id}' has no approved access to agent '{urn}'"
+        ))
+        .into());
+    }
+    let row = store.revoke_access(urn, user_id, auth.owner_user_id(), reason.as_deref())?;
+    let out = json!({ "request": request_json(store, &row) });
+    Ok(json_http_response(StatusCode::OK, out.to_string()))
 }
 
 fn parse_message(body: &str) -> Result<Option<String>, OrchestratorError> {
