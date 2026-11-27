@@ -47,6 +47,10 @@ pub async fn get_me(
         Err(e) => return Err(e.into()),
     };
     let domains = crate::registry::registry_domains();
+    // Both are left out when empty (design §6 amendments).
+    let (admin_of_agents, pending_access_requests) = state
+        .store
+        .access_me_summary(&user_id, auth.has_users_admin())?;
     let resp = GetMeResponse {
         user_id,
         default_namespace: namespace,
@@ -55,6 +59,8 @@ pub async fn get_me(
         username,
         role: auth.role().as_str().to_string(),
         scopes: auth.key.record.scopes.clone(),
+        admin_of_agents,
+        pending_access_requests: i32::try_from(pending_access_requests).unwrap_or(i32::MAX),
     };
     let (code, json) = json_response("vam.v1.GetMeResponse", &resp)?;
     Ok(json_http_response(code, json))
