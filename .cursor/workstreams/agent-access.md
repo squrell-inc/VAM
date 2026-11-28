@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: agent-access
-current_phase: 2
+current_phase: 5
 branch: feat/agent-access
 design_docs:
   - design/agent-access.md
@@ -470,7 +470,9 @@ mine|requests|approve|deny|revoke` (design §5).
 **Exit:** CLI scenarios green; `list_paged` handles paths with a query string; hints for
 `agent_access_required`; CLI docs updated.
 
-- [ ] Commands, hints, `list_paged` fix, docs
+- [x] Commands, hints, `list_paged` fix, docs
+
+Hand-off: Phase 3 done 2026-11-28. Wave PRs #147-#149 merged into `feat/agent-access-p3`; the Opus close review ran and its findings are fixed. CLI scenarios `a-member-browses-requests-and-leaves-an-agent-from-the-cli`, `an-agent-admin-decides-requests-from-the-cli`, `an-agent-admin-names-other-admins-from-the-cli` and `the-cli-tells-a-member-how-to-ask-for-an-agent` are green in CI. CI's `CI:` line takes scenario ids, not labels like C1.
 
 **Approved 2026-11-28 by Roshan with all recommended answers Q1 to Q9** (command names as design §5; short names resolve through browse; `requests` pending by default with `--state`, `--agent`, `--all` = every page; users by id or username plus `vam users ls`; no interactive confirm; table or global `--json`; docs in `getting-started/cli.md`; one short Opus high close review; commits as Roshan with `git commit -s`, no AI trailers).
 
@@ -676,6 +678,8 @@ are shown, not swallowed into `[]`.
 - [ ] `services/agentAccess.ts` and hooks; Marketplace Agents tab on `GET /v1/catalog/agents`
 - [ ] Request dialog, my requests, admin queue, `openAgentChat` gate
 
+Hand-off: Phase 4 done. Squrell-App PRs #18 to #22 merged into `feature/agent-access`; release PR #23 into `main` is held until vamd is deployed. See `p4-breakdown.md` in the project files (`agent-access/p4-breakdown.md`).
+
 ### Phase 5 — Marketplace manifest and hardening
 
 **Goal:** `access.default` in `marketplace.json` applied on first install; the pitfalls of design §7
@@ -728,7 +732,7 @@ listed last. The breakdown of each phase still decides its items and waves.
 | 1 | Owner: breakdown, W2 and W3 plans | Session per PR (playbook §4: CI green, reads the risky lines in `catalog.rs`, `run_start.rs`, `grants.rs`, `api/error.rs`); CodeRabbit | Opus review agent after W3: every design §3 site goes through the rule; Hidden equals a missing URN byte for byte; admin check is the §2.3 rule, never `pdp.authorize` or a scope; Space bound only after admission; no backfill on upgrade. Findings: one fix wave | Scenarios `active`, green; team checklist; owner check (playbook §6) | Separate design review (the design and A1–A9 are that review) |
 | 2 | Owner: breakdown, W1 plan, design §6 marked frozen | As P1, plus OpenAPI, proto and baseline match the handlers (`crates/vam-spec/tests/conformance.rs`) | Opus review agent on W1: admins write and lists use the §2.3 admin rule; browse and `/v1/me` leak no Hidden agent; `access.requested` reaches admins only | As P1 | — |
 | 3 | Owner: breakdown; wave plans delegated | Session per PR; CodeRabbit | Short Opus high read-only review at phase close (approved 2026-11-28): hints and fallbacks leak nothing vamd did not return; read-modify-write sends the intended set | Scenarios green; checklist | Dedicated security build wave |
-| 4 | Owner: breakdown; wave plans delegated | Session runs the app's local gate (playbook §4: `CI=1 pnpm test`, `tsc --noEmit`, `pnpm e2e:typecheck`); Playwright desktop and mobile (Squrell-App `.cursorrules`) | None: the app hides nothing vamd does not | Owner's manual check of the chat flow (working-agreement "Rules that bit us"); then against a Phase 2 node | Opus review |
+| 4 | Owner: breakdown; wave plans delegated | Session runs the app's local gate (playbook §4: `CI=1 yarn test`, `tsc --noEmit`, `yarn e2e:typecheck`); Playwright desktop and mobile (Squrell-App `.cursorrules`) | None: the app hides nothing vamd does not | Owner's manual check of the chat flow (working-agreement "Rules that bit us"); then against a Phase 2 node | Opus review |
 | 5 | Owner: breakdown, W2 plan, A9 | As P1; vam-marketplace PR reviewed by `CODEOWNERS` | Final Opus review agent over the whole feature (design §7 list): the one end-to-end security review before the last release | As P1 | — |
 
 **Model and effort.** Cost is context size times turns (§13): Opus only in short agents with a fresh
@@ -831,3 +835,4 @@ worth it: an extra close, checklist and full-suite release PR for files W3 edits
 | 2026-11-27 | 2 fix wave | Opus security review F1-F4 fixed. `PUT …/admins` now moves the open `access.requested` copies of the pending requests on the same transaction (removed admin's copy closes `expired`, new admin gets one, no admin left falls back to the org admins and the operator); `POST /v1/notifications/{id}/acted` clears a copy its holder can no longer decide; the requester is never a recipient; `access.decided` names a now-Hidden agent by its URN tail; OpenAPI gains the 403 (no `catalog:read`) on the access reads and writes and the full revoke 404 text. The W2 caveat "a late admin gets no notification" is gone. Scoreboard: N1–N8, P1 S1–S7 and the 10 marketplace scenarios 25/25 green, `cargo test -p vam-orchestrator` 2742 passed 0 failed, `vam-spec` green, `vam-e2e check` ok, `pnpm build` ok, clippy and fmt clean, 0 fix cycles, scenarios 4m44s. Phase not closed. |
 | 2026-11-28 | 3 W2 | AA-3.3 (`vam agent admins ls\|add\|rm`, `vam users ls`), AA-3.4 (`vam access requests\|approve\|deny\|revoke`) and AA-3.6 (CLI docs, feature row without `pending_page`) on `feat/agent-access-p3-w2`. C2 and C3 `active`; C1 to C4 active. `cargo test -p vam-cli`, clippy, `vam-e2e check` and `pnpm build` green locally; scenarios run in Actions. |
 | 2026-11-28 | 3 W0-W1 | Scenarios C1-C4 (pending) and the runner `exitCode` and placeholders (#147); paging fix, member commands and hints (#148). Note: the CI line takes scenario ids, not C1-C4, so #148 ran only `decision-anywhere-clears-the-notification`; the four CLI scenarios first run on #149 with their real ids. |
+| 2026-11-28 | 3 review, fix wave and close | Opus close review of the merged Phase 3 diff; findings fixed on `feat/agent-access-p3-fix`: exact user id beats any username, `/v1/users` read only for org admins and only 403/404 swallowed, admin list re-read right before the PUT, hint text and URN lists cleaned of control and format characters, a short-name locked run fails with 403 like the URN path and points at `vam access mine` for a pending request, path segments encode UTF-8 bytes and dots. Phase 3 closed. |

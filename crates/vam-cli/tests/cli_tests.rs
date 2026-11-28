@@ -3241,6 +3241,11 @@ mod access_admin_tests {
             );
         });
         server.mock(|when, then| {
+            when.method(GET).path("/v1/me");
+            then.status(200)
+                .body(r#"{"userId":"u","role":"org_admin","scopes":["users:admin"]}"#);
+        });
+        server.mock(|when, then| {
             when.method(GET).path("/v1/users");
             then.status(200).body(
                 serde_json::json!({"users":[{"userId":UID3,"username":"cy","role":"member"}]})
@@ -3265,6 +3270,11 @@ mod access_admin_tests {
             then.status(200).body(r#"{"requests":[]}"#);
         });
         server.mock(|when, then| {
+            when.method(GET).path("/v1/me");
+            then.status(200)
+                .body(r#"{"userId":"u","role":"org_admin","scopes":["users:admin"]}"#);
+        });
+        server.mock(|when, then| {
             when.method(GET).path("/v1/users");
             then.status(200).body(
                 serde_json::json!({"users":[{"userId":UID3,"username":"cy","role":"member"}]})
@@ -3279,6 +3289,30 @@ mod access_admin_tests {
                 .body(admins_body(&[(UID1, "ada"), (UID3, "cy")]));
         });
         let out = run_vam_against(&server, &["agent", "admins", "add", URN, "CY"]);
+        assert!(out.status.success(), "{:?}", text(&out));
+        put.assert();
+    }
+
+    #[test]
+    fn admins_add_an_id_beats_a_username_equal_to_it() {
+        let server = MockServer::start();
+        admins_get(&server, &[(UID1, "ada")]);
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/access-requests");
+            then.status(200).body(
+                serde_json::json!({"requests":[
+                    {"requestId":"acr_1","urn":URN,"userId":UID3,"username":UID2,"state":"pending","requestedAt":"t"},
+                    {"requestId":"acr_2","urn":URN,"userId":UID2,"username":"bob","state":"pending","requestedAt":"t"}]}).to_string(),
+            );
+        });
+        let put = server.mock(|when, then| {
+            when.method(PUT)
+                .path_matches("/admins$")
+                .json_body(serde_json::json!({"userIds": [UID1, UID2]}));
+            then.status(200)
+                .body(admins_body(&[(UID1, "ada"), (UID2, "bob")]));
+        });
+        let out = run_vam_against(&server, &["agent", "admins", "add", URN, UID2]);
         assert!(out.status.success(), "{:?}", text(&out));
         put.assert();
     }

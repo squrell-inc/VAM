@@ -2111,12 +2111,26 @@ async fn resolve_short_name(c: &Client, name: &str) -> Result<String> {
             // request. A hidden or missing one keeps the not-found text above.
             let rows = super::access::browse_all(c).await.unwrap_or_default();
             match super::access::urns_named(&rows, name).as_slice() {
-                [urn] => Err(output::fail(
-                    ExitCode::Auth,
-                    format!(
-                        "Wrong: agent_access_required: you have no access to '{urn}' yet.\nExpected: access to this agent, which an admin of it grants.\nFix: vam agent request {urn}."
-                    ),
-                )),
+                [urn] => {
+                    let pending = rows.iter().any(|r| {
+                        r.get("urn").and_then(|u| u.as_str()) == Some(urn.as_str())
+                            && r.pointer("/access/state").and_then(|x| x.as_str())
+                                == Some("pending")
+                    });
+                    let fix = if pending {
+                        "vam access mine".to_string()
+                    } else {
+                        format!("vam agent request {}", super::access::clean(urn))
+                    };
+                    Err(output::fail_http(
+                        ExitCode::Auth,
+                        format!(
+                            "Wrong: agent_access_required: you have no access to '{}' yet.\nExpected: access to this agent, which an admin of it grants.\nFix: {fix}.",
+                            super::access::clean(urn)
+                        ),
+                        403,
+                    ))
+                }
                 _ => Err(e),
             }
         }

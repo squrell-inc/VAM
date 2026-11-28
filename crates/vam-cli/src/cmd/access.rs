@@ -130,7 +130,19 @@ fn list_path(base: &str, page_size: Option<u32>) -> String {
 
 /// User text never reaches the terminal with control characters in it.
 pub(crate) fn clean(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).collect()
+    text.chars()
+        .filter_map(|c| match c {
+            ' ' => Some(' '),
+            c if c.is_whitespace() => Some(' '),
+            c if c.is_control() => None,
+            '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}' => None,
+            c => Some(c),
+        })
+        .collect()
 }
 
 fn text<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -291,7 +303,7 @@ fn pick(name: &str, urns: Vec<String>) -> Result<String> {
             format!(
                 "'{}' matches more than one agent:\n  {}\nPass the URN: vam agent request <urn>",
                 clean(name),
-                many.join("\n  ")
+                many.iter().map(|u| clean(u)).collect::<Vec<_>>().join("\n  ")
             ),
         )),
     }
@@ -541,6 +553,21 @@ pub(crate) fn looks_like_user_id(s: &str) -> bool {
 }
 
 /// The id of `who` in `pairs`: the same id, else the username in any letter case.
+pub(crate) fn find_user_id(pairs: &[(String, String)], who: &str) -> Option<String> {
+    pairs
+        .iter()
+        .find(|(id, _)| id == who)
+        .map(|(id, _)| id.clone())
+}
+
+/// The id of the user named `who`, in any letter case.
+pub(crate) fn find_user_name(pairs: &[(String, String)], who: &str) -> Option<String> {
+    pairs
+        .iter()
+        .find(|(_, name)| !name.is_empty() && name.eq_ignore_ascii_case(who))
+        .map(|(id, _)| id.clone())
+}
+
 pub(crate) fn find_user(pairs: &[(String, String)], who: &str) -> Option<String> {
     pairs
         .iter()
@@ -620,7 +647,7 @@ mod tests {
             .to_string();
         let out = format_browse(&browse);
         assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out}");
-        assert!(out.contains("reason: abc"));
+        assert!(out.contains("reason: ab c"));
         assert!(out.starts_with("URN"));
     }
 
@@ -678,5 +705,10 @@ mod tests {
         assert!(none.to_string().contains("vam agent browse"));
         let many = pick("twin", urns_named(&rows, "twin")).unwrap_err();
         assert_eq!(output::classify(&many).0, ExitCode::Usage);
+    }
+
+    #[test]
+    fn clean_drops_format_characters() {
+        assert_eq!(clean("a\u{202E}b\u{200B}c\td\ne"), "abc d e");
     }
 }
