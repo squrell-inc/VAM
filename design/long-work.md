@@ -246,8 +246,8 @@ max_wakes}, reason}`:
 | Stall | a running task with no turn boundary for 2 step timeouts | treated as a crash (Phase 4 resume) |
 | Loop detector | on for every long task, whatever the profile | as today (`harness.rs:259`) |
 
-**Stalls become notifications.** Every watchdog action and every
-`budget` or `deadline_reached` park goes to the notification module
+**Stalls become notifications.** Every watchdog action, every
+`budget` park and every `deadline_reached` end goes to the notification module
 (decision 9, existing `on_paused` hook), addressed to the task's owner,
 or the App owner for a shared App (owner answer of 2026-11-28).
 
@@ -389,8 +389,9 @@ These add to the tracker's list; none changes an existing entry.
   scratch dir plus host-side write leases, one shared commit sequence, an
   approval parks only that worker.
 - **LW7.** Background processes never keep a task alive past its active
-  time (a spent meter stops them and parks the task) and are never
-  restarted after a crash.
+  time (a spent meter stops them and parks the task) or its wall-clock
+  deadline (the deadline stops them and ends the task
+  `deadline_reached`), and are never restarted after a crash.
 - **LW8.** Stalls, budget parks and watchdog actions always notify the
   task's owner (the App owner for a shared App).
 
