@@ -1108,7 +1108,9 @@ above and change none of it.
 - [ ] Background processes (`run` background, `bg_*`).
   (5b: `bg_start`, `bg_status`, `bg_output`, `bg_kill`, `bg_wait`;
   per-process wall-clock and capture caps; a live process keeps the task
-  awake; lost after a crash, never restarted.)
+  awake and counts active time; a spent active-time meter stops it (output
+  kept) and parks the task; the wall-clock deadline ends the task; lost
+  after a crash, never restarted.)
 - [ ] In-VM sub-agents (`spawn_agent`).
   (5d: `worker_status`, `worker_send`, `worker_stop`, `wait_for_workers`;
   own lane, subset of tools, budget slice, depth 1, default 2 live, cap 4;
@@ -1119,8 +1121,9 @@ above and change none of it.
   compaction; unattended long tasks notify on finish.)
 - [ ] Timer waits: `wait_until`, `waiting(timer)`, backoff re-checks with
   a maximum number of wakes.
-  (5c: deadline sweeper; a wait past the task deadline is refused; a steer
-  wakes a parked task.)
+  (5c: deadline sweeper; a wait longer than 30 s parks with no keep-warm
+  hold; a wait past the task deadline is refused; a steer wakes a parked
+  task.)
 - [ ] Observability and watchdogs (5e): worker rows and per-lane cost,
   heartbeat, no-progress and spend-velocity watchdogs; stalls notify.
 - [ ] Repeated-compaction bench task (`u4-repeated-compaction`, at least

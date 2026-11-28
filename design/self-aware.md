@@ -109,6 +109,7 @@ On versions:
 | `subject` | string | what was refused, as the host names it: a tool name from the host catalog, a normalized host, a binding id, a connector id, an agent URN, a version label |
 | `fix` | `SuggestedFix` (optional) | absent when nothing can change it (the platform IP floor, a tampered skill) |
 | `text` | string | one host-written sentence for people, from a fixed template per `(reason, fix.change, fix.who)` |
+| `decision_ref` | string | the id of the stored decision row this denial came from (empty when nothing is stored, e.g. a 412 before a run); `POST /v1/fix-requests` resolves it |
 
 `DenialReason`:
 
@@ -184,10 +185,16 @@ against the client's own list for that `change`, and a mismatch shows text only.
 
 **Requests to the right person.** For `REQUEST_AGENT_ACCESS` the button calls
 the agent access route. For every other fix that the caller cannot apply, the
-button calls a new `POST /v1/fix-requests {denial}`: the host re-derives the
-fix from the denial's reason and subject (it never trusts the client's `fix`),
-and sends a `fix.requested` notification (new `Kind`,
-`notifications.rs:49-62`) to the agent's admins or the org admins. The admin's
+button calls a new `POST /v1/fix-requests {denial}`. The denial carries a
+reference to the stored decision row (new `Denial.decision_ref`, the id of
+the row S1 stores the denial with); reason and subject alone cannot name the
+recipient, since two agents with different owners can share a tool or a host.
+The host resolves the reference, checks that the requester is entitled to it
+(the run's caller or owner; otherwise 404, same text as a missing row),
+recovers the agent, scope and target from the stored row, re-derives the fix
+from those (it never trusts the client's `fix`), and sends a `fix.requested`
+notification (new `Kind`, `notifications.rs:49-62`) to that agent's admins or
+the org admins. The admin's
 notification carries the same typed fix, so their card has the button. No
 queue, no decision state in S1 (S3 adds one). One request per (requester,
 change, target) per 24 hours; a repeat answers 200 with the existing request.
@@ -246,8 +253,13 @@ with `Idempotency-Key`:
 | Same agent URN; switching agents is not an upgrade | 400 |
 | Target is released and not yanked, or the caller's own draft (isolation-verify-closeout decision 6 and its 2026-11-17 amendment) | 404 for a foreign draft; 409 for a yanked version |
 | The caller may run the agent (agent access, once in `main`) | 403 `agent_access_required:` with its denial |
-| Nothing live, queued or parked on the Space (the busy check in `api/inbox.rs:52-66` plus the parked reservation) | 409 `space_busy: run '<id>'` with a denial whose fix is "wait or stop that run" |
+| Nothing live, queued or parked on the Space (`workspace_busy` and `busy_run`, `api/inbox.rs:87`, `:145-148`, which cover the live session and the parked reservation, plus queued runs) | 409 `space_busy: run '<id>'` with a denial whose fix is "wait or stop that run" |
 | Thread compatibility (below) | not a refusal; the answer lists affected threads |
+
+The busy check and the pin write are one serialized step: they run under
+the same per-Space guard that run admission (`inbox::admit`,
+`api/inbox.rs:407`) holds, so no run can be admitted between the check and
+the write and a Space is never re-pinned while a run is starting.
 
 On success: `previous_agent_version := agent_version`, `agent_version :=
 target`, one audit record (`vam.v1.space.agent_version_changed`, through the
@@ -362,6 +374,9 @@ the usual canary is staging first, then prod; the in-App canary is for prod
 Apps with many Spaces. Rollback restores `previous_agent_version`. `follow`
 moves on release; a yank moves `follow` Apps back to the newest unyanked
 release and blocks `exact` Apps with the S2 prompt to the App owner.
+Turning on `follow` is the human approval for those later automatic moves:
+it is the App owner's explicit opt-in, revocable by setting `exact`, and
+the App owner is notified on each move (`agent.updated`).
 Unlike the personal re-pin, an App pin move does not wait for live runs (it
 cannot wait on many Spaces): each live run finishes on the spec it was
 resolved with, and the S2 thread check runs per Space at its next run. A personal
@@ -470,7 +485,9 @@ rollback restores the previous pin.
 
 - No guest-side settings writes. The guest never changes a policy, secret,
   connection or pin; it can only propose (S3), and the host applies.
-- No auto-apply without a human, at any phase, for any change kind.
+- No auto-apply without a human, at any phase, for any change kind. An App
+  in `follow` mode (S4) is not an exception: the owner's opt-in to `follow`
+  is that approval, revocable, with a notice on each move.
 - No fix text from the model or from tools. Fix text comes from host templates
   and host identifiers only.
 - No new `VamErrorCode`s.
@@ -517,8 +534,10 @@ rollback restores the previous pin.
   normalize it (`broker.rs` `normalize_host`), cap it at 253 bytes, render it as
   data, never as a link.
 - Hidden agents stay 404 with no denial (agent access §2.3).
-- `fix.requested` and `POST /v1/fix-requests` re-derive the fix on the host from
-  reason and subject; a client-sent `fix` is ignored.
+- `fix.requested` and `POST /v1/fix-requests` resolve the denial's
+  `decision_ref`, check the requester's entitlement, and re-derive the fix
+  and the recipients on the host from the stored row; a client-sent `fix`
+  is ignored.
 - The guest's template table and the host's change kinds are one proto enum;
   regenerate the descriptor baseline (`cargo run -p vam-spec --example
   generate_baseline`).

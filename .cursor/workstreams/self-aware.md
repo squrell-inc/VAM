@@ -52,7 +52,9 @@ to confirm** (2026-11-28); none is approved yet.
    builds the model's line from typed fields and its own template table; the
    line never tells the model to retry, escalate or look for another way.
 4. A fix the caller cannot apply becomes a request: agent access requests for
-   `agent_not_granted`, `POST /v1/fix-requests` (host re-derives the fix) and a
+   `agent_not_granted`, `POST /v1/fix-requests` (the denial carries a
+   reference to its stored decision row; the host resolves it, checks the
+   requester's entitlement, and derives the fix and recipients from it) and a
    `fix.requested` notification for the rest. No queue in S1.
 5. The Space row is the authority for a Space's version pin (`agent_version`,
    `previous_agent_version`), backfilled lazily from `workspace.json`; the file
@@ -141,7 +143,7 @@ answers on Q10, Q11 and on the change to isolation-verify-closeout decision 5
 **Exit:** GET Space shows `agentVersion`, `latestVersion`,
 `previousAgentVersion`, `updateAvailable`, `pinnedVersionYanked`;
 `POST /v1/spaces/{id}/agent-version` re-pins with the owner, target, access and
-busy checks, an audit record and `agent.updated`; the next run uses the new
+busy checks (busy check and pin write serialized with run admission), an audit record and `agent.updated`; the next run uses the new
 pin; affected threads continue fresh; a yanked version refuses new runs and
 prompts the upgrade; Squrell banner and `vam space upgrade`. Design:
 `design/self-aware.md` §S2.
@@ -197,7 +199,9 @@ lane's hot-file lock.
 **Plan:** not drafted  
 **Exit:** `version_mode` exact or follow; canary Spaces move first; live runs
 finish on the old version; rollback restores the previous pin; a yank moves
-follow Apps back and blocks exact Apps with a prompt to the App owner. Design:
+follow Apps back and blocks exact Apps with a prompt to the App owner;
+turning on follow is the owner's revocable approval for later moves, each
+notified. Design:
 `design/self-aware.md` §S4.
 
 - [ ] App row fields and the follow resolver

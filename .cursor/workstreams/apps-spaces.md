@@ -74,7 +74,7 @@ the amendment's changes and wait for the owner)
 10. **Authority.** Owner ∩ App limit; the App limit is forbid-only; personal
     Apps have none. Space is never a Cedar principal.
 11. **Secrets.** Personal App: all owner secrets. Shared App: listed vault
-    keys only.
+    keys only (none at all between P4 and P5, AS-4.5).
 12. **Target resolution.** Request → Credential → default → error; a request
     may only narrow a Credential.
 13. **Retention.** `keep` (personal default) or `idle_ttl` capped at 30 days;
@@ -187,16 +187,18 @@ unreachable; only the ref's hash is stored.
 ### Phase 4 — One `start_run` resolution
 
 **Goal:** App, Space and thread resolved once in `start_run`, on the App's pin.  
-**Depends on:** Phases 2 and 3; holds `run_start.rs` and `catalog_resolve.rs` (Q16)  
+**Depends on:** Phases 2 and 3; lane 3 S2 (`set_space_agent_version`); holds `run_start.rs` and `catalog_resolve.rs` (Q16)  
 **Plan:** not drafted  
 **Exit:** resolution table proven for HTTP and the gateway; a shared-App run
 without a Space is refused; the App pin is authoritative; the old request
-shape is unchanged.
+shape is unchanged; a shared-App run resolves no owner secrets until
+Phase 5 lands.
 
 - [ ] AS-4.1 Resolution in `start_run`
 - [ ] AS-2.6 App pin authoritative; `set_space_agent_version` seam with lane 3
 - [ ] AS-4.3 Narrow, never widen
 - [ ] AS-4.4 Stamp `app_id`; filter runs by App and Space
+- [ ] AS-4.5 Shared-App runs resolve zero owner secrets until Phase 5
 
 ### Phase 5 — App limits and secret bindings
 

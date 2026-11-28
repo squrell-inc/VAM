@@ -52,7 +52,8 @@ Do not re-litigate without editing this list. All **proposed, owner to confirm**
    marketplace skill never requires an image rebuild; it declares `requiresRuntime`.
 4. **The image is pinned in the agent version** (`AgentSpec.image_ref`), not in the App.
 5. **No `imageRef` means the standard base.** Operators choose which images a node holds,
-   not what "no imageRef" means.
+   not what "no imageRef" means. Migration: agent versions released before a node's I2
+   upgrade keep the node's I1 default image (`legacy_default_image`, design §3.2).
 6. **Skill packages are fetched, never built, on the host.** Wheels only with hashes, JS
    with scripts off, every file checked against the lockfile; a source build or install
    script is refused at release, naming the package.
@@ -145,7 +146,8 @@ hot files handed over (Q16); agent access released to `main`.
 **Exit:** on one node, an agent with `imageRef: vam/node:1` runs on it and one without runs
 on `vam/base:2`, each restoring from its own golden snapshot on the second run; the receipt
 names the image; a request above the cap runs at the cap and records `vm.clamped: true`; an
-App pinned to an agent version keeps its image when a newer image is released.
+App pinned to an agent version keeps its image when a newer image is released; an agent version
+released before I2 keeps the node's old default image.
 
 - [ ] `ArtifactKind::Image`, image package (`image.json`), curated images registered as
   released under the Squrell domain, short-form `imageRef` resolution
@@ -155,6 +157,8 @@ App pinned to an agent version keeps its image when a newer image is released.
 - [ ] VM size resolution: request, image floor, size classes (`VAMD_VM_SIZES`), cap
   (`VAMD_VM_MAX`)
 - [ ] Receipt and run status: image URN, version, package digest, node rootfs digest, VM size
+- [ ] `legacy_default_image` recorded on the first I2 start; pre-I2 agent versions without
+  `imageRef` boot it; release warns on a drop to the standard base
 
 **Scenario delta** (draft)
 
@@ -167,6 +171,7 @@ App pinned to an agent version keeps its image when a newer image is released.
 | `run-gets-the-vm-size-it-asked-for-within-the-cap` | new | firecracker | node with `VAMD_VM_MAX=2x1024` | decision 11 |
 | `receipt-names-the-image-the-run-booted` | new | process | `org-admin`, `agent-on-node-image` | receipt |
 | `app-keeps-its-image-when-a-newer-image-is-released` | new | process | Apps P2 pieces | decision 4 |
+| `agent-released-before-i2-keeps-the-nodes-old-default-image` | new | firecracker | node defaulting to `vam/node:1`, pre-I2 `agent-with-builtins` | decision 5 migration |
 
 **Open questions** (each with a default)
 
@@ -176,7 +181,8 @@ App pinned to an agent version keeps its image when a newer image is released.
 
 ### Phase 3 — Vamfile Lite (I3)
 
-**Goal:** a declarative recipe (FROM a VAM base, `RUNTIME`, `PACKAGES apt|pip|npm` exact
+**Goal:** a declarative recipe (FROM a `vam/*` image or one released in the same
+marketplace, `RUNTIME`, `PACKAGES apt|pip|npm` exact
 and hashed through `Vamfile.lock`, `COPY`, `ENV`, `LABEL`, `VM` floor, `TEST`; no `RUN`)
 builds in a builder microVM with egress limited to the package mirrors, produces ext4 with
 `vam-runtime` injected, an SBOM and a package list, and is admitted only if TEST passes and
@@ -206,7 +212,7 @@ a PR whose resolved package list drifts from `packages.txt`.
 | `image-listing-builds-on-the-node-and-an-agent-runs-on-it` | new | firecracker | `marketplace-with-image-listing` (new) | the exit |
 | `vamfile-lite-with-a-run-step-is-refused-before-building` | new | process | `image-draft-with-run` (new) | no `RUN` in Lite |
 | `vamfile-lite-with-an-unhashed-package-is-refused` | new | process | `image-draft-without-lock` (new) | lock rule |
-| `image-build-cannot-reach-a-host-outside-the-mirrors` | new | firecracker | `image-draft-that-fetches` (new) | builder egress |
+| `image-build-cannot-reach-a-host-outside-the-mirrors` | new | firecracker | `image-draft-that-fetches` (new; probes from inside the builder VM during the build) | builder egress |
 | `image-whose-test-fails-is-not-admitted` | new | firecracker | `image-draft-failing-test` (new) | TEST gates admission |
 | `image-listing-with-a-moved-tag-is-refused` | new | process | `marketplace-with-image-listing` | pin rule |
 | `node-refuses-to-build-a-recipe-from-a-bare-url` | new | process | `org-admin` | decision 9 |

@@ -126,7 +126,9 @@ times as it needs, until it ends.
 **Rule.** At a turn boundary, if the guest reports it is waiting and no
 background process or worker is running, the run goes `PAUSED` with its
 `waiting_for`, gets the keep-warm deadline (300 s, decision 5), and
-`sweep_keep_warm` parks it. This generalises `runs_due_to_park`
+`sweep_keep_warm` parks it. A `timer` wait longer than 30 s skips
+keep-warm and parks at the turn boundary, keeping only its timer wake; a
+shorter one keeps the VM up and counts active time. This generalises `runs_due_to_park`
 (`workflow.rs:2309`) from "an undecided approval" to "any open wait row".
 The wait row holds the deadline (decision 16); `vamd` stores no standing
 schedule.
@@ -145,7 +147,8 @@ for triggers). A steer during `timer` or `pause` ends that wait early.
 still holds its workspace (the "one live task per workspace" rule, design
 §"Still to drill into"). We keep the rule. What changes: the queued message
 on another thread tells the user which task holds the workspace and offers
-Pause or Stop on it, and an App caller is told to use a separate Space for
+Stop on it or a separate Space (Pause keeps the reservation, so it does not
+free the workspace), and an App caller is told to use a separate Space for
 concurrent jobs. Per-thread overlays wait for Drive9 merge, as before.
 
 ## 4. Task budgets
@@ -156,10 +159,10 @@ value, an **operator ceiling**, and a behaviour when spent.
 | Meter | Starting value | Operator ceiling (default) | When spent |
 |---|---|---|---|
 | Turns | 50 (decision 5) | 200 (today's hard cap, now a setting) | park `budget` |
-| Active time | 30 min (decision 5) | 4 h | park `budget` |
+| Active time | 30 min (decision 5) | 4 h | park `budget`; live background processes are stopped first, their captured output kept (§8.1) |
 | Money | operator's existing budget, or none | operator's budget | park `budget` |
 | Wakes (timer and condition re-checks) | 20 | 200 | the wait resolves `max_wakes`; the agent decides what next |
-| Wall-clock deadline | 7 days from start | 30 days (same bound as gates, `workflow.rs:51`) | the task ends `deadline_reached`; owner notified |
+| Wall-clock deadline | 7 days from start | 30 days (same bound as gates, `workflow.rs:51`) | the task ends `deadline_reached`, running or parked, live processes included; owner notified |
 
 - **Where the ceiling comes from.** Node operator settings first; for a
   shared App, the App's limits (Apps lane P5 "App limits") narrow it. A
@@ -217,6 +220,9 @@ max_wakes}, reason}`:
 
 - Without `recheck`, the task parks until `at` (bounded by the task
   deadline) and resumes once with "time reached".
+- A wait longer than 30 s parks at the turn boundary with no keep-warm
+  hold (§3), so no VM runs until the wake; a shorter wait keeps the VM up
+  and counts active time.
 - With `recheck`, each wake is a **check turn**: the model runs its check
   and either continues the job or calls `wait_until` again; the next delay
   follows the backoff. A wake counts against the wakes meter, not turns
@@ -234,7 +240,7 @@ max_wakes}, reason}`:
 
 | Watchdog | Rule (starting values, tuned by the benchmark) | Action |
 |---|---|---|
-| No progress across wakes | N wakes (default 5) where the workspace tree hash, the todo file and the outbox are unchanged and no tool call wrote anything | park `budget` with reason `no_progress`; notify |
+| No progress across wakes | N wakes (default 5) where the workspace tree hash, the todo file and the outbox (ignoring the host's heartbeat lines) are unchanged and no tool call wrote anything | park `budget` with reason `no_progress`; notify |
 | Spend velocity | money spent in the last 10 min above 3 times the task's average rate, or more than 25% of the money budget in one turn | Pause; notify with the numbers |
 | Heartbeat | every 15 min of active time, or every wake, the host posts a system line to the outbox: turns, active time, spend, todo done/total, workers live | none (it is the heartbeat) |
 | Stall | a running task with no turn boundary for 2 step timeouts | treated as a crash (Phase 4 resume) |
@@ -266,8 +272,11 @@ processes"). Rules:
   budget) and capture cap (default 4 MiB, kept as a workspace file under
   `.vam/bg/<id>.log`, the tail shown to the model).
 - At most 4 live processes per task.
-- **A task with a live process does not park**; active time counts while
-  it runs. `bg_wait {ids, timeout}` lets the model block cheaply without a
+- **A task with a live process does not park** on a wait; active time
+  counts while it runs. When the active-time meter is spent with a process
+  live, `vamd` stops the process (its captured output stays in
+  `.vam/bg/<id>.log`) and the task parks `budget` (§4). The wall-clock
+  deadline ends the task and its processes. `bg_wait {ids, timeout}` lets the model block cheaply without a
   model call, but the VM stays up.
 - A process dies with its VM. After a crash resume the model is told
   "process <id> was lost in a restart; its log up to the last commit is in
@@ -358,14 +367,17 @@ it. 5e ships with whichever of 5a to 5d ships first.
 These add to the tracker's list; none changes an existing entry.
 
 - **LW1.** A task parks between turns for any open wait (approval,
-  question, reauth, timer, workers, pause, budget), after keep-warm, with
-  no VM and no active-time clock. (Extends decision 10's "park after
+  question, reauth, timer, workers, pause, budget), after keep-warm (a
+  timer wait longer than 30 s parks at once), with no VM and no
+  active-time clock. (Extends decision 10's "park after
   keep-warm".)
 - **LW2.** Task budgets have five meters (turns, active time, money,
   wakes, wall-clock deadline). Starting values are decision 5's; ceilings
   are operator (and App) settings; today's hard cap 200 becomes the default
   turn ceiling. The agent raises within the ceiling; only a human extends
-  past it. A spent budget parks the task.
+  past it. A spent budget parks the task (a spent active-time meter first
+  stops live background processes, keeping their output); the wall-clock
+  deadline ends it.
 - **LW3.** Every task has a wall-clock deadline (default 7 days, maximum 30)
   and every timer wait has a maximum number of wakes.
 - **LW4.** Pause parks at the next turn boundary and keeps files,
@@ -377,7 +389,8 @@ These add to the tracker's list; none changes an existing entry.
   scratch dir plus host-side write leases, one shared commit sequence, an
   approval parks only that worker.
 - **LW7.** Background processes never keep a task alive past its active
-  time and are never restarted after a crash.
+  time (a spent meter stops them and parks the task) and are never
+  restarted after a crash.
 - **LW8.** Stalls, budget parks and watchdog actions always notify the
   task's owner (the App owner for a shared App).
 
@@ -432,7 +445,8 @@ without a step timeout; a crash loses the process and the model is told.
 sweeper; a steer ends a wait early.
 
 **Exit:** a timer wait resumes the task (design §VII.3 exit); a re-check
-stops at its maximum wakes; no VM runs between wakes.
+stops at its maximum wakes; no VM runs between wakes longer than 30 s
+(they park at the turn boundary with no keep-warm hold).
 
 | Scenario | Change | Layer | Given | Why |
 |---|---|---|---|---|
@@ -466,14 +480,15 @@ Worker rows and per-lane cost in the run view and receipt; heartbeat;
 no-progress and spend-velocity watchdogs; stall as crash.
 
 **Exit:** a seeded runaway (same check every wake, nothing changes) parks
-within 5 wakes and notifies; per-lane cost sums to the task's cost.
+within 5 wakes and notifies; if 5d is built, per-lane cost sums to the
+task's cost; otherwise a single-lane task reports its cost as one lane.
 
 | Scenario | Change | Layer | Given | Why |
 |---|---|---|---|---|
 | `task-with-no-progress-across-wakes-parks-and-notifies` | new | process | org-admin, agent-with-shell | watchdog |
 | `spend-spike-pauses-the-task-and-notifies` | new | process | org-admin, agent-with-shell | watchdog |
 | `long-task-posts-a-heartbeat` | new | process | org-admin, agent-with-shell | leave and return |
-| `worker-cost-shows-per-lane-and-sums-to-the-task` | new | process | org-admin, agent-with-shell | observability |
+| `worker-cost-shows-per-lane-and-sums-to-the-task` | new | process | org-admin, agent-with-shell | observability; only if 5d is built |
 | `long-task-posts-progress` | unchanged | process | — | still guards the outbox |
 
 **Benchmark delta:** `u4-triage` (50+ calls, single loop, task set 0.4.0);

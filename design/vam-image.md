@@ -81,7 +81,8 @@ of other trackers and are not new.
    `AgentSpec` field, so releasing a new image changes nothing until a new agent version
    names it. An App pins an agent version (C1), so it gets a fixed machine with no App field.
 5. **No `imageRef` means the standard base** (E7 rule 3). An operator chooses which images
-   a node holds, not what "no imageRef" means.
+   a node holds, not what "no imageRef" means. One migration exception (§3.2): agent
+   versions released before a node's I2 upgrade keep the node's I1 default image.
 6. **Skill packages are fetched, never built, on the host.** The host runs no package code:
    Python is wheels only with `--require-hashes`, JS installs with scripts off, every file is
    checked against the lockfile's hash. A skill whose lockfile needs a source build or an
@@ -261,6 +262,15 @@ skill whose `requiresRuntime` that image does not meet (the check moves from "th
 to "this agent's image"). `extends` inherits the parent's `imageRef` unless the overlay sets
 one.
 
+**Migration from a nonstandard default.** In I1 an operator may point `VAM_ROOTFS_PATH` at
+`vam/node` (§3.1). On the first I2 start, `vamd` records the image `VAM_ROOTFS_PATH` names
+(name, version, digest) as the node's `legacy_default_image`. An agent version released
+before that start with no `imageRef` keeps booting `legacy_default_image`, so it and every
+App pinned to it keep their runtime; a version released after it with no `imageRef` gets the
+standard base (decision 5). Agent release warns when a new version drops to the standard
+base from a previous version that ran on `legacy_default_image`, naming the `imageRef` to
+set. A node whose default was already the standard base sees no change.
+
 **Per-run rootfs.** `manager.rs:1919` stops reading the env: the run's resolved image gives
 the rootfs path and golden key. A run pinned to an image the node has since evicted from disk
 refuses with a typed error naming the image (no silent fallback to the default).
@@ -291,7 +301,8 @@ node-local rootfs digest it booted and the VM size. `record_run_isolation_fact`
 **Exit.** An agent with `imageRef: vam/node:1` runs on it and one without runs on
 `vam/base:2` on the same node; both restore from their own golden snapshot on the second
 run; the receipt names the image; a request above the cap is clamped and recorded; an App
-pinned to an agent version keeps its image when a newer image is released.
+pinned to an agent version keeps its image when a newer image is released; an agent version
+released before I2 on a node whose default was `vam/node` still boots `vam/node`.
 
 **Scenario delta (I2)**
 
@@ -304,6 +315,7 @@ pinned to an agent version keeps its image when a newer image is released.
 | `run-gets-the-vm-size-it-asked-for-within-the-cap` | new | firecracker | node with `VAMD_VM_MAX=2x1024`, agent asking 4 vCPU / 2048 | guest reports 1024 MiB, run records `vm.clamped: true` |
 | `receipt-names-the-image-the-run-booted` | new | process | `org-admin`, `agent-on-node-image` | receipt carries URN, version and digest |
 | `app-keeps-its-image-when-a-newer-image-is-released` | new | process | Apps P2 pieces, `agent-on-node-image` | decision 4: the image moves only with the agent version |
+| `agent-released-before-i2-keeps-the-nodes-old-default-image` | new | firecracker | node with `VAM_ROOTFS_PATH` at `vam/node:1`, `agent-with-builtins` released before the upgrade | migration from a nonstandard default |
 
 ### 3.3 I3 — Vamfile Lite
 
@@ -314,7 +326,7 @@ the curated bases lack, without anyone running arbitrary build code.
 
 ```
 # syntax=vamfile-lite/1
-FROM vam/python:1                         # a VAM base only; pinned to a digest in the lock
+FROM vam/python:1                         # vam/* or released in this marketplace; digest in the lock
 RUNTIME java@21                           # from VAM's maintained set (python, node, java)
 PACKAGES apt postgresql-client poppler-utils
 PACKAGES pip pdfplumber==0.11.4
@@ -346,7 +358,7 @@ hashes are generated, never hand-typed.
 **Pipeline.**
 
 ```
-recipe + lock -> check (grammar, lock matches, FROM is a VAM image)
+recipe + lock -> check (grammar, lock matches, FROM per the rule above)
   -> builder microVM: root = copy of the FROM image; egress = package mirrors only
      apt-get install (Debian-signed packages; maintainer scripts run inside the VM)
      pip install --require-hashes --only-binary :all:  |  npm install --ignore-scripts
@@ -391,8 +403,8 @@ The node imports it like any artifact: at the listing's tag, moved tag refused
    author's own machine, a preview only) to see the package list and run TEST.
 2. Open a pull request on the marketplace repo with the four files.
 3. Marketplace CI (`.github/workflows/validate.yml` in `vam-marketplace`) adds two steps
-   after `vam catalog validate --strict`: `vam image check` (grammar, lock matches, FROM is
-   a VAM image, COPY limits, secret lint), then a Docker build of the recipe on the CI
+   after `vam catalog validate --strict`: `vam image check` (grammar, lock matches, FROM
+   names a `vam/*` curated image or an image already released in the same marketplace, COPY limits, secret lint), then a Docker build of the recipe on the CI
    runner, TEST, and a diff of the resolved list against `packages.txt`. The runner is
    disposable, so a PR build is acceptable there; it is never a node. The SBOM is attached
    to the run for the reviewer.
@@ -417,7 +429,7 @@ admitted; marketplace CI rejects a PR whose package list drifts.
 | `image-listing-builds-on-the-node-and-an-agent-runs-on-it` | new | firecracker | `org-admin`, `marketplace-with-image-listing` (new), `agent-on-listed-image` | the exit |
 | `vamfile-lite-with-a-run-step-is-refused-before-building` | new | process | `org-admin`, `image-draft-with-run` (new) | Lite has no `RUN` |
 | `vamfile-lite-with-an-unhashed-package-is-refused` | new | process | `org-admin`, `image-draft-without-lock` (new) | decision 6 and the lock rule |
-| `image-build-cannot-reach-a-host-outside-the-mirrors` | new | firecracker | `image-draft-that-fetches` (new; a COPY'd TEST probe) | builder egress is mirrors only |
+| `image-build-cannot-reach-a-host-outside-the-mirrors` | new | firecracker | `image-draft-that-fetches` (new; a test-mirror apt package whose maintainer script, run inside the builder VM during the build, tries a non-mirror host and a mirror and writes both results into the image) | builder egress is mirrors only: the outside attempt fails and the proxy logs the deny |
 | `image-whose-test-fails-is-not-admitted` | new | firecracker | `image-draft-failing-test` (new) | TEST gates admission |
 | `image-listing-with-a-moved-tag-is-refused` | new | process | `marketplace-with-image-listing`, tag moved | same pin rule as other listings |
 | `node-refuses-to-build-a-recipe-from-a-bare-url` | new | process | `org-admin` | decision 9 |

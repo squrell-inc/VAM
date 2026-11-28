@@ -888,6 +888,15 @@ CREATE UNIQUE INDEX apps_personal ON apps(owner_user_id, agent_urn) WHERE kind =
   agent_urn)`, so filling is lazy and never required for a run to work. A
   startup pass may fill the rest; it only writes NULL columns and is safe to
   rerun.
+- **Spaces with no agent yet.** Session creation with a label and a run
+  with no `agent_ref` make default Spaces with NULL `agent_urn`
+  (`api/mod.rs:1058-1069`; `run_start.rs:260-284` through `resolve_place`,
+  `spaces.rs:540-545`). Such a Space keeps `app_id` NULL until the first
+  run binds an agent to it (`run_start.rs:316-351`: the workspace file, and
+  the row for non-default Spaces); that run fills `app_id` with the
+  personal App of the bound agent. A run with no agent leaves it NULL.
+  Reads (`GET /v1/spaces`, `Space.app_id`) return such a Space with an
+  empty `app_id` and never fail on it; the startup pass skips it.
 - App keys are `api_keys` rows: `holder 'http'`, `target_kind 'app'`,
   `target_id` the App id, scopes `runs:start`, `spaces:create`,
   `spaces:read`. Grants keep `target_kind 'space'`.
@@ -1002,7 +1011,7 @@ for agent access in `main`; lane 3 S4 runs inside or after P2
 | P0 | Model frozen: this amendment, Cedar `App` entity, scenario list | Owner answers (done 2026-11-28) | Amendment merged; `cargo test -p vam-security` proves a forbid-only App policy denies a tool its owner may use; policy audit (AS-0.4) section written; scenario names below copied to the tracker |
 | P2 | Apps: personal and shared, pinned version, App keys | P0; agent access in `main` | `POST/GET /v1/apps`, deactivate, reassign; personal App on first run with no visible change; App keys issued and narrowed by the bearer path |
 | P3 | Shared Spaces by ref | P2 | Same ref same Space; another App's Space unreachable; ref stored only as a hash |
-| P4 | One `start_run` resolution | P2, P3; holds `run_start.rs` and `catalog_resolve.rs` | Resolution table proven for HTTP and the gateway; App pin authoritative; old request shape unchanged |
+| P4 | One `start_run` resolution | P2, P3, lane 3 S2 (`set_space_agent_version`); holds `run_start.rs` and `catalog_resolve.rs` | Resolution table proven for HTTP and the gateway; App pin authoritative; old request shape unchanged; a shared-App run resolves no owner secrets until P5 |
 | P5 | App limits and secret bindings | P0 (Cedar), P4 | A shared-App run is denied a tool, a secret and an egress host its owner could use |
 | P6 | Quotas and retention | P3, P4 | Idle Spaces reaped within the 30-day cap; quotas refuse with typed reasons; erasure immediate |
 | P7 | Integrator kit and Apps screens | P4 (P5, P6 for the docs' limits section) | TS SDK published; example app runs against a process-mode vamd; docs page live; Squrell-App Apps screens shipped |
@@ -1074,6 +1083,10 @@ harness H2-H4 wait for it (D5).
   filter `GET /v1/runs` by App and Space.
 - Approvals of a shared-App run list for the App owner (D2): the run's
   owner is the App owner, so the existing approval list applies; verify.
+- **AS-4.5 No owner secrets before P5.** A shared-App run resolves zero
+  owner secrets (an empty binding list) until P5's secret bindings and App
+  limit land; P5 replaces the empty list with the App's bindings. Personal
+  Apps keep all owner secrets.
 
 | Scenario | Change | Layer | Given | Why |
 |---|---|---|---|---|
@@ -1083,6 +1096,7 @@ harness H2-H4 wait for it (D5).
 | `an-app-run-is-refused-after-the-owners-access-is-revoked` | new | process | `shared-app`, restricted agent | A7 |
 | `moving-the-app-pin-moves-every-space-and-a-live-run-finishes-on-the-old-version` | new (pending Q10) | process | `shared-app`, two released versions | §5 |
 | `an-app-approval-reaches-the-app-owner` | new | process | `shared-app` with `agent-with-guarded-tool` | D2 |
+| `a-shared-app-run-reads-no-owner-secrets-before-bindings` | new | process | `shared-app`, `agent-with-shell-and-secret-skill` | AS-4.5 |
 
 #### P5 — App limits and secret bindings
 
