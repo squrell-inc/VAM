@@ -488,7 +488,8 @@ pub(crate) fn seed_first_admin_on(
     Ok(added > 0)
 }
 
-/// A5: the default of a marketplace install. Writes `(org, approval)` for `urn` only when the
+/// A5: the default of a marketplace install. Writes `default` (the listing's `access.default`;
+/// absent means `(org, approval)`) for `urn` only when the
 /// agent has no released row in `agents` yet, so it runs before the install's own write. An
 /// update (or a pre-upgrade install getting its first update) finds its released row and writes
 /// nothing, and an existing policy is never replaced. A draft is not an install: marketplace
@@ -498,9 +499,24 @@ pub(crate) fn seed_first_admin_on(
 pub(crate) fn write_install_default_on(
     connection: &Connection,
     urn: &str,
+    default: Option<vam_spec::marketplace::AccessDefault>,
     by: &str,
     at: i64,
 ) -> Result<bool, OrchestratorError> {
+    use vam_spec::marketplace::{AccessMode as M, AccessVisibility as V};
+    let (visibility, mode) = default.map_or(("org", "approval"), |d| {
+        (
+            match d.visibility {
+                V::Org => "org",
+                V::Restricted => "restricted",
+            },
+            match d.mode {
+                M::Everyone => "everyone",
+                M::Open => "open",
+                M::Approval => "approval",
+            },
+        )
+    });
     let known: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM agents WHERE urn = ?1 AND channel = 'released')",
         params![urn],
@@ -511,8 +527,8 @@ pub(crate) fn write_install_default_on(
     }
     let added = connection.execute(
         "INSERT OR IGNORE INTO agent_access_policy (urn, visibility, access_mode, updated_by, updated_at)
-         VALUES (?1, 'org', 'approval', ?2, ?3)",
-        params![urn, resolved_owner(by), at],
+         VALUES (?1, ?4, ?5, ?2, ?3)",
+        params![urn, resolved_owner(by), at, visibility, mode],
     )?;
     Ok(added > 0)
 }
@@ -1911,14 +1927,14 @@ mod enforcement_tests {
         let s = store();
         let c = s.connection.lock().unwrap();
         // `DRAFT_ONLY` has only a draft row: a first install still gets `(org, approval)`.
-        assert!(write_install_default_on(&c, DRAFT_ONLY, "adm", 1).unwrap());
+        assert!(write_install_default_on(&c, DRAFT_ONLY, None, "adm", 1).unwrap());
         let p = read_policy(&c, DRAFT_ONLY).unwrap().unwrap();
         assert_eq!(
             (p.visibility, p.mode),
             (Visibility::Org, AccessMode::Approval)
         );
         // `URN` has a released row: an update or pre-upgrade install gets nothing.
-        assert!(!write_install_default_on(&c, URN, "adm", 1).unwrap());
+        assert!(!write_install_default_on(&c, URN, None, "adm", 1).unwrap());
         assert!(read_policy(&c, URN).unwrap().is_none());
     }
 

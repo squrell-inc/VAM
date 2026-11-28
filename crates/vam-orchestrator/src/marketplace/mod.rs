@@ -331,6 +331,7 @@ pub fn read_marketplace(f: &Fetcher, input: &ReadInput<'_>) -> Result<ReadResult
             connector: l.connector.clone(),
             git_ref: l.git_ref.clone(),
             requires_node: l.requires_node.clone(),
+            access: l.access.clone(),
             commit: None,
             artifacts: Vec::new(),
             summary: None,
@@ -921,6 +922,9 @@ pub fn listings_view_with(row: &MarketplaceRow, installs: &[installs::InstallRow
                 });
                 if let Some(c) = &l.connector {
                     v["connector"] = json!(c);
+                }
+                if let Some(a) = &l.access {
+                    v["access"] = json!(a);
                 }
                 if let Some(c) = &l.commit {
                     v["commit"] = json!(c);

@@ -877,6 +877,7 @@ fn a_listing_shows_nothing_installed_and_no_update() {
         connector: Some("urn:vam:connector:hub.squrell.cloud/squrell/microsoft-365".into()),
         git_ref: "microsoft-365-v1.0.0".into(),
         requires_node: ">=0.1.0".into(),
+        access: None,
         commit: Some("a".repeat(40)),
         artifacts: vec![],
         summary: Some(json!({ "tools": [] })),

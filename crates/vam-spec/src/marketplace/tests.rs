@@ -549,3 +549,65 @@ fn every_refused_fixture_listing_is_refused_offline_with_the_imports_words() {
         }
     }
 }
+
+fn with_access(access: serde_json::Value) -> serde_json::Value {
+    let mut v = good();
+    v["listings"][0]["access"] = access;
+    v
+}
+
+#[test]
+fn access_is_optional_and_absent_serializes_nothing() {
+    let idx = parse_index(&index("marketplace-squrell")).unwrap();
+    assert!(idx.listings[0].access.is_none());
+    let text = serde_json::to_string(&idx).unwrap();
+    assert!(!text.contains("access"));
+}
+
+#[test]
+fn every_valid_access_pair_parses() {
+    for (vis, mode) in [
+        ("org", "everyone"),
+        ("org", "open"),
+        ("org", "approval"),
+        ("restricted", "open"),
+        ("restricted", "approval"),
+    ] {
+        let v = with_access(serde_json::json!({"default": {"visibility": vis, "mode": mode}}));
+        let idx = parse_index(&v.to_string()).unwrap_or_else(|p| panic!("{vis}/{mode}: {p:?}"));
+        let d = idx.listings[0].access.as_ref().unwrap().default;
+        let back = serde_json::to_value(d).unwrap();
+        assert_eq!(back, serde_json::json!({"visibility": vis, "mode": mode}));
+    }
+}
+
+#[test]
+fn a_restricted_agent_open_to_everyone_is_refused() {
+    let v = with_access(
+        serde_json::json!({"default": {"visibility": "restricted", "mode": "everyone"}}),
+    );
+    let p = problems(v);
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(
+        p[0].starts_with("listing 'microsoft-365': access.default"),
+        "{p:?}"
+    );
+    assert!(p[0]
+        .contains("a restricted agent cannot be open to everyone: use mode 'open' or 'approval'"));
+}
+
+#[test]
+fn unknown_access_values_and_keys_are_refused() {
+    let bad = [
+        serde_json::json!({"default": {"visibility": "public", "mode": "open"}}),
+        serde_json::json!({"default": {"visibility": "org", "mode": "Open"}}),
+        serde_json::json!({"default": {"visibility": "org"}}),
+        serde_json::json!({"default": {"visibility": "org", "mode": "open", "extra": 1}}),
+        serde_json::json!({"default": {"visibility": "org", "mode": "open"}, "admins": ["u"]}),
+        serde_json::json!({"admins": ["u"]}),
+    ];
+    for a in bad {
+        let v = with_access(a.clone());
+        assert!(parse_index(&v.to_string()).is_err(), "{a}");
+    }
+}
