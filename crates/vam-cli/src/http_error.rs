@@ -243,6 +243,12 @@ fn hint(method: &str, path: &str, status: u16, body: &ApiBody) -> (String, Strin
             "vam login as a user who has the required scope".into(),
         );
     }
+    if method == "POST" && path == "/v1/fix-requests" && status == 404 {
+        return (
+            "a reference from your own refusal, no more than 30 days old".into(),
+            "run the refused command again as the same user and copy the reference from its Ask: line".into(),
+        );
+    }
     if is_workspace_file_put(method, path) {
         if msg.contains("agent is running") {
             let session = extract_after(&body.message, "(session ")
@@ -579,6 +585,30 @@ mod tests {
             "retryable": retryable,
         })
         .to_string()
+    }
+
+    #[test]
+    fn a_fix_request_for_a_reference_that_is_not_yours_says_where_to_get_one() {
+        let raw = body("NotFound", "denial not found", false);
+        let text = failure("POST", "/v1/fix-requests", 404, &raw).to_string();
+        assert!(text.contains("Wrong: denial not found."), "{text}");
+        assert!(
+            text.contains("Expected: a reference from your own refusal"),
+            "{text}"
+        );
+        assert!(
+            text.contains("copy the reference from its Ask: line"),
+            "{text}"
+        );
+        // Any other answer keeps the generic text.
+        let raw = body(
+            "FailedPrecondition",
+            "nobody can be asked to apply this fix right now",
+            false,
+        );
+        let text = failure("POST", "/v1/fix-requests", 409, &raw).to_string();
+        assert!(text.contains("nobody can be asked"), "{text}");
+        assert!(!text.contains("your own refusal"), "{text}");
     }
 
     #[test]

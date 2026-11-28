@@ -38,6 +38,7 @@ pub mod error;
 pub mod events;
 pub mod evidence;
 pub mod first_key;
+pub mod fix_requests;
 pub mod gateway;
 pub mod golden;
 pub mod grants;

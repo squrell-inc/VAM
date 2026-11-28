@@ -11,6 +11,7 @@ pub mod connectors;
 pub mod contacts;
 pub mod decide;
 pub mod error;
+pub mod fix_requests;
 mod inbox;
 pub mod login;
 pub mod marketplaces;
@@ -202,6 +203,7 @@ pub fn router(state: AppState) -> Router {
         .merge(workspace_files::path_routes())
         .merge(spaces::routes())
         .merge(notifications::routes())
+        .merge(fix_requests::routes())
         .merge(contacts::routes())
         .merge(node_notify::routes())
         .merge(connectors::routes())

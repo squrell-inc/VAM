@@ -3713,6 +3713,63 @@ paths:
               schema:
                 $ref: "#/components/schemas/DeleteHostSecretResponse"
 
+  /v1/fix-requests:
+    post:
+      summary: Ask the right person to apply the fix a refusal named
+      description: |
+        A member sends the `decisionRef` of a denial they were refused with. The host resolves the
+        stored decision, checks that the caller is the run's caller, and works out the change, the
+        target and who can apply it from the stored row alone: any other field in the body
+        (including a `fix`) is ignored. It then tells the agent's owner or the org admins with a
+        `fix.requested` notification, one per recipient, never the requester. One request per
+        requester, change and target per 24 hours: a repeat answers 200 with the first request
+        and tells nobody again. A reference that is missing, another caller's, older than 30
+        days, or has no askable fix answers 404 with the same text (`denial not found`), so a
+        reference reveals nothing. Requires an `Idempotency-Key` header. Scope `runs:write`.
+        New host (`ALLOW_HOST`) requests are capped at 10 per requester and agent per 24 hours
+        (429).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decisionRef]
+              properties:
+                decisionRef:
+                  type: string
+                  description: The `decisionRef` of a denial the caller was refused with (`dnl_` + 26 characters).
+      responses:
+        "201":
+          description: Asked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FixRequest"
+        "200":
+          description: The same fix was already asked within 24 hours; nobody was notified again.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FixRequest"
+        "400":
+          description: No `decisionRef`, or a missing `Idempotency-Key`.
+        "403":
+          description: The key lacks `runs:write`.
+        "404":
+          description: The reference is not the caller's to use (the text is the same for every cause).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+              example: { code: NotFound, message: denial not found, retryable: false }
+        "409":
+          description: Nobody can be asked right now (an installed agent, a deleted agent, an owner who is the requester or deactivated).
+        "429":
+          description: Too many new host requests for this agent in 24 hours.
+
   /v1/secrets/resolve:
     post:
       summary: Resolve secret requirements
@@ -7464,6 +7521,36 @@ components:
             Present with `denial`.
           items:
             $ref: "#/components/schemas/Denial"
+    FixRequest:
+      type: object
+      description: >
+        A filed fix request. The `fix.requested` notification the recipients get carries the same
+        facts as `fixRequest` (`id`, `change`, `target`, `who`, `requester` as the username,
+        `requesterUserId`, `createdAt`, and `denial` re-derived from the stored decision, with
+        `fix.callerCanApply` true) so their card has the button; the notification's own `action`
+        is `{verb: open, target: {kind: fix_request, id}, api}`.
+      properties:
+        id:
+          type: string
+          example: frq_k3q7xw2m5b4n6a7c3d2e3f4g5h
+        change:
+          type: string
+          enum: [ALLOW_TOOL, ALLOW_HOST, ENABLE_CONNECTOR, SET_SECRET]
+        target:
+          type: string
+          description: The fix target of the stored denial (`<agent urn>#<tool or host>`, a connector id, a binding id).
+        who:
+          type: string
+          enum: [AGENT_OWNER, ORG_ADMIN]
+        createdAt:
+          type: integer
+          description: Unix seconds.
+        asked:
+          type: string
+          description: Who was asked, as host text (`an org admin`, `the agent's owner`). No names.
+        existing:
+          type: boolean
+          description: True when this is the first request of the last 24 hours and nothing new was written.
     Denial:
       type: object
       description: >

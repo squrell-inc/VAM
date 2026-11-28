@@ -137,6 +137,11 @@ enum Commands {
         #[command(subcommand)]
         command: cmd::space::SpaceCmd,
     },
+    /// Ask the right person to apply the fix a refusal named (`vam fix request <ref>`).
+    Fix {
+        #[command(subcommand)]
+        command: cmd::fix::FixCmd,
+    },
     /// Read a Space's conversations (threads).
     Thread {
         #[command(subcommand)]
@@ -230,6 +235,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Receipt { command } => cmd::receipt::run(cli.host, cli.token, command).await,
         Commands::Workspace { command } => cmd::workspace::run(cli.host, cli.token, command).await,
         Commands::Space { command } => cmd::space::run(cli.host, cli.token, command).await,
+        Commands::Fix { command } => cmd::fix::run(cli.host, cli.token, command).await,
         Commands::Thread { command } => cmd::thread::run(cli.host, cli.token, command).await,
         Commands::Dock(args) => cmd::dock::run_dock(args),
         Commands::Undock(args) => cmd::dock::run_undock(args),

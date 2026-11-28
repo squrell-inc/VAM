@@ -233,6 +233,36 @@ fn openapi_has_permissions_migrate() {
 }
 
 #[test]
+fn openapi_has_fix_requests() {
+    let doc = load();
+    let post = &doc["paths"]["/v1/fix-requests"]["post"];
+    assert!(post.is_mapping(), "missing POST /v1/fix-requests");
+    for code in ["200", "201", "400", "403", "404", "409", "429"] {
+        assert!(post["responses"][code].is_mapping(), "missing {code}");
+    }
+    assert_eq!(
+        post["responses"]["404"]["content"]["application/json"]["example"]["message"].as_str(),
+        Some("denial not found")
+    );
+    let params = post["parameters"].as_sequence().unwrap();
+    assert!(params
+        .iter()
+        .any(|p| p["$ref"].as_str() == Some("#/components/parameters/IdempotencyKeyHeader")));
+    let schema = &doc["components"]["schemas"]["FixRequest"];
+    for field in [
+        "id",
+        "change",
+        "target",
+        "who",
+        "createdAt",
+        "asked",
+        "existing",
+    ] {
+        assert!(schema["properties"][field].is_mapping(), "missing {field}");
+    }
+}
+
+#[test]
 fn openapi_refresh_drift_lists_every_value_the_route_answers() {
     let doc = load();
     let drift = &doc["components"]["schemas"]["RefreshMcpResponse"]["properties"]["drift"];
