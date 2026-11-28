@@ -291,7 +291,10 @@ processes"). Rules:
   counts while it runs. When the active-time meter is spent with a process
   live, `vamd` stops the process (its captured output stays in
   `.vam/bg/<id>.log`) and the task parks `budget` (§4). The wall-clock
-  deadline ends the task and its processes. `bg_wait {ids, timeout}` lets the model block cheaply without a
+  deadline ends the task and its processes. If 5b ships before 5a (§9
+  allows it), there is no `budget` park yet: a spent active-time meter
+  stops the process the same way and ends the run as today's duration cap
+  does; the park and Extend arrive with 5a. `bg_wait {ids, timeout}` lets the model block cheaply without a
   model call, but the VM stays up.
 - A process dies with its VM. After a crash resume the model is told
   "process <id> was lost in a restart; its log up to the last commit is in
@@ -387,14 +390,22 @@ time-driven checks with little work per check. Three shapes were compared:
 | Shape | Verdict |
 |---|---|
 | One long task per ticket, parked on `wait_until` with `recheck` (§6) | **No.** A ticket due in six weeks passes the 30-day ceiling (LW3); 200 wakes at most; a parked task keeps its Space (LW5), so N tickets need N Spaces; "nothing changed yet" trips the no-progress watchdog (§7); state sits in a conversation that compacts for weeks; 5c is not built. |
-| One standing `vam.schedule` sweep (cron in working hours, IANA timezone) that reads open tickets and pings the ones due | **Recommended.** On `main` today (`docs/src/content/docs/hosted/schedule.md`). Each fire is a short run within today's caps, with its own receipt; a crash costs one fire, caught up within the grace window; the grant is listed, revocable and expires (90 days default, `grant.expiring` 7 days ahead). |
+| One standing `vam.schedule` sweep (cron in working hours, IANA timezone) that reads open tickets and pings the ones due | **Recommended.** On `main` today (`docs/src/content/docs/hosted/schedule.md`). Each fire is a short run within today's caps, with its own receipt; a fire the broker missed (broker or node down at the due time) is caught up within the grace window, while a run that started and then crashed is not re-fired, so the next fire picks up its tickets; the grant is listed, revocable and expires (90 days default, `grant.expiring` 7 days ahead). |
 | A broker-side condition (E5) that fires on a ticket change | **Later, as an addition.** Good for "the assignee replied", cheaper than polling, but a missed ping is the absence of a change, which a condition does not express. E5 is not built. |
 
 Rules the sweep follows (playbook text, no new runtime piece):
 
 - Follow-up state lives in the ticket system (priority, due date, a marker
-  comment with the last ping time), not in the thread, so every fire is
-  idempotent and a compaction loses nothing (§5).
+  comment with the last ping time), not in the thread, so a compaction
+  loses nothing (§5).
+- The ping is the marker: the follow-up is one ticket comment that
+  mentions the assignee and carries a stamp `vam-followup:<ticket>:<slot>`,
+  where the slot is the due time it answers. Before posting, a fire reads
+  the ticket's comments and skips a slot that already has its stamp. A
+  crash after posting leaves the stamp, so the next fire does not ping
+  again; a crash before posting leaves nothing, so the next fire sends it.
+  The connector call carries the same stamp as its idempotency key where
+  the ticket API supports one (effect journal, Phase 4).
 - One sweep schedule, not one schedule per ticket: a triggered run cannot
   create schedules (loop guard, `work-outside-chat` decision 6), so per-ticket
   schedules would need a person's turn for every new ticket or due-date move.
@@ -416,7 +427,8 @@ These add to the tracker's list; none changes an existing entry.
 - **LW1.** A task parks between turns for any open wait (approval,
   question, reauth, timer, workers, pause, budget), after keep-warm (a
   timer wait longer than 30 s parks at once), with no VM and no
-  active-time clock. (Extends decision 10's "park after
+  active-time clock, unless a background process or worker is running:
+  then the task stays up and counts active time until it can park (§3). (Extends decision 10's "park after
   keep-warm".)
 - **LW2.** Task budgets have five meters (turns, active time, money,
   wakes, wall-clock deadline). Starting values are decision 5's; ceilings

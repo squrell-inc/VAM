@@ -123,12 +123,13 @@ On versions:
 | `AGENT_NOT_GRANTED` | 403 `agent_access_required:` (agent access) | request access (agent admin) through `POST /v1/agents/{urn}/access` |
 | `VERSION_STALE` | 409 version mismatch (`api/error.rs:190-201`); a yanked pin (S2) | move the Space to another version (self, S2 route) |
 | `QUOTA` | inbox full (`api/error.rs:169-176`), egress byte quota (`broker.rs:1288-1290`), App quotas later (Apps P6) | text only in S1; who is the App owner or org admin |
+| `SPACE_BUSY` | 409 `space_busy:` on a Space re-pin (S2) | wait for that run or stop it (self); `subject` is the run id |
 
 `SuggestedFix`:
 
 | Field | Meaning |
 |---|---|
-| `change` | closed enum: `ALLOW_TOOL`, `ALLOW_HOST`, `SET_SECRET`, `CONNECT_CONNECTOR`, `ENABLE_CONNECTOR`, `REQUEST_AGENT_ACCESS`, `SET_SPACE_VERSION`, `RAISE_LIMIT` |
+| `change` | closed enum: `ALLOW_TOOL`, `ALLOW_HOST`, `SET_SECRET`, `CONNECT_CONNECTOR`, `ENABLE_CONNECTOR`, `REQUEST_AGENT_ACCESS`, `SET_SPACE_VERSION`, `RAISE_LIMIT`, `STOP_RUN` (target: the run id; the route is the existing `POST /v1/runs/{id}/stop`, `api/mod.rs:1495`, offered only when the caller may stop that run, otherwise text "wait for run <id>") |
 | `target` | the identifier the change acts on (agent URN plus tool or host; binding id plus scope; connector id; Space id plus version) |
 | `who` | `SELF`, `AGENT_OWNER`, `ORG_ADMIN` (`APP_OWNER` added by Apps) |
 | `route` | `{method, path}` of the existing write route that applies it, for API callers |
@@ -259,7 +260,7 @@ with `Idempotency-Key`:
 | Same agent URN; switching agents is not an upgrade | 400 |
 | Target is released and not yanked, or the caller's own draft (isolation-verify-closeout decision 6 and its 2026-11-17 amendment) | 404 for a foreign draft; 409 for a yanked version |
 | The caller may run the agent (agent access, once in `main`) | 403 `agent_access_required:` with its denial |
-| Nothing live, queued or parked on the Space (`workspace_busy` and `busy_run`, `api/inbox.rs:87`, `:145-148`, which cover the live session and the parked reservation, plus queued runs) | 409 `space_busy: run '<id>'` with a denial whose fix is "wait or stop that run" |
+| Nothing live, queued or parked on the Space (`workspace_busy` and `busy_run`, `api/inbox.rs:87`, `:145-148`, which cover the live session and the parked reservation, plus queued runs) | 409 `space_busy: run '<id>'` with `Denial{SPACE_BUSY, subject: <run id>}` and fix `STOP_RUN` targeting that run ("wait or stop that run") |
 | Thread compatibility (below) | not a refusal; the answer lists affected threads |
 
 The busy check and the pin write are one serialized step. Today's main has

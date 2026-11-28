@@ -244,8 +244,11 @@ machine-base scenario's message changes accordingly.
 lockfile on a second agent hits the cache; a source-only package is refused at release; the
 node reports every image it holds; golden restore median within 2x of ~217 ms on the default
 image (the `machine-base` escalation rule).
-If open question 10 is confirmed, the exit adds: an installed image's golden snapshot is
-baked before its first run (proposed; the tracker's exit changes only then).
+If open question 10 is confirmed, the exit adds: installing an image starts its bake and the
+node reports the image `ready` when the golden snapshot exists; a run never waits for a bake
+(a run that starts before `ready` boots cold, as above), and the scenario starts its first run
+only after `ready`, then sees `bootPath: restore` (proposed; the tracker's exit changes only
+then).
 
 **Scenario delta (I1)**
 
@@ -281,10 +284,15 @@ one.
 
 **Migration from a nonstandard default.** In I1 an operator may point `VAM_ROOTFS_PATH` at
 `vam/node` (§3.1). On the first I2 start, `vamd` records the image `VAM_ROOTFS_PATH` names
-(name, version, digest) as the node's `legacy_default_image`. An agent version released
-before that start with no `imageRef` keeps booting `legacy_default_image`, so it and every
-App pinned to it keep their runtime; a version released after it with no `imageRef` gets the
-standard base (decision 5). Agent release warns when a new version drops to the standard
+(name, version, digest) as the node's `legacy_default_image`. The classification uses no
+clock: from I2 on, release writes an explicit `imageRef` into every version it releases (the
+standard base when the author named none), before the digest is taken. So a version with no
+`imageRef` at all was released by a pre-I2 node, wherever it was released and whenever it was
+imported. Such a version boots the receiving node's `legacy_default_image`, so it and every
+App pinned to it keep their runtime; every version released from I2 on carries its image and
+boots the same image on every node (decision 4). A pre-I2 version imported from another node
+gets this node's legacy default, which can differ from the origin's; import warns when the
+two nodes' legacy defaults differ, naming the `imageRef` to set in a new version. Agent release warns when a new version drops to the standard
 base from a previous version that ran on `legacy_default_image`, naming the `imageRef` to
 set. A node whose default was already the standard base sees no change.
 
@@ -332,7 +340,7 @@ released before I2 on a node whose default was `vam/node` still boots `vam/node`
 | `run-gets-the-vm-size-it-asked-for-within-the-cap` | new | firecracker | node with `VAMD_VM_MAX=2x1024`, agent asking 4 vCPU / 2048 | guest reports 1024 MiB, run records `vm.clamped: true` |
 | `receipt-names-the-image-the-run-booted` | new | process | `org-admin`, `agent-on-node-image` | receipt carries URN, version and digest |
 | `app-keeps-its-image-when-a-newer-image-is-released` | new | process | Apps P2 pieces, `agent-on-node-image` | decision 4: the image moves only with the agent version |
-| `an-apps-first-run-restores-and-an-evicted-snapshot-is-rebaked` | new (proposed) | firecracker | node with `vam/base:2` and `vam/node:1`, a small `VAMD_GOLDEN_MAX_BYTES`, Apps P2 pieces, `agent-on-node-image` | pre-bake on App create; a pinned key evicted under pressure is re-baked in the background |
+| `an-apps-first-run-restores-and-an-evicted-snapshot-is-rebaked` | new (proposed) | firecracker | node with `vam/base:2` and `vam/node:1`, a small `VAMD_GOLDEN_MAX_BYTES`, Apps P2 pieces, `agent-on-node-image` | pre-bake on App create; the first run starts after the image reports `ready` and restores (a run before `ready` would boot cold, never wait); a pinned key evicted under pressure is re-baked in the background |
 | `agent-released-before-i2-keeps-the-nodes-old-default-image` | new | firecracker | node with `VAM_ROOTFS_PATH` at `vam/node:1`, `agent-with-builtins` released before the upgrade | migration from a nonstandard default |
 
 ### 3.3 I3 — Vamfile Lite

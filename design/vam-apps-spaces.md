@@ -1015,7 +1015,7 @@ for agent access in `main`; lane 3 S4 runs inside or after P2
 | P4 | One `start_run` resolution | P2, P3, lane 3 S2 (`set_space_agent_version`); holds `run_start.rs` and `catalog_resolve.rs` | Resolution table proven for HTTP and the gateway; App pin authoritative; old request shape unchanged; a shared-App run resolves no owner secrets until P5 |
 | P5 | App limits and secret bindings | P0 (Cedar), P4 | A shared-App run is denied a tool, a secret and an egress host its owner could use |
 | P6 | Quotas and retention | P3, P4 | Idle Spaces reaped within the 30-day cap; quotas refuse with typed reasons; erasure immediate |
-| P7 | Integrator kit and Apps screens | P4 (P5, P6 for the docs' limits section) | TS SDK published; example app runs against a process-mode vamd; docs page live; Squrell-App Apps screens shipped |
+| P7 | Integrator kit and Apps screens | P4 (P5, P6 for the docs' limits section; P6 AS-6.5 and AS-6.6 for the AS-7.5 SDK additions and their scenario, if confirmed) | TS SDK published; example app runs against a process-mode vamd; docs page live; Squrell-App Apps screens shipped |
 
 After P7: **pilot** (one internal app, one client). Not a build phase; Long
 work (`design/long-work.md` §9 lists what the pilot must measure) and
@@ -1119,8 +1119,12 @@ harness H2-H4 wait for it (D5).
   Space.
 - **AS-6.5 Expiry is visible (proposed, owner to confirm).** Space reads
   (`GET` by id, list by App, the get-or-create response) return
-  `expiresAt`: `last_active_at + idle_ttl` for an `idle_ttl` App, null for
-  a `keep` App or a kept Space. `last_active_at` exists today
+  `expiresAt`: the earliest time the reaper may delete the Space,
+  `last_active_at + idle_ttl` for an `idle_ttl` App, null for a `keep` App
+  or a kept Space. It is an eligibility time, not a promise: while a run is
+  live, queued or parked on the Space the reaper keeps it (P6), and the
+  read returns `expiresAt` null with `reapBlocked: true` until that run
+  ends. `last_active_at` exists today
   (`spaces.rs:121`, set by `touch_space`, `spaces.rs:418-421`). An App key
   may set `keep` on its own App's Spaces (`PUT /v1/apps/{id}/spaces/{space_id}
   {keep}`), so an integrator can keep a customer's history without asking

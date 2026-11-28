@@ -1103,7 +1103,8 @@ above and change none of it.
 - [ ] Park between turns after keep-warm; task budgets replace fixed caps.
   (5a: park on any open wait, not only an approval; five meters: turns,
   active time, money, wakes, wall-clock deadline; `request_budget` within
-  the operator/App ceiling; a spent budget parks with Extend; **Pause**
+  the operator/App ceiling; a spent turns, active-time, money or wakes
+  meter parks the task with Extend, the wall-clock deadline ends it; **Pause**
   keeps files and queued steers; bench task `u4-triage`.)
 - [ ] Background processes (`run` background, `bg_*`).
   (5b: `bg_start`, `bg_status`, `bg_output`, `bg_kill`, `bg_wait`;
