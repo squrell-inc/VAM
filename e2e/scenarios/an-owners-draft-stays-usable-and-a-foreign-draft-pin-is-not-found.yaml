@@ -17,7 +17,7 @@ when:
   - expect: { run: succeeded }
   - identity-request: { as: m2, credential: key, method: post, path: /v1/runs, status: 404, contains: "no draft of agent '{{urn:agent-member-draft-with-host-echo:m1}}' for this user", body: { spec: { agentRef: { resourceId: { urn: "{{urn:agent-member-draft-with-host-echo:m1}}" }, version: { major: 1, prerelease: draft } }, inputs: { prompt: "e2e-step:hi Hello" } } } }
 then:
-  - identity-request: { as: m2, credential: key, method: post, path: /v1/runs, status: 404, contains: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' not found in catalog", body: { spec: { agentRef: { resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/no-such-agent" }, version: { major: 1, prerelease: draft } }, inputs: { prompt: "e2e-step:hi Hello" } } } }
+  - identity-request: { as: m2, credential: key, method: post, path: /v1/runs, status: 404, contains: "no draft of agent 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' for this user", body: { spec: { agentRef: { resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/no-such-agent" }, version: { major: 1, prerelease: draft } }, inputs: { prompt: "e2e-step:hi Hello" } } } }
 guards:
   - vam:crates/vam-orchestrator/src/api/run_start.rs
   - vam:crates/vam-orchestrator/src/catalog_resolve.rs
@@ -26,8 +26,4 @@ guards:
 mock:
   - when: { step: hi, stepStart: true }
     reply: { text: Hello. }
-# W0 note: then.0 expects the "not found in catalog" text, but a draft pin on a missing URN answers
-# "no draft of agent '<urn>' for this user" (when.4 already uses that text). The owner decides whether
-# then.0 takes that wording; left pending, assertion unchanged.
-status: pending
-expectFail: { step: then.0, class: product }
+status: active
