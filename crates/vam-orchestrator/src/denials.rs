@@ -25,6 +25,9 @@ use crate::workflow::SqliteWorkflowStore;
 /// The `type_url` of a [`Denial`] in `ErrorStatus.details`.
 pub const DENIAL_TYPE_URL: &str = "type.googleapis.com/vam.v1.Denial";
 const MAX_SUBJECT_BYTES: usize = 253;
+/// Most denial rows a session writes for egress hosts, and (separately) for tools. Past it a
+/// refusal is unchanged but stores no row and carries no `decision_ref`.
+pub const MAX_DENIAL_ROWS_PER_SESSION: usize = 64;
 
 pub(crate) fn initialize_schema(connection: &Connection) -> Result<(), OrchestratorError> {
     connection.execute_batch(
@@ -77,6 +80,8 @@ pub enum Text {
     InstalledHost,
     /// The session's egress policy could not be built or evaluated; the request is refused.
     EgressUnavailable,
+    /// The session's egress byte quota is spent.
+    EgressQuota,
     /// The caller's version pin is not the one the Space is bound to.
     VersionStale,
     /// The run's inbox holds as many undelivered messages as it may.
@@ -119,6 +124,10 @@ pub fn host_text(text: Text, subject: &str, publisher: &str) -> String {
             "The egress policy for this session could not be evaluated, so the request was refused."
                 .into()
         }
+        Text::EgressQuota => {
+            "This session has used all the egress bytes it may, so the request was refused. Ask an org admin if the limit needs raising."
+                .into()
+        }
         Text::VersionStale => format!("Run again on version {subject}, or omit the version."),
         Text::InboxFull => {
             "This run already has as many undelivered messages as it may. Ask an org admin if the limit needs raising."
@@ -143,16 +152,50 @@ pub fn host_text(text: Text, subject: &str, publisher: &str) -> String {
     }
 }
 
-/// A host identifier as a subject: control characters dropped, at most 253 bytes.
+/// A host identifier as a subject: control and Unicode format characters (bidi controls,
+/// zero-width marks, BOM) dropped, at most 253 bytes.
 pub fn sanitize_subject(raw: &str) -> String {
     let mut out = String::new();
-    for c in raw.chars().filter(|c| !c.is_control()) {
+    for c in raw
+        .chars()
+        .filter(|c| !c.is_control() && !is_format_char(*c))
+    {
         if out.len() + c.len_utf8() > MAX_SUBJECT_BYTES {
             break;
         }
         out.push(c);
     }
     out
+}
+
+/// Unicode category Cf as it matters for display spoofing: soft hyphen, Arabic marks, zero-width
+/// and bidi controls, word joiners and invisible operators, interlinear marks, the BOM, and the
+/// tag characters.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
 }
 
 /// The publisher of an agent URN: its namespace segment (`urn:vam:agent:<domain>/<ns>/<name>`).
@@ -366,6 +409,23 @@ impl SqliteWorkflowStore {
         Ok(id)
     }
 
+    /// How many tool denial rows (not egress, not secrets) a session has stored. A read failure
+    /// counts as none: the insert then reports its own error.
+    fn tool_denial_rows(&self, session_id: &str) -> usize {
+        let Ok(connection) = self.connection.lock() else {
+            return 0;
+        };
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM denials
+                 WHERE session_id = ?1 AND reason NOT IN ('EGRESS_RULE', 'SECRET_MISSING')",
+                [session_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
+            .unwrap_or(0)
+    }
+
     /// One stored denial by id, for `POST /v1/fix-requests`. `None` when there is no such row;
     /// a storage failure is an error, never "not found".
     pub fn get_denial(&self, id: &str) -> Result<Option<StoredDenial>, OrchestratorError> {
@@ -444,6 +504,7 @@ fn with_fix(
     rules: Option<Rules>,
     text: Text,
 ) -> Denial {
+    let write_row = store.tool_denial_rows(session_id) < MAX_DENIAL_ROWS_PER_SESSION;
     with_fix_rows(
         store,
         session_id,
@@ -459,7 +520,7 @@ fn with_fix(
         decided_by,
         rules,
         text,
-        true,
+        write_row,
     )
 }
 
@@ -822,6 +883,11 @@ pub enum EgressKind {
     Unavailable,
     /// The name did not resolve: not a policy decision.
     NameResolution,
+    /// The session's egress byte quota is spent: a limit, not a rule.
+    Quota,
+    /// No rule is named (an invalid URL, a placeholder refusal, a failure that is not a policy
+    /// decision): there is nothing to explain or to change.
+    NoRule,
 }
 
 /// Classifies a policy id of the form `rule=<rule>; <policy>` (the label `vam-network` writes).
@@ -836,6 +902,8 @@ pub fn egress_kind(policy_label: &str) -> EgressKind {
         r if r.starts_with("agent rule ") => EgressKind::AgentRule,
         "egress policy unavailable" | "egress policy error" => EgressKind::Unavailable,
         "name resolution" => EgressKind::NameResolution,
+        "egress byte quota" => EgressKind::Quota,
+        "" => EgressKind::NoRule,
         _ => EgressKind::Fixed,
     }
 }
@@ -892,7 +960,10 @@ fn build_egress_denial(
         Some(no_fix(DenialReason::EgressRule, &host, text, publisher))
     };
     match kind {
-        EgressKind::NameResolution => return None,
+        EgressKind::NameResolution | EgressKind::NoRule => return None,
+        EgressKind::Quota => {
+            return Some(no_fix(DenialReason::Quota, &host, Text::EgressQuota, ""));
+        }
         EgressKind::Unavailable => return plain(Text::EgressUnavailable, ""),
         EgressKind::Fixed => return plain(Text::BuiltIn, ""),
         EgressKind::AgentDefault | EgressKind::AgentRule => {}
@@ -1584,7 +1655,11 @@ mod tests {
             k("rule=name resolution; active-policy:terminate"),
             EgressKind::NameResolution
         );
-        assert_eq!(k("active-policy:terminate"), EgressKind::Fixed);
+        assert_eq!(k("active-policy:terminate"), EgressKind::NoRule);
+        assert_eq!(
+            k("rule=egress byte quota; active-policy:terminate"),
+            EgressKind::Quota
+        );
     }
 
     #[test]
@@ -1602,6 +1677,18 @@ mod tests {
         assert!(floor.fix.is_none() && floor.decision_ref.is_empty());
         assert_eq!(floor.subject, "169.254.169.254");
         assert!(egress_denial(&st, "s1", None, "x.test", "rule=name resolution; p").is_none());
+        // A refusal that names no rule has no denial; the byte quota has a reason and no fix.
+        assert!(egress_denial(&st, "s1", None, "x.test", "active-policy:terminate").is_none());
+        let quota = egress_denial(
+            &st,
+            "s1",
+            None,
+            "x.test",
+            "rule=egress byte quota; active-policy:terminate",
+        )
+        .expect("denial");
+        assert_eq!(quota.reason, DenialReason::Quota as i32);
+        assert!(quota.fix.is_none() && quota.decision_ref.is_empty() && !quota.text.is_empty());
         let broken = egress_denial(
             &st,
             "s1",
@@ -1699,5 +1786,35 @@ mod tests {
         assert_eq!(fix.target, "1.0.0");
         assert!(fix.caller_can_apply && fix.who == FixWho::Self_ as i32);
         assert_eq!(d.text, "Run again on version 1.0.0, or omit the version.");
+    }
+
+    #[test]
+    fn subjects_lose_format_characters() {
+        let spoof = "ev\u{202E}il\u{200B}.com\u{FEFF}\u{2066}x\u{2069}\u{200F}";
+        assert_eq!(sanitize_subject(spoof), "evil.comx");
+        assert_eq!(sanitize_subject("caf\u{e9}-\u{4e2d}"), "caf\u{e9}-\u{4e2d}");
+    }
+
+    #[test]
+    fn tool_denial_rows_stop_at_the_cap_and_the_refusal_is_unchanged() {
+        let st = store();
+        st.create_session("s1", None, "vm", "ws", "storage-default")
+            .expect("session");
+        let first = connector_disabled_denial(&st, "s1", URN, "microsoft-365");
+        assert!(first.decision_ref.starts_with("dnl_"), "{first:?}");
+        for _ in 1..MAX_DENIAL_ROWS_PER_SESSION {
+            st.insert_denial(&new_denial(None)).expect("row");
+        }
+        assert_eq!(st.tool_denial_rows("s1"), MAX_DENIAL_ROWS_PER_SESSION);
+        let capped = connector_disabled_denial(&st, "s1", URN, "microsoft-365");
+        assert!(capped.decision_ref.is_empty());
+        assert_eq!(
+            Denial {
+                decision_ref: String::new(),
+                ..first
+            },
+            capped
+        );
+        assert_eq!(st.tool_denial_rows("s1"), MAX_DENIAL_ROWS_PER_SESSION);
     }
 }

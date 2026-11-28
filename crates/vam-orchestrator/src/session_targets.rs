@@ -115,14 +115,24 @@ pub struct SessionToolTarget {
     pub locked_reason: String,
 }
 
+/// A scope label reads `<origin>: <rule>` (`agent draft: tools:* default deny`); true when the
+/// rule part is exactly `rule`.
+fn label_rule_is(label: &str, rule: &str) -> bool {
+    label == rule
+        || label
+            .strip_suffix(rule)
+            .is_some_and(|origin| origin.ends_with(": "))
+}
+
 impl SessionToolTarget {
     /// The agent's deny is its own default (`tools.default: deny`, or a tool that needs an
     /// explicit allow rule), not a rule that names the tool. Read from the agent label the
     /// permissions resolver wrote; a test pins the wording against the resolver.
     pub fn agent_deny_is_default(&self) -> bool {
         self.agent_rule == ScopeRule::Deny
-            && (self.agent_label.contains(DEFAULT_DENY_RULE)
-                || self.agent_label.contains(NOTIFICATIONS_OPT_IN_RULE))
+            && [DEFAULT_DENY_RULE, NOTIFICATIONS_OPT_IN_RULE]
+                .iter()
+                .any(|rule| label_rule_is(&self.agent_label, rule))
     }
 
     /// The `Tool` entity for a Cedar request. All four attributes are set.
@@ -991,6 +1001,10 @@ mod tests {
         let row = by_name(&rows, "run");
         assert_eq!(row.agent_rule, ScopeRule::Deny);
         assert!(!row.agent_deny_is_default(), "{}", row.agent_label);
+        // A rule whose label merely mentions the default is not the default.
+        let mut named = row.clone();
+        named.agent_label = format!("agent draft: {DEFAULT_DENY_RULE} for x");
+        assert!(!named.agent_deny_is_default());
         // An agent that allows it by default is not a default deny.
         let (rows, _) = targets_for_agent(Some(&defaults()), &draft(), &cat, &[]);
         assert!(!by_name(&rows, "run").agent_deny_is_default());

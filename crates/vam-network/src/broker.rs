@@ -220,6 +220,9 @@ pub struct UpstreamRedirect {
     addr: SocketAddr,
 }
 
+/// The rule name on `egress.decided` when the per-session byte quota refuses a request.
+pub const EGRESS_QUOTA_RULE: &str = "egress byte quota";
+
 /// A port-54 request that failed, with the rule when the destination check
 /// refused it. The rule rides to the `egress.decided` event.
 struct EgressFailure {
@@ -231,9 +234,19 @@ struct EgressFailure {
 
 impl From<VamNetworkError> for EgressFailure {
     fn from(error: VamNetworkError) -> Self {
+        // The byte quota is the one rule-less failure the event names, so the host can tell a
+        // quota from a refusal that has no rule at all.
+        let rule = match &error {
+            VamNetworkError::EgressForbidden { reason }
+                if reason.starts_with("Egress byte quota exceeded") =>
+            {
+                Some(EGRESS_QUOTA_RULE.to_string())
+            }
+            _ => None,
+        };
         Self {
             error,
-            rule: None,
+            rule,
             envelope: false,
         }
     }
