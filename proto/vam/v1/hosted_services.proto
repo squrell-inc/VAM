@@ -138,6 +138,7 @@ message CallerContext {
   string space_id = 8;
   string thread_id = 9;
   string run_source = 10;                  // "" for a person; "broker:<id>" for a triggered run
+  string app_id = 11;                      // host-stamped; empty for a personal run
 }
 
 message HostArtifact {

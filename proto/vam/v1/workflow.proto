@@ -230,6 +230,7 @@ message RunSpec {
   InboxMode inbox_mode = 11;
   string space_id = 12;                   // wins over workspace_ref_uri when set; must agree if both
   string thread_id = 13;                  // wins over thread_ref when set; must agree if both
+  string app_id = 14;                     // host-resolved; ignored until Apps resolution, never trusted from a client
 
   // STEER delivers at the task's next turn boundary; QUEUE runs as the next
   // task. Nested so the JSON names are plain `STEER` and `QUEUE`.
@@ -363,6 +364,7 @@ message RunStatus {
   string thread_id = 21;
   RunSource source = 22;                  // absent for a person
   int32 resumes = 23;                     // Times the task was picked up again after a crash or restart.
+  string app_id = 24;
 }
 
 // What started a run when it was not a person.

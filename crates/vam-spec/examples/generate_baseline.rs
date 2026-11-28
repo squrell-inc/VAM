@@ -193,6 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         inbox_mode: 0,
         space_id: String::new(),
         thread_id: String::new(),
+        app_id: String::new(),
         resolved_refs: vec![],
         run_id: Some(ResourceId {
             urn: "urn:vam:run:control.vam.dev/acme/run-abc-123".to_string(),
