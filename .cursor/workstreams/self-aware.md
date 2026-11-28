@@ -101,7 +101,7 @@ CLI and Squrell draw a fix card; "ask your admin" becomes a request.
 **Depends on:** none (`agent_not_granted` is reserved until agent access is in
 `main`, then wired).  
 **Base branch:** `fix/typed-denials`  
-**Plan:** breakdown below (draft 2026-11-28, awaiting owner approval; summary page private to the owner)  
+**Plan:** breakdown below, approved by the owner 2026-11-28 with the recommended answers; summary page private to the owner  
 **Exit:** the Cedar, permissions-row, catalog, egress, missing-secret,
 connector-disabled, connector-park, version-mismatch and quota refusals carry a
 `Denial`; the denied observation carries the fix line; `vam` prints `Fix:` or
@@ -153,7 +153,7 @@ a member's request reaches the right admin as `fix.requested`. Design:
 | 409 version mismatch | VERSION_STALE | run on the bound version (S2 adds SET_SPACE_VERSION) | SELF |
 | 429 inbox full, egress byte quota | QUOTA | none in S1 | text names the org admin |
 
-#### Owner questions (recommended answer in bold; awaiting answers)
+#### Owner questions (answered 2026-11-28: owner approved the plan with every recommended answer)
 
 1. **Branch.** Cut `fix/typed-denials` from `main` in VAM and in Squrell-App, as the design names it. **Yes.**
 2. **Several missing secrets.** Body carries `denials` (one per secret) plus `denial` = the first. **Yes.**
@@ -306,4 +306,4 @@ notified. Design:
 | Date | Phase | What landed (end with the scoreboard: scenarios green, red, fix cycles, wall time) |
 |---|---|---|
 | 2026-11-28 | — | Tracker opened with `design/self-aware.md` |
-| 2026-11-28 | S1 | Breakdown drafted (issues, scenario delta, items SA-1.1 to SA-1.10, waves W0 to W5); awaiting owner approval |
+| 2026-11-28 | S1 | Breakdown drafted (issues, scenario delta, items SA-1.1 to SA-1.10, waves W0 to W5); approved by the owner the same day |
