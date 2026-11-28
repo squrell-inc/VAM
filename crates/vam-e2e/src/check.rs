@@ -1167,6 +1167,7 @@ fn check_scenario(
                 }
             }
             Step::SetRole(x) => refer_org(errors, p, &pos, &org_aliases, Some(&x.as_)),
+            Step::FixRequest(x) => refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref()),
             Step::CatalogWrite(x) => {
                 refer_org(errors, p, &pos, &org_aliases, x.as_.as_deref());
                 if !matches!(x.kind.as_str(), "agent" | "playbook" | "skill") {

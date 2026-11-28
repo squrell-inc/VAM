@@ -5,7 +5,9 @@ description: >
   address and for a public host. Both requests are refused, the tool output in the thread says
   so, and the run events record a deny for each host and no allow. A process guest runs the same
   host-side gate as a microVM guest, so this proves the gate, not the guest's lack of a route
-  (see `guest-has-no-route-off-the-vm`).
+  (see `guest-has-no-route-off-the-vm`). Each deny also carries a typed denial: the public host
+  names the agent's owner as the one who can allow it, the metadata address has no fix because
+  nobody can change the platform's floor.
 tags: [chat, egress]
 needs: process
 given:
@@ -20,6 +22,21 @@ then:
   - expect: { event: egress.decided, fields: { data.domain: 169.254.169.254, data.disposition: DENY } }
   - expect: { event: egress.decided, fields: { data.domain: example.com, data.disposition: DENY } }
   - expect: { event: egress.decided, absent: true, fields: { data.disposition: ALLOW } }
+  - expect:
+      event: egress.decided
+      fields:
+        data.domain: example.com
+        data.disposition: DENY
+        data.denial.reason: EGRESS_RULE
+        data.denial.fix.who: AGENT_OWNER
+        data.denial.fix.change: ALLOW_HOST
+  - expect:
+      event: egress.decided
+      fields:
+        data.domain: 169.254.169.254
+        data.disposition: DENY
+        data.denial.reason: EGRESS_RULE
+        data.denial.fix: { absent: true }
 guards:
   - vam:crates/vam-network/src/broker.rs
   - vam:crates/vam-runtime/src/egress.rs
@@ -51,4 +68,5 @@ mock:
             verdict() { case "${1#HTTP/* }" in 4*|5*) echo "$2"-"refused" ;; 2*) echo "$2"-"served" ;; *) echo "$2"-"silent" ;; esac; }
             verdict "$(ask http://169.254.169.254/latest/meta-data/ 169.254.169.254)" metadata
             verdict "$(ask http://example.com/ example.com)" ungranted
-status: active
+status: pending
+expectFail: { step: then.6, class: product }

@@ -1,0 +1,39 @@
+id: denied-tool-tells-the-model-who-can-allow-it
+title: A tool the host refuses comes back to the model with a fix line, marked as meant for the user, and the run event carries the typed denial
+description: >
+  A member runs an agent whose skill needs a connector that nobody enabled. The model calls the
+  skill's tool and the host refuses it. The tool message the model reads carries one host-written
+  line starting "Suggested fix (for the user, not for you):", which names who can change it (an
+  organization admin can enable the connector). The mock model can only call tools the agent is
+  offered, so a tool hidden by default-deny permissions cannot be called; this refusal is one
+  the model can reach, and the line comes from the same typed denial for every refusal.
+tags: [chat, permissions, connectors]
+needs: process
+given:
+  - org-member
+  - agent-with-m365-probe
+when:
+  - chat: { text: "e2e-step:ask Search my mail", as: org-member }
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "Suggested fix (for the user, not for you):" } }
+  - expect:
+      event: policy.decided
+      tool: m365_probe_search
+      fields:
+        disposition: DENY
+        denial.fix.who: ORG_ADMIN
+guards:
+  - vam:crates/vam-orchestrator/src/security.rs
+  - vam:crates/vam-orchestrator/src/connector_park.rs
+  - vam:crates/vam-runtime/src/agent.rs
+  - vam:crates/vam-orchestrator/src/denials.rs
+mock:
+  - when: { step: ask, lastRole: tool, contains: ask your admin }
+    reply: { text: Ask your administrator to enable Microsoft 365. }
+  - when: { step: ask, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_search, args: { method: GET, path: /v1.0/me/messages } } }
+  - when: { step: ask, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-denied-tool-tells-the-model-who-can-allow-it } } }
+status: pending
+expectFail: { step: then.1, class: product }

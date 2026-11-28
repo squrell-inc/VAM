@@ -271,6 +271,9 @@ pub enum Step {
     /// `create-user: { as, username, userId, status, contains }`: `POST /v1/users` with a fresh
     /// password, as an `org` identity or the bootstrap key.
     CreateUser(crate::engine::identity::CreateUser),
+    /// `fix-request: { from: latest-denial, as, tool, status, contains, fields }`: `POST /v1/fix-requests`
+    /// with the `decisionRef` of the latest run's latest denial.
+    FixRequest(crate::engine::fixes::FixRequest),
 }
 
 /// A `cli` step. `{{root}}` (the scratch tree) and `{{vamd}}` (the built `vamd`) are replaced in
@@ -548,6 +551,7 @@ impl<'de> Deserialize<'de> for Step {
             "put-draft" => Step::PutDraft(val(v)?),
             "set-role" => Step::SetRole(val(v)?),
             "create-user" => Step::CreateUser(val(v)?),
+            "fix-request" => Step::FixRequest(val(v)?),
             other => return Err(D::Error::custom(format!("unknown step `{other}`"))),
         })
     }
