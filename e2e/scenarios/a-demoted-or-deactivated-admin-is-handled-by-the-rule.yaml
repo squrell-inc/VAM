@@ -23,6 +23,8 @@ when:
   - identity-request: { as: m2, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr2 } }
 then:
   - identity-request: { as: admin, credential: key, path: "/v1/notifications?kind=access.requested&state=open", status: 200, contains: "{{acr2}}" }
+  # cleanup: withdraw the open request so it does not stay in the shared org admin's inbox for later scenarios
+  - identity-request: { as: m2, credential: key, method: delete, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 204 }
 guards:
   - vam:crates/vam-orchestrator/src/agent_access.rs
   - vam:crates/vam-orchestrator/src/api/agent_access.rs
