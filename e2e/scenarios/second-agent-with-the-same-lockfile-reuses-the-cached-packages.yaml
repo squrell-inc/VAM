@@ -1,0 +1,39 @@
+id: second-agent-with-the-same-lockfile-reuses-the-cached-packages
+title: A second skill with the same lockfile is served from the node's package cache, and both tools import the package
+description: >
+  Two skills carry byte-identical requirements.txt files. The first fetch comes from the
+  package mirror; the second skill's package record says its packages came from the cache.
+  Each agent runs its own skill's tool and the result holds the marker the package computes.
+tags: [chat, release]
+needs: process
+given:
+  - org-admin
+  - agent-with-python-lockfile-skill
+  - agent-with-the-same-python-lockfile-skill
+when:
+  - chat: { agent: agent-with-python-lockfile-skill, text: "e2e-step:first Run the lockfile tool" }
+  - expect: { thread: { role: tool, contains: "lockfile-python-55" } }
+then:
+  - chat: { agent: agent-with-the-same-python-lockfile-skill, text: "e2e-step:second Run the lockfile tool" }
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "lockfile-python-55" } }
+  - api-call: { path: /v1/skills/packages, contains: "\"source\":\"cache\"" }
+guards:
+  - vam:crates/vam-orchestrator/src/skill_package_admit.rs
+  - vam:crates/vam-orchestrator/src/api/skill_packages.rs
+  - vam:crates/vam-runtime/src/exec.rs
+mock:
+  - when: { step: first, toolName: lockfile_report }
+    reply: { text: Done. }
+  - when: { step: first, toolName: load_skill }
+    reply: { toolCall: { name: lockfile_report, args: {} } }
+  - when: { step: first, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-with-python-lockfile-second-agent-with-the-same-lockfile-reuses-the-cached-packages } } }
+  - when: { step: second, toolName: lockfile_report }
+    reply: { text: Done. }
+  - when: { step: second, toolName: load_skill }
+    reply: { toolCall: { name: lockfile_report, args: {} } }
+  - when: { step: second, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-with-the-same-python-lockfile-second-agent-with-the-same-lockfile-reuses-the-cached-packages } } }
+status: pending
+expectFail: { step: when.1, class: product }

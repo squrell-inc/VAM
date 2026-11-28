@@ -1,0 +1,25 @@
+id: node-reports-each-image-it-holds
+title: The node names every image it holds, with the runtimes in each, and flags the default
+description: >
+  The process node is given a directory of image manifests (the run-level fixture) beside the
+  base manifest it already reports. `GET /v1/node` lists the base and each held image by name
+  with its runtimes, flags the default, and keeps the `base` field as it was.
+tags: [release]
+needs: process
+given:
+  - org-admin
+when:
+  - expect:
+      node:
+        fields:
+          status.base.name: vam/base:2
+          status.images.name=vam/base:2.default: true
+          status.images.name=vam/python:1.runtimes.name=python.version: { present: true }
+          status.images.name=vam/node:1.runtimes.name=node.version: { present: true }
+          status.images.name=vam/node:1.default: false
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/node_base.rs
+  - vam:crates/vam-orchestrator/src/daemon.rs
+status: pending
+expectFail: { step: when.0, class: product }

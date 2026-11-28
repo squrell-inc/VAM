@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "api-version": "1.0"
+  },
+  "name": "vamfixture-hello",
+  "files": [
+    {
+      "filename": "vamfixture_hello-1.0.0-py3-none-any.whl",
+      "url": "vamfixture_hello-1.0.0-py3-none-any.whl",
+      "hashes": {
+        "sha256": "ba5a8f0ad76889d0864d568cc3896dd5555f4d97d45017e1e334a2383e16c74a"
+      },
+      "requires-python": ">=3.8",
+      "yanked": false
+    }
+  ]
+}

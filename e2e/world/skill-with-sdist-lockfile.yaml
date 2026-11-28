@@ -1,0 +1,17 @@
+piece: skill-with-sdist-lockfile
+kind: skill
+deferred: true
+files:
+  requirements.txt: lockfile-sdist/requirements.txt
+  report.py: lockfile-python/report.py
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: A skill whose requirements.txt names a project the mirror holds only as a source archive (test nodes only)
+    tools:
+      - name: lockfile_report
+        description: Imports the package its lockfile names and prints a marker the package computes
+        inputSchemaJson: "{\"type\":\"object\"}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        localExec: { command: python3, entrypoint: ./report.py }

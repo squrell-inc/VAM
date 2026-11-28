@@ -1,0 +1,8 @@
+{
+  "name": "js-lockfile-skill",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "vamfixture-hello": "1.0.0"
+  }
+}

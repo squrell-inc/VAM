@@ -59,6 +59,9 @@ vam-telemetry.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 vam-vsock = { path = "../vam-vsock", default-features = false, features = ["host", "guest"] }
+zip = { version = "9.9", default-features = false, features = ["deflate-flate2"] }
+toml = "0.8"
+percent-encoding = "2"
 
 
 [features]

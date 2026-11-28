@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "api-version": "1.0"
+  },
+  "name": "vamfixture-sdist-only",
+  "files": [
+    {
+      "filename": "vamfixture-sdist-only-1.0.0.tar.gz",
+      "url": "vamfixture-sdist-only-1.0.0.tar.gz",
+      "hashes": {
+        "sha256": "1bdaa7f5307d93a041459d1e8520af1c52ea3c21874ff5d3c4bf1a20005eab38"
+      },
+      "yanked": false
+    }
+  ]
+}

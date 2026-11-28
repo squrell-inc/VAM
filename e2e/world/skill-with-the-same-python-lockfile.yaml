@@ -1,0 +1,16 @@
+piece: skill-with-the-same-python-lockfile
+kind: skill
+files:
+  requirements.txt: lockfile-python/requirements.txt
+  report.py: lockfile-python/report.py
+body:
+  spec:
+    resourceId: { urn: "urn:vam:skill:local.vam.dev/e2e/{{name}}" }
+    version: { major: 1, minor: 0, patch: 0 }
+    description: A second skill with byte-identical requirements.txt, so its packages come from the cache (test nodes only)
+    tools:
+      - name: lockfile_report
+        description: Imports the package its lockfile names and prints a marker the package computes
+        inputSchemaJson: "{\"type\":\"object\"}"
+        sideEffect: SIDE_EFFECT_CLASS_READ_ONLY
+        localExec: { command: python3, entrypoint: ./report.py }

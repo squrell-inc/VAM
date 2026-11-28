@@ -1,0 +1,11 @@
+{
+  "name": "vam/python:1",
+  "version": "fixture",
+  "digest": "sha256:fixture-not-a-real-digest-python",
+  "runtimes": {
+    "python": "3.13.5",
+    "git": "2.47.3",
+    "curl": "8.14.1",
+    "jq": "1.7.1"
+  }
+}
