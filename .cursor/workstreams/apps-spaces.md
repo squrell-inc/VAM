@@ -3,7 +3,7 @@
 ```yaml
 status: active          # active | paused | done
 slug: apps-spaces
-current_phase: 0 (plan approved, wave 1 next)
+current_phase: 0 (built, PRs 161 and 164 await merge)
 base_branch: feat/apps-spaces
 design_docs:
   - design/vam-apps-spaces.md   # read "Amendment 2026-11-28" first; it supersedes the phase list
@@ -152,10 +152,10 @@ App policy denies a tool its owner may use; AS-0.4 policy audit written;
 `cargo test -p vam-spec` passes with the additive protos.
 
 - [x] Design amendment 2026-11-28 merged (PRs 153 and 157)
-- [ ] AS-0.1 Proto: `App`, `Space.app_id`, `RunSpec.app_id`, `RunStatus.app_id`, `CallerContext.app_id = 11`
-- [ ] AS-0.3 Cedar `App` entity and one forbid-only test
-- [ ] AS-0.4 Policy audit (`principal ==` vs `in`)
-- [ ] Scenario names for P2-P7 confirmed
+- [x] AS-0.1 Proto (PR 161): `App`, `Space.app_id`, `RunSpec.app_id`, `RunStatus.app_id`, `CallerContext.app_id = 11`
+- [x] AS-0.3 Cedar `App` entity and forbid-only tests (PR 164; `evaluate_in_app`)
+- [x] AS-0.4 Policy audit (`principal ==` vs `in`) (PR 164, design amendment 2026-11-28 audit section)
+- [x] Scenario names for P2-P7 confirmed (list in the Phase 0 breakdown, Scenario delta)
 
 **Frozen numbers (W1):** `Space.app_id = 8`, `RunSpec.app_id = 14`, `RunStatus.app_id = 24`, `CallerContext.app_id = 11`, `App` fields 1-8. Self-aware S2 starts new `Space` fields at 9.
 
@@ -424,6 +424,7 @@ Phase 5 lands.
 **Goal:** A shared App can only take authority away from its owner.  
 **Depends on:** Phases 0 and 4  
 **Plan:** not drafted  
+**Hand-off from P0 (Opus review, PR 164):** (1) the engine does not itself enforce forbid-only: with the schema change, catalog publish accepts `permit (principal in App::...)` and `forbid ... unless { principal in App::... }`, which `evaluate_in_app` would honour. P5 must reject any `App` reference outside a plain forbid scope (and `unless`/`!` forms) at publish and when composing a run's policy set, before wiring `evaluate_in_app`. (2) `security.rs:643` holds `Arc<dyn PolicyDecisionPoint>`, so the inherent method is unreachable there: P5 adds a defaulted trait method or a downcast. (3) Egress checks use the fixed principal `Agent::"egress"`; compile App egress limits per run set.  
 **Exit:** a shared-App run is denied a tool, a secret and an egress host its
 owner could use.
 
@@ -478,3 +479,4 @@ Work that must not be pulled into this tracker.
 | Date | Phase | What landed (end with the scoreboard: scenarios green, red, fix cycles, wall time) |
 |---|---|---|
 | 2026-11-28 | — | Tracker opened; design amendment 2026-11-28 written (C1-C3 and owner decisions approved). Scoreboard: none yet |
+| 2026-11-28 | 0 | Phase 0 built: W1 additive proto (PR 161), W2 Cedar App entity and audit (PR 164, Opus review GO, nothing blocking), both into `feat/apps-spaces`, awaiting owner merge. Frozen numbers: Space 8, RunSpec 14, RunStatus 24, CallerContext 11, App 1-8. Scoreboard: 0 scenarios turned green (none planned), 3 guarded scenarios green, 0 red, 0 fix cycles, about 3 h wall time |

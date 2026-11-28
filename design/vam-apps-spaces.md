@@ -804,8 +804,9 @@ different later version (`vam_dir.rs:292-330`, called from
 fills it in. **There is no call that changes a Space's pin**, and `yanked`
 is a catalog channel value with no behaviour (`catalog.rs:31`; DX-94 open).
 
-**Not on main:** `apps` table, App keys, a Cedar `App` entity
-(`vam-security/schema/vam.cedarschema:1-14` has `Agent, User, Tool, Host,
+**Not on main:** `apps` table, App keys, the App proto fields and a Cedar
+`App` entity (both land with Phase 0, PRs 161 and 164; until then
+`vam-security/schema/vam.cedarschema:1-14` has `Agent, User, Tool, Host,
 Path, Workspace`), agent access (on `feat/agent-access`, Phase 5).
 
 ### 2. What is stale in this doc, and the replacement
