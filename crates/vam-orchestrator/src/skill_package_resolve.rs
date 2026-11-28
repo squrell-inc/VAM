@@ -280,11 +280,24 @@ pub fn skill_required_secrets(
         Err(err) => return Err(err),
     };
     let temp_dir = tempfile::tempdir().map_err(OrchestratorError::Io)?;
-    let Some(root) = unpack_package_to(&package, temp_dir.path())? else {
-        return Ok(None);
+    // A corrupt blob or a bad manifest must not fail run start: skip the secret precheck for
+    // this package, as runs did before the precheck existed.
+    let root = match unpack_package_to(&package, temp_dir.path()) {
+        Ok(Some(root)) => root,
+        Ok(None) => return Ok(None),
+        Err(err @ (OrchestratorError::Io(_) | OrchestratorError::InvalidContract(_))) => {
+            tracing::warn!(urn, error = %err, "skill package unreadable; skipping its secret precheck");
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
     };
-    let manifest = vam_spec::package::load_skill_manifest(&root)
-        .map_err(|e| OrchestratorError::InvalidContract(e.0))?;
+    let manifest = match vam_spec::package::load_skill_manifest(&root) {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            tracing::warn!(urn, error = %e.0, "skill manifest invalid; skipping its secret precheck");
+            return Ok(None);
+        }
+    };
     Ok(Some(
         crate::secret_requirements::collect_skill_requirements(&[manifest]),
     ))
@@ -1157,6 +1170,42 @@ mod tests {
         };
         assert!(skill_required_secrets(&store, &other, LOCAL_USER_ID)
             .expect("read")
+            .is_none());
+    }
+
+    #[test]
+    fn a_corrupt_blob_or_bad_manifest_skips_the_secret_precheck() {
+        let _drive9 = Drive9Fixture::new();
+        let store = store();
+        let pinned = ResourceRef {
+            version: Some(Version {
+                major: 1,
+                minor: 0,
+                patch: 0,
+                prerelease: String::new(),
+                build: String::new(),
+            }),
+            ..skill_ref(DIGEST_A, "")
+        };
+        let digest = real_digest_for("corrupt");
+        let mut record = package_record(&digest, SkillChannel::Released, "");
+        record.channel = SkillChannel::Released as i32;
+        store.put_skill_package(&record).expect("package");
+
+        // Not a gzip archive at all.
+        _drive9.write_blob(&digest, b"this is not a tarball");
+        assert!(skill_required_secrets(&store, &pinned, LOCAL_USER_ID)
+            .expect("admission goes on")
+            .is_none());
+
+        // A valid archive whose manifest does not validate.
+        let archive = write_tar_gz(&[
+            ("SKILLS.md", minimal_skills_md(ASSISTANT_URN).as_bytes()),
+            ("manifest.json", b"{ not json"),
+        ]);
+        _drive9.write_blob(&digest, &archive);
+        assert!(skill_required_secrets(&store, &pinned, LOCAL_USER_ID)
+            .expect("admission goes on")
             .is_none());
     }
 }
