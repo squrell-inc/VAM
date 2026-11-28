@@ -27,8 +27,9 @@ result. While the job runs:
 - The agent treats its **context as a cache**: the plan and its notes live
   in files, are restated each turn, and are re-read after every
   compaction.
-- **Waits cost nothing**: an event first, then a broker-side condition,
-  then a timer with backoff and a maximum number of wakes.
+- **Waits longer than 30 s cost nothing** (no VM between wakes): an event
+  first, then a broker-side condition, then a timer with backoff and a
+  maximum number of wakes. Shorter waits keep the VM up (§6).
 - **Background processes** and **in-VM workers** (sub-agents) let one task
   do slow or parallel work without a new VM.
 - **Watchdogs** turn a stalled or runaway job into a notification, not a
@@ -207,6 +208,10 @@ needs lives only in the conversation.**
 
 ## 6. Waits that cost nothing
 
+"Cost nothing" means no VM and no active time between wakes. It holds for
+every wait longer than 30 s; a wait of 30 s or less keeps the VM up and
+counts active time, because parking and resuming would cost more.
+
 Per decision 16 the guest only asks; `vamd` holds deadlines; brokers own
 vendor watching and standing schedules. Order of preference:
 
@@ -218,11 +223,13 @@ vendor watching and standing schedules. Order of preference:
 `wait_until {at | after, recheck?: {backoff: [60, 120, 300, 600], cap: 600,
 max_wakes}, reason}`:
 
-- Without `recheck`, the task parks until `at` (bounded by the task
-  deadline) and resumes once with "time reached".
+- Without `recheck`, the task waits until `at` (bounded by the task
+  deadline) and resumes once with "time reached"; whether it parks follows
+  the next rule.
 - A wait longer than 30 s parks at the turn boundary with no keep-warm
-  hold (§3), so no VM runs until the wake; a shorter wait keeps the VM up
-  and counts active time.
+  hold (§3), so no VM runs until the wake; a wait of 30 s or less keeps
+  the VM up and counts active time. The rule is the same with or without
+  `recheck`, and applies to each delay of a backoff.
 - With `recheck`, each wake is a **check turn**: the model runs its check
   and either continues the job or calls `wait_until` again; the next delay
   follows the backoff. A wake counts against the wakes meter, not turns

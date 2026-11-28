@@ -109,7 +109,7 @@ On versions:
 | `subject` | string | what was refused, as the host names it: a tool name from the host catalog, a normalized host, a binding id, a connector id, an agent URN, a version label |
 | `fix` | `SuggestedFix` (optional) | absent when nothing can change it (the platform IP floor, a tampered skill) |
 | `text` | string | one host-written sentence for people, from a fixed template per `(reason, fix.change, fix.who)` |
-| `decision_ref` | string | the id of the stored decision row this denial came from (empty when nothing is stored, e.g. a 412 before a run); `POST /v1/fix-requests` resolves it |
+| `decision_ref` | string | the id of the stored decision row this denial came from; `POST /v1/fix-requests` resolves it. Every denial whose `fix` the caller cannot apply has a row: a 412 before a run (for example an org-scoped `SECRET_MISSING`) stores one keyed to the caller, the agent and version it named, and the binding id. It is empty only when there is no `fix` or the caller can apply the fix itself |
 
 `DenialReason`:
 
@@ -190,7 +190,8 @@ reference to the stored decision row (new `Denial.decision_ref`, the id of
 the row S1 stores the denial with); reason and subject alone cannot name the
 recipient, since two agents with different owners can share a tool or a host.
 The host resolves the reference, checks that the requester is entitled to it
-(the run's caller or owner; otherwise 404, same text as a missing row),
+(the run's caller or owner, or for a pre-run 412 row the authenticated caller
+it was stored for; otherwise 404, same text as a missing row),
 recovers the agent, scope and target from the stored row, re-derives the fix
 from those (it never trusts the client's `fix`), and sends a `fix.requested`
 notification (new `Kind`, `notifications.rs:49-62`) to that agent's admins or
