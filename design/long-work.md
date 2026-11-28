@@ -382,43 +382,55 @@ it. 5e ships with whichever of 5a to 5d ships first.
 
 ### 9.1 Recurring follow-ups are schedules, not one long task (proposed)
 
-Owner use case (2026-11-28): the agent opens a ticket for a teammate, then
-pings them every few hours, by priority and deadline, until it is done, and
-prepares a summary before a daily 4 PM call. This is days or weeks of
-time-driven checks with little work per check. Three shapes were compared:
+Owner use case (2026-11-28, clarified the same day): everything stays inside
+VAM and the Squrell app; no Slack, Teams or third-party ticket tool. The
+owner tells his primary agent "inform Priya about this feature". The agent
+creates an **assignment** for Priya, a VAM work item addressed to another
+VAM user, which reaches Priya's primary agent and her notification list.
+Every few hours, by priority and deadline, it checks on open assignments and
+nudges the assignee, then reports back. Before a daily 4 PM call it
+summarises what happened across the team, in the Squrell app. The
+assignment model itself belongs to the primary agent backlog
+(`.cursor/workstreams/README.md`, Primary agent row); this section only
+records what it means for Long work. Three shapes were compared for the
+follow-up loop:
 
 | Shape | Verdict |
 |---|---|
-| One long task per ticket, parked on `wait_until` with `recheck` (§6) | **No.** A ticket due in six weeks passes the 30-day ceiling (LW3); 200 wakes at most; a parked task keeps its Space (LW5), so N tickets need N Spaces; "nothing changed yet" trips the no-progress watchdog (§7); state sits in a conversation that compacts for weeks; 5c is not built. |
-| One standing `vam.schedule` sweep (cron in working hours, IANA timezone) that reads open tickets and pings the ones due | **Recommended.** On `main` today (`docs/src/content/docs/hosted/schedule.md`). Each fire is a short run within today's caps, with its own receipt; a fire the broker missed (broker or node down at the due time) is caught up within the grace window, while a run that started and then crashed is not re-fired, so the next fire picks up its tickets; the grant is listed, revocable and expires (90 days default, `grant.expiring` 7 days ahead). |
-| A broker-side condition (E5) that fires on a ticket change | **Later, as an addition.** Good for "the assignee replied", cheaper than polling, but a missed ping is the absence of a change, which a condition does not express. E5 is not built. |
+| One long task per assignment, parked on `wait_until` with `recheck` (§6) | **No.** An assignment due in six weeks passes the 30-day ceiling (LW3); 200 wakes at most; a parked task keeps its Space (LW5), so N assignments need N Spaces; "nothing changed yet" trips the no-progress watchdog (§7); state sits in a conversation that compacts for weeks; 5c is not built. |
+| One standing `vam.schedule` sweep (cron in working hours, IANA timezone) that reads open assignments and nudges the ones due | **Recommended.** The schedule is on `main` today (`docs/src/content/docs/hosted/schedule.md`). Each fire is a short run within today's caps, with its own receipt; a fire the broker missed (broker or node down at the due time) is caught up within the grace window, while a run that started and then crashed is not re-fired, so the next fire picks up its assignments; the grant is listed, revocable and expires (90 days default, `grant.expiring` 7 days ahead). |
+| A host event on assignment change (the assignee answers or changes status) waking the owner's agent | **Later, as an addition.** Good for "Priya replied", but a missed deadline is the absence of a change, which an event does not express. |
 
-Rules the sweep follows (playbook text, no new runtime piece):
+Rules the sweep follows:
 
-- Follow-up state lives in the ticket system (priority, due date, a marker
-  comment with the last ping time), not in the thread, so a compaction
-  loses nothing (§5).
-- The ping is the marker: the follow-up is one ticket comment that
-  mentions the assignee and carries a stamp `vam-followup:<ticket>:<slot>`,
-  where the slot is the due time it answers. Before posting, a fire reads
-  the ticket's comments and skips a slot that already has its stamp. A
-  crash after posting leaves the stamp, so the next fire does not ping
-  again; a crash before posting leaves nothing, so the next fire sends it.
-  The connector call carries the same stamp as its idempotency key where
-  the ticket API supports one (effect journal, Phase 4).
-- One sweep schedule, not one schedule per ticket: a triggered run cannot
-  create schedules (loop guard, `work-outside-chat` decision 6), so per-ticket
-  schedules would need a person's turn for every new ticket or due-date move.
-- The sweep never parks on a question: a parked run holds its Space and later
-  fires queue, then expire. It ends with a "needs you" line, which the
+- Follow-up state lives in the assignment record on the host (priority,
+  due date, status, the assignee's last answer, nudges sent), not in the
+  thread, so a compaction loses nothing (§5).
+- A nudge is idempotent by construction: the host stores it under a unique
+  `(assignment, slot)` key, where the slot is the due time it answers, and
+  a second nudge for the same slot is a no-op. A crash after the write
+  leaves the nudge; a crash before it leaves nothing, so the next fire sends
+  it.
+- A nudge never starts a run as the assignee. It is a notification to
+  Priya and an entry her primary agent reads on her next turn. Her agent
+  works an assignment only when she talks to it, or under a standing
+  schedule she approved herself. The owner's request is data in her Space,
+  never authority.
+- One sweep schedule, not one schedule per assignment: a triggered run
+  cannot create schedules (loop guard, `work-outside-chat` decision 6), so
+  per-assignment schedules would need a person's turn for every new
+  assignment or due-date move.
+- The sweep never parks on a question: a parked run holds its Space and
+  later fires queue, then expire. It ends with a "needs you" line, which the
   unattended-finish notification carries (§7).
-- The summary schedule targets a Space of its own, so the owner's chat in the
-  primary agent's Space does not queue it (`work-outside-chat` decision 7).
+- The summary and sweep schedules target a Space of their own, so the
+  owner's chat with the primary agent does not queue them
+  (`work-outside-chat` decision 7).
 
 **What this changes in Phase 5:** nothing in the slices. In §9, a pilot run
-that polls for days counts as demand for a schedule or for the E5 condition,
-not for 5c. `wait_until` stays for waits inside one task (minutes to hours).
-A sweep that outgrows one run (hundreds of tickets) is a 5a or 5d signal.
+that polls for days counts as demand for a schedule or a host event, not
+for 5c. `wait_until` stays for waits inside one task (minutes to hours). A
+sweep that outgrows one run (hundreds of assignments) is a 5a or 5d signal.
 
 ## 10. Locked decisions (proposed, owner to confirm)
 

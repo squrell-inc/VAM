@@ -449,7 +449,7 @@ today), and only with `spaces:create` for shared Apps.
 | --- | --- | --- | --- | --- |
 | Alice chats | Login session | Her default App | `assistant` | Same as today |
 | "Summarise Jira daily at 6 PM" | Scheduler grant | Alice's App | Where she created it | Runs as Alice at 6 PM; queued behind her task if she is mid-run (amended 2026-10-29) |
-| "Prep the 4 PM standup and chase my tickets" (owner use case, added 2026-11-28, proposed) | Two scheduler grants: summary at 15:30 with a timezone; one sweep hourly in working hours | Alice's App | A "Standup" Space, not her default Space, so her chat does not queue the fires | Runs as Alice; pings go out as ticket comments under her Linear connection; replies are read from the ticket each sweep (`design/long-work.md` §9.1) |
+| "Prep the 4 PM standup and chase my tickets" (owner use case, added 2026-11-28, proposed) | Two scheduler grants: summary at 15:30 with a timezone; one sweep hourly in working hours | Alice's App | A "Standup" Space, not her default Space, so her chat does not queue the fires | Runs as Alice; creates VAM assignments for teammates (their primary agent and notification list, never a run as them); the sweep reads assignment state and nudges; all inside VAM and the Squrell app (`design/long-work.md` §9.1) |
 | Customers @mention a Slack bot | Bot grant with `spaces:create` | Support bot (shared) | Per channel or per person, broker's choice | Private history each; App's limited rights and secrets |
 | Website visitors (Mast) | Website key, or grant held by `mast.ui` | Site App (`idle_ttl`) | Hash of visitor cookie | Isolated; idle Spaces reaped ≤ 30 days |
 | Alice revokes the scheduler | — | — | — | Next broker request `DENIED` |
