@@ -816,6 +816,19 @@ features:
       - slack-decision-needs-the-handle-and-the-linked-account
       - restarted-approval-keeps-one-notification
       - skipped-schedule-is-told-once-a-day
+  - id: typed-denials-and-fix-requests
+    area: "Notifications"
+    surface: "Denial in error bodies, policy.decided, egress.decided; POST /v1/fix-requests; fix.requested; CLI Fix:/Ask: lines, vam fix request"
+    dev: [orchestrator/denials]
+    arch: [orchestrator/api, orchestrator/notifications]
+    proves:
+      - denied-tool-tells-the-model-who-can-allow-it
+      - fix-line-ignores-text-the-tool-wrote
+      - egress-refuses-an-ungranted-host
+      - missing-secret-refusal-names-the-secret-to-set
+      - member-asks-an-org-admin-to-enable-a-connector
+      - member-cannot-file-a-fix-request-for-someone-elses-denial
+      - cli-prints-the-fix-from-the-error-body
   - id: broker-triggered-runs-run-grants-and-gateway
     area: "Hosted brokers"
     surface: "run grants, HostedTriggerGateway, run source on the receipt"

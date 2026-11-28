@@ -14,6 +14,7 @@ proves:
   - revoked-microsoft-connection-parks-the-call-and-tells-the-member
   - gate-decided-from-slack-names-slack-on-the-receipt
   - quiet-hours-hold-slack-until-morning
+  - member-asks-an-org-admin-to-enable-a-connector
   - unverified-contact-receives-nothing
 description: The per-user notification record that vamd writes when something needs a person or something they left running is done, with its API, CLI, agent tool, preferences and contacts.
 ---
@@ -54,8 +55,11 @@ Two trust tiers apply, as in the [run receipt](/security/run-receipt/). The row 
 | `trigger.fired` | info | A trigger fire was queued behind a live task. | `open` | The grant owner. |
 | `trigger.skipped` | warn | A fire was skipped: workspace busy, Space or thread gone, agent unavailable, grant expired. | `open` | The grant owner. |
 | `connection.needs_reauth` | action | A connector connection moves to needs-reconnect. | `open` the connector | The connection owner. |
+| `fix.requested` | action | A member asks you to apply a fix a refusal named, through `POST /v1/fix-requests`. | `open` | The agent's owner or the org admins, never the requester. |
 
-`approval.pending`, `question.asked` and `gate.opened` are the **decision kinds**. A `reauth` park (a run waiting for a connection, not for a decision) writes none; it gets `connection.needs_reauth` instead.
+`approval.pending`, `question.asked` and `gate.opened` are the **decision kinds**. A `reauth` park (a run waiting for a connection, not for a decision) writes none; it gets `connection.needs_reauth` instead. Its JSON carries a `denial` (`CONNECTOR_NOT_CONNECTED`, fix `CONNECT_CONNECTOR`, who `SELF`); see [Denials and fixes](/orchestrator/denials/).
+
+`fix.requested` is not a decision kind. Its JSON carries `fixRequest {id, change, target, who, requesterUserId, createdAt, denial}`, frozen when the request was filed. The title and body come from host templates and hold no text from the agent. A host is never in the title. The admin closes it with `acted`. Its subject key is the request id.
 
 `run.finished` is not written for every run. A chat turn that succeeds without waiting leaves none. A run gets one when any of these holds:
 

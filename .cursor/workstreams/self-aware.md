@@ -109,15 +109,29 @@ connector-disabled, connector-park, version-mismatch and quota refusals carry a
 a member's request reaches the right admin as `fix.requested`. Design:
 `design/self-aware.md` §S1.
 
-- [ ] `Denial`, `DenialReason`, `SuggestedFix` in proto; descriptor baseline
-- [ ] Denials at every `PERMISSION_DENIED` site in `security.rs`, with `who` from the deciding scope
-- [ ] `denial` on `ApiError` bodies (412 secret, 409 version mismatch, 429 inbox full, connector refusals)
-- [ ] Egress denial on `egress.decided` and in the proxy refusal body
-- [ ] Guest fix line in `denied_observation`, from typed fields only
-- [ ] `POST /v1/fix-requests` and the `fix.requested` notification kind
-- [ ] CLI reads `denial` (fallback to message matching); version-mismatch hint
-- [ ] Squrell fix card (error bodies and run events), in Squrell-App
-- [ ] Docs: `orchestrator/denials.md`, error body in `orchestrator/api.md`
+- [x] `Denial`, `DenialReason`, `SuggestedFix` in proto; descriptor baseline
+- [x] Denials at every `PERMISSION_DENIED` site in `security.rs`, with `who` from the deciding scope
+- [x] `denial` on `ApiError` bodies (412 secret, 409 version mismatch, 429 inbox full, connector refusals)
+- [x] Egress denial on `egress.decided` and in the proxy refusal body
+- [x] Guest fix line in `denied_observation`, from typed fields only
+- [x] `POST /v1/fix-requests` and the `fix.requested` notification kind
+- [x] CLI reads `denial` (fallback to message matching); version-mismatch hint
+- [x] Squrell fix card (error bodies and run events), in Squrell-App
+- [x] Docs: `orchestrator/denials.md`, error body in `orchestrator/api.md`
+
+Wave PRs: VAM #163 (W0), #166 (W1), #167 (W2), #168 (W3), Squrell-App #24 (W4); W5 is the docs PR. The Opus close review is pending, so the phase is not done.
+
+#### Build decisions
+
+- M6: an explicit agent deny and an explicit host deny are text only; only a default deny gets `ALLOW_TOOL` or `ALLOW_HOST`.
+- An org-scope deny is text only (it names the org admins); no org rule write route exists.
+- A connector the server does not know has no fix.
+- The `VERSION_STALE` fix has no change until S2.
+- The `denials` array is always present on a body that has a denial.
+- Egress denial rows are capped at 64 hosts per session.
+- A `decisionRef` older than 30 days answers the same 404.
+- `ALLOW_HOST` requests are capped at 10 new per agent per requester per 24 hours (429).
+- `fix.requested` is a non-decision kind: the admin closes it with `acted`.
 
 #### Issues found (checked in code against `main` @ f1c1431)
 
@@ -307,3 +321,4 @@ notified. Design:
 |---|---|---|
 | 2026-11-28 | — | Tracker opened with `design/self-aware.md` |
 | 2026-11-28 | S1 | Breakdown drafted (issues, scenario delta, items SA-1.1 to SA-1.10, waves W0 to W5); approved by the owner the same day |
+| 2026-11-28 | S1 | S1 waves 0-3 and Squrell W4 built; 7 scenarios green, 0 red, 0 fix cycles; package-skill secret admission fixed |
