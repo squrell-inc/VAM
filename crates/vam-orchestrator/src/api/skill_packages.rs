@@ -171,7 +171,7 @@ async fn delete_skill_package_wildcard(
     auth: AuthContext,
     Path(rest): Path<String>,
 ) -> Result<Response, ApiError> {
-    crate::api::refuse_catalog_delete(&state, &auth, &rest, "skill package").await
+    crate::api::refuse_catalog_delete(&state, &auth, &rest, "skill package", false).await
 }
 
 async fn skill_package_wildcard_post(

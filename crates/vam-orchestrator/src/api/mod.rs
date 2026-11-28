@@ -606,14 +606,17 @@ async fn put_agent(
         .spec
         .ok_or_else(|| OrchestratorError::InvalidContract("spec is required".into()))?;
     let saved = match mode {
-        crate::api::catalog_auth::AgentWriteMode::Full => state
-            .store
-            .publish_agent_draft_with_owner(&spec, auth.owner_user_id())?,
+        crate::api::catalog_auth::AgentWriteMode::Full => state.store.publish_agent_draft_as(
+            &spec,
+            auth.owner_user_id(),
+            auth.has_users_admin(),
+        )?,
         crate::api::catalog_auth::AgentWriteMode::Restricted => {
-            state.store.publish_agent_draft_restricted(
+            state.store.publish_agent_draft_restricted_as(
                 &spec,
                 auth.owner_user_id(),
                 crate::member_draft::member_draft_agents_max(),
+                auth.has_users_admin(),
             )?
         }
     };
@@ -708,22 +711,35 @@ async fn get_agent_wildcard(
 
 /// `DELETE /v1/{agents|playbooks|skills/packages}/{urn}`: the catalog keeps every release, so
 /// nothing is deleted. The route exists so the answer is explicit: an installed row is refused as
-/// read-only (409, M2) and any other row as not deletable (405).
+/// read-only (409, M2) and any other row as not deletable (405). `agent` is true for an agent:
+/// one the access rule hides from the caller gets what a missing URN gets.
 pub(crate) async fn refuse_catalog_delete(
     state: &AppState,
     auth: &AuthContext,
     rest: &str,
     noun: &str,
+    agent: bool,
 ) -> Result<Response, ApiError> {
     state.pdp.authorize(auth, "PutCatalog", "catalog:write")?;
     let urn = percent_decode_path(rest.trim_start_matches('/'));
-    state.store.require_not_installed(&urn, noun)?;
-    Err(ApiError {
+    let not_deletable = || ApiError {
         status: StatusCode::METHOD_NOT_ALLOWED,
         code: vam_spec::v1::VamErrorCode::Unimplemented,
         message: format!("{noun} '{urn}' cannot be deleted: the catalog keeps every release"),
         retryable: false,
-    })
+    };
+    if agent {
+        // Agent access: Hidden gets exactly what a missing URN gets here (400 inside a
+        // marketplace domain, else the 405 below), never the installed row's 409.
+        state.store.refuse_hidden_agent(
+            &urn,
+            auth.owner_user_id(),
+            auth.has_users_admin(),
+            not_deletable,
+        )?;
+    }
+    state.store.require_not_installed(&urn, noun)?;
+    Err(not_deletable())
 }
 
 async fn delete_agent_wildcard(
@@ -736,7 +752,7 @@ async fn delete_agent_wildcard(
     if let Some(urn) = agent_access::access_urn(&rest) {
         return agent_access::delete_access(&state, &auth, &urn, &headers);
     }
-    refuse_catalog_delete(&state, &auth, &rest, "agent").await
+    refuse_catalog_delete(&state, &auth, &rest, "agent", true).await
 }
 
 async fn delete_playbook_wildcard(
@@ -744,7 +760,7 @@ async fn delete_playbook_wildcard(
     auth: AuthContext,
     Path(rest): Path<String>,
 ) -> Result<Response, ApiError> {
-    refuse_catalog_delete(&state, &auth, &rest, "playbook").await
+    refuse_catalog_delete(&state, &auth, &rest, "playbook", false).await
 }
 
 async fn get_policy_wildcard(

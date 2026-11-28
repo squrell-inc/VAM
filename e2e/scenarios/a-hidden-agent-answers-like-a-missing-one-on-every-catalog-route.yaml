@@ -58,5 +58,4 @@ guards:
   - vam:crates/vam-orchestrator/src/api/composition.rs
   - vam:crates/vam-orchestrator/src/api/outcomes.rs
   - vam:crates/vam-orchestrator/src/api/mod.rs
-status: pending
-expectFail: { step: when.19, class: product }
+status: active

@@ -1203,6 +1203,8 @@ pub struct Facts {
     pub id: String,
     pub kind: Kind,
     pub approval_id: Option<String>,
+    /// What the record is about: the request id for `access.requested`.
+    pub subject_key: String,
     pub agent_label: String,
     pub title: String,
     pub body: String,
@@ -1216,7 +1218,7 @@ fn load_facts(conn: &Connection, id: &str) -> Result<Option<Facts>, Orchestrator
     let row = conn
         .query_row(
             "SELECT kind, approval_id, agent_label, title, body, resolved_at, resolved_reason,
-                    acted_by_user_id, acted_surface
+                    acted_by_user_id, acted_surface, subject_key
              FROM notifications WHERE id = ?1",
             [id],
             |r| {
@@ -1230,16 +1232,18 @@ fn load_facts(conn: &Connection, id: &str) -> Result<Option<Facts>, Orchestrator
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
+                    r.get::<_, String>(9)?,
                 ))
             },
         )
         .optional()?;
     Ok(row.and_then(
-        |(kind, approval_id, agent_label, title, body, ra, rr, by, surface)| {
+        |(kind, approval_id, agent_label, title, body, ra, rr, by, surface, subject_key)| {
             Some(Facts {
                 id: id.to_string(),
                 kind: Kind::parse(&kind)?,
                 approval_id,
+                subject_key,
                 agent_label,
                 title,
                 body,
@@ -1503,8 +1507,12 @@ pub fn build_rendering(
         title: f.title.clone(),
         body: f.body.clone(),
         open_url: open_url(app_url, &f.id),
-        cli_line: match (&f.approval_id, f.kind.is_decision()) {
-            (Some(a), true) => format!("vam approve decide {a}"),
+        cli_line: match (&f.approval_id, f.kind) {
+            (Some(a), kind) if kind.is_decision() => format!("vam approve decide {a}"),
+            // An access request is decided by its request id, not by an approval.
+            (_, Kind::AccessRequested) if !f.subject_key.is_empty() => {
+                format!("vam access approve {}", f.subject_key)
+            }
             _ => format!("vam notifications show {}", f.id),
         },
         ..Default::default()

@@ -487,6 +487,7 @@ fn a_summary_lists_ten_then_says_and_n_more() {
             id: format!("n{i}"),
             kind: Kind::BudgetHit,
             approval_id: None,
+            subject_key: String::new(),
             agent_label: String::new(),
             title: format!("Budget {i}"),
             body: String::new(),
@@ -569,6 +570,7 @@ fn an_update_says_who_decided_where_and_offers_nothing() {
         id: "n1".into(),
         kind: Kind::ApprovalPending,
         approval_id: Some("ap1".into()),
+        subject_key: String::new(),
         agent_label: "researcher".into(),
         title: "Approve write_file".into(),
         body: "body".into(),
@@ -867,6 +869,7 @@ fn facts(kind: Kind, approval: &str) -> Facts {
         id: "nt_1".into(),
         kind,
         approval_id: Some(approval.into()),
+        subject_key: String::new(),
         agent_label: "researcher".into(),
         title: "Host title".into(),
         body: "Host body".into(),
@@ -939,6 +942,21 @@ fn agent_text_is_capped_labelled_and_cannot_close_the_fence() {
     let t = agent_text("l", "before ``` rm -rf ``` after\u{7}").unwrap();
     assert!(!t.text.contains("```") && !t.text.contains('\u{7}'));
     assert!(agent_text("l", "   ").is_none());
+}
+
+#[test]
+fn an_access_request_names_the_command_that_approves_it_by_request_id() {
+    let mut f = facts(Kind::AccessRequested, "unused");
+    f.approval_id = None;
+    f.subject_key = "acr_7".into();
+    let r = build_rendering(&f, None, None);
+    assert_eq!(r.cli_line, "vam access approve acr_7");
+    // A record with no request id falls back to showing the record.
+    f.subject_key = String::new();
+    assert_eq!(
+        build_rendering(&f, None, None).cli_line,
+        "vam notifications show nt_1"
+    );
 }
 
 #[test]
