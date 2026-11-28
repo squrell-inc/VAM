@@ -497,6 +497,12 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   `product`); `copyCli: <path in tree>` (runs a copy of `vam` placed there); and `files: { <path>:
   { contains, absent, unchanged } }` (assertions on files in the tree; `unchanged` compares with the
   file before the step).
+  `exitCode: <0..=255>` asserts the exact exit status; with it `exit` may be left out (it then
+  means `fail`, or `ok` for code 0), and `check` refuses `exit: ok` with a non-zero code (and
+  `exit: fail` with 0). A `cli` step without `exit` or `exitCode` is refused. `args`, `contains`,
+  `absent` and `matches` also expand `{{urn:<piece>}}` (a given agent piece), `{{urn:<piece>:<as>}}`
+  (the URN a `put-draft` as `<as>` wrote) and `{<alias>.userId}` / `{<alias>.username}` (an `org`
+  piece of `given`); `check` refuses a piece or alias that is not in `given`.
   Fields for commands that act on the user's machine or a release: `home: tree` (`HOME` is the
   scratch tree itself, not a directory beside it, so a command that edits login files can be
   judged); `env: { NAME: value }` (extra variables on top of `PATH` and `HOME`; `{{root}}` and

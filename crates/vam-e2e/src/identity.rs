@@ -533,7 +533,7 @@ impl Engine {
 
     /// `text` with every `{<alias>.userId|username|USERNAME}` replaced; `encode` percent-encodes
     /// each value (for a path segment).
-    fn expand(&self, text: &str, encode: bool) -> Result<String, Fail> {
+    pub(super) fn expand(&self, text: &str, encode: bool) -> Result<String, Fail> {
         let mut out = text.to_string();
         for (alias, word) in placeholders(text) {
             if !PLACEHOLDER_FIELDS.contains(&word) {

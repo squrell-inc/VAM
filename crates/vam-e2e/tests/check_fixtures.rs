@@ -916,3 +916,25 @@ fn git_tag_root_needs_an_earlier_cli_step_and_is_not_an_overlay() {
     );
     f.expect_error("git-tag", "`root` is `{ same: true }`");
 }
+
+#[test]
+fn cli_exit_code_and_placeholders_are_checked() {
+    let mk = |args: &str, tail: &str| {
+        format!("  - cli: {{ args: [{args}], root: {{ from: listing }}, {tail} }}\n")
+    };
+    // exit or exitCode is required; ok with a non-zero code is refused.
+    let f = declared_fx(Some(TEST_FILE), &mk("--version", "contains: [x]"));
+    f.expect_error("cli", "needs `exit` or `exitCode`");
+    let f = declared_fx(Some(TEST_FILE), &mk("--version", "exit: ok, exitCode: 4"));
+    f.expect_error("cli", "does not combine with `exitCode: 4`");
+    let f = declared_fx(Some(TEST_FILE), &mk("--version", "exitCode: 4"));
+    assert_eq!(f.errors(), Vec::<String>::new());
+    // A placeholder names a piece or alias that is in `given`.
+    let f = declared_fx(
+        Some(TEST_FILE),
+        &mk("\"{{urn:no-such-piece}}\"", "exit: ok"),
+    );
+    f.expect_error("step-alias", "no-such-piece");
+    let f = declared_fx(Some(TEST_FILE), &mk("\"{nobody.userId}\"", "exit: ok"));
+    f.expect_error("step-alias", "nobody");
+}

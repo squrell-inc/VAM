@@ -274,7 +274,8 @@ pub enum Step {
 }
 
 /// A `cli` step. `{{root}}` (the scratch tree) and `{{vamd}}` (the built `vamd`) are replaced in
-/// `args` and in `contains` and `absent`.
+/// `args` and in `contains` and `absent`; so are `{{urn:<piece>}}`, `{{urn:<piece>:<as>}}`,
+/// `{<alias>.userId}` and `{<alias>.username}` (in `matches` too).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CliStep {
@@ -282,8 +283,11 @@ pub struct CliStep {
     pub args: Vec<String>,
     /// The tree the command runs against.
     pub root: CliRoot,
-    /// `ok` (exit 0) or `fail` (non-zero exit).
-    pub exit: CliExit,
+    /// `ok` (exit 0) or `fail` (non-zero exit). Optional with `exitCode` (then `fail`, or `ok`
+    /// for code 0); otherwise `check` refuses a step without it.
+    pub exit: Option<CliExit>,
+    /// The exact exit status (0 to 255).
+    pub exit_code: Option<u8>,
     /// Text the combined stdout and stderr must contain.
     #[serde(default)]
     pub contains: Vec<String>,
@@ -419,6 +423,17 @@ pub struct CliRoot {
     pub from: Option<String>,
     #[serde(default)]
     pub same: bool,
+}
+
+impl CliStep {
+    /// The exit the step expects: `exit`, else `fail` with a non-zero `exitCode`, else `ok`.
+    pub fn exit_kind(&self) -> CliExit {
+        match (self.exit, self.exit_code) {
+            (Some(e), _) => e,
+            (None, Some(c)) if c != 0 => CliExit::Fail,
+            _ => CliExit::Ok,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
