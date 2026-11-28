@@ -444,12 +444,19 @@ fn http_reject(
 
 /// Percent-encode a URN or id for use as a single URL path segment.
 pub fn encode_path_segment(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            _ => format!("%{:02X}", c as u32),
-        })
-        .collect()
+    if s == "." || s == ".." {
+        return s.replace('.', "%2E");
+    }
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Decode a percent-encoded path segment back to the canonical id/URN.
@@ -538,6 +545,13 @@ fn next_token(page: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The path of the page after `token`: `?` or `&` by whether `path` already has a query, and the
+/// token percent-encoded.
+fn next_page_path(path: &str, token: &str) -> String {
+    let sep = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{sep}pageToken={}", encode_path_segment(token))
+}
+
 /// `GET path` for a paged list (runs, sessions, approvals). Without `all` it returns the first
 /// page and says on stderr that more exist; with `all` it follows `nextPageToken` and returns
 /// one merged answer. A node that does not page answers one page and that is all there is.
@@ -557,7 +571,7 @@ pub async fn list_paged(c: &Client, path: &str, array_key: &str, all: bool) -> R
     }
     let mut pages = vec![page];
     while pages.len() < MAX_PAGES {
-        let body = c.get(&format!("{path}?pageToken={token}")).await?;
+        let body = c.get(&next_page_path(path, &token)).await?;
         let page: serde_json::Value = serde_json::from_str(&body).context("read a list page")?;
         let next = next_token(&page);
         pages.push(page);
@@ -585,6 +599,18 @@ mod paging_tests {
             "statuses",
         );
         assert_eq!(m, json!({"statuses": [1, 2, 3]}));
+    }
+
+    #[test]
+    fn next_page_path_joins_by_query_and_encodes_the_token() {
+        assert_eq!(
+            next_page_path("/v1/approvals", "t"),
+            "/v1/approvals?pageToken=t"
+        );
+        assert_eq!(
+            next_page_path("/v1/access-requests?state=all", "a=b"),
+            "/v1/access-requests?state=all&pageToken=a%3Db"
+        );
     }
 
     #[test]
@@ -628,5 +654,13 @@ mod surface_header_tests {
         client.get("/v1/x").await.unwrap();
         let request = server.await.unwrap();
         assert!(request.contains("x-vam-surface: cli"), "{request}");
+    }
+
+    #[test]
+    fn path_segments_encode_bytes_and_dots() {
+        assert_eq!(encode_path_segment("é"), "%C3%A9");
+        assert_eq!(encode_path_segment(".."), "%2E%2E");
+        assert_eq!(encode_path_segment("."), "%2E");
+        assert_eq!(encode_path_segment("a.b"), "a.b");
     }
 }

@@ -3,7 +3,7 @@
 ```yaml
 status: active
 slug: agent-access
-current_phase: 2
+current_phase: 5
 branch: feat/agent-access
 design_docs:
   - design/agent-access.md
@@ -470,7 +470,201 @@ mine|requests|approve|deny|revoke` (design §5).
 **Exit:** CLI scenarios green; `list_paged` handles paths with a query string; hints for
 `agent_access_required`; CLI docs updated.
 
-- [ ] Commands, hints, `list_paged` fix, docs
+- [x] Commands, hints, `list_paged` fix, docs
+
+Hand-off: Phase 3 done 2026-11-28. Wave PRs #147-#149 merged into `feat/agent-access-p3`; the Opus close review ran and its findings are fixed. CLI scenarios `a-member-browses-requests-and-leaves-an-agent-from-the-cli`, `an-agent-admin-decides-requests-from-the-cli`, `an-agent-admin-names-other-admins-from-the-cli` and `the-cli-tells-a-member-how-to-ask-for-an-agent` are green in CI. CI's `CI:` line takes scenario ids, not labels like C1.
+
+**Approved 2026-11-28 by Roshan with all recommended answers Q1 to Q9** (command names as design §5; short names resolve through browse; `requests` pending by default with `--state`, `--agent`, `--all` = every page; users by id or username plus `vam users ls`; no interactive confirm; table or global `--json`; docs in `getting-started/cli.md`; one short Opus high close review; commits as Roshan with `git commit -s`, no AI trailers).
+
+
+Read-only breakdown by the Opus breakdown agent, 2026-11-28, against `feat/agent-access-p3` @ 91f470d.
+Format: `phase-playbook.md` §3 step 2, as `p2-breakdown.md`. Item prefix `AA-3.n`.
+
+**Phase rubric.** `Decide: NOW (proof 2: owner goal, tracker exit; cost 1: one crate plus the e2e
+runner and docs)`. `lane: no` for every wave (no guest or VM path).
+
+#### 1. Code map
+
+| Piece | Where |
+|---|---|
+| Command tree | `main.rs:29-151` (`Agent` `:88-91`, dispatch `:213`); help guard `every_vam_command_named_in_help_exists` `main.rs:304-330` |
+| `vam agent` | `cmd/catalog.rs:24-108` (`AgentCmd`), `run_agent` `:326-412`; the file is 1214 lines, so access code goes in a new `cmd/access.rs` |
+| Templates | `cmd/approve.rs` (list, decide, key), `cmd/notifications.rs` (tables, decide line), `cmd/marketplace.rs` (small writes) |
+| Client | `get` `client.rs:57-71`, `delete` `:128-144`, `put_raw_json` `:174-197`, `post_raw_json` `:237-266` (202 is success), `list_paged` `:544-571`, `merge_pages` `:515-531` |
+| Errors | `http_error.rs` `hint` `:72-225`, `command_for` `:280-331`, `list_command` `:337-351`; exit codes `output.rs:43-119`; `--json` failure document `output.rs:144-160` |
+| Tests | `crates/vam-cli/tests/cli_tests.rs` (httpmock, `PROCESS_STATE_LOCK`), module `flag_tests` |
+| Server facts used | browse JSON `api/agent_access.rs:643-670`; lists `:673-758`; decide `:404-461`; revoke `:465-504`; admins `:509-569`; replay 409 `agent_access.rs:1182-1184` |
+
+#### 2. Items
+
+**AA-3.1 `list_paged` with a query** (W1). `client.rs`: next-page URL uses `&` when `path` contains
+`?`; token percent-encoded with `encode_path_segment`. Tests: httpmock asserts
+`/v1/access-requests?state=all&pageToken=t` and `/v1/approvals?pageToken=t`; `list_paged_follows_the_token_only_with_all` stays green.
+
+**AA-3.2 Member commands** (W1). New `cmd/access.rs`, wired from `AgentCmd`:
+- `browse [--all] [--page-size n]`: table `URN  NAME  VERSION  MODE  STATE  ADMIN` (`ADMIN` = `canAdmin`), with `reason` under a denied or revoked row.
+- `add <agent> [-m msg] [--idempotency-key k]` and `request <agent> [-m msg] [--idempotency-key k]`:
+  POST `{message?}`; print `request <id> approved` or `request <id> pending: an admin of <urn> decides`
+  (the scenarios remember the id after `request `).
+- `leave <agent> [--idempotency-key k]`: DELETE; prints `left <urn>`; `--json` local document (Q6).
+- `access-policy <agent> --visibility <org|restricted> --mode <everyone|open|approval> [--idempotency-key k]`: both flags required (vamd requires both, `api/agent_access.rs:211`).
+- `<agent>`: URN, or a short name through browse (Q2).
+- `vam access mine [--all] [--page-size n]`: table `REQUEST  AGENT  STATE  REQUESTED  REASON`.
+Tests: flag parsing, the 200/202 wording, short-name resolution (unique, none, ambiguous), control
+characters stripped. Accept: C1 green.
+
+**AA-3.3 Admins** (W2). `vam agent admins ls <agent>`: table `USER ID  USERNAME  ADDED BY  ADDED AT`,
+`(deactivated)` marked. `add|rm <agent> <user> [--idempotency-key k]`: read-modify-write and the
+resolution order of issue 2; no-op exits 0 with a stderr note; removing the last admin warns that org
+admins now decide. `vam users ls` (Q4). Tests: resolution by id, by username in any case, from the
+list, from requests, from `/v1/users`, none (exit 4); unchanged set sends no PUT; PUT body keeps the
+order. Accept: C3 green.
+
+**AA-3.4 `vam access` admin side** (W2). `requests [--state s] [--agent urn] [--all] [--page-size n]`
+(path `/v1/access-requests?state=s&adminOf=me&pageSize=n`): table `REQUEST  AGENT  USER  STATE
+REQUESTED  MESSAGE`. `approve <id> [--reason r]`, `deny <id> --reason r`, `revoke <agent> <user>
+--reason r`, each with `--idempotency-key`. Print `request <id> approved|denied|revoked`. Tests:
+bodies, required reasons (exit 2, no request), revoke resolution over two pages. Accept: C2 green.
+
+**AA-3.5 Hints and helpers** (W1). In `http_error.rs`, before the generic 403:
+`agent_access_required:` gives `vam agent request <urn>`; the admin 403 texts; the replay 409
+(`different request`) before the `idempotency` branch; 404 on `/v1/agents/<urn>/access|admins|...`
+gives `vam agent browse`; `/v1/access-requests` 404 and 409 give `vam access requests [--state all]`;
+`/v1/agents/<urn>/access` 409 gives `vam access mine`; revoke 404 gives the approved list. `list_command`
+learns `access-requests`. `run.rs` short-name fallback (issue 6). `notifications.rs` decide line for
+`access.requested` (issue 14). Tests per hint, a byte-equal test for a hidden and a missing 404, and a
+test that every `vam ...` command a new hint names parses through the CLI tree (as `main.rs:304-330`).
+Accept: C4 green.
+
+**AA-3.6 Docs** (W2). `getting-started/cli.md`: section "Agent access (`vam agent browse`,
+`vam access`)" with one example per command, the exit codes they use and the user-naming rule; add
+the new writes to the mutating list (`cli.md:86`) and `agent leave` to the local outputs (`cli.md:53`);
+add C1 to C4 to its `proves`. `orchestrator/agent-access.md`: one line linking the CLI section, C1 to
+C4 in `proves`. `e2e/docs-features.yaml`: row `agent-access` `dev: [getting-started/cli]`, C1 to C4 in
+`proves`, surface gains the CLI commands, `pending_page` removed. Check with `cargo run -p vam-e2e --
+check` and `pnpm build`.
+
+#### 3. Scenario delta (wave 0)
+
+All four are `process`, mock model, `status: pending`, layer CLI through `cli` steps with
+`as: <alias>` and `root: { from: version/empty }` (as `node-status-shows-the-node-and-cli-versions`).
+World pieces exist: `org-admin` (bootstrap key, org admin), `org-publisher`, `org-member`,
+`org-member-email` (second member), `agent-plain`, `agent-inline-probe` (deferred; `put-draft` as
+`pub`). The node is shared, so assert by `{{acr}}` and the per-scenario agent, never by counts; a
+fixed `--idempotency-key` is safe because replays are per user and the users are new each run.
+Below, `P` = `{{urn:agent-inline-probe:pub}}`, `A` = `{{urn:agent-plain}}`; `cli m [...]` = a `cli`
+step as `member`.
+
+| Scenario | Given | Steps (when, then) | Red (W0) | Green |
+|---|---|---|---|---|
+| C1 `a-member-browses-requests-and-leaves-an-agent-from-the-cli` | admin, pub, member, agent-plain, agent-inline-probe | when: admin policy A {org, approval} (identity-request); put-draft P as pub, release 1.0.0, pub policy P {org, open}; `cli m [agent, browse]` ok contains A and `none`; `cli m [agent, request, A, -m, please]` ok contains `pending`, remember `acr` after `request `; `cli m [agent, add, P]` ok contains `approved`. then: `cli m [access, mine, --page-size, "1", --all]` ok contains `{{acr}}` and P (two pages on a path with a query); `cli m [agent, leave, A]` ok; `cli m [--json, access, mine]` contains `withdrawn`; `cli m [agent, leave, A]` exitCode 4 contains `vam access mine`; `cli m [agent, request, P]` exitCode 5 contains `already usable` | when.4 (`browse` is no subcommand: exit 2) | W1 |
+| C2 `an-agent-admin-decides-requests-from-the-cli` | admin, pub, member, member2, agent-inline-probe | when: put-draft P as pub, release; `cli pub [agent, access-policy, P, --visibility, org, --mode, approval]` ok; member requests (202, `acr1`), member2 requests (202, `acr2`) by identity-request; `cli pub [notifications, --kind, access.requested]` contains `vam access approve {{acr1}}`; `cli pub [access, requests]` contains both ids; `cli pub [access, approve, {{acr1}}, --idempotency-key, a1]` ok contains `approved`; `cli pub [access, deny, {{acr2}}]` exitCode 2 contains `--reason`. then: the same approve with key `a1` ok contains `approved` (replay); `cli pub [access, deny, {{acr2}}, --reason, "not now", --idempotency-key, a1]` exitCode 5 contains `different request`, `new key`; deny with reason ok; `cli pub [access, approve, {{acr2}}]` exitCode 5 contains `not pending`, `vam access requests`; `cli pub [access, approve, acr_nope]` exitCode 4 contains `vam access requests`; `cli member2 [agent, browse]` contains `denied`, `not now`; `cli pub [access, revoke, P, "{member.username}", --reason, done]` ok contains `revoked`; `cli m [access, mine]` contains `revoked`; revoke without `--reason` exitCode 2 | when.2 (`access-policy` is no subcommand) | W2 |
+| C3 `an-agent-admin-names-other-admins-from-the-cli` | admin, pub, member, member2, agent-inline-probe | when: put-draft P as pub, release; `cli pub [agent, admins, ls, P]` ok contains `{pub.username}`; `cli pub [agent, admins, add, P, "{member2.userId}"]` ok contains `{member2.username}`; `cli pub [agent, admins, add, P, nobody-e2e]` exitCode 4 contains `user id`; `cli admin [agent, admins, add, P, "{member.username}"]` ok (org admin, via `/v1/users`); `cli member2 [agent, admins, rm, P, "{pub.username}"]` ok (from the list). then: `cli m [--json, agent, admins, ls, P]` contains `{member.userId}`, `{member2.userId}`, absent `{pub.userId}`; `cli pub [agent, admins, ls, P]` exitCode 3 contains `only an agent admin`; `cli m [agent, admins, rm, P, "{member2.userId}", --idempotency-key, r1]` ok; the same again ok (no change) | when.2 (`admins` is no subcommand) | W2 |
+| C4 `the-cli-tells-a-member-how-to-ask-for-an-agent` | admin, pub, member, agent-plain, agent-inline-probe | when: admin policy A {org, approval}; put-draft P as pub, release, pub policy P {restricted, approval}. then: `cli m [run, A, -p, "e2e-step:hi Hello"]` exitCode 3 contains `agent_access_required`, `vam agent request A`; `cli m [--json, run, A, -p, "e2e-step:hi Hello"]` contains `"exitCode":3`, `"httpStatus":403`; `cli m [agent, request, P]` exitCode 4 contains `not found in catalog`, `vam agent browse`, absent `agent_access_required`; `cli m [agent, request, urn:vam:agent:local.vam.dev/e2e/no-such-agent]` exitCode 4 contains `vam agent browse` | then.0 (exit 3 holds, but the text says `vam login`: class `product`) | W1 |
+
+Mock: C4 carries the `hi` rule (`agent-plain`'s reply) in case a start slips through. No existing
+scenario changes; none guards a `vam-cli` file today (grep), and the one `via: cli` scenario
+(`decision-anywhere-clears-the-notification`) re-runs in W1 because `client.rs` changes.
+
+**Guards** for C1 to C4: `crates/vam-cli/src/main.rs`, `cmd/catalog.rs`, `client.rs`,
+`http_error.rs`; plus `cmd/run.rs` (C4) and `cmd/notifications.rs` (C2). W1 adds `cmd/access.rs` once
+it exists (a guard must name a real file).
+
+**W0 runner additions** (`crates/vam-e2e/src/cli.rs`, `scenario.rs`, `check.rs`; documented in
+`e2e/README.md` "Receipt expectations and offline verify", the `cli` paragraph): `exitCode: <0..=255>`
+(exact; with it `exit` defaults to `fail`, and `check` refuses `exit: ok` with a non-zero code), and
+the placeholder expansion of issue 16. `check` refuses a placeholder whose piece or alias is not in
+`given`. Unit tests in `cli.rs` and `check.rs`.
+
+#### 4. Waves
+
+| Wave | Items | Turns green | Model | Budget | Depends | CI line | lane |
+|---|---|---|---|---|---|---|---|
+| 0 | C1 to C4 + runner `exitCode`, placeholders | none (red, right reason) | Sonnet 5.5 low | 60 min | approval | `CI: scenarios=<C1..C4>` | no |
+| 1 | AA-3.1, 3.2, 3.5 | C1, C4 | Sonnet 5.5 low (one crate, existing patterns) | 90 min | 0 | `CI: scenarios=<C1..C4>,decision-anywhere-clears-the-notification` | no |
+| 2 | AA-3.3, 3.4, 3.6 | C2, C3 | Sonnet 5.5 medium (user resolution and read-modify-write are logic the plan cannot fully specify) | 120 min | 1 | `CI: scenarios=<C1..C4>` (docs check runs in `checks`) | no |
+| review | phase close, read-only | n/a | Opus 5.5 high | 20 min | 2 | n/a | n/a |
+| fix | only if the review finds something | per finding | Sonnet 5.5 low | 45 min | review | as W2 | no |
+
+Build waves run one at a time; no dedicated security wave (the CLI decides nothing; vamd enforces).
+
+**Files per wave.**
+- W0: `e2e/scenarios/<C1..C4>.yaml` (new), `crates/vam-e2e/src/cli.rs`, `scenario.rs`, `check.rs`,
+  `e2e/README.md`. No product code.
+- W1: `crates/vam-cli/src/client.rs`, `cmd/access.rs` (new), `cmd/mod.rs`, `cmd/catalog.rs`
+  (variants delegate), `main.rs` (the `Access` group), `http_error.rs`, `cmd/run.rs`,
+  `cmd/notifications.rs`, `tests/cli_tests.rs`; C1 and C4 flipped to `active`.
+- W2: `cmd/access.rs`, `cmd/users.rs`, `main.rs`, `tests/cli_tests.rs`,
+  `docs/src/content/docs/getting-started/cli.md`, `docs/src/content/docs/orchestrator/agent-access.md`,
+  `e2e/docs-features.yaml`; C2 and C3 flipped.
+
+**Exit checks** (each wave in its worktree; low-disk settings from working-agreement "Running Rust
+tests"):
+- W0: `cargo test -p vam-e2e`, `cargo run -p vam-e2e -- check`, `scripts/e2e/run.sh --scenarios
+  <C1..C4>`: each fails at its Red step, class `product` (`expectFail`). Then `scripts/ci/local.sh
+  --fast --base origin/feat/agent-access`.
+- W1: `cargo test -p vam-cli`, `cargo clippy -p vam-cli --all-targets -- -D warnings`,
+  `scripts/e2e/run.sh --scenarios <C1..C4>,decision-anywhere-clears-the-notification` (C1, C4 green;
+  C2, C3 still red at their Red step), `local.sh --fast`.
+- W2: as W1 plus `cargo run -p vam-e2e -- check`, `pnpm build` in `docs/`; C1 to C4 green. Phase exit:
+  C1 to C4 `active` and green in Actions.
+
+**How the wave plans run.** The phase session starts each wave as a background agent in its own
+worktree with a pointer brief (tracker path, wave number, base, the facts above). Its first turn is
+plan only; the phase session checks it against this breakdown and approves it (delegated: no wave is
+a security wave). The agent builds, runs the exit checks and `local.sh --fast`, opens the PR with the
+wave's `CI:` line and "Local CI" summary, and reports in at most 15 lines. The phase session verifies
+CI and merges. Two failed check cycles stop the wave; the rerun moves one row up (playbook §2).
+
+**Phase-close review (Q8).** One read-only Opus 5.5 high agent, about 20 minutes, after W2, on the
+phase diff only. Checklist: no hint, fallback or table shows anything vamd did not return to that
+caller (short-name and user resolution read only routes the caller may call; hidden and missing print
+the same text); read-modify-write sends exactly the intended set and never drops a deactivated admin
+by accident; every write sends the user's key when given and a fresh one otherwise, and a key is
+never reused across two different commands; user text is stripped of control characters; no file
+outside the allowed list changed. Findings go to one fix wave.
+
+**PR and commit rules.** Every PR targets `feat/agent-access` (wave PRs onto the phase branch
+`feat/agent-access-p3`, which reaches `feat/agent-access` in one PR as #145 did for Phase 2); never
+`main`. Commits use `git commit -s` with the maintainer identity (Q9). No `Co-Authored-By`, session
+links or "Generated with" lines in commits or PR bodies (AGENTS.md:256). Wave PR titles
+`AA-3 W<n>: <summary>`, body lists the items and says "Do not merge".
+
+#### 5. Docs and tracker updates
+
+- Docs: AA-3.6 (W2). `e2e/README.md` for the runner fields (W0).
+- Tracker at approval (phase session, docs only): paste section 2 to 4 under Phase 3, record Q1 to Q9,
+  set Phase 3 `Plan: approved <date>`, update the reviews row for Phase 3 if Q8 holds, and set
+  `current_phase: 3` with the README row once Phase 2 is closed.
+- Per wave: tick items, wave row with PR, a progress-log row with the scoreboard.
+- Phase close: checkbox `[x]`, progress row, hand-off to the coordinator; Phase 5's breakdown is the
+  next session's job.
+
+#### 6. Risks
+
+- **Read-modify-write races.** Two admins changing the list at once can lose one change (no ETag;
+  accepted in Phase 2). The CLI re-reads before each PUT, so the window is one round trip.
+- **User resolution by name** reads only routes the caller may call; an agent admin who is not an org
+  admin can add a never-seen user by id only. A server lookup route is backlog (Q4).
+- **Shared node.** `browse --all` walks every agent on the node; the scenarios avoid it and use
+  `access mine --page-size 1 --all`, which is per user.
+- **Remembered ids from human output.** C1 and C2 remember `{{acr}}` after `request `; that line
+  format is part of AA-3.2 and must not change without changing the scenarios.
+- **W0 shares `crates/vam-e2e/src/scenario.rs` with Phase 5** (tracker lane note). Phase 5 runs after
+  Phase 3, so there is no overlap; Phase 5 rebases on the merged runner.
+- **Help guard.** New help texts that name `vam ...` commands must resolve (`main.rs:304-330`); the
+  hint test of AA-3.5 extends the same idea to hints.
+
+#### 7. What must NOT be touched
+
+Phase 4 builds on the frozen design §6 in parallel, and Phase 5 owns the server fixes. So Phase 3
+changes no file under `crates/vam-orchestrator/`, `crates/vam-spec/`, `proto/` (and the baseline),
+`docs/api/openapi.yaml`, and no vamd route, error text or JSON shape. It does not edit design §6 or a
+locked decision. If a wave finds it needs a server change, it stops and the phase session asks the
+owner. Server items noticed here, for the Phase 5 or backlog list: the `access.requested` CLI line
+says `vam notifications show` (`notify_delivery.rs:1506-1509`); no username lookup for agent admins;
+no `?agent=` filter on `GET /v1/access-requests`.
+
 
 ### Phase 4 — Squrell-App
 
@@ -483,6 +677,8 @@ are shown, not swallowed into `[]`.
 
 - [ ] `services/agentAccess.ts` and hooks; Marketplace Agents tab on `GET /v1/catalog/agents`
 - [ ] Request dialog, my requests, admin queue, `openAgentChat` gate
+
+Hand-off: Phase 4 done. Squrell-App PRs #18 to #22 merged into `feature/agent-access`; release PR #23 into `main` is held until vamd is deployed. See `p4-breakdown.md` in the project files (`agent-access/p4-breakdown.md`).
 
 ### Phase 5 — Marketplace manifest and hardening
 
@@ -535,8 +731,8 @@ listed last. The breakdown of each phase still decides its items and waves.
 | 0 | Owner answers A1–A9 | — | — | `docs` check green | all: docs only |
 | 1 | Owner: breakdown, W2 and W3 plans | Session per PR (playbook §4: CI green, reads the risky lines in `catalog.rs`, `run_start.rs`, `grants.rs`, `api/error.rs`); CodeRabbit | Opus review agent after W3: every design §3 site goes through the rule; Hidden equals a missing URN byte for byte; admin check is the §2.3 rule, never `pdp.authorize` or a scope; Space bound only after admission; no backfill on upgrade. Findings: one fix wave | Scenarios `active`, green; team checklist; owner check (playbook §6) | Separate design review (the design and A1–A9 are that review) |
 | 2 | Owner: breakdown, W1 plan, design §6 marked frozen | As P1, plus OpenAPI, proto and baseline match the handlers (`crates/vam-spec/tests/conformance.rs`) | Opus review agent on W1: admins write and lists use the §2.3 admin rule; browse and `/v1/me` leak no Hidden agent; `access.requested` reaches admins only | As P1 | — |
-| 3 | Owner: breakdown; wave plans delegated | Session per PR; CodeRabbit | None: the CLI holds no authority, vamd enforces | Scenarios green; checklist | Opus review, security review |
-| 4 | Owner: breakdown; wave plans delegated | Session runs the app's local gate (playbook §4: `CI=1 pnpm test`, `tsc --noEmit`, `pnpm e2e:typecheck`); Playwright desktop and mobile (Squrell-App `.cursorrules`) | None: the app hides nothing vamd does not | Owner's manual check of the chat flow (working-agreement "Rules that bit us"); then against a Phase 2 node | Opus review |
+| 3 | Owner: breakdown; wave plans delegated | Session per PR; CodeRabbit | Short Opus high read-only review at phase close (approved 2026-11-28): hints and fallbacks leak nothing vamd did not return; read-modify-write sends the intended set | Scenarios green; checklist | Dedicated security build wave |
+| 4 | Owner: breakdown; wave plans delegated | Session runs the app's local gate (playbook §4: `CI=1 yarn test`, `tsc --noEmit`, `yarn e2e:typecheck`); Playwright desktop and mobile (Squrell-App `.cursorrules`) | None: the app hides nothing vamd does not | Owner's manual check of the chat flow (working-agreement "Rules that bit us"); then against a Phase 2 node | Opus review |
 | 5 | Owner: breakdown, W2 plan, A9 | As P1; vam-marketplace PR reviewed by `CODEOWNERS` | Final Opus review agent over the whole feature (design §7 list): the one end-to-end security review before the last release | As P1 | — |
 
 **Model and effort.** Cost is context size times turns (§13): Opus only in short agents with a fresh
@@ -637,3 +833,6 @@ worth it: an extra close, checklist and full-suite release PR for files W3 edits
 | 2026-11-27 | 2 W1 | Browse, `/v1/me/access`, `/v1/access-requests`, admins GET/PUT, DELETE access and Idempotency-Key replay on all six access writes (the four Phase 1 writes included) landed on `feat/agent-access-p2`, with the Opus plan review's 10 changes. N1–N6 `active` and green; N7, N8 pending (W2). Scoreboard: N1–N6, P1 S1–S7 and the 10 marketplace scenarios 23/23 green, `cargo test -p vam-orchestrator` green, 0 fix cycles. |
 | 2026-11-27 | 2 W2 | `access.requested` (admins, else org admins and the operator; fixed title, the member's message never copied; decide clears every copy as `acted`, withdraw as `withdrawn`) and `access.decided` (approve, deny, revoke) written inside the replay transaction, so a replay emits nothing; `/v1/me` `adminOfAgents` and `pendingAccessRequests`; proto messages and baseline; OpenAPI for all 10 access routes; the Agent access docs page, catalog, notifications and api amendments, sidebar and feature row. N7, N8 `active`. An admin added after a request was raised gets no notification (queue and badge still show it). Scoreboard: N1–N8, P1 S1–S7 and the 10 marketplace scenarios 25/25 green (N1–N8 8/8), `cargo test --workspace` green, `vam-spec` green, `vam-e2e check` ok, `pnpm build` ok, clippy and fmt clean, 0 fix cycles; `local.sh --fast` stops at `install.test.sh` (environmental as root). Phase not closed: the phase-close review is next. |
 | 2026-11-27 | 2 fix wave | Opus security review F1-F4 fixed. `PUT …/admins` now moves the open `access.requested` copies of the pending requests on the same transaction (removed admin's copy closes `expired`, new admin gets one, no admin left falls back to the org admins and the operator); `POST /v1/notifications/{id}/acted` clears a copy its holder can no longer decide; the requester is never a recipient; `access.decided` names a now-Hidden agent by its URN tail; OpenAPI gains the 403 (no `catalog:read`) on the access reads and writes and the full revoke 404 text. The W2 caveat "a late admin gets no notification" is gone. Scoreboard: N1–N8, P1 S1–S7 and the 10 marketplace scenarios 25/25 green, `cargo test -p vam-orchestrator` 2742 passed 0 failed, `vam-spec` green, `vam-e2e check` ok, `pnpm build` ok, clippy and fmt clean, 0 fix cycles, scenarios 4m44s. Phase not closed. |
+| 2026-11-28 | 3 W2 | AA-3.3 (`vam agent admins ls\|add\|rm`, `vam users ls`), AA-3.4 (`vam access requests\|approve\|deny\|revoke`) and AA-3.6 (CLI docs, feature row without `pending_page`) on `feat/agent-access-p3-w2`. C2 and C3 `active`; C1 to C4 active. `cargo test -p vam-cli`, clippy, `vam-e2e check` and `pnpm build` green locally; scenarios run in Actions. |
+| 2026-11-28 | 3 W0-W1 | Scenarios C1-C4 (pending) and the runner `exitCode` and placeholders (#147); paging fix, member commands and hints (#148). Note: the CI line takes scenario ids, not C1-C4, so #148 ran only `decision-anywhere-clears-the-notification`; the four CLI scenarios first run on #149 with their real ids. |
+| 2026-11-28 | 3 review, fix wave and close | Opus close review of the merged Phase 3 diff; findings fixed on `feat/agent-access-p3-fix`: exact user id beats any username, `/v1/users` read only for org admins and only 403/404 swallowed, admin list re-read right before the PUT, hint text and URN lists cleaned of control and format characters, a short-name locked run fails with 403 like the URN path and points at `vam access mine` for a pending request, path segments encode UTF-8 bytes and dots. Phase 3 closed. |

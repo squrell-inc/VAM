@@ -240,6 +240,10 @@ fn list_path(unread: bool, kind: Option<&str>, all: bool) -> String {
 
 /// The command a person runs to act on a record, for decision kinds.
 fn decide_line(rec: &Value) -> Option<String> {
+    if rec.get("kind").and_then(Value::as_str) == Some("access.requested") {
+        let id = rec.pointer("/action/target/id").and_then(Value::as_str)?;
+        return Some(format!("vam access approve {id}"));
+    }
     let verb = rec.pointer("/action/verb").and_then(Value::as_str)?;
     let approval = rec.get("approvalId").and_then(Value::as_str)?;
     (verb == "decide").then(|| format!("vam approve decide {approval}"))
@@ -282,7 +286,14 @@ pub fn format_list(body: &Value) -> String {
             out.push(format!("    {}", s("body")));
         }
         if let Some(line) = decide_line(rec) {
-            out.push(format!("    decide: {line} --decision approved|rejected"));
+            if line.starts_with("vam access approve") {
+                let id = line.rsplit(' ').next().unwrap_or("");
+                out.push(format!(
+                    "    decide: {line}  /  vam access deny {id} --reason \"...\""
+                ));
+            } else {
+                out.push(format!("    decide: {line} --decision approved|rejected"));
+            }
         }
         if let Some(line) = connect_line(rec) {
             out.push(format!("    connect: {line}"));
@@ -538,6 +549,11 @@ mod tests {
         assert_eq!(text.matches("vam approve decide").count(), 1);
         assert!(text.contains("* n1") && text.contains("  n2"));
         assert_eq!(format_list(&json!({"records": []})), "Nothing waiting.");
+        let access = json!({"id":"n3","severity":"action","kind":"access.requested","title":"T",
+            "action":{"verb":"decide","target":{"kind":"access_request","id":"acr_7"}}});
+        let text = format_list(&json!({"records":[access]}));
+        assert!(text.contains("vam access approve acr_7"), "{text}");
+        assert!(text.contains("vam access deny acr_7 --reason"), "{text}");
         let rec = json!({"id":"nt_1","severity":"action","kind":"connection.needs_reauth",
             "title":"Reconnect Microsoft 365 to continue","body":"b",
             "action":{"verb":"open","target":{"kind":"connector","id":"microsoft-365"}}});

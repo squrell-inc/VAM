@@ -18,6 +18,10 @@ proves:
   - a-retried-access-write-replays-the-first-answer
   - an-access-request-notifies-the-agents-admins-and-the-decision-notifies-the-member
   - a-request-for-an-agent-with-no-admin-goes-to-the-org-admins
+  - a-member-browses-requests-and-leaves-an-agent-from-the-cli
+  - an-agent-admin-decides-requests-from-the-cli
+  - an-agent-admin-names-other-admins-from-the-cli
+  - the-cli-tells-a-member-how-to-ask-for-an-agent
   - crates/vam-orchestrator/src/agent_access.rs::sql_predicate_matches_rule
   - crates/vam-orchestrator/src/agent_access.rs::a_request_reaches_the_agents_admins_only_with_a_fixed_text
   - crates/vam-orchestrator/src/agent_access.rs::with_no_active_admin_the_org_admins_and_the_operator_are_told
@@ -26,7 +30,7 @@ proves:
   - crates/vam-spec/tests/openapi_yaml.rs::openapi_has_agent_access_routes
 ---
 
-Every agent has an **access policy**. It decides which members can see the agent, and which can run it. Members browse the agents they may ask for, add one that is open, request one that needs approval, and leave one they no longer want. An admin of the agent decides requests. The whole feature is HTTP on the node; nothing here needs a guest or a VM.
+Every agent has an **access policy**. It decides which members can see the agent, and which can run it. Members browse the agents they may ask for, add one that is open, request one that needs approval, and leave one they no longer want. An admin of the agent decides requests. The whole feature is HTTP on the node; nothing here needs a guest or a VM. The `vam` commands for it are in the [CLI reference](/getting-started/cli/#agent-access-vam-agent-browse-vam-access).
 
 ## The rule
 

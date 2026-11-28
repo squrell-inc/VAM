@@ -89,6 +89,11 @@ enum Commands {
         #[command(subcommand)]
         command: cmd::catalog::AgentCmd,
     },
+    /// Agent access: your requests, and the queue for the agents you administer.
+    Access {
+        #[command(subcommand)]
+        command: cmd::access::AccessCmd,
+    },
     Playbook {
         #[command(subcommand)]
         command: cmd::catalog::PlaybookCmd,
@@ -211,6 +216,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Secrets { command } => cmd::secrets::run(cli.host, cli.token, command).await,
         Commands::Mcp { command } => cmd::mcp::run(cli.host, cli.token, command).await,
         Commands::Agent { command } => cmd::catalog::run_agent(cli.host, cli.token, command).await,
+        Commands::Access { command } => cmd::access::run(cli.host, cli.token, command).await,
         Commands::Playbook { command } => {
             cmd::catalog::run_playbook(cli.host, cli.token, command).await
         }
@@ -327,5 +333,43 @@ mod tests {
             "help names commands that do not exist:\n{}",
             bad.join("\n")
         );
+    }
+
+    /// Commands a hint names before they exist. Empty: every hint command parses.
+    const NOT_YET: &[&str] = &[];
+
+    #[test]
+    fn every_command_an_access_hint_names_parses() {
+        let mut checked = 0;
+        for hint in vam_cli::http_error::access_hint_commands() {
+            // A hint may chain commands with `;` or `/`; each `vam ...` span is one command.
+            for part in hint.split([';', '/']).map(str::trim) {
+                let Some(rest) = part.strip_prefix("vam ") else {
+                    continue;
+                };
+                if NOT_YET.iter().any(|n| rest.starts_with(n)) {
+                    continue;
+                }
+                let mut argv = vec!["vam"];
+                argv.extend(rest.split_whitespace());
+                use clap::Parser;
+                let args: Vec<String> = argv
+                    .iter()
+                    .map(|w| {
+                        if w.starts_with('<') {
+                            "x".to_string()
+                        } else {
+                            w.to_string()
+                        }
+                    })
+                    .collect();
+                assert!(
+                    Cli::try_parse_from(&args).is_ok(),
+                    "hint names `{part}`, which does not parse"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 3, "checked {checked}");
     }
 }

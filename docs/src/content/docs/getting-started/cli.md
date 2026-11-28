@@ -24,6 +24,10 @@ proves:
   - username-differing-only-in-letter-case-is-refused
   - user-path-resolves-by-id-then-by-login-name
   - generated-id-and-email-login-survive-a-restart
+  - a-member-browses-requests-and-leaves-an-agent-from-the-cli
+  - an-agent-admin-decides-requests-from-the-cli
+  - an-agent-admin-names-other-admins-from-the-cli
+  - the-cli-tells-a-member-how-to-ask-for-an-agent
 ---
 
 The **`vam`** binary (`crates/vam-cli`) is a control-plane client that communicates exclusively with the `vamd` daemon via HTTP REST APIs. It enforces a strict security boundary by never directly touching Firecracker, cgroups, or host SQLite databases.
@@ -50,7 +54,7 @@ Credential resolution order: `--token` → `VAM_API_KEY` → `session_token` fro
 
 **`--json` output schema (stable).**
 
-- Success: stdout holds exactly one compact JSON document. For API commands it is the `vamd` response body unchanged. A non-JSON body is wrapped as `{"raw": "<text>"}`. Local commands emit: `login` → `{"username","expiresAt","config"}`; `logout` → `{"loggedOut":true,"config"}`; `config set-host|set-key` → `{"saved":"host"|"api_key","config"}`; `config set-ca` → `{"saved":"ca_file","caFile","fingerprintSha256","config"}`; `config show` → `{"host","caFile","apiKey","sessionToken","sessionExpiresAt","config"}` (secrets redacted, unset is `null`); `evidence export` → `{"runId","dir"}`; `evidence verify` → `{"verified":true,"dir"}`; `receipt show --json` → the signed receipt document as stored (`evidence receipt` is an alias, removed after 0.1.0); `receipt verify --json` → `{"verified":true,"keyId","publicKey","pinned"}`; `workspace cat -o … --json` → `{"workspaceId","path","sizeBytes","out"}`; `run --dry-run` → `{"dryRun":true,"started":false,"resolved":{"agent","policy":{"urn","source","warning"},"playbook","skills":[{"urn","version"}]},"tools":[{"name","decision","matchingPolicies","diagnostic"}]}`. `decision` is `allow`, `deny`, or `hitl`. `matchingPolicies` is the Cedar policy set that decided that row.
+- Success: stdout holds exactly one compact JSON document. For API commands it is the `vamd` response body unchanged. A non-JSON body is wrapped as `{"raw": "<text>"}`. Local commands emit: `login` → `{"username","expiresAt","config"}`; `logout` → `{"loggedOut":true,"config"}`; `config set-host|set-key` → `{"saved":"host"|"api_key","config"}`; `config set-ca` → `{"saved":"ca_file","caFile","fingerprintSha256","config"}`; `config show` → `{"host","caFile","apiKey","sessionToken","sessionExpiresAt","config"}` (secrets redacted, unset is `null`); `evidence export` → `{"runId","dir"}`; `evidence verify` → `{"verified":true,"dir"}`; `receipt show --json` → the signed receipt document as stored (`evidence receipt` is an alias, removed after 0.1.0); `receipt verify --json` → `{"verified":true,"keyId","publicKey","pinned"}`; `agent leave --json` → `{"urn","state":"withdrawn"}`; `workspace cat -o … --json` → `{"workspaceId","path","sizeBytes","out"}`; `run --dry-run` → `{"dryRun":true,"started":false,"resolved":{"agent","policy":{"urn","source","warning"},"playbook","skills":[{"urn","version"}]},"tools":[{"name","decision","matchingPolicies","diagnostic"}]}`. `decision` is `allow`, `deny`, or `hitl`. `matchingPolicies` is the Cedar policy set that decided that row.
 - Streaming (`run events --follow`, `vam run --follow`, `vam run --file --follow`): one JSON object per line (NDJSON).
 - Failure: stdout holds `{"error":{"code":"<name>","exitCode":<n>,"message":"<text>","httpStatus":<n|null>}}`.
 - Progress lines (`[vam] ...`) always go to stderr, never stdout.
@@ -83,7 +87,7 @@ Fix: <the command to run>.
 
 **Idempotency.** Every mutating command accepts `--idempotency-key <KEY>`. Omit it and `vam` mints a new key. Pass the same key to retry that write without creating a second resource. `vam session create` also accepts `--idempotency` as an alias of `--idempotency-key`.
 
-Mutating commands: `vam keys create`, `vam keys revoke`, `vam secrets set`, `vam secrets delete`, `vam agent put`, `vam agent release`, `vam agent permissions set`, `vam agent migrate`, `vam playbook put`, `vam playbook release`, `vam policy put`, `vam policy release`, `vam skill put`, `vam skill publish`, `vam skill release`, `vam session create`, `vam session pause`, `vam session resume`, `vam session terminate`, `vam session snapshot`, `vam session restore`, `vam run`, `vam run start`, `vam run cancel`, and `vam approve decide`, and `vam users create`.
+Mutating commands: `vam keys create`, `vam keys revoke`, `vam secrets set`, `vam secrets delete`, `vam agent put`, `vam agent release`, `vam agent permissions set`, `vam agent migrate`, `vam playbook put`, `vam playbook release`, `vam policy put`, `vam policy release`, `vam skill put`, `vam skill publish`, `vam skill release`, `vam session create`, `vam session pause`, `vam session resume`, `vam session terminate`, `vam session snapshot`, `vam session restore`, `vam run`, `vam run start`, `vam run cancel`, `vam approve decide`, `vam users create`, `vam agent add`, `vam agent request`, `vam agent leave`, `vam agent access-policy`, `vam agent admins add`, `vam agent admins rm`, `vam access approve`, `vam access deny` and `vam access revoke`.
 
 **No TTY, no prompts.** When stdin is not a terminal, or `--json` is set, `vam` never prompts. It exits `2` and names the flag to use:
 
@@ -506,6 +510,44 @@ When at least one case ran and none failed, `test` prints `the key never reached
 | 6 | An error in the files, a failed case, or no case ran. |
 
 ---
+
+## Agent access (`vam agent browse`, `vam access`)
+
+These commands call the [agent access](/orchestrator/agent-access/) routes. The CLI decides nothing: vamd says who may see, use, ask for or administer an agent, and every refusal names the command that fixes it. An `<agent>` is a URN, or the last segment of one when exactly one agent you may ask for has that name (more than one is a usage error, exit `2`, and lists the URNs). Lists print a table; `--json` prints the vamd answer unchanged. Lists show one page and say so on stderr; `--all` follows every page and `--page-size <n>` sets the page (at most 1000). Every write takes `--idempotency-key`.
+
+Members:
+
+```bash
+vam agent browse                                   # URN NAME VERSION MODE STATE ADMIN; a denied row shows the reason
+vam agent request urn:vam:agent:local.vam.dev/acme/probe -m "need it for the audit"
+# request acr_01 pending: an admin of urn:vam:agent:local.vam.dev/acme/probe decides
+vam agent add probe                                # an open agent: request acr_02 approved
+vam access mine --all                              # REQUEST AGENT STATE REQUESTED REASON
+vam agent leave probe                              # withdraws a pending request or leaves an approved agent
+```
+
+`add` and `request` make the same call; vamd answers `approved` for an open agent and `pending` for one that needs approval. A locked agent refuses a run with exit `3` and `Fix: vam agent request <urn>`. A hidden or missing agent is exit `4` with `vam agent browse`, in the same words for both; this holds for `agent add|request|leave|admins|access-policy`, while `vam run` keeps its own not-installed text. A request that is no longer pending, an agent you already use and a reused key are exit `5`.
+
+Agent admins and org admins:
+
+```bash
+vam agent access-policy probe --visibility org --mode approval   # both flags are required
+vam access requests                                # pending requests for agents you administer
+vam access requests --state all --agent urn:vam:agent:local.vam.dev/acme/probe --all
+vam access approve acr_01 --idempotency-key a1     # request acr_01 approved
+vam access deny acr_02 --reason "not this quarter" # request acr_02 denied
+vam access revoke probe ada --reason "left the team"   # request acr_01 revoked
+vam agent admins ls probe                          # USER ID USERNAME ADDED BY ADDED AT
+vam agent admins add probe ada
+vam agent admins rm probe ada
+vam users ls                                       # org admin: ids and usernames
+```
+
+`requests` takes `--state pending|approved|denied|revoked|withdrawn|all` (default `pending`) and always asks for the agents you administer. `deny` and `revoke` need `--reason` (exit `2` and nothing is sent without it); `approve` takes an optional one. An unknown request id, or one you may not decide, is exit `4` with `vam access requests`.
+
+**Naming users.** `admins add|rm` and `revoke` take a user id or a username. `revoke` resolves a username only from the approved requests for that agent, not from the admin list. For `admins add|rm` a user id always wins over a username; a username is matched in any letter case, first in the agent's admin list, then in the access requests you can see, then, for an org admin, in `vam users ls`. When none matches the command exits `4` and asks for the user id; nothing is guessed. `admins add|rm` look the user up, read the list again, change one id and send the whole list in one write. Adding someone who is already an admin, or removing someone who is not, changes nothing: it exits `0`, says so on stderr and sends no write. Removing the last admin warns on stderr that the org admins now decide the agent's requests. Two admins editing at the same moment can lose one edit.
+
+Proved by `a-member-browses-requests-and-leaves-an-agent-from-the-cli`, `an-agent-admin-decides-requests-from-the-cli`, `an-agent-admin-names-other-admins-from-the-cli` and `the-cli-tells-a-member-how-to-ask-for-an-agent`.
 
 ## 6. API Keys & Authorization (`vam keys`)
 

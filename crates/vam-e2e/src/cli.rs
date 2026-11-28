@@ -14,6 +14,18 @@ use std::path::{Path, PathBuf};
 impl Engine {
     /// `cli: { args, root, exit, contains, absent }`
     pub(super) fn cli_step(&mut self, x: &CliStep) -> Result<(), Fail> {
+        // `{{urn:<piece>[:<as>]}}`, `{<alias>.userId|username}` in args and expectations.
+        let mut expanded = x.clone();
+        for t in expanded
+            .args
+            .iter_mut()
+            .chain(&mut expanded.contains)
+            .chain(&mut expanded.absent)
+            .chain(&mut expanded.matches)
+        {
+            *t = self.expand_draft_urns(&self.expand(t, false)?, false)?;
+        }
+        let x = &expanded;
         let what = "the built program runs on the fixture tree";
         let var = x.bin.env_var();
         let mut cli = std::env::var(var).unwrap_or_default();
@@ -177,12 +189,17 @@ impl Engine {
             out.status.code().map_or("signal".into(), |c| c.to_string()),
             self.scrub(&text.chars().take(600).collect::<String>())
         );
-        let verb = match x.exit {
-            CliExit::Ok => "ok",
-            CliExit::Fail => "non-zero",
+        let verb = match (x.exit_code, x.exit_kind()) {
+            (Some(c), _) => c.to_string(),
+            (None, CliExit::Ok) => "ok".to_string(),
+            (None, CliExit::Fail) => "non-zero".to_string(),
         };
         let want = format!("`{} {}` exits {verb}", x.bin.name(), x.args.join(" "));
-        if out.status.success() != (x.exit == CliExit::Ok) {
+        let exit_matches = match x.exit_code {
+            Some(c) => out.status.code() == Some(i32::from(c)),
+            None => out.status.success() == (x.exit_kind() == CliExit::Ok),
+        };
+        if !exit_matches {
             return Err(Fail::new(Class::Product, want, shown));
         }
         if let Some(prefix) = &x.capture {
@@ -774,5 +791,24 @@ mod tests {
             "{ args: [x], root: { from: a }, exit: ok, nonsense: 1 }",
         );
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn exit_code_parses_and_defaults_exit_to_fail() {
+        let x: CliStep =
+            serde_yaml::from_str("{ args: [x], root: { from: a }, exitCode: 4 }").unwrap();
+        assert_eq!(x.exit_code, Some(4));
+        assert_eq!(x.exit_kind(), CliExit::Fail);
+        let x: CliStep =
+            serde_yaml::from_str("{ args: [x], root: { from: a }, exitCode: 0 }").unwrap();
+        assert_eq!(x.exit_kind(), CliExit::Ok);
+        let x: CliStep =
+            serde_yaml::from_str("{ args: [x], root: { from: a }, exit: ok }").unwrap();
+        assert_eq!(x.exit_code, None);
+        assert_eq!(x.exit_kind(), CliExit::Ok);
+        assert!(
+            serde_yaml::from_str::<CliStep>("{ args: [x], root: { from: a }, exitCode: 256 }")
+                .is_err()
+        );
     }
 }

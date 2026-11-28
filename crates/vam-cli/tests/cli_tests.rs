@@ -522,6 +522,93 @@ fn list_paged_follows_the_token_only_with_all() {
 }
 
 #[test]
+fn list_paged_joins_the_token_to_a_path_with_a_query() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(true);
+    let server = MockServer::start();
+    let first = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/v1/access-requests")
+            .query_param("state", "all")
+            .is_true(|req| !req.query_params().iter().any(|(k, _)| k == "pageToken"));
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"requests":[{"n":1}],"pagination":{"nextPageToken":"tok-2"}}"#);
+    });
+    let second = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/v1/access-requests")
+            .query_param("state", "all")
+            .query_param("pageToken", "tok-2");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"requests":[{"n":2}],"pagination":{"nextPageToken":""}}"#);
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let cfg = vam_cli::config::resolve(Some(server.base_url()), Some("vam_sk_test".into()))
+            .await
+            .unwrap();
+        let c = vam_cli::client::Client::new(&cfg).unwrap();
+        let every =
+            vam_cli::client::list_paged(&c, "/v1/access-requests?state=all", "requests", true)
+                .await
+                .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&every).unwrap();
+        assert_eq!(v["requests"].as_array().unwrap().len(), 2);
+    });
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 1);
+    vam_cli::output::set_json(false);
+}
+
+#[test]
+fn request_prints_what_vamd_decided_and_sends_the_key() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let server = MockServer::start();
+    let urn = "urn:vam:agent:local.vam.dev/ns/plain";
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path(format!(
+                "/v1/agents/{}/access",
+                vam_cli::client::encode_path_segment(urn)
+            ))
+            .header("idempotency-key", "k1")
+            .body(r#"{"message":"please"}"#);
+        then.status(202)
+            .header("content-type", "application/json")
+            .body(format!(
+                r#"{{"request":{{"requestId":"acr_9","urn":"{urn}","state":"pending"}}}}"#
+            ));
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let cfg = ResolvedConfig {
+            host: server.base_url(),
+            api_key: "vam_sk_test".into(),
+        };
+        let c = Client::new(&cfg).unwrap();
+        let out = c
+            .post_raw_json(
+                &format!(
+                    "/v1/agents/{}/access",
+                    vam_cli::client::encode_path_segment(urn)
+                ),
+                r#"{"message":"please"}"#,
+                "k1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            vam_cli::cmd::access::format_decision(&out),
+            format!("request acr_9 pending: an admin of {urn} decides")
+        );
+    });
+    mock.assert();
+}
+
+#[test]
 fn approve_decide_parked_tool_hitl() {
     let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     vam_cli::output::set_json(false);
@@ -3062,4 +3149,337 @@ fn space_create_rename_and_thread_rename_call_the_id_routes() {
     create.assert();
     rename.assert();
     thread.assert();
+}
+
+mod access_admin_tests {
+    use super::run_vam_against;
+    use httpmock::Method::{GET, POST, PUT};
+    use httpmock::MockServer;
+
+    const URN: &str = "urn:vam:agent:local.vam.dev/acme/probe";
+    const UID1: &str = "usr_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const UID2: &str = "usr_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const UID3: &str = "usr_cccccccccccccccccccccccccc";
+
+    fn admins_body(ids: &[(&str, &str)]) -> String {
+        let rows: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|(id, name)| serde_json::json!({"userId": id, "username": name, "addedBy": "x", "addedAt": "t"}))
+            .collect();
+        serde_json::json!({ "admins": rows }).to_string()
+    }
+
+    fn admins_get<'a>(server: &'a MockServer, ids: &[(&str, &str)]) -> httpmock::Mock<'a> {
+        let body = admins_body(ids);
+        server.mock(|when, then| {
+            when.method(GET).path_matches("/admins$");
+            then.status(200).body(body);
+        })
+    }
+
+    fn text(out: &std::process::Output) -> (String, String) {
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    }
+
+    #[test]
+    fn admins_add_by_id_sends_the_whole_set_in_order() {
+        let server = MockServer::start();
+        admins_get(&server, &[(UID2, "bob"), (UID1, "ada")]);
+        let put = server.mock(|when, then| {
+            when.method(PUT)
+                .path_matches("/admins$")
+                .header_exists("Idempotency-Key")
+                .json_body(serde_json::json!({"userIds": [UID2, UID1, UID3]}));
+            then.status(200)
+                .body(admins_body(&[(UID2, "bob"), (UID1, "ada"), (UID3, "cy")]));
+        });
+        let out = run_vam_against(&server, &["agent", "admins", "add", URN, UID3]);
+        assert!(out.status.success(), "{:?}", text(&out));
+        put.assert();
+        assert!(text(&out).0.contains("cy"));
+    }
+
+    #[test]
+    fn admins_add_a_present_admin_by_username_in_any_case_sends_no_put() {
+        let server = MockServer::start();
+        admins_get(&server, &[(UID1, "Ada")]);
+        let put = server.mock(|when, then| {
+            when.method(PUT);
+            then.status(200).body("{}");
+        });
+        let out = run_vam_against(&server, &["agent", "admins", "add", URN, "aDA"]);
+        assert!(out.status.success(), "{:?}", text(&out));
+        assert_eq!(put.calls(), 0);
+        assert!(text(&out).1.contains("nothing changed"));
+    }
+
+    #[test]
+    fn admins_rm_an_absent_admin_changes_nothing() {
+        let server = MockServer::start();
+        admins_get(&server, &[(UID1, "ada")]);
+        let put = server.mock(|when, then| {
+            when.method(PUT);
+            then.status(200).body("{}");
+        });
+        let out = run_vam_against(&server, &["agent", "admins", "rm", URN, UID2]);
+        assert!(out.status.success(), "{:?}", text(&out));
+        assert_eq!(put.calls(), 0);
+        assert!(text(&out).1.contains("nothing changed"));
+    }
+
+    #[test]
+    fn admins_add_resolves_a_name_from_the_callers_requests_then_from_users() {
+        let server = MockServer::start();
+        admins_get(&server, &[(UID1, "ada")]);
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/access-requests");
+            then.status(200).body(
+                serde_json::json!({"requests":[{"requestId":"acr_1","urn":URN,"userId":UID2,"username":"Bob","state":"pending","requestedAt":"t"}]}).to_string(),
+            );
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/me");
+            then.status(200)
+                .body(r#"{"userId":"u","role":"org_admin","scopes":["users:admin"]}"#);
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/users");
+            then.status(200).body(
+                serde_json::json!({"users":[{"userId":UID3,"username":"cy","role":"member"}]})
+                    .to_string(),
+            );
+        });
+        let put = server.mock(|when, then| {
+            when.method(PUT)
+                .path_matches("/admins$")
+                .json_body(serde_json::json!({"userIds": [UID1, UID2]}));
+            then.status(200)
+                .body(admins_body(&[(UID1, "ada"), (UID2, "Bob")]));
+        });
+        let out = run_vam_against(&server, &["agent", "admins", "add", URN, "bob"]);
+        assert!(out.status.success(), "{:?}", text(&out));
+        put.assert();
+
+        let server = MockServer::start();
+        admins_get(&server, &[(UID1, "ada")]);
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/access-requests");
+            then.status(200).body(r#"{"requests":[]}"#);
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/me");
+            then.status(200)
+                .body(r#"{"userId":"u","role":"org_admin","scopes":["users:admin"]}"#);
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/users");
+            then.status(200).body(
+                serde_json::json!({"users":[{"userId":UID3,"username":"cy","role":"member"}]})
+                    .to_string(),
+            );
+        });
+        let put = server.mock(|when, then| {
+            when.method(PUT)
+                .path_matches("/admins$")
+                .json_body(serde_json::json!({"userIds": [UID1, UID3]}));
+            then.status(200)
+                .body(admins_body(&[(UID1, "ada"), (UID3, "cy")]));
+        });
+        let out = run_vam_against(&server, &["agent", "admins", "add", URN, "CY"]);
+        assert!(out.status.success(), "{:?}", text(&out));
+        put.assert();
+    }
+
+    #[test]
+    fn admins_add_an_id_beats_a_username_equal_to_it() {
+        let server = MockServer::start();
+        admins_get(&server, &[(UID1, "ada")]);
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/access-requests");
+            then.status(200).body(
+                serde_json::json!({"requests":[
+                    {"requestId":"acr_1","urn":URN,"userId":UID3,"username":UID2,"state":"pending","requestedAt":"t"},
+                    {"requestId":"acr_2","urn":URN,"userId":UID2,"username":"bob","state":"pending","requestedAt":"t"}]}).to_string(),
+            );
+        });
+        let put = server.mock(|when, then| {
+            when.method(PUT)
+                .path_matches("/admins$")
+                .json_body(serde_json::json!({"userIds": [UID1, UID2]}));
+            then.status(200)
+                .body(admins_body(&[(UID1, "ada"), (UID2, "bob")]));
+        });
+        let out = run_vam_against(&server, &["agent", "admins", "add", URN, UID2]);
+        assert!(out.status.success(), "{:?}", text(&out));
+        put.assert();
+    }
+
+    #[test]
+    fn admins_add_an_unknown_name_exits_4_and_asks_for_the_user_id() {
+        let server = MockServer::start();
+        admins_get(&server, &[(UID1, "ada")]);
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/access-requests");
+            then.status(200).body(r#"{"requests":[]}"#);
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/users");
+            then.status(403).body(r#"{"error":"forbidden"}"#);
+        });
+        let put = server.mock(|when, then| {
+            when.method(PUT);
+            then.status(200).body("{}");
+        });
+        let out = run_vam_against(&server, &["agent", "admins", "add", URN, "nobody"]);
+        assert_eq!(out.status.code(), Some(4), "{:?}", text(&out));
+        assert!(text(&out).1.contains("user id"));
+        assert_eq!(put.calls(), 0);
+    }
+
+    #[test]
+    fn admins_rm_the_last_admin_warns_that_org_admins_decide() {
+        let server = MockServer::start();
+        admins_get(&server, &[(UID1, "ada")]);
+        let put = server.mock(|when, then| {
+            when.method(PUT)
+                .path_matches("/admins$")
+                .json_body(serde_json::json!({"userIds": []}));
+            then.status(200).body(r#"{"admins":[]}"#);
+        });
+        let out = run_vam_against(
+            &server,
+            &[
+                "agent",
+                "admins",
+                "rm",
+                URN,
+                "ada",
+                "--idempotency-key",
+                "k1",
+            ],
+        );
+        assert!(out.status.success(), "{:?}", text(&out));
+        put.assert();
+        assert!(text(&out).1.contains("org admins decide"));
+    }
+
+    #[test]
+    fn requests_always_send_admin_of_me_and_filter_by_agent() {
+        let server = MockServer::start();
+        let list = server.mock(|when, then| {
+            when.method(GET)
+                .path("/v1/access-requests")
+                .query_param("state", "pending")
+                .query_param("adminOf", "me")
+                .query_param("pageSize", "5");
+            then.status(200).body(
+                serde_json::json!({"requests":[
+                    {"requestId":"acr_1","urn":URN,"userId":UID1,"username":"ada","state":"pending","requestedAt":"t"},
+                    {"requestId":"acr_2","urn":"urn:other","userId":UID2,"state":"pending","requestedAt":"t"}]}).to_string(),
+            );
+        });
+        let out = run_vam_against(
+            &server,
+            &["access", "requests", "--agent", URN, "--page-size", "5"],
+        );
+        assert!(out.status.success(), "{:?}", text(&out));
+        list.assert();
+        let (stdout, _) = text(&out);
+        assert!(
+            stdout.contains("acr_1") && !stdout.contains("acr_2"),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn approve_and_deny_post_the_decision_and_deny_needs_a_reason() {
+        let server = MockServer::start();
+        let approve = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/access-requests/acr_1/decide")
+                .header("Idempotency-Key", "a1")
+                .json_body(serde_json::json!({"decision":"approve"}));
+            then.status(200)
+                .body(r#"{"request":{"requestId":"acr_1","state":"approved"}}"#);
+        });
+        let deny = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/access-requests/acr_2/decide")
+                .json_body(serde_json::json!({"decision":"deny","reason":"not now"}));
+            then.status(200)
+                .body(r#"{"request":{"requestId":"acr_2","state":"denied"}}"#);
+        });
+        let out = run_vam_against(
+            &server,
+            &["access", "approve", "acr_1", "--idempotency-key", "a1"],
+        );
+        assert!(out.status.success(), "{:?}", text(&out));
+        assert_eq!(text(&out).0.trim(), "request acr_1 approved");
+        approve.assert();
+        let out = run_vam_against(&server, &["access", "deny", "acr_2", "--reason", "not now"]);
+        assert_eq!(text(&out).0.trim(), "request acr_2 denied");
+        deny.assert();
+        let before = approve.calls() + deny.calls();
+        let out = run_vam_against(&server, &["access", "deny", "acr_2"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(text(&out).1.contains("--reason"));
+        let out = run_vam_against(&server, &["access", "revoke", URN, "ada"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(approve.calls() + deny.calls(), before);
+    }
+
+    #[test]
+    fn revoke_finds_the_user_on_the_second_page_of_approved_rows() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/v1/access-requests")
+                .query_param("state", "approved")
+                .query_param("adminOf", "me")
+                .query_param_missing("pageToken");
+            then.status(200).body(
+                serde_json::json!({"requests":[{"requestId":"acr_1","urn":URN,"userId":UID1,"username":"ada","state":"approved","requestedAt":"t"}],"pagination":{"nextPageToken":"t2"}}).to_string(),
+            );
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/v1/access-requests")
+                .query_param("pageToken", "t2");
+            then.status(200).body(
+                serde_json::json!({"requests":[{"requestId":"acr_2","urn":URN,"userId":UID2,"username":"Bob","state":"approved","requestedAt":"t"}]}).to_string(),
+            );
+        });
+        let revoke = server.mock(|when, then| {
+            when.method(POST)
+                .path_matches(format!("/access/{UID2}/revoke$").as_str())
+                .json_body(serde_json::json!({"reason":"done"}));
+            then.status(200)
+                .body(r#"{"request":{"requestId":"acr_2","state":"revoked"}}"#);
+        });
+        let out = run_vam_against(
+            &server,
+            &["access", "revoke", URN, "bob", "--reason", "done"],
+        );
+        assert!(out.status.success(), "{:?}", text(&out));
+        revoke.assert();
+        assert_eq!(text(&out).0.trim(), "request acr_2 revoked");
+    }
+
+    #[test]
+    fn users_ls_prints_ids() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/v1/users");
+            then.status(200).body(
+                serde_json::json!({"users":[{"userId":UID1,"username":"ada","role":"member"}]})
+                    .to_string(),
+            );
+        });
+        let out = run_vam_against(&server, &["users", "ls"]);
+        assert!(out.status.success(), "{:?}", text(&out));
+        assert!(text(&out).0.contains(UID1));
+    }
 }
