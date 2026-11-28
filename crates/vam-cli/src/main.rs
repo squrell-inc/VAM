@@ -89,7 +89,7 @@ enum Commands {
         #[command(subcommand)]
         command: cmd::catalog::AgentCmd,
     },
-    /// Your agent access: the requests you made.
+    /// Agent access: your requests, and the queue for the agents you administer.
     Access {
         #[command(subcommand)]
         command: cmd::access::AccessCmd,
@@ -335,14 +335,8 @@ mod tests {
         );
     }
 
-    /// Commands that arrive in Wave 2; their hints are already printed. Remove each entry
-    /// when its command lands.
-    const NOT_YET: &[&str] = &[
-        "access requests",
-        "access approve",
-        "access deny",
-        "access revoke",
-    ];
+    /// Commands a hint names before they exist. Empty: every hint command parses.
+    const NOT_YET: &[&str] = &[];
 
     #[test]
     fn every_command_an_access_hint_names_parses() {

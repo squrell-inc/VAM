@@ -36,5 +36,5 @@ guards:
   - vam:crates/vam-cli/src/client.rs
   - vam:crates/vam-cli/src/http_error.rs
   - vam:crates/vam-cli/src/cmd/notifications.rs
-status: pending
-expectFail: { step: when.2, class: product }
+  - vam:crates/vam-cli/src/cmd/access.rs
+status: active
