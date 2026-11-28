@@ -36,6 +36,11 @@ pub fn explain(method: &str, path: &str, status: u16, body: &str) -> String {
 }
 
 fn line(label: &str, text: &str) -> String {
+    let text = text
+        .split('\n')
+        .map(crate::cmd::access::clean)
+        .collect::<Vec<_>>()
+        .join("\n");
     let text = text.trim().trim_end_matches('.').trim();
     format!("{label}: {text}.")
 }

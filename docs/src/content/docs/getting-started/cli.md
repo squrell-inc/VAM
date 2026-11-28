@@ -526,7 +526,7 @@ vam access mine --all                              # REQUEST AGENT STATE REQUEST
 vam agent leave probe                              # withdraws a pending request or leaves an approved agent
 ```
 
-`add` and `request` make the same call; vamd answers `approved` for an open agent and `pending` for one that needs approval. A locked agent refuses a run with exit `3` and `Fix: vam agent request <urn>`. A hidden or missing agent is exit `4` with `vam agent browse`, in the same words for both. A request that is no longer pending, an agent you already use and a reused key are exit `5`.
+`add` and `request` make the same call; vamd answers `approved` for an open agent and `pending` for one that needs approval. A locked agent refuses a run with exit `3` and `Fix: vam agent request <urn>`. A hidden or missing agent is exit `4` with `vam agent browse`, in the same words for both; this holds for `agent add|request|leave|admins|access-policy`, while `vam run` keeps its own not-installed text. A request that is no longer pending, an agent you already use and a reused key are exit `5`.
 
 Agent admins and org admins:
 
@@ -545,7 +545,7 @@ vam users ls                                       # org admin: ids and username
 
 `requests` takes `--state pending|approved|denied|revoked|withdrawn|all` (default `pending`) and always asks for the agents you administer. `deny` and `revoke` need `--reason` (exit `2` and nothing is sent without it); `approve` takes an optional one. An unknown request id, or one you may not decide, is exit `4` with `vam access requests`.
 
-**Naming users.** `admins add|rm` and `revoke` take a user id or a username. A username is matched in any letter case, first in the agent's admin list, then in the access requests you can see, then, for an org admin, in `vam users ls`. When none matches the command exits `4` and asks for the user id; nothing is guessed. `admins add|rm` read the list, change one id and send the whole list in one write. Adding someone who is already an admin, or removing someone who is not, changes nothing: it exits `0`, says so on stderr and sends no write. Removing the last admin warns on stderr that the org admins now decide the agent's requests. Two admins editing at the same moment can lose one edit.
+**Naming users.** `admins add|rm` and `revoke` take a user id or a username. `revoke` resolves a username only from the approved requests for that agent, not from the admin list. For `admins add|rm` a user id always wins over a username; a username is matched in any letter case, first in the agent's admin list, then in the access requests you can see, then, for an org admin, in `vam users ls`. When none matches the command exits `4` and asks for the user id; nothing is guessed. `admins add|rm` look the user up, read the list again, change one id and send the whole list in one write. Adding someone who is already an admin, or removing someone who is not, changes nothing: it exits `0`, says so on stderr and sends no write. Removing the last admin warns on stderr that the org admins now decide the agent's requests. Two admins editing at the same moment can lose one edit.
 
 Proved by `a-member-browses-requests-and-leaves-an-agent-from-the-cli`, `an-agent-admin-decides-requests-from-the-cli`, `an-agent-admin-names-other-admins-from-the-cli` and `the-cli-tells-a-member-how-to-ask-for-an-agent`.
 

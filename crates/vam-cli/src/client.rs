@@ -444,12 +444,19 @@ fn http_reject(
 
 /// Percent-encode a URN or id for use as a single URL path segment.
 pub fn encode_path_segment(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            _ => format!("%{:02X}", c as u32),
-        })
-        .collect()
+    if s == "." || s == ".." {
+        return s.replace('.', "%2E");
+    }
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Decode a percent-encoded path segment back to the canonical id/URN.
@@ -647,5 +654,13 @@ mod surface_header_tests {
         client.get("/v1/x").await.unwrap();
         let request = server.await.unwrap();
         assert!(request.contains("x-vam-surface: cli"), "{request}");
+    }
+
+    #[test]
+    fn path_segments_encode_bytes_and_dots() {
+        assert_eq!(encode_path_segment("é"), "%C3%A9");
+        assert_eq!(encode_path_segment(".."), "%2E%2E");
+        assert_eq!(encode_path_segment("."), "%2E");
+        assert_eq!(encode_path_segment("a.b"), "a.b");
     }
 }

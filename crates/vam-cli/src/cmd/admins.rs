@@ -7,7 +7,8 @@ use clap::Subcommand;
 use serde_json::{json, Value};
 
 use super::access::{
-    clean, find_user, looks_like_user_id, queue_rows, resolve_agent, table, user_pairs,
+    clean, find_user_id, find_user_name, looks_like_user_id, queue_rows, resolve_agent, table,
+    user_pairs,
 };
 use crate::client::{self, encode_path_segment, Client};
 use crate::output::{self, fail, ExitCode};
@@ -90,27 +91,66 @@ fn admin_pairs(body: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// The sources after the admin list, in order: the caller's own queue rows, then `GET /v1/users`
-/// (org admins only; a refusal there is not an error here).
-async fn lookup_elsewhere(c: &Client, who: &str) -> Option<String> {
-    if let Ok(rows) = queue_rows(c, "all").await {
-        if let Some(id) = find_user(&user_pairs(&rows), who) {
-            return Some(id);
+/// A refusal (403) or a missing route (404) means "this source is not open to the caller";
+/// anything else (network, 5xx) is a real failure and goes through.
+fn soft<T>(r: Result<T>) -> Result<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if matches!(output::classify(&e).1, Some(403 | 404)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// True when `GET /v1/me` shows an org admin (role or the `users:admin` scope).
+async fn is_org_admin(c: &Client) -> Result<bool> {
+    let Some(body) = soft(c.get("/v1/me").await)? else {
+        return Ok(false);
+    };
+    let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let scoped = v["scopes"]
+        .as_array()
+        .is_some_and(|s| s.iter().any(|x| x.as_str() == Some("users:admin")));
+    Ok(scoped || v["role"].as_str() == Some("org_admin"))
+}
+
+/// Resolve `who` to a user id. Every exact id wins over any username: the admin list, an
+/// id-shaped input, the caller's queue rows, `GET /v1/users` (org admins only); then usernames
+/// in the same order.
+async fn resolve_user(c: &Client, who: &str, admins: &[(String, String)]) -> Result<String> {
+    if let Some(id) = find_user_id(admins, who) {
+        return Ok(id);
+    }
+    if looks_like_user_id(who) {
+        return Ok(who.to_string());
+    }
+    let mut sources: Vec<Vec<(String, String)>> = vec![admins.to_vec()];
+    if let Some(rows) = soft(queue_rows(c, "all").await)? {
+        sources.push(user_pairs(&rows));
+    }
+    if is_org_admin(c).await? {
+        if let Some(body) = soft(c.get("/v1/users").await)? {
+            let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            let pairs = v["users"]
+                .as_array()
+                .map(|us| {
+                    us.iter()
+                        .map(|u| {
+                            (
+                                text(u, "userId").to_string(),
+                                text(u, "username").to_string(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            sources.push(pairs);
         }
     }
-    let body = c.get("/v1/users").await.ok()?;
-    let v: Value = serde_json::from_str(&body).ok()?;
-    let pairs: Vec<(String, String)> = v["users"]
-        .as_array()?
+    sources
         .iter()
-        .map(|u| {
-            (
-                text(u, "userId").to_string(),
-                text(u, "username").to_string(),
-            )
-        })
-        .collect();
-    find_user(&pairs, who)
+        .find_map(|p| find_user_id(p, who))
+        .or_else(|| sources.iter().find_map(|p| find_user_name(p, who)))
+        .ok_or_else(|| unknown_user(who))
 }
 
 fn unknown_user(who: &str) -> anyhow::Error {
@@ -159,16 +199,12 @@ fn show(body: &str) {
 
 async fn change(c: &Client, agent: &str, user: &str, add: bool, key: Option<String>) -> Result<()> {
     let urn = resolve_agent(c, agent).await?;
+    let who = user.trim();
+    let listed = c.get(&admins_path(&urn)).await?;
+    let id = resolve_user(c, who, &admin_pairs(&listed)).await?;
+    // Read the list again right before the write: one round trip between read and PUT.
     let current = c.get(&admins_path(&urn)).await?;
     let pairs = admin_pairs(&current);
-    let who = user.trim();
-    let id = match find_user(&pairs, who) {
-        Some(id) => id,
-        None if looks_like_user_id(who) => who.to_string(),
-        None => lookup_elsewhere(c, who)
-            .await
-            .ok_or_else(|| unknown_user(who))?,
-    };
     let mut ids: Vec<String> = pairs.iter().map(|(i, _)| i.clone()).collect();
     let present = ids.contains(&id);
     if add == present {
@@ -222,5 +258,16 @@ mod tests {
                 .to_string();
         let ids: Vec<String> = admin_pairs(&body).into_iter().map(|p| p.0).collect();
         assert_eq!(ids, ["u2", "u1"]);
+    }
+
+    #[test]
+    fn an_id_match_beats_a_username_match() {
+        let pairs = vec![
+            ("u1".to_string(), "u2".to_string()),
+            ("u2".to_string(), "bob".to_string()),
+        ];
+        assert_eq!(find_user_id(&pairs, "u2").as_deref(), Some("u2"));
+        assert_eq!(find_user_name(&pairs, "U2").as_deref(), Some("u1"));
+        assert!(find_user_id(&pairs, "bob").is_none());
     }
 }
