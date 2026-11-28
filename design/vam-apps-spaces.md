@@ -449,6 +449,7 @@ today), and only with `spaces:create` for shared Apps.
 | --- | --- | --- | --- | --- |
 | Alice chats | Login session | Her default App | `assistant` | Same as today |
 | "Summarise Jira daily at 6 PM" | Scheduler grant | Alice's App | Where she created it | Runs as Alice at 6 PM; queued behind her task if she is mid-run (amended 2026-10-29) |
+| "Prep the 4 PM standup and chase my tickets" (owner use case, added 2026-11-28, proposed) | Two scheduler grants: summary at 15:30 with a timezone; one sweep hourly in working hours | Alice's App | A "Standup" Space, not her default Space, so her chat does not queue the fires | Runs as Alice; pings go out as ticket comments under her Linear connection; replies are read from the ticket each sweep (`design/long-work.md` §9.1) |
 | Customers @mention a Slack bot | Bot grant with `spaces:create` | Support bot (shared) | Per channel or per person, broker's choice | Private history each; App's limited rights and secrets |
 | Website visitors (Mast) | Website key, or grant held by `mast.ui` | Site App (`idle_ttl`) | Hash of visitor cookie | Isolated; idle Spaces reaped ≤ 30 days |
 | Alice revokes the scheduler | — | — | — | Next broker request `DENIED` |
@@ -708,3 +709,555 @@ Not created yet.
   `cargo check --workspace`, and `cargo fmt --all --check`.
 - If an issue changes a public contract, update the Starlight docs and
   `docs/astro.config.mjs` when pages move.
+
+## Amendment 2026-11-28: Apps on today's main
+
+Written by a design session against `main` (branch `docs/next-lanes`, cut
+from `origin/main` on 2026-11-28). It is the plan of record for the Apps and
+Spaces lane (tracker `.cursor/workstreams/apps-spaces.md`, branch
+`feat/apps-spaces`). Where `main` contradicts an earlier section, `main` is
+the fact. Superseded parts are listed in §2; everything not listed there
+stands. Decisions are in §3: rows marked **approved 2026-11-28** were
+answered by the owner; rows marked **proposal** are recommendations the
+owner has not answered.
+
+The other lanes cut on the same day: lane 2 VAM image
+(`design/vam-image.md`, tracker `.cursor/workstreams/vam-image.md`, phases
+I1-I4), lane 3 Self-aware (`design/self-aware.md`, tracker
+`.cursor/workstreams/self-aware.md`, phases S1-S4) and lane 4 Long work
+(`design/long-work.md`, tracker `.cursor/workstreams/agent-runtime.md`
+"Phase 5 — Long work (U4)", slices 5a-5e).
+
+### 1. What `main` has now
+
+**Spaces and threads** (`crates/vam-orchestrator/src/spaces.rs`, built by
+E5 under `work-outside-chat` locked decision 10, which already replaced this
+doc's row "Existing workspaces keep their IDs. Backfill only adds rows."):
+
+- A Space is stored in Drive9 under its `sp_…` id alone, with no owner or
+  agent prefix; owner and bound agent are columns of the row
+  (`spaces.rs:1-10`). Ids are `sp_`/`th_` + 26 base32 characters from
+  `OsRng` (`spaces.rs:31-52`).
+- The `spaces` table has `space_id, app_id, owner_user_id, agent_urn, label,
+  is_default, default_key, default_thread_id, created_via,
+  created_by_grant_id, created_at, last_active_at` (`spaces.rs:172-185`).
+  **`app_id` exists and is always NULL**: no code writes it. There is **no
+  `ref` column**: `label` is a display string, never a key, a directory or a
+  lookup (`spaces.rs:4-6`, `:343-357`).
+- Default Spaces: one per `(owner, agent, default_key)` with
+  `default_key IN ('released','draft')`, enforced by the partial unique index
+  `idx_spaces_default` and created on first use by `default_space`
+  (`spaces.rs:179, 186-187, 245-274`). This pair is the implicit personal App
+  of amendment 2026-10-29 §3, split by draft and released.
+- Idempotent create: `space_create_keys(owner_user_id, idempotency_key,
+  space_id)` (`spaces.rs:199-204`); `create_space_once` returns the first
+  call's Space for a repeated key under the connection lock
+  (`spaces.rs:309-341`). `POST /v1/spaces {agentUrn, label}` requires an
+  `Idempotency-Key` header and checks the agent with `get_agent_visible`
+  first (`api/spaces.rs:126-155`; header read at `api/auth.rs:270-278`,
+  any non-empty string).
+- Every read by id goes through `get_space(owner, space_id)`, which answers
+  "not found" for a foreign id (`spaces.rs:224-231`); routes accept only an
+  `sp_…` id (`space_for_route`, `spaces.rs:499-511`).
+- The `Space` proto has no `app_id` (`proto/vam/v1/orchestrator.proto:1176-1184`);
+  `RunSpec.space_id = 12`, `thread_id = 13` (`workflow.proto:231-232`).
+
+**Credentials** (`keys.rs`, `credentials.rs`, built by E5 as AS-1.1 to
+AS-1.4): `api_keys` has the nullable `holder, target_kind, target_id,
+constraints_json, issued_via, external_ref, expires_at, source_run_id,
+tool_name` (`keys.rs:239-248, 321-329`). `check_credential` checks hash,
+holder against transport, revoke and expiry (`credentials.rs:134-203`).
+Grants use `target_kind = 'space'` (`grants.rs:565`). **The HTTP bearer path
+refuses non-`http` holders and revoked keys only** (`keys.rs:704-760`,
+holder check at `:736-740`): it reads neither `target_kind` nor `expires_at`
+for an `http` key. An `http` key with `target_kind = 'app'` minted today
+would act with its owner's full authority. App keys must not be issued
+before the bearer path narrows them (P2). **Today's `main` is not exposed**
+(checked 2026-11-28): the only `http` mint path,
+`create_api_key_owned_with_mode` (`keys.rs:444-490`), writes neither
+`target_kind` nor `expires_at`; the rows that carry a target or an expiry
+are grants (`insert_grant_credential` refuses a non-`broker:` holder,
+`credentials.rs:239-247`) and action handles (`mint_action_handle`, holder
+`broker:<id>`, `credentials.rs:356-397`), both refused by the bearer path's
+holder check. The gap opens only when a route mints an `http` key with a
+target or an expiry, which is AS-2.7. Owner question 7 (§9).
+
+**Run start** (`api/run_start.rs`): `start_run(state, caller, req, opts)`
+(`:236`) is the one entry for `POST /v1/runs`, the inbox starter and the
+gateway (`work-outside-chat` locked decision 8). Order: refuse inline parts;
+idempotency lookup; `resolve_place` picks a Space id (owner checked) or the
+agent's default Space and a thread id or a new thread (`:273-285`;
+`spaces.rs:535-560`); inbox admission (`:294-312`); the bound agent from
+`workspace.json` and from the `spaces` row must equal the requested URN, else
+`AgentWorkspaceMismatch`, and an unbound non-default Space is bound
+(`:314-351`); `apply_workspace_version_pin` (`:353-357`); `load_agent_for_run`
+(`:359-376`).
+
+**Version pin** lives in the workspace, not in SQLite:
+`WorkspaceMeta.agent_version: Option<WorkspaceAgentVersion>`
+(`vam-storage/src/vam_dir.rs:115-125`; the type at `:47-104`, where any two
+draft pins match and released pins compare every field, `:93-103`). It is
+written once, at the first run, by `ensure_workspace_json`, which refuses a
+different later version (`vam_dir.rs:292-330`, called from
+`api/mod.rs:3401-3428`). `apply_workspace_version_pin`
+(`catalog_resolve.rs:58-114`) requires a run's version to match the pin or
+fills it in. **There is no call that changes a Space's pin**, and `yanked`
+is a catalog channel value with no behaviour (`catalog.rs:31`; DX-94 open).
+
+**Not on main:** `apps` table, App keys, a Cedar `App` entity
+(`vam-security/schema/vam.cedarschema:1-14` has `Agent, User, Tool, Host,
+Path, Workspace`), agent access (on `feat/agent-access`, Phase 5).
+
+### 2. What is stale in this doc, and the replacement
+
+| Earlier text | Status | Replacement |
+| --- | --- | --- |
+| Workspace id scheme `{owner}--{app_id}--{space_id}` (§ Data model "Workspace IDs", line 509; amendment 2026-10-29 §3, line 195; AS-3.3, line 612) | **Superseded** | A shared-App Space is an ordinary `sp_…` Space with `app_id` set. No new directory scheme. |
+| `spaces.ref` column and `UNIQUE(app_id, ref)` (§ Data model, line 495; amendment 2026-10-29 §3, lines 175, 182) | **Superseded** | No `ref` column. Get-or-create by caller ref reuses the idempotency-key path (§4). Only a hash of the ref is stored. |
+| `spaces.keep`, `default_thread`, `space_labels` (§ Data model) | Deferred to P6 | `keep` added in P6. Labels stay the single `label` column. |
+| AS-2.4 and AS-3.2 "Backfill … from workspace metadata" | **Superseded** | Spaces already exist as rows. P2 fills `spaces.app_id` (§4.1). |
+| `RunTarget { app, space_ref, thread }` and `CallerContext.space_ref` (AS-0.1, AS-0.2, § Starting a run) | **Superseded** | A run names `RunSpec.space_id` (exists) and, new, `app_id`. The ref is never returned or stamped: brokers route by `space_id` (amendment 2026-10-29 §4 already dropped `space_ref`). |
+| Phase table and Phases 0-6 (§ Phases) | **Superseded** by §7 | P1 shipped in E5. Phases renumbered by goal, not by number. |
+| Open questions C1-C3 (§ Open questions) | **Answered** in §3 | — |
+| Decision summary (locked), lines 360-372 | **Replaced** by §3.2 | Rows kept unless §3.2 marks them changed. |
+
+### 3. Decisions
+
+#### 3.1 Owner answers (approved 2026-11-28)
+
+| # | Question | Answer |
+| --- | --- | --- |
+| C1 | What is an App? | The deployed agent: one agent URN and one pinned version (DX-90's "deployed agent"). |
+| C2 | One App per environment? | Yes. Staging and prod are two Apps, with separate Spaces, keys, secrets and quotas. "Environment" means staging/prod only. |
+| C3 | Must callers of a shared App name a Space? | Yes. A shared-App run without a Space is refused; there is no shared default Space. |
+| D1 | Who owns an App? | The developer who creates it. Org admins (`users:admin`) can reassign it. |
+| D2 | Who answers approvals in a shared App? | The App owner (and org admins) in v1, or the App uses read-only playbooks. End-user approvals are later. |
+| D3 | Where may App keys live? | Backend only in v1. A browser widget later uses short-lived tokens minted by the integrator's backend. |
+| D4 | First integrator kit language | TypeScript. |
+| D5 | Long work, harness H2-H4 | Long work stays design-only until the first pilot; H2-H4 held until pilots give real tasks. |
+
+#### 3.2 Decision summary (replaces lines 360-372)
+
+Rows that cite C1-C3 or D1-D4 are approved 2026-11-28. Rows marked
+**Changed** are proposals, owner to confirm. Every other row is the locked
+summary of lines 360-372, unchanged in meaning.
+
+| Topic | Decision |
+| --- | --- |
+| Concepts | Account, App, Space, Thread, Credential. Unchanged. |
+| App | The deployed agent: one agent URN, one pinned version, kind `personal` or `shared` (C1). One App per environment (C2). Owner = creator; org admins reassign (D1). |
+| Space | A place, not an identity. One Drive9 workspace stored under its `sp_…` id. Owner and agent are row columns; `app_id` names its App. **Changed:** a shared-App Space is found by id, or get-or-created by an opaque caller ref whose hash is stored as an idempotency key (§4.2); there is no `ref` column. |
+| Shared App runs | Always name a Space (C3). |
+| Personal Apps | One per `(owner, agent)`, created on first run (unchanged). Its draft and released default Spaces are today's `default_space` rows. The "default App = primary agent" sentence stays as amended 2026-11-01. |
+| Version pin | **Changed:** the App pin is authoritative for shared-App Spaces (AS-2.6). Personal Spaces keep their own pin (proposal Q10, §5). |
+| Credentials | One type on `api_keys` (shipped). App keys: holder `http`, `target_kind = 'app'`, backend only (D3). |
+| Holder | `http` or `broker:<id>` (shipped). |
+| Authority | Owner ∩ App limit; App limit forbid-only; personal Apps have none. The owner's agent access is checked at every App run start (§6). |
+| Approvals | Routed to the App owner in v1 (D2). |
+| Secrets | Personal App: all owner secrets. Shared App: listed vault keys only. Unchanged. |
+| Existing workspaces | Superseded by `work-outside-chat` decision 10 (ids are the identity, no backfill). P2 fills `app_id` on existing rows; nothing is moved. |
+| Target resolution | Request → Credential → default → error. A request may only narrow a Credential. Unchanged in meaning; §7 P4 restates it on `start_run`. |
+| Retention | `keep` (personal default) or `idle_ttl` capped at 30 days; per-Space `keep`. Unchanged. |
+| Integrator kit | TypeScript first (D4). |
+
+### 4. Data model on today's main
+
+#### 4.1 `apps` and the `app_id` column
+
+```sql
+CREATE TABLE apps (
+  app_id TEXT PRIMARY KEY,           -- "app_" + 26 base32, spaces::mint_id
+  owner_user_id TEXT NOT NULL,
+  name TEXT NOT NULL,                -- a label, like Space labels
+  kind TEXT NOT NULL CHECK(kind IN ('personal','shared')),
+  agent_urn TEXT NOT NULL,
+  agent_version TEXT,                -- "X.Y.Z"; NULL only for a personal App (§5)
+  limit_policy_id TEXT,              -- P5
+  secret_bindings_json TEXT,         -- P5; NULL = all owner secrets (personal)
+  retention_json TEXT, quotas_json TEXT,  -- P6
+  created_at INTEGER NOT NULL,
+  deactivated_at INTEGER
+);
+CREATE UNIQUE INDEX apps_personal ON apps(owner_user_id, agent_urn) WHERE kind = 'personal';
+```
+
+- `UNIQUE(owner_user_id, name)` from § Data model is dropped: names are
+  labels (work-outside-chat decision 10).
+- `spaces.app_id` (exists) is filled when a run resolves a Space: the
+  personal App's id for `(owner, agent)`, or the shared App's id. A row with
+  NULL `app_id` reads as the personal App of its `(owner_user_id,
+  agent_urn)`, so filling is lazy and never required for a run to work. A
+  startup pass may fill the rest; it only writes NULL columns and is safe to
+  rerun.
+- **Spaces with no agent yet.** Session creation with a label and a run
+  with no `agent_ref` make default Spaces with NULL `agent_urn`
+  (`api/mod.rs:1058-1069`; `run_start.rs:260-284` through `resolve_place`,
+  `spaces.rs:540-545`). Such a Space keeps `app_id` NULL until the first
+  run binds an agent to it (`run_start.rs:316-351`: the workspace file, and
+  the row for non-default Spaces); that run fills `app_id` with the
+  personal App of the bound agent. A run with no agent leaves it NULL.
+  Reads (`GET /v1/spaces`, `Space.app_id`) return such a Space with an
+  empty `app_id` and never fail on it; the startup pass skips it.
+- App keys are `api_keys` rows: `holder 'http'`, `target_kind 'app'`,
+  `target_id` the App id, scopes `runs:start`, `spaces:create`,
+  `spaces:read`. Grants keep `target_kind 'space'`.
+
+#### 4.2 Get-or-create a shared-App Space by caller ref
+
+`POST /v1/apps/{id}/spaces {ref, label?}` returns the same Space for the same
+`(app, ref)`. It reuses `create_space_once` (`spaces.rs:309-341`) unchanged
+in shape:
+
+- `owner_user_id` = the App's owner; `idempotency_key` =
+  `app:{app_id}:` + hex SHA-256 of the ref bytes. The ref itself is never
+  stored, logged or returned (Implementer constraints: `ref` is opaque).
+- `POST /v1/spaces` refuses an `Idempotency-Key` that starts with `app:`
+  (400), so a header key cannot collide with a derived one.
+- The new row has `app_id` set and `created_via 'api'`. The label defaults
+  to `untitled`; the integrator may set a label it is willing to show the
+  owner (never required).
+- Requires `spaces:create` on the credential (C3, AS-4.3). With only
+  `spaces:read`, an unknown ref is `not found`, a known ref returns its Space.
+- Owner reassignment (D1) moves `apps.owner_user_id`, every
+  `spaces.owner_user_id` with that `app_id`, and their `space_create_keys`
+  rows in one transaction. Workspace directories do not move (they are
+  `sp_…` only).
+
+Rejected: a new `app_space_refs` table. It duplicates `space_create_keys`
+and its lock-protected get-or-create.
+
+### 5. Version pin
+
+- **App pin authoritative (AS-2.6, kept).** A shared App holds
+  `agent_version`. `start_run` for an App Space resolves the version from
+  the App row and passes it where `apply_workspace_version_pin` now reads
+  `WorkspaceMeta` (`catalog_resolve.rs:58-114`): a request naming another
+  version is `AgentWorkspaceVersionMismatch`; a request naming none gets the
+  App's. `AgentWorkspaceMismatch` stays as a consistency check
+  (`run_start.rs:314-351`).
+- **Proposal Q10, owner to confirm.** Shared-App Spaces follow the App pin:
+  one write to `apps.agent_version` moves every Space of the App; a live run
+  finishes on the version it started with (the spec is resolved at start).
+  Personal Spaces stay pinned and show "Agent updated, use vX?" with one
+  click. A personal App's `agent_version` is NULL: each personal Space keeps
+  its own pin, set at its first run (in `workspace.json` today, in the
+  `spaces` row after lane 3 S2).
+- **Seam shared with lane 3 (S2, S4; `design/self-aware.md` §S2 "The
+  seam").** One store call, `set_space_agent_version(owner, space_id,
+  version)`, built and owned by lane 3 S2 (Space upgrade API and banner).
+  S2 makes the `spaces` row the authority for a Space's pin (new
+  `spaces.agent_version`, lazily backfilled from the file);
+  `WorkspaceMeta.agent_version` in `workspace.json` becomes "last version
+  run here" and is rewritten from the row at the next session start (today
+  `ensure_workspace_json` refuses a changed pin, `vam_dir.rs:316-327`; S2
+  adds the session-start rewrite). Apps P4 (AS-2.6) calls the seam to route
+  an App Space to the App pin, so an App pin move reaches each Space through
+  the same function. Lane 3 S4 (App version follow and bulk upgrade) lands
+  inside or after Apps P2. Whoever lands first owns `catalog_resolve.rs` for
+  that change (Q16).
+- **Proposal Q11 (yank), owner to confirm; settles DX-94.** A yanked version
+  refuses new runs with a typed denial; Spaces pinned to it, and Apps pinned
+  to it, get a forced upgrade prompt; running sessions are not killed. For a
+  shared App the owner moves the App pin; until then its runs are refused.
+
+### 6. Agent access and VAM image interplay
+
+**Agent access** (`git show origin/feat/agent-access:design/agent-access.md`;
+decisions A1-A9 approved 2026-11-27):
+
+- **App runs pass through `start_run`, so the owner's access is checked.**
+  The rule sits in the catalog visibility calls that every admission makes,
+  including run start (`agent-access.md:156-158`, citing
+  `api/run_start.rs:359-376`) and triggered runs (`:159`). An App key
+  authenticates as its owner, and "API keys of a user carry that user's
+  access" (`agent-access.md:341-342`), so an App run is admitted only if the App
+  owner may use the agent.
+- **Creating an App needs access.** `POST /v1/apps` makes the same check as
+  `POST /v1/spaces` (`agent-access.md:161`): Hidden is 404, Visible is 403
+  `agent_access_required:` (`:96-116`). Reassigning an App checks the new
+  owner the same way.
+- **Revoke stops the next run (A7, `agent-access.md:127`).** Access is
+  checked at each start; a live session is not killed. An App whose owner
+  loses access refuses every new run until access is restored or the App is
+  reassigned.
+- **Check before writing.** The agent check must run before any Space bind
+  or create (`agent-access.md:170-171`); the App path keeps that order and
+  checks before `create_space_once` too.
+- Agent access is per URN, not per version (`agent-access.md:90-91`), so an
+  App pin change needs no new access check.
+
+**VAM image** (lane 2, `design/vam-image.md`): the image will be pinned
+inside the agent version (`imageRef`, lane 2 I2). An App pins the agent version, so it pins the image
+through it. **An App has no image field.** Moving an App's pin is also how
+its image changes. Where VM sizing lives (DX locked decision 17, environment
+profile; C1 originally proposed the App as its home) is not decided here:
+**proposal**, owner to confirm, that the App carries the DX-17 profile once
+DX-17 is implemented, and until then lane 2 I2 reads the agent's
+`resourceRequirements`. That interim read is itself an owner question
+against DX locked decision 17 (`design/vam-image.md` §7 question 4).
+
+### 7. Phases (replace § Phases)
+
+P1 (one Credential type) shipped in E5 and is not repeated. IDs stay
+`AS-<phase>.<n>`. Each phase is broken down in its own thread; the items
+below are the scope, not the plan. Hot files (Q16, proposal): P4 holds
+`api/run_start.rs` and `catalog_resolve.rs`; lane 3 S2 and lane 2 I2 must
+not hold them at the same time. Lane 2 I2 starts only after P4 has merged
+and agent access is in `main` (`design/vam-image.md` §5); lane 3 S3 waits
+for agent access in `main`; lane 3 S4 runs inside or after P2
+(`design/self-aware.md` §S4).
+
+| Phase | Goal | Depends on | Exit |
+| --- | --- | --- | --- |
+| P0 | Model frozen: this amendment, Cedar `App` entity, scenario list | Owner answers (done 2026-11-28) | Amendment merged; `cargo test -p vam-security` proves a forbid-only App policy denies a tool its owner may use; policy audit (AS-0.4) section written; scenario names below copied to the tracker |
+| P2 | Apps: personal and shared, pinned version, App keys | P0; agent access in `main` | `POST/GET /v1/apps`, deactivate, reassign; personal App on first run with no visible change; App keys issued and narrowed by the bearer path |
+| P3 | Shared Spaces by ref | P2 | Same ref same Space; another App's Space unreachable; ref stored only as a hash |
+| P4 | One `start_run` resolution | P2, P3, lane 3 S2 (`set_space_agent_version`); holds `run_start.rs` and `catalog_resolve.rs` | Resolution table proven for HTTP and the gateway; App pin authoritative; old request shape unchanged; a shared-App run resolves no owner secrets until P5 |
+| P5 | App limits and secret bindings | P0 (Cedar), P4 | A shared-App run is denied a tool, a secret and an egress host its owner could use |
+| P6 | Quotas and retention | P3, P4 | Idle Spaces reaped within the 30-day cap; quotas refuse with typed reasons; erasure immediate |
+| P7 | Integrator kit and Apps screens | P4 (P5, P6 for the docs' limits section; P6 AS-6.5 and AS-6.6 for the AS-7.5 SDK additions and their scenario, if confirmed) | TS SDK published; example app runs against a process-mode vamd; docs page live; Squrell-App Apps screens shipped |
+
+After P7: **pilot** (one internal app, one client). Not a build phase; Long
+work (`design/long-work.md` §9 lists what the pilot must measure) and
+harness H2-H4 wait for it (D5).
+
+#### P0 — Model frozen
+
+- **AS-0.1** Proto, additive: `App {app_id, name, kind, agent_urn,
+  agent_version, owner_user_id, created_at, deactivated_at}`,
+  `Space.app_id`, `RunSpec.app_id` and `RunStatus.app_id` at the next free
+  field numbers, `CallerContext.app_id = 11` (amendment 2026-10-29 §4).
+  No `RunTarget`, no `space_ref`.
+- **AS-0.3** Cedar `App` entity; the run principal is `in` it; one
+  forbid-only policy test.
+- **AS-0.4** Policy audit (`principal ==` vs `in`), as a section in this doc.
+- Scenario names for P2-P7 copied into the tracker.
+
+**Scenario delta:** none turns green (PDP and proto unit tests only).
+
+#### P2 — Apps
+
+- **AS-2.1** `apps` table and store (`apps.rs`).
+- **AS-2.2** Personal App get-or-create for `(owner, agent)` in
+  `start_run`; fill `spaces.app_id` (§4.1).
+- **AS-2.5** `/v1/apps` create (agent access checked), list, get,
+  deactivate; `PUT /v1/apps/{id}/owner` for org admins; `vam apps`.
+- **AS-2.7** App keys: `POST /v1/apps/{id}/keys`; the bearer path reads
+  `target_kind = 'app'` and limits the key to that App's routes and runs,
+  and honours `expires_at` for `http` keys. Shipped together with issuance.
+- **AS-2.6** moves to P4 (it changes `start_run`).
+
+| Scenario | Change | Layer | Given | Why |
+|---|---|---|---|---|
+| `a-developer-creates-a-shared-app-pinned-to-a-released-version` | new | process | `org-publisher`, `agent-plain` | P2 exit |
+| `an-app-cannot-be-created-for-an-agent-the-owner-may-not-use` | new | process | `org-member`, restricted agent (agent access world piece) | §6 |
+| `an-app-key-cannot-reach-the-owners-other-agents-or-keys` | new | process | `shared-app` (new world piece) | AS-2.7 narrowing |
+| `a-revoked-app-key-starts-nothing` | new | process | `shared-app` | revoke path |
+| `an-org-admin-reassigns-an-app-and-the-new-owner-gets-its-runs` | new | process | `org-admin`, `shared-app` | D1 |
+| `agent-workspaces-are-isolated` | unchanged, must stay green | process | existing | personal runs see no change |
+
+#### P3 — Shared Spaces by ref
+
+- **AS-3.4** `POST /v1/apps/{id}/spaces {ref}` get-or-create (§4.2); list
+  and get by App with cursor pagination; delete moves to P6.
+- **AS-3.5** `last_active_at` on run start (exists as `touch_space`,
+  `spaces.rs:418`); keep it for App Spaces.
+- `POST /v1/spaces` refuses `app:` keys.
+
+| Scenario | Change | Layer | Given | Why |
+|---|---|---|---|---|
+| `the-same-ref-returns-the-same-space` | new | process | `shared-app` | get-or-create |
+| `two-refs-get-two-private-spaces` | new | process | `shared-app` | isolation |
+| `an-app-key-cannot-open-another-apps-space` | new | process | two `shared-app`s | P3 exit |
+| `an-app-key-without-spaces-create-cannot-make-a-space` | new | process | `shared-app` | AS-4.3 |
+
+#### P4 — One `start_run` resolution
+
+- **AS-4.1** Resolution in `start_run`: App from request, then credential,
+  then the personal App of the named agent; Space from `RunSpec.space_id`,
+  then the credential's fixed Space, then the personal default Space, else
+  refused for a shared App (C3); thread as today.
+- **AS-2.6** App pin authoritative (§5); calls lane 3's
+  `set_space_agent_version` seam (S2) to route App Spaces to the App pin.
+- **AS-4.3** Narrow, never widen.
+- **AS-4.4** Stamp `app_id` on the run record, `RunStatus`, `CallerContext`;
+  filter `GET /v1/runs` by App and Space.
+- Approvals of a shared-App run list for the App owner (D2): the run's
+  owner is the App owner, so the existing approval list applies; verify.
+- **AS-4.5 No owner secrets before P5.** A shared-App run resolves zero
+  owner secrets (an empty binding list) until P5's secret bindings and App
+  limit land; P5 replaces the empty list with the App's bindings. Personal
+  Apps keep all owner secrets.
+
+| Scenario | Change | Layer | Given | Why |
+|---|---|---|---|---|
+| `an-app-key-run-lands-in-the-named-space-on-the-apps-pin` | new | process | `shared-app` | P4 exit |
+| `a-shared-app-run-without-a-space-is-refused` | new | process | `shared-app` | C3 |
+| `a-request-cannot-widen-an-app-key` | new | process | `shared-app` | AS-4.3 |
+| `an-app-run-is-refused-after-the-owners-access-is-revoked` | new | process | `shared-app`, restricted agent | A7 |
+| `moving-the-app-pin-moves-every-space-and-a-live-run-finishes-on-the-old-version` | new (pending Q10) | process | `shared-app`, two released versions | §5 |
+| `an-app-approval-reaches-the-app-owner` | new | process | `shared-app` with `agent-with-guarded-tool` | D2 |
+| `a-shared-app-run-reads-no-owner-secrets-before-bindings` | new | process | `shared-app`, `agent-with-shell-and-secret-skill` | AS-4.5 |
+
+#### P5 — App limits and secret bindings
+
+- **AS-5.1** App limit in the PEP (tool, file, egress). **AS-5.2** Secret
+  bindings for host tools, HSP `Invoke` and MCP. **AS-5.3** Layer order.
+  **AS-5.4** Deny matrix. Scope as in § Phases (Phase 5).
+
+| Scenario | Change | Layer | Given | Why |
+|---|---|---|---|---|
+| `an-app-limit-denies-a-tool-its-owner-may-use` | new | process | `shared-app` with limit | P5 exit |
+| `an-app-limit-denies-an-egress-host-its-owner-may-reach` | new | process | `shared-app`, `agent-with-egress-probe` | P5 exit |
+| `a-shared-app-reads-only-its-bound-secrets` | new | process | `shared-app`, `agent-with-shell-and-secret-skill` | AS-5.2 |
+| `a-personal-app-keeps-all-owner-secrets` | new | process | `agent-with-shell-and-secret-skill` | no change for personal use |
+
+#### P6 — Quotas and retention
+
+- **AS-6.1** to **AS-6.4** as in § Phases (Phase 6), with `spaces.keep`
+  added here and the reaper deleting the `space_create_keys` row with the
+  Space.
+- **AS-6.5 Expiry is visible (proposed, owner to confirm).** Space reads
+  (`GET` by id, list by App, the get-or-create response) return
+  `expiresAt`: the earliest time the reaper may delete the Space,
+  `last_active_at + idle_ttl` for an `idle_ttl` App, null for a `keep` App
+  or a kept Space. It is an eligibility time, not a promise: while a run is
+  live, queued or parked on the Space the reaper keeps it (P6), and the
+  read returns `expiresAt` null with `reapBlocked: true` until that run
+  ends. `last_active_at` exists today
+  (`spaces.rs:121`, set by `touch_space`, `spaces.rs:418-421`). An App key
+  may set `keep` on its own App's Spaces (`PUT /v1/apps/{id}/spaces/{space_id}
+  {keep}`), so an integrator can keep a customer's history without asking
+  the App owner.
+- **AS-6.6 Per-Space usage (proposed, owner to confirm).** `GET
+  /v1/apps/{id}/usage?space_id=&since=&until=` returns, per Space: runs,
+  prompt and completion tokens, and estimated cost (currency and micro
+  amount). No new metering: cost and tokens per run are already persisted
+  in `run_metering` (`workflow.rs:543-550`: `spend_micro`, `token_count`,
+  `prompt_tokens`, `completion_tokens`), written from `SessionBudget`
+  (`vam-inference/src/budget.rs:41-51`). Receipts carry tokens, turns and
+  approvals but no cost (`ReceiptSpend`, `receipt.proto:224-229`), so the
+  route reads `run_metering`, not receipts. The `runs` table has no Space
+  column (`workflow.rs:462-472`; the Space is inside `spec_json` as
+  `RunSpec.space_id`, `workflow.proto:231`), so the route groups by the
+  `app_id`/`space_id` that AS-4.4 stamps on the run record. Read-only, App
+  key or App owner; it lets a client bill or cap its own customers. VAM
+  does not enforce per-Space caps in v1 (AS-6.4 quotas stay per App).
+- AS-6.5 and AS-6.6 join the P6 exit (and the tracker) only once the owner
+  confirms them (§9 Q9); until then the P6 exit above stands.
+
+| Scenario | Change | Layer | Given | Why |
+|---|---|---|---|---|
+| `a-space-read-shows-when-its-history-expires` | new (proposed) | process | `shared-app` with `idle_ttl` | AS-6.5 |
+| `an-app-key-keeps-its-own-space` | new (proposed) | process | `shared-app` with `idle_ttl` | AS-6.5 |
+| `an-app-reports-runs-tokens-and-cost-per-space` | new (proposed) | process | `shared-app`, two Spaces | AS-6.6 |
+| `an-idle-shared-space-is-reaped-within-its-ttl` | new | process | `shared-app` with `idle_ttl` | P6 exit |
+| `a-kept-space-is-never-reaped` | new | process | `shared-app` | per-Space `keep` |
+| `a-space-with-a-parked-run-is-not-reaped` | new | process | `shared-app`, `agent-with-guarded-tool` | AS-6.2 |
+| `deleting-a-space-erases-it-at-once` | new | process | `shared-app` | AS-6.3 |
+| `an-app-over-its-run-quota-is-refused-with-a-typed-reason` | new | process | `shared-app` with quota | AS-6.4 |
+
+#### P7 — Integrator kit and Apps screens
+
+- **AS-7.1** TS SDK: create a Space by ref, start a run, follow
+  `/v1/runs/{id}/events` (`api/mod.rs:1481-1484`), answer approvals
+  (`/v1/approvals/{id}/decide`, `api/mod.rs:226-228`). Types generated from
+  `docs/api/openapi.yaml`. Backend only (D3): the SDK refuses to run in a
+  browser.
+- **AS-7.2** Example app: a small web backend where each visitor gets a
+  Space by a hash of their session; one App key in the backend.
+- **AS-7.3** Docs page (`docs/src/content/docs/integrations/`, sidebar in
+  `docs/astro.config.mjs`): Apps, App keys, Spaces by ref, approvals,
+  limits.
+- **AS-7.5 Kit additions (proposed, owner to confirm).** The SDK exposes
+  `expiresAt` and `keep` on Spaces (AS-6.5) and the per-Space usage read
+  (AS-6.6). The docs page (AS-7.3) and the example app also say:
+  - **One live task per Space.** A Space runs one task at a time (the "one
+    live task per workspace" rule, `design/long-work.md` §3); a message to
+    a busy Space waits. Run background jobs (nightly triage, reports) in
+    their own Space, not in a visitor's or employee's chat Space. No model
+    change until the pilot's "Workspace contention" signal
+    (`design/long-work.md` §9) says the rule blocks real use.
+  - **Approvals go to the App owner (D2).** A client-facing App's end
+    users cannot answer approvals in v1, so client pilots use read-only
+    playbooks; any tool that needs an approval waits for the App owner.
+  - **The App acts as its owner.** A shared App reads data through its own
+    bound secrets and connectors, never as the end user (§8); pilots use
+    org-wide read-only data.
+- **AS-7.4** Squrell-App Apps screens: list Apps, create (agent and version
+  picker), keys (issue once, revoke), Spaces per App, pin and upgrade.
+
+| Scenario | Change | Layer | Given | Why |
+|---|---|---|---|---|
+| `the-sdk-creates-a-space-runs-and-follows-events` | new | process | `shared-app` | AS-7.1 |
+| `the-sdk-answers-an-approval-and-the-run-resumes` | new | process | `shared-app`, `agent-with-guarded-tool` | AS-7.1 |
+| `the-example-app-gives-two-visitors-two-private-spaces` | new | process | `shared-app` | AS-7.2 |
+| `the-sdk-reads-a-spaces-usage-and-expiry` | new (proposed) | process | `shared-app` with `idle_ttl` | AS-7.5 |
+| `an-owner-creates-an-app-and-issues-a-key-in-the-app` | new | ui | Squrell-App | AS-7.4 |
+| `the-apps-screen-shows-each-apps-spaces-and-pin` | new | ui | Squrell-App | AS-7.4 |
+
+### 8. What we are not building (additions)
+
+- End-user approvals in shared Apps (D2); a browser-held App key (D3).
+- Any image field on an App (§6).
+- A `ref` column, ref lookup without the App, or a ref in any response.
+- Environment promotion between Apps (`vam promote`, DX-92): staging and prod
+  are two Apps; moving prod's pin is a manual pin write.
+- SDKs other than TypeScript before the pilot.
+- **Acting on behalf of the end user** (proposed, owner to confirm). A
+  shared App runs with its own bound secrets and connectors as its owner;
+  VAM never sees the integrator's user mapping, so an internal App cannot
+  read "my leave balance" or "my mailbox". Not built in v1; pilots use
+  org-wide read-only data. Planned direction: Q8 in §9.
+- **More than one live task per Space** (proposed, owner to confirm). The
+  rule stays; integrators are told to use a separate Space per background
+  job (AS-7.5) until the pilot's "Workspace contention" signal
+  (`design/long-work.md` §9) says otherwise.
+- **Per-Space caps enforced by VAM.** The usage read (AS-6.6) lets the
+  integrator cap its own customers; VAM's quotas stay per App (AS-6.4).
+
+### 9. Open questions (each with a recommended answer)
+
+1. **Q10, Q11** — proposals in §5. Recommended: as written.
+2. **Does an App key's Space create count against the owner's or the App's
+   quota?** Recommended: the App's (P6), so one site cannot exhaust the
+   owner's personal use.
+3. **Where does the TS SDK live?** Recommended: its own repo, with types
+   generated from `docs/api/openapi.yaml`, so the VAM repo stays Rust-only
+   (AGENTS.md §7: no external monorepo tools without instruction). The P7
+   process scenarios drive the same HTTP calls the SDK makes; the SDK's own
+   tests run against a process-mode vamd.
+4. **Can the e2e runner drive the example app?** Recommended: no new step
+   type in P7; the scenarios assert the HTTP behaviour, and the example app
+   has its own smoke test.
+5. **Personal App rows: create on first run, or keep them implicit?**
+   Recommended: create on first run (the locked row), since `spaces.app_id`
+   and App-filtered run lists need an id; the NULL-reads-as-personal rule
+   keeps runs working while rows fill.
+6. **The DX-17 profile on the App** — proposal in §6. Recommended: yes,
+   after DX-17 is implemented; not in P2.
+7. **Owner question: does P2 ship bearer-path narrowing in the same change
+   as App key issuance?** The HTTP bearer path (`keys.rs:704-760`) checks
+   holder and revoke only; it ignores `target_kind` and `expires_at` for
+   `http` keys. No `http` key with a target or expiry can be minted on
+   today's `main` (§1), so nothing is exposed now. Recommended: yes; AS-2.7
+   makes the bearer path enforce `target_kind = 'app'` (App routes and runs
+   only) and `expires_at` for `http` keys, with tests, before or in the same
+   PR as `POST /v1/apps/{id}/keys`; no App key is issued from a build
+   without it.
+8. **How does an App act on behalf of its end user?** (proposed, owner to
+   confirm; §8.) Direction: per run, the integrator's backend mints a
+   short-lived, narrowly scoped "on behalf of" token for the signed-in end
+   user (the same pattern as the planned browser widget token, D3) and
+   passes it with the run request. The host holds it for that run only and
+   carries a reference to it in the run's `CallerContext`
+   (`hosted_services.proto:130-141`, host-stamped), so connector calls use
+   the end user's delegated identity; it is never stored in the Space, the
+   thread log, the run record or a receipt, and never reaches the guest.
+   Recommended: a candidate phase after the pilot, designed together with
+   the D3 widget tokens; not in P2-P7.
+9. **Is the per-Space usage read (AS-6.6) and visible expiry (AS-6.5) in
+   v1?** Recommended: yes, in P6, with the SDK side in P7 (AS-7.5); both
+   read data that exists today (`run_metering`, `spaces.last_active_at`)
+   and add no metering. Cost is the estimate from model prices, not an
+   invoice; the docs say so.

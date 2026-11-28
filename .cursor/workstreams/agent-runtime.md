@@ -1093,15 +1093,42 @@ k = 5) runs on GitHub Actions (`bench.yml`, the owner authorised it
 
 **Goal:** hand off a long task and come back to the result.
 **Depends on:** Phase 4
-**Plan:** not drafted
+**Design:** design/long-work.md (2026-11-28; build waits for the first Apps pilot)
+**Plan:** not drafted (one breakdown per slice 5a–5e; the pilot signals in design §9 decide which slices and their order)
 **Exit:** the 50+ call triage task passes; leave and return works.
 
+Proposed decisions LW1–LW8 (design §10, owner to confirm) add to the list
+above and change none of it.
+
 - [ ] Park between turns after keep-warm; task budgets replace fixed caps.
+  (5a: park on any open wait, not only an approval; five meters: turns,
+  active time, money, wakes, wall-clock deadline; `request_budget` within
+  the operator/App ceiling; a spent turns, active-time, money or wakes
+  meter parks the task with Extend, the wall-clock deadline ends it; **Pause**
+  keeps files and queued steers; bench task `u4-triage`.)
 - [ ] Background processes (`run` background, `bg_*`).
+  (5b: `bg_start`, `bg_status`, `bg_output`, `bg_kill`, `bg_wait`;
+  per-process wall-clock and capture caps; a live process keeps the task
+  awake and counts active time; a spent active-time meter stops it (output
+  kept) and parks the task; the wall-clock deadline ends the task; lost
+  after a crash, never restarted.)
 - [ ] In-VM sub-agents (`spawn_agent`).
+  (5d: `worker_status`, `worker_send`, `worker_stop`, `wait_for_workers`;
+  own lane, subset of tools, budget slice, depth 1, default 2 live, cap 4;
+  scratch dir plus host-side write leases; shared commits and rollback;
+  an approval parks only that worker.)
 - [ ] Todo recitation; notify on finish through `on_paused` hooks.
+  (5a: recitation on for every long task; `NOTES.md` re-read after each
+  compaction; unattended long tasks notify on finish.)
 - [ ] Timer waits: `wait_until`, `waiting(timer)`, backoff re-checks with
   a maximum number of wakes.
+  (5c: deadline sweeper; a wait longer than 30 s parks with no keep-warm
+  hold when no background process or worker runs; a wait past the task deadline is refused; a steer wakes a parked
+  task.)
+- [ ] Observability and watchdogs (5e): worker rows and per-lane cost,
+  heartbeat, no-progress and spend-velocity watchdogs; stalls notify.
+- [ ] Repeated-compaction bench task (`u4-repeated-compaction`, at least
+  five compactions).
 
 ### Phase 6 — Learns (U7)
 

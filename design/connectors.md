@@ -486,6 +486,13 @@ the first event source. **Slack mentions are the cheapest first source**:
 transport, identity mapping and the gateway socket exist in `vam.notify`.
 GitHub pull requests second, on the relay.
 
+Owner use case (2026-11-28, proposed; `design/long-work.md` §9.1): a Slack
+reply to an agent's follow-up ping should start a run in the one follow-up
+thread, with `event_context` carrying the ticket key the agent stamped in the
+ping. Replies, and outbound pings, involving people who are not VAM users need
+a contact model beyond verified VAM contacts and an agent-side Slack or Teams
+connector; `vam.notify` stays DM-to-self.
+
 Phase 1 needs no change for this. It should keep the connector definition
 open to an `events` field and make sure a triggered run resolves the
 subscriber's connections like any other run.

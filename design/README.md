@@ -11,7 +11,10 @@ Several docs below are partly shipped. Their shipped parts are trimmed as each w
 |---|---|---|
 | [Agent experience](agent-experience.md) | Problem-led roadmap (problems P1–P14, epics E1–E8); machine images and Vamfile (E7 Phases 2–5); egress Phases 4–5. Shipped parts: drafts and versions, permissions as data, egress Phases 1–3. | `agent-experience`, `machine-base` |
 | [Agent runtime](agent-runtime.md) | E10: effect journal (Phase 4), long work (Phase 5), memory (Phase 6). Phases 0–3 shipped. | `agent-runtime` |
-| [Apps and Spaces](vam-apps-spaces.md) | Apps, shared Spaces, App authority, retention, per-App quotas. Space and thread ids and Credentials shipped (`hosted/triggered-runs`). | none yet |
+| [Long work](long-work.md) | E10 Phase 5 design: park between turns, task budgets, background processes, timer waits, in-VM workers (slices 5a–5e). Build waits for the first Apps pilot. | `agent-runtime` |
+| [Self-aware](self-aware.md) | Denials that carry their fix (S1), one-click agent version upgrade for a Space with minimal yank (S2), agent-proposed settings changes a human approves (S3), App version follow and bulk upgrade (S4). | `self-aware` |
+| [VAM image](vam-image.md) | Curated bases and skill lockfiles (I1), image artifact and `imageRef` (I2), Vamfile Lite through the marketplace (I3), full Vamfile (I4, only for a blocked client). Builds on E7 in agent-experience. | `vam-image` |
+| [Apps and Spaces](vam-apps-spaces.md) | Apps, shared Spaces, App authority, retention, per-App quotas, integrator kit (P0–P7; amendment 2026-11-28 against today's main). Space and thread ids and Credentials shipped (`hosted/triggered-runs`). | `apps-spaces` |
 | [Connectors](connectors.md) | Real-tenant proof, installable connectors, more providers. Phases 0–4 built. | `connectors` |
 | [Developer experience](developer-experience.md) | Packages and lockfile, `vam init`/`validate`/`dev`, signing, deployments (tracker Phases 3–11). | `developer-experience` |
 | [Harness](harness.md) | Ablation grid, harness profiles per model class, recursive harnessing (H2–H4). H0 and H1 shipped. | `harness` |

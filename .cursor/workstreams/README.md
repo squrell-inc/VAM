@@ -21,6 +21,9 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | `user-identity` | User identity: self-service password change, opaque user IDs and email usernames, then one namespace per user | active | 3 (one namespace per user): W0–W2 done on `claude/wizardly-feynman-d5ch88`, phase close next; 1 and 2 released to `main` |
 | `release-artifacts` | Release artifacts: one workspace version chosen at release time, manual owner-approved release workflow, immutable `v*` tags, an x86_64 node bundle and `vam` for Linux/macOS with SHA256SUMS and attestations, `vam dock` and `vam upgrade`. Phases A, B, Final; Lima and Windows in the next release (`v0.2.0`) | active | B (rc.1 published 2026-11-19; B waves merged; rc.2 close waits for the B release PR) |
 | `skill-list` | Skill list: paged `GET /v1/skills` for the member skill picker (`design/skill-list.md`) | active | 0 |
+| `apps-spaces` | Apps and Spaces: shared Apps with keys and limits, a Space per end user, secret bindings, quotas, retention, integrator kit (`design/vam-apps-spaces.md`, amendment 2026-11-28) | active | 0 (plan not drafted); build phases wait for agent access in `main` |
+| `self-aware` | Self-aware: typed denials with a suggested fix, one-click agent version upgrade, agent-proposed changes, App version follow (`design/self-aware.md`) | active | S1 and S2 (plans not drafted) |
+| `vam-image` | VAM image: curated bases, skill lockfiles, `imageRef`, Vamfile Lite via the marketplace, full Vamfile later (`design/vam-image.md`) | active | 1 (plan not drafted) |
 
 ## Backlog (no tracker)
 
@@ -32,4 +35,4 @@ New tracker: copy `_template.md` to `<slug>.md` and add a row below. Team norms 
 | Member `extends` / `overlay` | Open these fields to members once the run-time merge is wired; refused on a member save today. |
 | Old-repo branch names | Rename `isolation-verify-closeout` decision 9's branch names (`feat/improving-the-vam`); deferred by the owner 2026-11-18. |
 | E11 Jig, the larger plan | Queries and mutations, composed components, jig packages and a registry, agent-written `.jig`, Slack and A2UI adapters. The basics are shipped (`docs/src/content/docs/runtime/jig.md`); the earlier plan is in git history. |
-| Primary agent | One default agent per user that asks the other agents the user may run (a delegate broker, depth one). Not started; the earlier proposal is in git history. |
+| Primary agent | One default agent per user that asks the other agents the user may run (a delegate broker, depth one). Not started; the earlier proposal is in git history. Owner use case 2026-11-28 (standup prep, tickets for teammates, follow-ups; `design/long-work.md` §9.1): scheduled work cannot delegate, so a schedule names an agent that holds the connectors; follow-ups are one sweep schedule with state in the ticket system; needs a team directory (name, ticket user, chat id, timezone, hours) and per-assignee quiet hours; a released primary cannot save the allow rule an unattended ping needs; DMs to people who are not VAM users need an agent-side Slack/Teams connector, not `vam.notify`; Slack replies need an E5 event source (`design/connectors.md` §6.6). |
