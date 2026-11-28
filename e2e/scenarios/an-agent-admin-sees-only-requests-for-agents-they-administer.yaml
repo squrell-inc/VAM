@@ -26,6 +26,9 @@ then:
   - identity-request: { as: member, credential: key, path: "/v1/me/access", status: 200, contains: "{{acr1}}" }
   - identity-request: { as: member, credential: key, path: "/v1/me/access", status: 200, contains: "{{acr2}}" }
   - identity-request: { as: pub, credential: key, path: "/v1/access-requests?state=bogus", status: 400 }
+  # cleanup: withdraw both pending requests so they do not stay in the shared org admin's inbox for later scenarios
+  - identity-request: { as: member, credential: key, method: delete, path: "/v1/agents/{{urn:agent-plain}}/access", status: 204 }
+  - identity-request: { as: member, credential: key, method: delete, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 204 }
 guards:
   - vam:crates/vam-orchestrator/src/agent_access.rs
   - vam:crates/vam-orchestrator/src/api/agent_access.rs
