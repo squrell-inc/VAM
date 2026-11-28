@@ -675,8 +675,8 @@ no `?agent=` filter on `GET /v1/access-requests`.
 **Exit:** app tests green against mocks, then against a node with Phase 2; errors on these paths
 are shown, not swallowed into `[]`.
 
-- [ ] `services/agentAccess.ts` and hooks; Marketplace Agents tab on `GET /v1/catalog/agents`
-- [ ] Request dialog, my requests, admin queue, `openAgentChat` gate
+- [x] `services/agentAccess.ts` and hooks; Marketplace Agents tab on `GET /v1/catalog/agents`
+- [x] Request dialog, my requests, admin queue, `openAgentChat` gate
 
 Hand-off: Phase 4 done. Squrell-App PRs #18 to #22 merged into `feature/agent-access`; release PR #23 into `main` is held until vamd is deployed. See `p4-breakdown.md` in the project files (`agent-access/p4-breakdown.md`).
 
@@ -690,10 +690,10 @@ that carries the field (see Execution plan, lane C)
 **Exit:** hardening scenarios green (name leaks, standalone refs, draft runs, credential confusion,
 yanked version, admin vs catalog scopes, demoted owner); vam-marketplace schema documents the field.
 
-- [ ] W0 scenarios H1 to H8 and the `marketplace-access` piece
-- [ ] W1 manifest field and install copy (AA-5.1 to 5.5)
-- [ ] W2 (sec) hardening fixes (AA-5.6 to 5.9)
-- [ ] Close: Opus whole-feature review, fix wave, records (AA-5.10), release in order
+- [x] W0 scenarios H1 to H8 and the `marketplace-access` piece
+- [x] W1 manifest field and install copy (AA-5.1 to 5.5)
+- [x] W2 (sec) hardening fixes (AA-5.6 to 5.9)
+- [x] Close: Opus whole-feature review, fix wave, records (AA-5.10), release in order
 - [ ] W3 vam-marketplace docs and pin, after the VAM release and vamd deploy
 
 #### Phase 5 breakdown (approved 2026-11-28)
@@ -1026,3 +1026,5 @@ worth it: an extra close, checklist and full-suite release PR for files W3 edits
 | 2026-11-28 | 3 W2 | AA-3.3 (`vam agent admins ls\|add\|rm`, `vam users ls`), AA-3.4 (`vam access requests\|approve\|deny\|revoke`) and AA-3.6 (CLI docs, feature row without `pending_page`) on `feat/agent-access-p3-w2`. C2 and C3 `active`; C1 to C4 active. `cargo test -p vam-cli`, clippy, `vam-e2e check` and `pnpm build` green locally; scenarios run in Actions. |
 | 2026-11-28 | 3 W0-W1 | Scenarios C1-C4 (pending) and the runner `exitCode` and placeholders (#147); paging fix, member commands and hints (#148). Note: the CI line takes scenario ids, not C1-C4, so #148 ran only `decision-anywhere-clears-the-notification`; the four CLI scenarios first run on #149 with their real ids. |
 | 2026-11-28 | 3 review, fix wave and close | Opus close review of the merged Phase 3 diff; findings fixed on `feat/agent-access-p3-fix`: exact user id beats any username, `/v1/users` read only for org admins and only 403/404 swallowed, admin list re-read right before the PUT, hint text and URN lists cleaned of control and format characters, a short-name locked run fails with 403 like the URN path and points at `vam access mine` for a pending request, path segments encode UTF-8 bytes and dots. Phase 3 closed. |
+| 2026-11-28 | 4 | Squrell-App PRs 18-22 merged into `feature/agent-access`: browse with status chips, request dialog, My requests, admin review queue with revoke, `openAgentChat` gate, 403 mapping, errors shown not swallowed, Tauri commands. Release PR 23 into `main` held until vamd is deployed. Open: app nit N6 and the `src-tauri` cargo test (gate PR 23); N4, N5, N7 to the app backlog. |
+| 2026-11-28 | 5 | W0 scenarios H1-H8 (#152), W1 `access.default` in `marketplace.json` with first-install-only application and the reset-seam fix (#154), W2 hidden-equals-missing on release, release suggestion, DELETE and PUT, `vam access approve` hint, docs (#155), then the Opus whole-feature review (0 Critical, 1 Important, 9 Nits; `p5-close-security-review.md`) and its fix wave on `feat/agent-access-p5-fix` (restricted `PUT` on a hidden orphan agent answers the missing-URN 400, Slack fallback escape, records). Owner answers Q1-Q9 as recommended. Scoreboard: 8 new scenarios active and green (27 agent access scenarios in all), Actions green on #154 and #155, 0 fix cycles in the waves, 1 review fix wave. Frozen: `listing.access.default {visibility, mode}`, no admins. Accepted residuals: `PUT` by a `catalog:write` holder shows a foreign or installed URN exists. Backlog: install binds `ref` but not `access` (N3); older nodes reject an index carrying `access` until all upgrade (no live listing may carry it before that). Open: W3 (vam-marketplace docs and pin) after the VAM release and vamd deploy. |

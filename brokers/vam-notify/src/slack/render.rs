@@ -160,7 +160,7 @@ pub fn render(r: &NotificationRendering, delivery_id: &str, caps: &Capabilities)
     let text = [&r.title, &r.body]
         .into_iter()
         .find(|s| !s.trim().is_empty())
-        .map(|s| clip(s, 200))
+        .map(|s| clip(&esc(s), 200))
         .unwrap_or_else(|| "VAM notification".to_string());
     Rendered {
         text,
@@ -659,5 +659,22 @@ mod tests {
                 <= SECTION_MAX
         );
         assert!(r.text.chars().count() <= 200);
+    }
+
+    #[test]
+    fn fallback_text_escapes_mrkdwn_control_characters() {
+        let mut n = approval("");
+        n.title = "<!channel> & <@U1|x> asks to use <https://e.example|agent>".into();
+        n.body = "<!here>".into();
+        let r = render(&n, "nd_1", &caps());
+        assert_eq!(
+            r.text,
+            "&lt;!channel&gt; &amp; &lt;@U1|x&gt; asks to use &lt;https://e.example|agent&gt;"
+        );
+        assert!(!r.text.contains('<') && !r.text.contains('>'));
+        // The body is the fallback when the title is empty, and is escaped the same way.
+        n.title = String::new();
+        let r = render(&n, "nd_1", &caps());
+        assert_eq!(r.text, "&lt;!here&gt;");
     }
 }

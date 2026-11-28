@@ -1090,7 +1090,13 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        crate::catalog_tier::reject_caller_installed_agent(&connection, urn, owner, org_admin)?;
+        crate::catalog_tier::reject_caller_installed_agent(
+            &connection,
+            urn,
+            owner,
+            org_admin,
+            false,
+        )?;
         let row = upsert_spec_draft(
             &connection,
             CatalogKind::Agent,
@@ -1157,7 +1163,13 @@ impl SqliteWorkflowStore {
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         let table = CatalogKind::Agent.table();
-        crate::catalog_tier::reject_caller_installed_agent(&connection, urn, owner, org_admin)?;
+        crate::catalog_tier::reject_caller_installed_agent(
+            &connection,
+            urn,
+            owner,
+            org_admin,
+            true,
+        )?;
         if !crate::owner::caller_owns_any_row(&connection, table, urn, owner)? {
             crate::member_draft::require_own_namespace(&connection, owner, urn)?;
         }

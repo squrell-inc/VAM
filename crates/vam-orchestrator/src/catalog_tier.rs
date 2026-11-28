@@ -194,22 +194,53 @@ pub(crate) fn agent_hidden_from(
 }
 
 /// [`reject_caller_installed_urn`] for an agent write (PUT, either mode): an installed agent the
-/// rule hides from the caller answers as a missing URN under the same domain would (400 inside a
-/// marketplace domain). Where the domain check passes (the marketplace was removed since), the
-/// 409 stays: a PUT of a missing URN would succeed, so there is no missing answer to give.
+/// rule hides from the caller answers as a missing URN would. Inside a marketplace domain that
+/// is the 400 domain refusal. Where the domain check passes (the marketplace was removed since):
+///
+/// - restricted mode (`restricted`, `agents:draft` without `catalog:write`): the namespace 400 a
+///   missing URN outside the caller's namespace gets, taken in the same order as the restricted
+///   save takes it (skipped when the caller owns a row at the URN). A marketplace can never
+///   install under the registry domain, so this is always that 400.
+/// - full mode (`catalog:write`): the 409 stays, because a PUT of a missing URN would succeed
+///   and there is no missing answer to give.
 pub(crate) fn reject_caller_installed_agent(
     connection: &Connection,
     urn: &str,
     caller: &str,
     org_admin: bool,
+    restricted: bool,
 ) -> Result<(), OrchestratorError> {
     if is_installed_urn(connection, urn)? && agent_hidden_from(connection, urn, caller, org_admin)?
     {
         return Err(hidden_answer(connection, urn, "agent", || {
-            installed_error(urn, "agent")
+            hidden_orphan_put_answer(connection, urn, caller, restricted)
         }));
     }
     reject_caller_installed_urn(connection, urn, "agent")
+}
+
+/// The answer of a PUT on a hidden installed agent whose marketplace domain no longer owns it
+/// (see [`reject_caller_installed_agent`]).
+fn hidden_orphan_put_answer(
+    connection: &Connection,
+    urn: &str,
+    caller: &str,
+    restricted: bool,
+) -> OrchestratorError {
+    if restricted {
+        let table = crate::catalog::CatalogKind::Agent.table();
+        match crate::owner::caller_owns_any_row(connection, table, urn, caller) {
+            Ok(false) => {
+                if let Err(e) = crate::member_draft::require_own_namespace(connection, caller, urn)
+                {
+                    return e;
+                }
+            }
+            Ok(true) => {}
+            Err(e) => return e,
+        }
+    }
+    installed_error(urn, "agent")
 }
 
 /// Migration `catalog_tier_marketplace` (CN-4.5): the tier `CHECK` of a catalog table created
