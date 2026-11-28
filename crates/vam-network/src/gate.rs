@@ -115,8 +115,16 @@ pub trait EgressGate: Send + Sync {
 /// `egress.decided` event and the OCSF block event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EgressAuthorization {
-    Allow { rule: String },
-    Deny { rule: String },
+    Allow {
+        rule: String,
+    },
+    /// `owner_can_allow`: the host is refused only because the agent's default does not allow
+    /// it, and the agent's owner can allow it. The guest-facing refusal then says so in one
+    /// fixed phrase; it never names the owner or the rule.
+    Deny {
+        rule: String,
+        owner_can_allow: bool,
+    },
 }
 
 /// Decides whether the session may reach a host name.

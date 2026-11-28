@@ -245,9 +245,15 @@ pub fn admit_requirements(
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(OrchestratorError::MissingRequiredSecrets(format_missing(
-            &missing,
-        )))
+        Err(OrchestratorError::MissingRequiredSecrets(
+            crate::error::MissingSecrets {
+                text: format_missing(&missing),
+                items: missing
+                    .iter()
+                    .map(|m| (m.binding_id.clone(), m.scope.as_str().to_string()))
+                    .collect(),
+            },
+        ))
     }
 }
 
@@ -419,7 +425,8 @@ mod tests {
         ];
         let err = admit_requirements(&vault, "alice", &reqs).expect_err("admission fails");
         match err {
-            OrchestratorError::MissingRequiredSecrets(msg) => {
+            OrchestratorError::MissingRequiredSecrets(missing) => {
+                let msg = missing.text;
                 assert!(msg.contains("jira/auth-header@user"), "{msg}");
                 assert!(msg.contains("openai/api-key@org"), "{msg}");
                 assert!(!msg.contains("optional/note"), "{msg}");

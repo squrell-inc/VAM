@@ -96,6 +96,7 @@ fn map_drive9_error(err: Drive9Error) -> ApiError {
     match err {
         Drive9Error::NotFound(msg) => OrchestratorError::NotFound(msg).into(),
         Drive9Error::FileTooLarge { size, max } => ApiError {
+            denials: Vec::new(),
             status: StatusCode::PAYLOAD_TOO_LARGE,
             code: VamErrorCode::InvalidArgument,
             message: format!("file size {size} bytes exceeds maximum {max} bytes"),

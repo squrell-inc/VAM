@@ -1117,19 +1117,35 @@ pub async fn spawn_session_brokers(
 
         let store_egress = store_clone_54.clone();
         let session_id_egress = session_id_clone_54.clone();
+        let principal_egress = resolved_principal.clone();
+        let denials_egress = EgressDenialCache::default();
         let egress_cb: vam_network::EgressDecisionCallback =
             Arc::new(move |domain, port, disposition, policy_id| {
-                crate::events::append_egress_decided(
+                let blocked = disposition.eq_ignore_ascii_case("DENY")
+                    || disposition.eq_ignore_ascii_case("BLOCK")
+                    || disposition.eq_ignore_ascii_case("DENIED");
+                // The denial is built from the session binding and the host's own rules; the
+                // host name is the guest's and is only ever a normalized, capped subject.
+                let denial = blocked
+                    .then(|| {
+                        denials_egress.denial(
+                            &store_egress,
+                            &session_id_egress,
+                            principal_egress.as_deref(),
+                            domain,
+                            policy_id,
+                        )
+                    })
+                    .flatten();
+                crate::events::append_egress_decided_with_denial(
                     &store_egress,
                     &session_id_egress,
                     domain,
                     port,
                     disposition,
                     policy_id,
+                    denial.as_ref(),
                 );
-                let blocked = disposition.eq_ignore_ascii_case("DENY")
-                    || disposition.eq_ignore_ascii_case("BLOCK")
-                    || disposition.eq_ignore_ascii_case("DENIED");
                 if blocked {
                     let ocsf = vam_telemetry::ocsf::from_egress_block(
                         &session_id_egress,
@@ -1237,6 +1253,52 @@ pub async fn spawn_session_brokers(
     Ok(())
 }
 
+/// The typed denial of each refused host of one session, built once. A guest that retries a
+/// refused host gets the same denial (and the same `decision_ref`) and does not write a row per
+/// attempt; the cache holds at most [`EGRESS_DENIAL_HOSTS`] hosts, and a later host gets a denial
+/// built each time (without a stored row past the cap).
+#[derive(Default)]
+struct EgressDenialCache {
+    seen: std::sync::Mutex<std::collections::HashMap<String, Option<vam_spec::v1::Denial>>>,
+}
+
+const EGRESS_DENIAL_HOSTS: usize = 64;
+
+impl EgressDenialCache {
+    fn denial(
+        &self,
+        store: &SqliteWorkflowStore,
+        session_id: &str,
+        principal_urn: Option<&str>,
+        host: &str,
+        policy_label: &str,
+    ) -> Option<vam_spec::v1::Denial> {
+        let key = format!("{}\u{0}{policy_label}", host.trim().to_ascii_lowercase());
+        if let Ok(seen) = self.seen.lock() {
+            if let Some(known) = seen.get(&key) {
+                return known.clone();
+            }
+            if seen.len() >= EGRESS_DENIAL_HOSTS {
+                // Over the cap: still explain the refusal, but write no new row.
+                drop(seen);
+                return crate::denials::egress_denial_without_row(
+                    store,
+                    session_id,
+                    principal_urn,
+                    host,
+                    policy_label,
+                );
+            }
+        }
+        let built =
+            crate::denials::egress_denial(store, session_id, principal_urn, host, policy_label);
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.insert(key, built.clone());
+        }
+        built
+    }
+}
+
 /// Where a host rule came from, for the rule name on `egress.decided`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EgressRuleOrigin {
@@ -1258,6 +1320,9 @@ pub(crate) struct SessionEgressAuthorizer {
     /// `None` when the policy could not be built.
     policy: Option<String>,
     origin: EgressRuleOrigin,
+    /// The agent's owner can allow a host its default refuses: a permissions agent that is not a
+    /// marketplace install. Read once at build; it only words the guest-facing refusal.
+    owner_can_allow: bool,
 }
 
 impl SessionEgressAuthorizer {
@@ -1281,10 +1346,16 @@ impl SessionEgressAuthorizer {
                 EgressRuleOrigin::Agent,
             ),
         };
+        let owner_can_allow = origin == EgressRuleOrigin::Agent
+            && crate::security::session_agent_urn(store, session_id, principal_urn)
+                .ok()
+                .flatten()
+                .is_some_and(|urn| matches!(store.agent_is_installed(&urn), Ok(false)));
         match policy {
             Ok(policy) => Self {
                 policy: Some(policy),
                 origin,
+                owner_can_allow,
             },
             Err(message) => {
                 eprintln!(
@@ -1293,6 +1364,7 @@ impl SessionEgressAuthorizer {
                 Self {
                     policy: None,
                     origin,
+                    owner_can_allow: false,
                 }
             }
         }
@@ -1335,6 +1407,7 @@ impl vam_network::EgressAuthorizer for SessionEgressAuthorizer {
         let Some(policy) = &self.policy else {
             return Deny {
                 rule: "egress policy unavailable".to_string(),
+                owner_can_allow: false,
             };
         };
         match vam_security::evaluate_egress(policy, host) {
@@ -1348,15 +1421,20 @@ impl vam_network::EgressAuthorizer for SessionEgressAuthorizer {
             {
                 Deny {
                     rule: self.label("internet:*"),
+                    owner_can_allow: self.owner_can_allow,
                 }
             }
             Ok(decision) => Deny {
+                // Only the default `internet:*` is the owner's to widen; a rule that names the
+                // host is their choice, and the guest is not told otherwise.
+                owner_can_allow: self.owner_can_allow && decision.deciding_rule == "internet:*",
                 rule: self.label(&decision.deciding_rule),
             },
             Err(err) => {
                 eprintln!("[orchestrator] ERROR egress policy evaluation failed for {host}: {err}");
                 Deny {
                     rule: "egress policy error".to_string(),
+                    owner_can_allow: false,
                 }
             }
         }
@@ -1549,6 +1627,7 @@ mod egress_authorizer_tests {
                     .cedar,
             ),
             origin: EgressRuleOrigin::Agent,
+            owner_can_allow: true,
         }
     }
 
@@ -1559,6 +1638,7 @@ mod egress_authorizer_tests {
                 crate::policy_legacy::compile_legacy_egress_policy(&destinations).expect("legacy"),
             ),
             origin: EgressRuleOrigin::SecretDestination,
+            owner_can_allow: false,
         }
     }
 
@@ -1571,6 +1651,8 @@ mod egress_authorizer_tests {
     fn deny(rule: &str) -> EgressAuthorization {
         EgressAuthorization::Deny {
             rule: rule.to_string(),
+            // Only the agent's own default is the owner's to widen.
+            owner_can_allow: rule == "agent rule internet:*",
         }
     }
 
@@ -1726,6 +1808,7 @@ mod egress_authorizer_tests {
         let broken = SessionEgressAuthorizer {
             policy: Some("this is not cedar".to_string()),
             origin: EgressRuleOrigin::Agent,
+            owner_can_allow: false,
         };
         assert_eq!(broken.authorize("example.com"), deny("egress policy error"));
     }

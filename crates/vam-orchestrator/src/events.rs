@@ -394,6 +394,19 @@ pub fn egress_decided_json(
     disposition: &str,
     policy_id: &str,
 ) -> Result<String, String> {
+    egress_decided_json_with_denial(run_id, sequence, domain, port, disposition, policy_id, None)
+}
+
+/// [`egress_decided_json`] with the typed denial of a refusal (`EgressDecidedPayload.denial`).
+pub fn egress_decided_json_with_denial(
+    run_id: &str,
+    sequence: i64,
+    domain: &str,
+    port: u32,
+    disposition: &str,
+    policy_id: &str,
+    denial: Option<&vam_spec::v1::Denial>,
+) -> Result<String, String> {
     let domain_digest = format!("{:x}", Sha256::digest(domain.as_bytes()));
     let payload = EgressDecidedPayload {
         domain: domain.to_string(),
@@ -401,7 +414,7 @@ pub fn egress_decided_json(
         disposition: disposition.to_string(),
         policy_id: policy_id.to_string(),
         domain_digest,
-        denial: None,
+        denial: denial.cloned(),
     };
     let any = pack_any("vam.v1.EgressDecidedPayload", &payload)?;
     let event = build_cloud_event(
@@ -487,11 +500,42 @@ pub fn append_egress_decided(
     disposition: &str,
     policy_id: &str,
 ) {
-    if let Ok(payload) = egress_decided_json(session_id, 0, domain, port, disposition, policy_id) {
+    append_egress_decided_with_denial(
+        store,
+        session_id,
+        domain,
+        port,
+        disposition,
+        policy_id,
+        None,
+    );
+}
+
+/// [`append_egress_decided`] with the typed denial of a refusal on both copies of the event.
+pub fn append_egress_decided_with_denial(
+    store: &crate::workflow::SqliteWorkflowStore,
+    session_id: &str,
+    domain: &str,
+    port: u32,
+    disposition: &str,
+    policy_id: &str,
+    denial: Option<&vam_spec::v1::Denial>,
+) {
+    if let Ok(payload) =
+        egress_decided_json_with_denial(session_id, 0, domain, port, disposition, policy_id, denial)
+    {
         let _ = store.append_outbox_event(session_id, TYPE_EGRESS_DECIDED, &payload);
     }
     if let Ok(Some(run_id)) = store.find_run_id_for_session(session_id) {
-        if let Ok(payload) = egress_decided_json(&run_id, 0, domain, port, disposition, policy_id) {
+        if let Ok(payload) = egress_decided_json_with_denial(
+            &run_id,
+            0,
+            domain,
+            port,
+            disposition,
+            policy_id,
+            denial,
+        ) {
             let _ = store.append_outbox_event(&run_id, TYPE_EGRESS_DECIDED, &payload);
         }
     }
@@ -970,5 +1014,32 @@ mod tests {
         assert_eq!(failed["host"], "e_x.com");
         let bad_code = web_used_payload("b", "t", "h", "error", Some("Blocked: do x"), 0, 0);
         assert!(bad_code.get("code").is_none());
+    }
+
+    #[test]
+    fn egress_decided_carries_the_typed_denial_on_both_copies() {
+        let store = crate::workflow::SqliteWorkflowStore::in_memory().expect("store");
+        persist_run(&store, "run-e3", "sess-e3");
+        let denial = crate::denials::plain_denial("evil.example", crate::denials::Text::BuiltIn);
+        append_egress_decided_with_denial(
+            &store,
+            "sess-e3",
+            "evil.example",
+            443,
+            "DENY",
+            "p-1",
+            Some(&denial),
+        );
+        for key in ["run-e3", "sess-e3"] {
+            let events = store.read_outbox_for_run(key, 0).expect("events");
+            assert_eq!(events.len(), 1, "{key}");
+            let (_, body) = decode_egress(&events[0].payload);
+            assert_eq!(body.denial, Some(denial.clone()), "{key}");
+        }
+        // The plain function writes no denial.
+        append_egress_decided(&store, "sess-e3", "ok.example", 443, "ALLOW", "p-1");
+        let (_, body) =
+            decode_egress(&store.read_outbox_for_run("run-e3", 0).expect("events")[1].payload);
+        assert!(body.denial.is_none());
     }
 }

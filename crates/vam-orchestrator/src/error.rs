@@ -1,6 +1,20 @@
 use thiserror::Error;
 use vam_security::SecurityError;
 
+/// The required secrets an admission found missing: the `binding@scope, ...` text the refusal
+/// has always shown (this is its `Display`), and each `(binding, scope)` for the typed denial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingSecrets {
+    pub text: String,
+    pub items: Vec<(String, String)>,
+}
+
+impl std::fmt::Display for MissingSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttemptState {
     Queued,
@@ -167,7 +181,7 @@ pub enum OrchestratorError {
     #[error("missing secret binding '{binding_id}' (scope {scope})")]
     MissingSecretBinding { binding_id: String, scope: String },
     #[error("admission failed: missing required secrets: {0}")]
-    MissingRequiredSecrets(String),
+    MissingRequiredSecrets(MissingSecrets),
     #[error("agent is running on workspace '{workspace_id}' (session {session_id}, run {run_id})")]
     AgentRunning {
         workspace_id: String,
