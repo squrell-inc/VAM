@@ -9,6 +9,7 @@ pub mod connectors;
 pub mod dock;
 mod dry_run;
 pub mod evidence;
+pub mod fix;
 pub mod health;
 pub mod keys;
 pub mod login;

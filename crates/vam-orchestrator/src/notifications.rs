@@ -59,10 +59,11 @@ pub enum Kind {
     TriggerFired,
     TriggerSkipped,
     ConnectionNeedsReauth,
+    FixRequested,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 12] = [
+    pub const ALL: [Kind; 13] = [
         Kind::ApprovalPending,
         Kind::QuestionAsked,
         Kind::GateOpened,
@@ -75,6 +76,7 @@ impl Kind {
         Kind::TriggerFired,
         Kind::TriggerSkipped,
         Kind::ConnectionNeedsReauth,
+        Kind::FixRequested,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -91,6 +93,7 @@ impl Kind {
             Kind::TriggerFired => "trigger.fired",
             Kind::TriggerSkipped => "trigger.skipped",
             Kind::ConnectionNeedsReauth => "connection.needs_reauth",
+            Kind::FixRequested => "fix.requested",
         }
     }
 
@@ -105,7 +108,8 @@ impl Kind {
             Kind::ApprovalPending
             | Kind::QuestionAsked
             | Kind::GateOpened
-            | Kind::ConnectionNeedsReauth => Severity::Action,
+            | Kind::ConnectionNeedsReauth
+            | Kind::FixRequested => Severity::Action,
             Kind::RunFinished | Kind::ReportArrived | Kind::TriggerFired => Severity::Info,
             Kind::DelegationStopped
             | Kind::DelegationExpired
@@ -133,7 +137,7 @@ impl Kind {
     }
 }
 
-fn clip(s: &str, max: usize) -> String {
+pub(crate) fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
@@ -160,6 +164,7 @@ pub fn render(kind: Kind, agent: &str, detail: &str, expires_at: Option<i64>) ->
         Kind::TriggerFired => format!("{agent}: a scheduled run was queued"),
         Kind::TriggerSkipped => format!("{agent}: a scheduled run was skipped"),
         Kind::ConnectionNeedsReauth => format!("Reconnect {agent} to continue"),
+        Kind::FixRequested => format!("{agent}: a fix was requested"),
     };
     let mut body = match kind {
         Kind::ApprovalPending => format!("Tool: {detail}"),
@@ -756,7 +761,7 @@ pub fn record_run_finished(
     Ok(true)
 }
 
-fn agent_label_of(agent_urn: &str) -> String {
+pub(crate) fn agent_label_of(agent_urn: &str) -> String {
     agent_urn
         .rsplit('/')
         .next()
@@ -1058,6 +1063,10 @@ impl Row {
         let mut action = serde_json::from_str::<Value>(&self.action).unwrap_or(Value::Null);
         if let Some(denial) = action.as_object_mut().and_then(|a| a.remove("denial")) {
             put("denial", denial);
+        }
+        // A fix request's typed payload is lifted the same way: `fixRequest` is the admin's card.
+        if let Some(fix_request) = action.as_object_mut().and_then(|a| a.remove("fixRequest")) {
+            put("fixRequest", fix_request);
         }
         put("action", action);
         put("count", json!(self.count));

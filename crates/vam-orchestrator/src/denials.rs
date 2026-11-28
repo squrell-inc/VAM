@@ -310,6 +310,22 @@ pub struct NewDenial<'a> {
     pub rules: Option<Rules>,
 }
 
+/// A stored denial as `POST /v1/fix-requests` reads it: the columns a request is re-derived
+/// from. Everything here was written by the host at refusal time.
+#[derive(Debug, Clone)]
+pub struct StoredDenial {
+    pub id: String,
+    pub run_id: Option<String>,
+    pub caller_user_id: String,
+    pub agent_urn: String,
+    pub reason: String,
+    pub subject: String,
+    pub target: String,
+    pub change: String,
+    pub who: String,
+    pub created_at: i64,
+}
+
 impl SqliteWorkflowStore {
     /// Stores one denial and returns its id (`dnl_` plus 26 characters).
     pub fn insert_denial(&self, d: &NewDenial<'_>) -> Result<String, OrchestratorError> {
@@ -348,6 +364,38 @@ impl SqliteWorkflowStore {
             ],
         )?;
         Ok(id)
+    }
+
+    /// One stored denial by id, for `POST /v1/fix-requests`. `None` when there is no such row;
+    /// a storage failure is an error, never "not found".
+    pub fn get_denial(&self, id: &str) -> Result<Option<StoredDenial>, OrchestratorError> {
+        use rusqlite::OptionalExtension;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        Ok(connection
+            .query_row(
+                "SELECT id, run_id, caller_user_id, agent_urn, reason, subject, target, change,
+                        who, created_at
+                 FROM denials WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok(StoredDenial {
+                        id: r.get(0)?,
+                        run_id: r.get(1)?,
+                        caller_user_id: r.get(2)?,
+                        agent_urn: r.get(3)?,
+                        reason: r.get(4)?,
+                        subject: r.get(5)?,
+                        target: r.get(6)?,
+                        change: r.get(7)?,
+                        who: r.get(8)?,
+                        created_at: r.get(9)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// Whether `urn` is a marketplace install (read-only on this node).
@@ -793,7 +841,7 @@ pub fn egress_kind(policy_label: &str) -> EgressKind {
 }
 
 /// A host name usable in a fix target: lower-case letters, digits, dot, dash, underscore.
-fn is_fixable_host(host: &str) -> bool {
+pub(crate) fn is_fixable_host(host: &str) -> bool {
     !host.is_empty()
         && host.bytes().all(|b| {
             b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_')

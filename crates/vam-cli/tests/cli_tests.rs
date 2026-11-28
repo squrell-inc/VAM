@@ -3063,3 +3063,59 @@ fn space_create_rename_and_thread_rename_call_the_id_routes() {
     rename.assert();
     thread.assert();
 }
+
+#[test]
+fn fix_request_posts_only_the_reference_and_prints_the_request_and_who_was_asked() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let reference = "dnl_k3q7xw2m5b4n6a7c3d2e3f4g5h";
+    let server = MockServer::start();
+    let created = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/fix-requests")
+            .header_exists("idempotency-key")
+            .json_body(serde_json::json!({ "decisionRef": reference }));
+        then.status(201)
+            .header("content-type", "application/json")
+            .body(r#"{"id":"frq_abc","asked":"an org admin","existing":false}"#);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let host = server.base_url();
+    let base = ["--host", host.as_str(), "--token", "vam_sk_test"];
+    let go = |extra: &[&str]| {
+        let mut args: Vec<&str> = base.to_vec();
+        args.extend_from_slice(extra);
+        run_vam(dir.path(), &args)
+    };
+    let out = go(&["fix", "request", reference]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("Asked an org admin. Request frq_abc."),
+        "{text}"
+    );
+    created.assert();
+
+    // A reference of the wrong shape is refused before any request.
+    let out = go(&["fix", "request", "not-a-ref"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    created.assert_calls(1);
+
+    // The node's 404 for a reference that is not yours says where to get one.
+    let missing = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/fix-requests")
+            .body_includes("dnl_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+        then.status(404)
+            .header("content-type", "application/json")
+            .body(r#"{"code":"NotFound","message":"denial not found","retryable":false}"#);
+    });
+    let out = go(&["fix", "request", "dnl_aaaaaaaaaaaaaaaaaaaaaaaaaa"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("copy the reference from its Ask: line"),
+        "{err}"
+    );
+    missing.assert();
+}
