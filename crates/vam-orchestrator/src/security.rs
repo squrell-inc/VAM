@@ -1108,7 +1108,8 @@ impl SessionSecurityContext {
                          nothing was sent"
                     ),
                     details: vec![crate::denials::pack_any(&crate::denials::plain_denial(
-                        tool_name,
+                        // The model supplied this name: no subject, as at the catalog miss.
+                        "",
                         crate::denials::Text::BuiltIn,
                     ))],
                     retryable: false,

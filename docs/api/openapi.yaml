@@ -7550,7 +7550,7 @@ components:
           description: Who was asked, as host text (`an org admin`, `the agent's owner`). No names.
         existing:
           type: boolean
-          description: True when this is the first request of the last 24 hours and nothing new was written.
+          description: True when an earlier request in the last 24 hours already covers this one; nothing new was written and the returned request is that earlier one.
     Denial:
       type: object
       description: >

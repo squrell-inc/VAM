@@ -16,7 +16,7 @@ when:
   - chat: { text: "e2e-step:ask Search my mail", as: org-member }
 then:
   - expect: { run: succeeded }
-  - expect: { thread: { role: tool, contains: "Suggested fix (for the user, not for you):" } }
+  - expect: { thread: { role: tool, contains: "Suggested fix (for the user, not for you): an org admin can enable microsoft-365 for this organization." } }
   - expect:
       event: policy.decided
       tool: m365_probe_search

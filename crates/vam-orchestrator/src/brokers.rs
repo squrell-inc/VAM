@@ -1262,7 +1262,7 @@ struct EgressDenialCache {
     seen: std::sync::Mutex<std::collections::HashMap<String, Option<vam_spec::v1::Denial>>>,
 }
 
-const EGRESS_DENIAL_HOSTS: usize = 64;
+const EGRESS_DENIAL_HOSTS: usize = crate::denials::MAX_DENIAL_ROWS_PER_SESSION;
 
 impl EgressDenialCache {
     fn denial(
@@ -2144,5 +2144,93 @@ mod mock_scripts_load_tests {
             .expect("loads")
             .expect("scripted mode on");
         assert_eq!(scripts.ids().collect::<Vec<_>>(), vec!["smoke"]);
+    }
+}
+
+#[cfg(test)]
+mod egress_denial_cache_tests {
+    use super::{EgressDenialCache, EGRESS_DENIAL_HOSTS};
+    use crate::workflow::SqliteWorkflowStore;
+    use vam_spec::v1::{AgentSpec, ResourceId};
+
+    const URN: &str = "urn:vam:agent:hub.example.dev/acme/helper";
+    const LABEL: &str = "rule=agent rule internet:*; active-policy:terminate";
+
+    fn rows(st: &SqliteWorkflowStore) -> i64 {
+        st.connection
+            .lock()
+            .expect("lock")
+            .query_row("SELECT COUNT(*) FROM denials", [], |r| r.get(0))
+            .expect("count")
+    }
+
+    fn setup() -> SqliteWorkflowStore {
+        let st = SqliteWorkflowStore::in_memory().expect("store");
+        for user in ["owner1", "other1"] {
+            st.create_user_with_role(user, user, crate::users::UserRole::Member)
+                .expect("user");
+        }
+        let spec = AgentSpec {
+            resource_id: Some(ResourceId { urn: URN.into() }),
+            display_name: "Helper".into(),
+            role: "assistant".into(),
+            instruction_source: Some(
+                vam_spec::v1::agent_spec::InstructionSource::SystemInstructions("x".into()),
+            ),
+            ..Default::default()
+        };
+        st.publish_agent_draft_with_owner(&spec, "owner1")
+            .expect("agent");
+        st.create_session("s1", None, "vm-s1", "ws", "storage-default")
+            .expect("session");
+        st.connection
+            .lock()
+            .expect("lock")
+            .execute(
+                "UPDATE sessions SET owner_user_id = 'other1' WHERE session_id = 's1'",
+                [],
+            )
+            .expect("owner");
+        st
+    }
+
+    #[test]
+    fn a_repeated_host_gets_the_same_reference_and_one_row() {
+        let st = setup();
+        let cache = EgressDenialCache::default();
+        let a = cache
+            .denial(&st, "s1", Some(URN), "Example.com", LABEL)
+            .expect("denial");
+        assert!(a.decision_ref.starts_with("dnl_"), "{a:?}");
+        let b = cache
+            .denial(&st, "s1", Some(URN), "example.com", LABEL)
+            .expect("denial");
+        assert_eq!(a.decision_ref, b.decision_ref);
+        assert_eq!(rows(&st), 1);
+    }
+
+    #[test]
+    fn the_cache_holds_at_most_the_cap_and_later_hosts_get_no_row() {
+        let st = setup();
+        let cache = EgressDenialCache::default();
+        assert_eq!(EGRESS_DENIAL_HOSTS, 64);
+        for i in 0..EGRESS_DENIAL_HOSTS {
+            let d = cache
+                .denial(&st, "s1", Some(URN), &format!("h{i}.example.com"), LABEL)
+                .expect("denial");
+            assert!(d.decision_ref.starts_with("dnl_"));
+        }
+        assert_eq!(rows(&st), EGRESS_DENIAL_HOSTS as i64);
+        let over = cache
+            .denial(&st, "s1", Some(URN), "over.example.com", LABEL)
+            .expect("denial");
+        assert!(over.fix.is_some() && over.decision_ref.is_empty());
+        assert_eq!(rows(&st), EGRESS_DENIAL_HOSTS as i64);
+        assert_eq!(cache.seen.lock().expect("lock").len(), EGRESS_DENIAL_HOSTS);
+        // A host already held still answers with its reference.
+        let again = cache
+            .denial(&st, "s1", Some(URN), "h0.example.com", LABEL)
+            .expect("denial");
+        assert!(again.decision_ref.starts_with("dnl_"));
     }
 }

@@ -184,6 +184,16 @@ fn plain(value: &str) -> Option<&str> {
     ok.then_some(value)
 }
 
+/// A secret id fit for a code span: `[A-Za-z0-9._/-]`, 1 to 128 bytes (no `:`, no backtick).
+fn secret_id(value: &str) -> Option<&str> {
+    let ok = !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'));
+    ok.then_some(value)
+}
+
 /// A username (or user id) as a name: letters, digits and `. - _ + @` only.
 fn display_name(name: &str) -> String {
     let ok = !name.is_empty()
@@ -206,6 +216,7 @@ pub fn notification_text(
     requester: &str,
     agent_urn: &str,
     fix_target: &str,
+    subject: &str,
 ) -> (String, String) {
     let u = display_name(requester);
     let label = notifications::agent_label_of(agent_urn);
@@ -225,7 +236,10 @@ pub fn notification_text(
             )
         }
         FixChange::AllowTool => {
-            let t = plain(shown).unwrap_or("a tool");
+            // The target of an allow may be `builtin:write_file`; the denial subject is the
+            // catalog tool name.
+            let subject = denials::sanitize_subject(subject);
+            let t = plain(&subject).unwrap_or("a tool");
             (
                 format!("{u} asks you to allow {t} for {agent}"),
                 format!(
@@ -246,13 +260,20 @@ pub fn notification_text(
             )
         }
         FixChange::SetSecret => {
-            let s = plain(shown).unwrap_or("a secret");
-            (
-                format!("{u} asks you to set the secret {s}"),
-                format!(
-                    "A run of {agent} by {u} needs the organization secret {s}, which is not set."
+            match secret_id(shown) {
+                Some(id) => (
+                    format!("{u} asks you to set a secret for {agent}"),
+                    format!(
+                        "A run of {agent} by {u} needs the organization secret `{id}`, which is not set."
+                    ),
                 ),
-            )
+                None => (
+                    format!("{u} asks you to set a secret for {agent}"),
+                    format!(
+                        "A run of {agent} by {u} needs a secret this agent needs, which is not set."
+                    ),
+                ),
+            }
         }
         _ => (
             format!("{u} asks for a change to {agent}"),
@@ -328,7 +349,13 @@ pub fn plan(
         who: el.who.as_str_name().to_string(),
         created_at: now,
     };
-    let (title, body) = notification_text(el.change, requester_name, &den.agent_urn, &el.target);
+    let (title, body) = notification_text(
+        el.change,
+        requester_name,
+        &den.agent_urn,
+        &el.target,
+        &den.subject,
+    );
     let denial = denials::denial_json(&denial_for_recipient(den, el));
     let api = denials::route_for(el.change, &el.target)
         .map(|r| format!("{} {}", r.method, r.path))
@@ -369,7 +396,8 @@ pub fn plan(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filed {
     pub request: FixRequest,
-    /// The request is the first one of the last 24 hours; nothing new was written.
+    /// True when an earlier request in the last 24 hours already covers this one; nothing new was
+    /// written and the returned request is that earlier one.
     pub existing: bool,
 }
 
@@ -723,7 +751,13 @@ mod tests {
 
     #[test]
     fn notification_text_is_host_text_with_plain_values_only() {
-        let (t, b) = notification_text(FixChange::EnableConnector, "alice", URN, "microsoft-365");
+        let (t, b) = notification_text(
+            FixChange::EnableConnector,
+            "alice",
+            URN,
+            "microsoft-365",
+            "",
+        );
         assert_eq!(t, "alice asks you to enable microsoft-365");
         assert!(
             b.contains("alice ran helper") && b.contains("not enabled"),
@@ -735,6 +769,7 @@ mod tests {
             "alice",
             URN,
             &format!("{URN}#evil.example.com"),
+            "evil.example.com",
         );
         assert!(!t.contains("evil.example.com"), "{t}");
         assert!(b.contains("`evil.example.com`"), "{b}");
@@ -748,18 +783,52 @@ mod tests {
             "alice",
             URN,
             "jira/auth header\n[x](http://e)",
+            "",
         );
-        assert_eq!(t, "alice asks you to set the secret a secret");
+        assert_eq!(t, "alice asks you to set a secret for helper");
         assert!(!b.contains("http") && !b.contains('\n'), "{b}");
+        assert!(b.contains("a secret this agent needs"), "{b}");
+        // A `/`-containing id is shown in a code span, in the body only.
+        let (t, b) = notification_text(FixChange::SetSecret, "alice", URN, "jira/auth-header", "");
+        assert!(!t.contains("jira"), "{t}");
+        assert!(
+            b.contains("the organization secret `jira/auth-header`,"),
+            "{b}"
+        );
+        // A `:` or a backtick is not an id.
+        for bad in ["a:b", "x`y", "", &"a".repeat(129)] {
+            let (_, b) = notification_text(FixChange::SetSecret, "alice", URN, bad, "");
+            assert!(
+                b.contains("a secret this agent needs") && !b.contains('`'),
+                "{b}"
+            );
+        }
+        // A builtin tool target renders the catalog tool name, not the target.
+        let (t, b) = notification_text(
+            FixChange::AllowTool,
+            "alice",
+            URN,
+            &format!("{URN}#builtin:write_file"),
+            "write_file",
+        );
+        assert_eq!(t, "alice asks you to allow write_file for helper");
+        assert!(b.contains("write_file is not allowed"), "{b}");
         let (t, _) = notification_text(
             FixChange::AllowTool,
             "alice",
             URN,
             &format!("{URN}#{}", "a".repeat(129)),
+            &"a".repeat(129),
         );
         assert!(t.contains("allow a tool for helper"), "{t}");
         // A name with markup is not shown.
-        let (t, _) = notification_text(FixChange::AllowTool, "al ice]\n", URN, &format!("{URN}#t"));
+        let (t, _) = notification_text(
+            FixChange::AllowTool,
+            "al ice]\n",
+            URN,
+            &format!("{URN}#t"),
+            "t",
+        );
         assert!(t.starts_with("A user asks"), "{t}");
         // Sizes.
         let long = "a".repeat(300);
@@ -768,6 +837,7 @@ mod tests {
             &long,
             &format!("urn:vam:agent:h/n/{long}"),
             &format!("{URN}#{long}"),
+            &long,
         );
         assert!(t.chars().count() <= MAX_TITLE_CHARS && b.chars().count() <= MAX_BODY_CHARS);
     }
