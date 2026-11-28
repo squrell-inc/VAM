@@ -183,7 +183,7 @@ Wave 0 may need one runner step in `vam-e2e` (send a fix request from the latest
 
 | Item | Scope | Files | Acceptance |
 |---|---|---|---|
-| SA-1.1 | Proto: `Denial`, `DenialReason` (incl. reserved `SPACE_BUSY`), `SuggestedFix`, `FixChange` (incl. reserved `SET_SPACE_VERSION`, `REQUEST_AGENT_ACCESS`, `STOP_RUN`), `FixWho`; `denial` on `PolicyDecidedPayload` and `EgressDecidedPayload`; descriptor baseline | `proto/vam/v1/common.proto`, `events.proto`, baseline | `cargo run -p vam-spec --example generate_baseline`; proto checks green |
+| SA-1.1 | Proto: `Denial`, `DenialReason` (incl. reserved `SPACE_BUSY`), `SuggestedFix`, `FixChange` (incl. reserved `SET_SPACE_VERSION`, `REQUEST_AGENT_ACCESS`, `STOP_RUN`), `FixWho`; `denial` on `PolicyDecidedPayload` and `EgressDecidedPayload`; descriptor baseline | `proto/vam/v1/common.proto`, `events.proto`, baseline | `cargo run -p vam-spec --example generate_baseline`; proto checks green (+ baseline note below) |
 | SA-1.2 | `denials` store and id; host text templates keyed `(reason, change, who)`; `fix_recipients()` | new `crates/vam-orchestrator/src/denials.rs`, schema init | unit tests per template; write failure leaves the refusal intact |
 | SA-1.3 | Denials at every `PERMISSION_DENIED` site in `security.rs` (5) and `connector_park.rs` (1), with the mapping table above; `policy.decided` carries it | `security.rs`, `connector_park.rs`, `events.rs` | per-scope unit tests; scenario `denied-tool-...` |
 | SA-1.4 | Guest fix line in `denied_observation` from `ErrorStatus.details` only, fixed template table in the guest | `crates/vam-runtime/src/agent.rs` (+ a small template module) | unit tests incl. injected text; scenario `fix-line-...` |
@@ -207,6 +207,8 @@ Wave 0 may need one runner step in `vam-e2e` (send a fix request from the latest
 
 Build waves in the same repo never run in parallel. Each wave lands as one PR into
 `fix/typed-denials`; the phase branch goes to `main` only on your word (Q6).
+
+Proto coordination: S1 adds no fields to `orchestrator.proto` (Apps P0 claims `Space.app_id`=8, `RunSpec.app_id`=14, `RunStatus.app_id`=24, `CallerContext.app_id`=11 and a new `App` message there); S1's proto changes are only in `common.proto` and `events.proto`, and whichever lane merges second regenerates the descriptor baseline.
 
 #### Out of scope (later)
 
