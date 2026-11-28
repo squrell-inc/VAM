@@ -1006,6 +1006,8 @@ pub(crate) mod test_support {
         pub methods_seen: Vec<String>,
         /// Tools the host refuses at intent time, with the reason it gives.
         pub denied_tools: std::collections::HashMap<String, String>,
+        /// `ErrorStatus.details` the host attaches to those refusals (a typed denial).
+        pub denied_details: Vec<prost_types::Any>,
         /// Text the host returns for `ExecuteHostTool`, by tool name.
         pub host_tool_text: std::collections::HashMap<String, String>,
         /// Tool names asked about in `RequestToolAuthorization`, in order.
@@ -1119,7 +1121,7 @@ pub(crate) mod test_support {
                         error: Some(ErrorStatus {
                             code: 7,
                             message: reason.clone(),
-                            details: vec![],
+                            details: host.denied_details.clone(),
                             retryable: false,
                         }),
                         capability_token: None,

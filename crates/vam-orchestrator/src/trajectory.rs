@@ -252,6 +252,7 @@ pub fn emit_policy_decided(
     disposition: &str,
     args_digest: &str,
     path: Option<&str>,
+    denial: Option<&serde_json::Value>,
 ) {
     let mut payload = serde_json::json!({
         "tool_name": tool_name,
@@ -260,6 +261,10 @@ pub fn emit_policy_decided(
     });
     if let Some(p) = path.filter(|s| !s.is_empty()) {
         payload["path"] = serde_json::Value::String(p.to_string());
+    }
+    // The typed denial as proto JSON (camelCase), flat on the event.
+    if let Some(d) = denial {
+        payload["denial"] = d.clone();
     }
     append_trajectory_event(store, run_id, EVENT_POLICY_DECIDED, &payload);
 

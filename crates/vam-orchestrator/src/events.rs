@@ -401,6 +401,7 @@ pub fn egress_decided_json(
         disposition: disposition.to_string(),
         policy_id: policy_id.to_string(),
         domain_digest,
+        denial: None,
     };
     let any = pack_any("vam.v1.EgressDecidedPayload", &payload)?;
     let event = build_cloud_event(

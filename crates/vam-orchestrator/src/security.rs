@@ -344,7 +344,40 @@ forbid (principal, action == Action::"WriteFile", resource)
 when { context has path && context.path like "/mnt/drive9/skills/*" };
 "#;
 
-fn version_text(version: &vam_spec::v1::Version) -> String {
+/// The scope and rule that decided a call, for the run's record and for the denial. The
+/// diagnostic can name a path; this never does.
+pub(crate) fn deciding_of(
+    decided_by: &str,
+    guard_reason: Option<&str>,
+    target_row: Option<&crate::session_targets::SessionToolTarget>,
+    outcome: &DecisionOutcome,
+) -> (String, String) {
+    use crate::run_facts::decided_by as by;
+    match decided_by {
+        by::PLAYBOOK_GUARD => (
+            "playbook".to_string(),
+            guard_reason.unwrap_or_default().to_string(),
+        ),
+        // The diagnostic can name a path; the record never does.
+        by::PATH_LIMB => ("path".to_string(), "path limit".to_string()),
+        by::HOST_ERROR => ("host".to_string(), String::new()),
+        _ => match target_row {
+            Some(row) => (row.deciding_scope.clone(), row.deciding_rule.clone()),
+            None => (
+                "policy".to_string(),
+                match outcome {
+                    DecisionOutcome::Allow { matching_policies }
+                    | DecisionOutcome::Deny {
+                        matching_policies, ..
+                    } => matching_policies.join(","),
+                    DecisionOutcome::Suspend { .. } => String::new(),
+                },
+            ),
+        },
+    }
+}
+
+pub(crate) fn version_text(version: &vam_spec::v1::Version) -> String {
     if version.prerelease.is_empty() {
         format!("{}.{}.{}", version.major, version.minor, version.patch)
     } else {
@@ -793,7 +826,6 @@ impl SessionSecurityContext {
         args_digest: &str,
         constraint_rule: Option<String>,
     ) {
-        use crate::run_facts::decided_by as by;
         let (disposition, approval_request_id) = match outcome {
             DecisionOutcome::Allow { .. } => ("allowed", None),
             DecisionOutcome::Deny { .. } => ("denied", None),
@@ -802,28 +834,8 @@ impl SessionSecurityContext {
                 ..
             } => ("asked", Some(approval_request_id.clone())),
         };
-        let (deciding_scope, deciding_rule) = match decided_by {
-            by::PLAYBOOK_GUARD => (
-                "playbook".to_string(),
-                guard_reason.unwrap_or_default().to_string(),
-            ),
-            // The diagnostic can name a path; the record never does.
-            by::PATH_LIMB => ("path".to_string(), "path limit".to_string()),
-            by::HOST_ERROR => ("host".to_string(), String::new()),
-            _ => match target_row {
-                Some(row) => (row.deciding_scope.clone(), row.deciding_rule.clone()),
-                None => (
-                    "policy".to_string(),
-                    match outcome {
-                        DecisionOutcome::Allow { matching_policies }
-                        | DecisionOutcome::Deny {
-                            matching_policies, ..
-                        } => matching_policies.join(","),
-                        DecisionOutcome::Suspend { .. } => String::new(),
-                    },
-                ),
-            },
-        };
+        let (deciding_scope, deciding_rule) =
+            deciding_of(decided_by, guard_reason, target_row, outcome);
         // A call that passes only because an earlier ask was approved.
         let via_grant =
             outcome.is_allowed() && eval_request.context.hitl_approved == Some(true) && {
@@ -1095,7 +1107,10 @@ impl SessionSecurityContext {
                         "call id '{call_id}' was already used for a different call; \
                          nothing was sent"
                     ),
-                    details: vec![],
+                    details: vec![crate::denials::pack_any(&crate::denials::plain_denial(
+                        tool_name,
+                        crate::denials::Text::BuiltIn,
+                    ))],
                     retryable: false,
                 }),
                 capability_token: None,
@@ -1192,7 +1207,11 @@ impl SessionSecurityContext {
                             "Tool '{}' is not present in the host-authoritative tool catalog",
                             tool_name
                         ),
-                        details: vec![],
+                        // The name is the model's; no subject is trusted.
+                        details: vec![crate::denials::pack_any(&crate::denials::plain_denial(
+                            "",
+                            crate::denials::Text::BuiltIn,
+                        ))],
                         retryable: false,
                     }),
                     capability_token: None,
@@ -1280,7 +1299,10 @@ impl SessionSecurityContext {
                         "Skill tamper detected: tool '{}' script digest mismatch (expected {}, observed {})",
                         tool_name, catalog_entry.digest, observed_script_digest
                     ),
-                    details: vec![],
+                    details: vec![crate::denials::pack_any(&crate::denials::plain_denial(
+                        &tool_name,
+                        crate::denials::Text::BuiltIn,
+                    ))],
                     retryable: false,
                 }),
                 capability_token: None,
@@ -1511,7 +1533,10 @@ impl SessionSecurityContext {
                     error: Some(ErrorStatus {
                         code: 7, // PERMISSION_DENIED
                         message: reason,
-                        details: vec![],
+                        details: vec![crate::denials::pack_any(&crate::denials::plain_denial(
+                            &tool_name,
+                            crate::denials::Text::BuiltIn,
+                        ))],
                         retryable: false,
                     }),
                     capability_token: None,
@@ -1756,6 +1781,29 @@ impl SessionSecurityContext {
             crate::egress::emit_ocsf(&ocsf_event);
         }
 
+        // The typed denial, built once from the final outcome: the event and the refusal carry
+        // the same one. Evidence and explanation only; it cannot change the outcome.
+        let denial: Option<vam_spec::v1::Denial> = matches!(outcome, DecisionOutcome::Deny { .. })
+            .then(|| {
+                let (scope, _) = deciding_of(
+                    decided_by,
+                    guard_rule.as_deref().or(guard_denial.as_deref()),
+                    target_row.as_ref(),
+                    &outcome,
+                );
+                crate::denials::policy_denial(
+                    store,
+                    &self.session_id,
+                    &self.agent_urn,
+                    &tool_name,
+                    decided_by,
+                    &scope,
+                    target_row.as_ref(),
+                )
+            });
+        let denial_event = denial
+            .as_ref()
+            .and_then(|d| crate::denials::event_denial(store, &self.session_id, run_id, d));
         emit_policy_decided(
             store,
             run_id,
@@ -1763,6 +1811,7 @@ impl SessionSecurityContext {
             decision_str,
             &computed_digest,
             workspace_path.as_deref(),
+            denial_event.as_ref(),
         );
         self.record_pep_decision(
             store,
@@ -1968,7 +2017,7 @@ impl SessionSecurityContext {
                     error: Some(ErrorStatus {
                         code: 7, // PERMISSION_DENIED
                         message: diagnostic_message,
-                        details: vec![],
+                        details: denial.iter().map(crate::denials::pack_any).collect(),
                         retryable: false,
                     }),
                     capability_token: None,

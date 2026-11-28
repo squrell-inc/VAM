@@ -26,6 +26,7 @@ pub mod connectors;
 pub mod contacts;
 pub mod credentials;
 pub mod daemon;
+pub mod denials;
 pub mod driver;
 pub mod effect_class;
 pub mod effect_key;

@@ -176,6 +176,66 @@ message ErrorStatus {
   repeated google.protobuf.Any details = 4;// Arbitrary structured payloads (e.g., ValidationViolation)
 }
 
+// Why a call was refused. The host sets it; clients and the guest act on the enum, never on text.
+// Values are unprefixed like VamErrorCode so the JSON names read POLICY_RULE, ORG_ADMIN.
+enum DenialReason {
+  DENIAL_REASON_UNSPECIFIED = 0;
+  POLICY_RULE = 1;
+  EGRESS_RULE = 2;
+  SECRET_MISSING = 3;
+  CONNECTOR_NOT_CONNECTED = 4;
+  CONNECTOR_DISABLED = 5;
+  AGENT_NOT_GRANTED = 6;
+  VERSION_STALE = 7;
+  QUOTA = 8;
+  SPACE_BUSY = 9;          // reserved for the Space upgrade phase
+}
+
+// The closed list of changes a fix can ask for.
+enum FixChange {
+  FIX_CHANGE_UNSPECIFIED = 0;
+  ALLOW_TOOL = 1;
+  ALLOW_HOST = 2;
+  SET_SECRET = 3;
+  CONNECT_CONNECTOR = 4;
+  ENABLE_CONNECTOR = 5;
+  REQUEST_AGENT_ACCESS = 6;
+  SET_SPACE_VERSION = 7;   // reserved for the Space upgrade phase
+  RAISE_LIMIT = 8;
+  STOP_RUN = 9;
+}
+
+// Who holds the right to apply a fix.
+enum FixWho {
+  FIX_WHO_UNSPECIFIED = 0;
+  SELF = 1;
+  AGENT_OWNER = 2;
+  ORG_ADMIN = 3;
+}
+
+// An existing write route that applies a fix, for API callers. Clients check it against their own list.
+message FixRoute {
+  string method = 1;
+  string path = 2;
+}
+
+message SuggestedFix {
+  FixChange change = 1;
+  string target = 2;           // what the change acts on (agent urn#permission target, host, binding, connector id)
+  FixWho who = 3;
+  FixRoute route = 4;
+  bool caller_can_apply = 5;   // a hint: the host's read of the caller's rights when it refused
+}
+
+// A typed refusal, packed into ErrorStatus.details as type.googleapis.com/vam.v1.Denial.
+message Denial {
+  DenialReason reason = 1;
+  string subject = 2;          // a host identifier: tool, host, binding or connector id; empty when none is trusted
+  SuggestedFix fix = 3;        // absent when nobody can change it
+  string text = 4;             // one host-written sentence for people, from a fixed template
+  string decision_ref = 5;     // id of the stored denials row; empty when no row was written
+}
+
 // Signature metadata for canonical protobuf bytes. Signing algorithms are
 // explicit so verification never depends on out-of-band defaults.
 message Signature {
