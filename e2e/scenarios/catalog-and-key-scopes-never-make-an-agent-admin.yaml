@@ -1,0 +1,38 @@
+id: catalog-and-key-scopes-never-make-an-agent-admin
+title: Catalog and key scopes never make a user an agent admin, and a named admin needs no scope
+description: >
+  A publisher's catalog write does not let them set an agent's policy, read or set its admins, decide a request or use the agent. A member whose key has only the member scopes, named as the agent's admin, decides the request and sets the policy. The requesting member's session carries the same access as their key.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member-with-a-narrow-key, as: nk }
+  - { piece: org-member, as: member }
+  - agent-plain
+when:
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/admins", status: 200, body: { userIds: ["{nk.userId}"] } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr } }
+  - identity-request: { as: pub, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 403, body: { visibility: org, mode: open } }
+  - identity-request: { as: pub, credential: key, method: get, path: "/v1/agents/{{urn:agent-plain}}/admins", status: 403 }
+  - identity-request: { as: pub, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/admins", status: 403, body: { userIds: ["{pub.userId}"] } }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 404, body: { decision: approve } }
+  - chat: { text: "e2e-step:hi Hello", agent: agent-plain, as: pub, refused: true }
+  - expect: { refused: true, status: 403, contains: "agent_access_required:" }
+  - identity-request: { as: nk, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 200, body: { decision: approve } }
+  - identity-request: { as: nk, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+then:
+  - login: { as: member }
+  - identity-request: { as: member, credential: session, method: get, path: "/v1/agents/{{urn:agent-plain}}", status: 200 }
+  - identity-request: { as: member, credential: session, method: get, path: "/v1/agents", status: 200, contains: "{{urn:agent-plain}}" }
+guards:
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/auth.rs
+  - vam:crates/vam-orchestrator/src/api/catalog_auth.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+mock:
+  - when: { step: hi, stepStart: true }
+    reply: { text: Hello. }
+status: active

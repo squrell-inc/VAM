@@ -1,0 +1,23 @@
+{
+  "spec": {
+    "resourceId": {
+      "urn": "urn:vam:agent:access.community.example/community/open-helper"
+    },
+    "displayName": "Open helper",
+    "description": "An agent anyone in the org may add.",
+    "role": "Assistant",
+    "systemInstructions": "Answer briefly. Finish with task_complete.",
+    "allowAnyPlaybook": true,
+    "permissions": {
+      "tools": {
+        "default": "deny",
+        "rules": [
+          {
+            "target": "builtin:load_skill",
+            "decision": "allow"
+          }
+        ]
+      }
+    }
+  }
+}
