@@ -1,4 +1,5 @@
-entity Agent;
+entity App;
+entity Agent in [App];
 entity User;
 // Required attributes. The host always sets each one to "allow", "ask",
 // "deny", or "none". A missing attribute would make Cedar skip a forbid

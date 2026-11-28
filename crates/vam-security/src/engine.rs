@@ -74,8 +74,21 @@ impl CedarPolicyEngine {
     }
 }
 
-impl PolicyDecisionPoint for CedarPolicyEngine {
-    fn evaluate(&self, req: &EvaluationRequest) -> DecisionOutcome {
+impl CedarPolicyEngine {
+    /// Evaluate `req` with the Agent principal placed inside `App::"<app_id>"`.
+    ///
+    /// App limits are written `forbid (principal in App::"<id>", ...)`, never
+    /// `principal == App::...` (the strict validator rejects it). Fail-closed Deny,
+    /// in every mode (also Shadow), when the principal is not an `Agent` or `app_id`
+    /// is not `app_` + 26 characters of `[a-z2-7]`.
+    ///
+    /// This is an inherent method, not part of [`PolicyDecisionPoint`]. P5 decides how
+    /// the PEP reaches it (a downcast or a defaulted trait method).
+    pub fn evaluate_in_app(&self, req: &EvaluationRequest, app_id: &str) -> DecisionOutcome {
+        self.evaluate_with(req, Some(app_id))
+    }
+
+    fn evaluate_with(&self, req: &EvaluationRequest, app_id: Option<&str>) -> DecisionOutcome {
         let principal = match EntityUid::from_str(&req.principal) {
             Ok(uid) => uid,
             Err(e) => {
@@ -86,6 +99,31 @@ impl PolicyDecisionPoint for CedarPolicyEngine {
                     ),
                     matching_policies: Vec::new(),
                 };
+            }
+        };
+
+        let app = match app_id {
+            None => None,
+            Some(id) => {
+                let type_name = principal.type_name().to_string();
+                if type_name != "Agent" {
+                    return DecisionOutcome::Deny {
+                        diagnostic_message: format!(
+                            "evaluate_in_app requires an Agent principal, got '{type_name}'"
+                        ),
+                        matching_policies: Vec::new(),
+                    };
+                }
+                if !is_app_id(id) {
+                    let shown: String = id.chars().take(64).collect();
+                    return DecisionOutcome::Deny {
+                        diagnostic_message: format!(
+                            "invalid App id {shown:?}: expected app_ + 26 characters of a-z2-7"
+                        ),
+                        matching_policies: Vec::new(),
+                    };
+                }
+                Some((&principal, id))
             }
         };
 
@@ -130,7 +168,7 @@ impl PolicyDecisionPoint for CedarPolicyEngine {
             }
         };
 
-        let cedar_request = match Request::new(principal, action, resource, context, None) {
+        let cedar_request = match Request::new(principal.clone(), action, resource, context, None) {
             Ok(r) => r,
             Err(e) => {
                 return DecisionOutcome::Deny {
@@ -140,7 +178,7 @@ impl PolicyDecisionPoint for CedarPolicyEngine {
             }
         };
 
-        let entities = match request_entities(&self.schema, &req.entities) {
+        let entities = match request_entities(&self.schema, &req.entities, app) {
             Ok(entities) => entities,
             Err(err) => {
                 return DecisionOutcome::Deny {
@@ -194,6 +232,12 @@ impl PolicyDecisionPoint for CedarPolicyEngine {
             }
         }
     }
+}
+
+impl PolicyDecisionPoint for CedarPolicyEngine {
+    fn evaluate(&self, req: &EvaluationRequest) -> DecisionOutcome {
+        self.evaluate_with(req, None)
+    }
 
     fn mode(&self) -> PolicyMode {
         self.mode
@@ -224,6 +268,11 @@ impl ArcSwapPolicyEngine {
         self.inner.load()
     }
 
+    /// See [`CedarPolicyEngine::evaluate_in_app`].
+    pub fn evaluate_in_app(&self, req: &EvaluationRequest, app_id: &str) -> DecisionOutcome {
+        self.inner.load().evaluate_in_app(req, app_id)
+    }
+
     pub fn hot_reload(&self, new_engine: CedarPolicyEngine) -> Result<(), SecurityError> {
         let current = self.inner.load();
         if new_engine.generation <= current.generation {
@@ -237,15 +286,45 @@ impl ArcSwapPolicyEngine {
     }
 }
 
-/// Empty `tools` uses `Entities::empty`, the same store legacy requests use.
-fn request_entities(schema: &Schema, tools: &[crate::pdp::ToolEntity]) -> Result<Entities, String> {
-    if tools.is_empty() {
+/// Empty `tools` with no App uses `Entities::empty`, the same store legacy requests use.
+/// With an App, the store is `tools ++ [agent, app]`, built from JSON values (never Cedar
+/// text) so an id with quotes or backslashes stays data.
+fn request_entities(
+    schema: &Schema,
+    tools: &[crate::pdp::ToolEntity],
+    app: Option<(&EntityUid, &str)>,
+) -> Result<Entities, String> {
+    if tools.is_empty() && app.is_none() {
         return Ok(Entities::empty());
     }
-    let json =
-        serde_json::Value::Array(tools.iter().map(|tool| tool.cedar_entity_json()).collect());
-    Entities::from_json_value(json, Some(schema))
+    let mut items: Vec<serde_json::Value> =
+        tools.iter().map(|tool| tool.cedar_entity_json()).collect();
+    if let Some((agent, app_id)) = app {
+        items.push(serde_json::json!({
+            "uid": {"type": "Agent", "id": agent.id().unescaped()},
+            "attrs": {},
+            "parents": [{"type": "App", "id": app_id}],
+        }));
+        items.push(serde_json::json!({
+            "uid": {"type": "App", "id": app_id},
+            "attrs": {},
+            "parents": [],
+        }));
+    }
+    Entities::from_json_value(serde_json::Value::Array(items), Some(schema))
         .map_err(|err| format!("Failed to load request entities: {err}"))
+}
+
+/// `app_` + 26 characters of `[a-z2-7]`. Mirrors `spaces::BASE32` and `mint_id` in
+/// `vam-orchestrator/src/spaces.rs` (26 chars from 16 bytes); `vam-security` cannot
+/// depend on that crate.
+fn is_app_id(id: &str) -> bool {
+    match id.strip_prefix("app_") {
+        Some(rest) => {
+            rest.len() == 26 && rest.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'))
+        }
+        None => false,
+    }
 }
 
 impl PolicyDecisionPoint for ArcSwapPolicyEngine {
