@@ -673,6 +673,7 @@ impl SqliteWorkflowStore {
             crate::resume_store::initialize_schema(&connection)?;
             crate::spaces::initialize_schema(&connection)?;
             crate::notifications::initialize_schema(&connection)?;
+            crate::denials::initialize_schema(&connection)?;
             crate::contacts::initialize_schema(&connection)?;
             crate::node_notify::initialize_schema(&connection)?;
             crate::connectors::initialize_schema(&connection)?;

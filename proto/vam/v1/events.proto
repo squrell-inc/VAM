@@ -49,6 +49,7 @@ message PolicyDecidedPayload {
   string disposition = 2;
   string args_digest = 3;
   optional string path = 4;
+  Denial denial = 5;   // set when disposition is DENY and the host built a typed denial
 }
 
 message SkillLoadedPayload {
@@ -184,6 +185,7 @@ message EgressDecidedPayload {
   string disposition = 3; // "ALLOW" or "DENY"
   string policy_id = 4;
   string domain_digest = 5;
+  Denial denial = 6;   // set on a DENY the host built a typed denial for
 }
 
 message SecretAccessedPayload {

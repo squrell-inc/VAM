@@ -14,6 +14,7 @@ compile_error!(
 pub mod agent;
 pub mod compaction;
 pub mod context_window;
+pub mod denial_line;
 pub mod drive9;
 pub mod egress;
 pub mod exec;

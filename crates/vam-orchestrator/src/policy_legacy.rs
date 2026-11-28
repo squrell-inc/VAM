@@ -64,7 +64,10 @@ fn load_run_spec(
 }
 
 /// The version the run pinned for `agent_urn`, if its `agent_ref` names that agent.
-fn pinned_agent_version<'a>(run_spec: &'a RunSpec, agent_urn: &str) -> Option<&'a Version> {
+pub(crate) fn pinned_agent_version<'a>(
+    run_spec: &'a RunSpec,
+    agent_urn: &str,
+) -> Option<&'a Version> {
     let agent_ref = run_spec.agent_ref.as_ref()?;
     let names_agent = agent_ref
         .resource_id

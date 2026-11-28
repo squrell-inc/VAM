@@ -26,14 +26,24 @@ use crate::workflow::SqliteWorkflowStore;
 pub enum ConnectorGate {
     /// The tool needs no connector, or the member is connected.
     Clear,
-    /// Refused with this fixed text; no park.
-    Refuse(String),
+    /// Refused with this fixed text; no park. The kind says which refusal it is, so the typed
+    /// denial is built from it and never from the text.
+    Refuse(String, RefuseKind),
     /// Parked until `connector_id` is connected (`reconnect`: it was connected and is not now).
     Park {
         connector_id: String,
         name: String,
         reconnect: bool,
     },
+}
+
+/// Which refusal a [`ConnectorGate::Refuse`] is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefuseKind {
+    /// The node does not have the connector the tool needs.
+    Unknown,
+    /// The node has it and the organization has not enabled it (`id`: the connector id).
+    NotEnabled { id: String },
 }
 
 /// What a parked call tells the member: "Connect <name> to continue", or "Reconnect <name> to
@@ -91,7 +101,7 @@ struct Needed {
 
 enum Lookup {
     None,
-    Refuse(String),
+    Refuse(String, RefuseKind),
     Needed(Needed),
 }
 
@@ -112,6 +122,7 @@ fn lookup(store: &SqliteWorkflowStore, session_id: &str, owner: &str, tool: &str
     else {
         return Lookup::Refuse(
             "This tool needs a connector this server does not know; ask your admin.".into(),
+            RefuseKind::Unknown,
         );
     };
     // An MCP connector's connection is its MCP row (its own park); not this gate's.
@@ -129,9 +140,12 @@ fn lookup(store: &SqliteWorkflowStore, session_id: &str, owner: &str, tool: &str
         .flatten()
         .is_some_and(|n| n.enabled && (!needs_consent || n.consent_tenant_id.is_some()));
     if !enabled {
-        return Lookup::Refuse(format!(
-            "{name} is not enabled for this organization; ask your admin to enable {name}."
-        ));
+        return Lookup::Refuse(
+            format!(
+                "{name} is not enabled for this organization; ask your admin to enable {name}."
+            ),
+            RefuseKind::NotEnabled { id },
+        );
     }
     Lookup::Needed(Needed {
         owner: owner.to_string(),
@@ -195,7 +209,7 @@ fn gate_for(
 ) -> ConnectorGate {
     match lookup(store, session_id, owner, tool) {
         Lookup::None => ConnectorGate::Clear,
-        Lookup::Refuse(t) => ConnectorGate::Refuse(t),
+        Lookup::Refuse(t, k) => ConnectorGate::Refuse(t, k),
         Lookup::Needed(n) => state_of(store, &n),
     }
 }
@@ -253,7 +267,7 @@ pub(crate) async fn precheck_with_outcome(
 ) -> (ConnectorGate, bool) {
     let n = match lookup(store, session_id, owner, tool) {
         Lookup::None => return (ConnectorGate::Clear, false),
-        Lookup::Refuse(t) => return (ConnectorGate::Refuse(t), false),
+        Lookup::Refuse(t, k) => return (ConnectorGate::Refuse(t, k), false),
         Lookup::Needed(n) => n,
     };
     let first = state_of(store, &n);
@@ -285,13 +299,13 @@ impl crate::security::SessionSecurityContext {
         run_id: &str,
         gate: ConnectorGate,
     ) -> Option<ToolIntentResponse> {
-        let refuse = |message: String| ToolIntentResponse {
+        let refuse = |message: String, denial: Option<vam_spec::v1::Denial>| ToolIntentResponse {
             disposition: Disposition::Denied as i32,
             approval_request_id: None,
             error: Some(ErrorStatus {
                 code: 7, // PERMISSION_DENIED
                 message,
-                details: vec![],
+                details: denial.iter().map(crate::denials::pack_any).collect(),
                 retryable: false,
             }),
             capability_token: None,
@@ -300,18 +314,46 @@ impl crate::security::SessionSecurityContext {
         };
         match gate {
             ConnectorGate::Clear => None,
-            ConnectorGate::Refuse(text) => Some(refuse(text)),
+            ConnectorGate::Refuse(text, kind) => {
+                let denial = match &kind {
+                    RefuseKind::Unknown => crate::denials::connector_unknown_denial(),
+                    RefuseKind::NotEnabled { id } => crate::denials::connector_disabled_denial(
+                        store,
+                        &self.session_id,
+                        &self.agent_urn,
+                        id,
+                    ),
+                };
+                // The refusal is a decision the run shows, as a policy refusal is.
+                let on_event =
+                    crate::denials::event_denial(store, &self.session_id, run_id, &denial);
+                crate::trajectory::emit_policy_decided(
+                    store,
+                    run_id,
+                    &request.tool_name,
+                    "DENY",
+                    args_digest,
+                    None,
+                    on_event.as_ref(),
+                );
+                Some(refuse(text, Some(denial)))
+            }
             ConnectorGate::Park {
                 connector_id,
                 name,
                 reconnect,
             } => {
                 let message = park_message(reconnect, &name);
+                let not_connected = || {
+                    Some(crate::denials::connector_not_connected_denial(
+                        &connector_id,
+                    ))
+                };
                 let Ok(owner) = store.session_owner_user_id(&self.session_id) else {
-                    return Some(refuse(message));
+                    return Some(refuse(message, not_connected()));
                 };
                 if run_id.is_empty() {
-                    return Some(refuse(message));
+                    return Some(refuse(message, not_connected()));
                 }
                 let parked = self.suspend_for_reauth(
                     store,
@@ -327,7 +369,20 @@ impl crate::security::SessionSecurityContext {
                 if reconnect && parked.is_some() {
                     store.attach_run_to_connection_needs_reauth(&owner, &connector_id, run_id);
                 }
-                parked.or_else(|| Some(refuse(message)))
+                // The denial rides only on a park (suspended) or a permission refusal (code 7),
+                // never on another failure `suspend_for_reauth` reports.
+                let parked = parked.map(|mut resp| {
+                    let fits = resp.disposition == Disposition::Suspended as i32
+                        || resp.error.as_ref().is_some_and(|e| e.code == 7);
+                    if let (true, Some(e)) = (fits, resp.error.as_mut()) {
+                        if e.details.is_empty() {
+                            e.details
+                                .extend(not_connected().iter().map(crate::denials::pack_any));
+                        }
+                    }
+                    resp
+                });
+                parked.or_else(|| Some(refuse(message, not_connected())))
             }
         }
     }
@@ -492,7 +547,7 @@ mod tests {
         let (store, _) = fx();
         for (enabled, consent) in [(false, true), (true, false)] {
             node(&store, enabled, consent);
-            let ConnectorGate::Refuse(t) = gate_for(&store, S, ME, T) else {
+            let ConnectorGate::Refuse(t, _) = gate_for(&store, S, ME, T) else {
                 panic!("refused")
             };
             assert!(t.contains("ask your admin"), "{t}");
@@ -501,7 +556,7 @@ mod tests {
         let store2 = fx().0;
         assert!(matches!(
             gate_for(&store2, S, ME, T),
-            ConnectorGate::Refuse(_)
+            ConnectorGate::Refuse(..)
         ));
     }
 
@@ -518,7 +573,7 @@ mod tests {
             ConnectionStatus::Connected,
             10_000_000_000,
         );
-        let ConnectorGate::Refuse(t) = gate_for(&store, S, ME, T) else {
+        let ConnectorGate::Refuse(t, _) = gate_for(&store, S, ME, T) else {
             panic!("refused");
         };
         assert!(t.contains("not enabled"), "{t}");
@@ -557,7 +612,7 @@ mod tests {
         store.put_node_connector(&row(false)).unwrap();
         assert!(matches!(
             gate_for(&store, S, ME, "ticket_search"),
-            ConnectorGate::Refuse(t) if t.contains("not enabled")
+            ConnectorGate::Refuse(t, _) if t.contains("not enabled")
         ));
         store.put_node_connector(&row(true)).unwrap();
         // Enabled, member not connected: parked on this connector, not refused.
@@ -604,7 +659,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             gate_for(&store, S, ME, T),
-            ConnectorGate::Refuse(_)
+            ConnectorGate::Refuse(..)
         ));
     }
 
@@ -1058,7 +1113,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             gate_for(&store, S, ME, NT),
-            ConnectorGate::Refuse(t) if t.contains("ask your admin")
+            ConnectorGate::Refuse(t, _) if t.contains("ask your admin")
         ));
     }
 

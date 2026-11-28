@@ -1279,3 +1279,346 @@ mod tool_cards {
         assert_eq!(cards[0]["data"]["ir"]["nodes"]["root"]["type"], "List");
     }
 }
+
+// ---- typed denials on tool intents ------------------------------------------------------------
+
+fn denial_of(resp: &ToolIntentResponse) -> Option<vam_spec::v1::Denial> {
+    use prost::Message as _;
+    let any = resp
+        .error
+        .as_ref()?
+        .details
+        .iter()
+        .find(|a| a.type_url == crate::denials::DENIAL_TYPE_URL)?;
+    vam_spec::v1::Denial::decode(any.value.as_slice()).ok()
+}
+
+fn policy_decided(fx: &Fx, tool: &str) -> Vec<serde_json::Value> {
+    fx.store
+        .read_outbox_for_run(&fx.run, 0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.event_type.ends_with("policy.decided"))
+        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
+        .filter(|p| p["tool_name"] == tool)
+        .collect()
+}
+
+/// The agent belongs to someone other than the session's owner (the member running it).
+fn owned_by_someone_else(fx: &Fx) {
+    fx.store
+        .create_user_with_role(
+            "someone-else",
+            "someone-else",
+            crate::users::UserRole::Member,
+        )
+        .unwrap();
+    fx.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute("UPDATE agents SET owner_user_id = 'someone-else'", [])
+        .unwrap();
+}
+
+fn denied_run(fx: &Fx) -> ToolIntentResponse {
+    let resp = intent(fx, "run", &prost_types::Struct::default());
+    assert_eq!(resp.disposition, Disposition::Denied as i32);
+    resp
+}
+
+#[test]
+fn a_default_deny_names_the_agents_owner_and_the_event_carries_the_same_denial() {
+    use vam_spec::v1::{DenialReason, FixChange, FixWho};
+    let fx = default_deny();
+    let resp = denied_run(&fx);
+    let message = resp.error.as_ref().unwrap().message.clone();
+    assert!(!message.contains("Suggested fix"), "{message}");
+    let d = denial_of(&resp).expect("a denial");
+    assert_eq!(d.reason, DenialReason::PolicyRule as i32);
+    assert_eq!(d.subject, "run");
+    let fix = d.fix.as_ref().expect("a fix");
+    assert_eq!(fix.change, FixChange::AllowTool as i32);
+    assert_eq!(fix.who, FixWho::AgentOwner as i32);
+    assert_eq!(fix.target, format!("{AGENT}#builtin:run"));
+    assert_eq!(
+        fix.route.as_ref().unwrap().path,
+        format!("/v1/agents/{AGENT}/permissions")
+    );
+    // The caller owns the agent: the fix is theirs to apply, so no stored row.
+    assert!(fix.caller_can_apply);
+    assert!(d.decision_ref.is_empty());
+    assert_eq!(d.text, "The agent's owner can allow run for this agent.");
+    let event = &policy_decided(&fx, "run")[0];
+    assert_eq!(event["disposition"], "DENY");
+    assert_eq!(event["denial"]["reason"], "POLICY_RULE");
+    assert_eq!(event["denial"]["fix"]["who"], "AGENT_OWNER");
+    assert_eq!(event["denial"]["subject"], "run");
+}
+
+#[test]
+fn a_member_who_cannot_change_the_agent_gets_a_stored_reference() {
+    let fx = default_deny();
+    owned_by_someone_else(&fx);
+    let d = denial_of(&denied_run(&fx)).expect("a denial");
+    let fix = d.fix.as_ref().expect("a fix");
+    assert!(!fix.caller_can_apply);
+    assert!(d.decision_ref.starts_with("dnl_"), "{d:?}");
+    let event = &policy_decided(&fx, "run")[0];
+    assert_eq!(event["denial"]["decisionRef"], d.decision_ref.as_str());
+    let c = fx.store.connection.lock().unwrap();
+    let row: (
+        Option<String>,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = c
+        .query_row(
+            "SELECT run_id, session_id, caller_user_id, agent_urn, agent_version, target, change
+             FROM denials WHERE id = ?1",
+            [&d.decision_ref],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row.0.as_deref(), Some(fx.run.as_str()), "the bound run");
+    assert_eq!(
+        (row.1.as_str(), row.2.as_str(), row.3.as_str()),
+        (SESSION, LOCAL_USER_ID, AGENT)
+    );
+    assert_eq!(
+        (row.4.as_str(), row.5.as_str(), row.6.as_str()),
+        ("1.1.0", "builtin:run", "ALLOW_TOOL")
+    );
+}
+
+#[test]
+fn a_failed_row_write_never_changes_the_refusal() {
+    let fx = default_deny();
+    owned_by_someone_else(&fx);
+    let with_row = denied_run(&fx);
+    fx.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TABLE denials;")
+        .unwrap();
+    let without = denied_run(&fx);
+    assert_eq!(
+        with_row.error.as_ref().unwrap().message,
+        without.error.as_ref().unwrap().message
+    );
+    assert_eq!(without.disposition, Disposition::Denied as i32);
+    let d = denial_of(&without).expect("a denial");
+    assert!(d.fix.is_some(), "the fix stays");
+    assert!(d.decision_ref.is_empty(), "no reference without a row");
+}
+
+#[test]
+fn an_explicit_agent_deny_is_text_only_so_no_request_can_be_made() {
+    let fx = fixture(
+        Perms::Rules(
+            ToolDefault::Deny,
+            vec![("builtin:run", PermissionDecision::Deny)],
+        ),
+        true,
+    );
+    owned_by_someone_else(&fx);
+    let d = denial_of(&denied_run(&fx)).expect("a denial");
+    assert!(d.fix.is_none());
+    assert!(d.decision_ref.is_empty());
+    assert_eq!(d.text, "The agent's owner has blocked run for this agent.");
+    let event = &policy_decided(&fx, "run")[0];
+    assert!(event["denial"].get("fix").is_none(), "{event}");
+}
+
+#[test]
+fn an_installed_agent_has_no_fix_and_the_text_names_its_publisher() {
+    let fx = default_deny();
+    owned_by_someone_else(&fx);
+    fx.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute("UPDATE agents SET catalog_tier = 'marketplace'", [])
+        .unwrap();
+    let d = denial_of(&denied_run(&fx)).expect("a denial");
+    assert!(d.fix.is_none());
+    assert_eq!(
+        d.text,
+        "This agent was installed from acme. Its publisher sets which tools it may use."
+    );
+}
+
+#[test]
+fn a_tool_the_catalog_does_not_have_gets_a_denial_with_no_subject_and_no_fix() {
+    let fx = default_deny();
+    let resp = intent(&fx, "made_up_tool", &prost_types::Struct::default());
+    assert_eq!(resp.disposition, Disposition::Denied as i32);
+    let d = denial_of(&resp).expect("a denial");
+    assert_eq!(
+        d.subject, "",
+        "a model-chosen name is never trusted as a subject"
+    );
+    assert!(d.fix.is_none());
+    assert!(resp
+        .error
+        .as_ref()
+        .unwrap()
+        .message
+        .starts_with("Tool 'made_up_tool' is not present"));
+}
+
+#[test]
+fn the_event_carries_the_denial_only_for_the_run_the_session_is_bound_to() {
+    let fx = default_deny();
+    let d = crate::denials::plain_denial("run", crate::denials::Text::BuiltIn);
+    assert!(crate::denials::event_denial(&fx.store, SESSION, &fx.run, &d).is_some());
+    assert!(crate::denials::event_denial(
+        &fx.store,
+        SESSION,
+        "urn:vam:run:local.vam.dev/acme/another-run",
+        &d
+    )
+    .is_none());
+}
+
+#[test]
+fn an_allowed_call_has_no_denial() {
+    let fx = default_deny();
+    let ok = message_ok(&fx, "hi");
+    assert!(ok.error.is_none());
+    let events = policy_decided(&fx, "post_message");
+    assert_eq!(events.len(), 1);
+    assert!(events[0].get("denial").is_none());
+}
+
+fn gated(fx: &Fx, gate: crate::connector_park::ConnectorGate) -> ToolIntentResponse {
+    fx.ctx.handle_tool_intent_request_gated(
+        &fx.store,
+        ToolIntentRequest {
+            lease: Some(fx.lease()),
+            tool_name: "run".to_string(),
+            arguments: Some(prost_types::Struct::default()),
+            arguments_digest: None,
+            script_digest: Some(vam_spec::v1::Digest {
+                algorithm: 1,
+                hex_hash: vam_spec::outbox::tool_digest("run"),
+            }),
+            call_id: "call-gated".to_string(),
+        },
+        gate,
+    )
+}
+
+#[test]
+fn a_connector_that_is_not_enabled_names_the_org_admin_and_is_a_decision_on_the_run() {
+    use crate::connector_park::{ConnectorGate, RefuseKind};
+    let text = "Microsoft 365 is not enabled for this organization; ask your admin to enable \
+                Microsoft 365.";
+    let fx = default_deny();
+    let resp = gated(
+        &fx,
+        ConnectorGate::Refuse(
+            text.to_string(),
+            RefuseKind::NotEnabled {
+                id: "microsoft-365".into(),
+            },
+        ),
+    );
+    assert_eq!(resp.disposition, Disposition::Denied as i32);
+    assert_eq!(resp.error.as_ref().unwrap().message, text, "text unchanged");
+    let d = denial_of(&resp).expect("a denial");
+    assert_eq!(
+        d.reason,
+        vam_spec::v1::DenialReason::ConnectorDisabled as i32
+    );
+    assert_eq!(d.subject, "microsoft-365");
+    let fix = d.fix.as_ref().expect("a fix");
+    assert_eq!(fix.change, vam_spec::v1::FixChange::EnableConnector as i32);
+    assert_eq!(fix.who, vam_spec::v1::FixWho::OrgAdmin as i32);
+    assert_eq!(fix.target, "microsoft-365");
+    assert!(!fix.caller_can_apply, "the session owner is a member");
+    assert!(d.decision_ref.starts_with("dnl_"));
+    let event = &policy_decided(&fx, "run")[0];
+    assert_eq!(event["disposition"], "DENY");
+    assert_eq!(event["denial"]["fix"]["who"], "ORG_ADMIN");
+    assert_eq!(event["denial"]["decisionRef"], d.decision_ref.as_str());
+}
+
+#[test]
+fn a_connector_the_node_does_not_have_has_no_fix_and_no_subject() {
+    use crate::connector_park::{ConnectorGate, RefuseKind};
+    let fx = default_deny();
+    let text = "This tool needs a connector this server does not know; ask your admin.";
+    let resp = gated(
+        &fx,
+        ConnectorGate::Refuse(text.to_string(), RefuseKind::Unknown),
+    );
+    assert_eq!(resp.error.as_ref().unwrap().message, text);
+    let d = denial_of(&resp).expect("a denial");
+    assert_eq!(
+        d.reason,
+        vam_spec::v1::DenialReason::ConnectorDisabled as i32
+    );
+    assert!(d.fix.is_none());
+    assert_eq!(d.subject, "");
+    assert!(d.decision_ref.is_empty());
+    assert_eq!(
+        d.text,
+        "This tool needs a connector this server does not have. Ask an org admin to add it."
+    );
+    let event = &policy_decided(&fx, "run")[0];
+    assert!(event["denial"].get("fix").is_none());
+}
+
+#[test]
+fn a_connector_park_keeps_its_text_and_carries_a_connect_denial_without_a_row() {
+    use crate::connector_park::ConnectorGate;
+    let fx = default_deny();
+    let resp = gated(
+        &fx,
+        ConnectorGate::Park {
+            connector_id: "microsoft-365".into(),
+            name: "Microsoft 365".into(),
+            reconnect: false,
+        },
+    );
+    assert_eq!(resp.disposition, Disposition::Suspended as i32, "{resp:?}");
+    assert_eq!(
+        resp.error.as_ref().unwrap().message,
+        "Connect Microsoft 365 to continue"
+    );
+    let d = denial_of(&resp).expect("a denial");
+    assert_eq!(
+        d.reason,
+        vam_spec::v1::DenialReason::ConnectorNotConnected as i32
+    );
+    let fix = d.fix.as_ref().expect("a fix");
+    assert_eq!(fix.change, vam_spec::v1::FixChange::ConnectConnector as i32);
+    assert_eq!(fix.who, vam_spec::v1::FixWho::Self_ as i32);
+    assert!(fix.caller_can_apply);
+    assert!(d.decision_ref.is_empty(), "the member connects: no row");
+    let rows: i64 = fx
+        .store
+        .connection
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM denials", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+    // A park is not a decision: no `policy.decided` for it.
+    assert!(policy_decided(&fx, "run").is_empty());
+}

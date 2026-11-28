@@ -116,6 +116,15 @@ pub struct SessionToolTarget {
 }
 
 impl SessionToolTarget {
+    /// The agent's deny is its own default (`tools.default: deny`, or a tool that needs an
+    /// explicit allow rule), not a rule that names the tool. Read from the agent label the
+    /// permissions resolver wrote; a test pins the wording against the resolver.
+    pub fn agent_deny_is_default(&self) -> bool {
+        self.agent_rule == ScopeRule::Deny
+            && (self.agent_label.contains(DEFAULT_DENY_RULE)
+                || self.agent_label.contains(NOTIFICATIONS_OPT_IN_RULE))
+    }
+
     /// The `Tool` entity for a Cedar request. All four attributes are set.
     pub fn entity(&self) -> ToolEntity {
         ToolEntity::new(
@@ -295,6 +304,8 @@ pub fn targets_for_agent(
 
 /// Origin text of the agent decision the host grants the outbox tools.
 /// Label of the forced deny for a tool that needs an explicit allow rule.
+/// The rule label `vam_security::resolve_tool` writes for `tools.default: deny`.
+const DEFAULT_DENY_RULE: &str = "tools:* default deny";
 const NOTIFICATIONS_OPT_IN_RULE: &str = "opt-in tool (needs an explicit allow rule)";
 const OUTBOX_DEFAULT_RULE: &str = "conversation tool (host default)";
 
@@ -962,6 +973,27 @@ mod tests {
             by_name(&rows, "notifications_list").agent_rule,
             ScopeRule::Allow
         );
+    }
+
+    #[test]
+    fn a_default_deny_is_told_apart_from_a_rule_that_names_the_tool() {
+        let cat = [entry("run", "builtin", "", 1, false)];
+        let (rows, _) = targets_for_agent(Some(&deny_by_default()), &draft(), &cat, &[]);
+        let row = by_name(&rows, "run");
+        assert_eq!(row.agent_rule, ScopeRule::Deny);
+        assert!(row.agent_deny_is_default(), "{}", row.agent_label);
+        let mut permissions = deny_by_default();
+        permissions.tools.as_mut().unwrap().rules = vec![PermissionRule {
+            target: "builtin:run".to_string(),
+            decision: PermissionDecision::Deny as i32,
+        }];
+        let (rows, _) = targets_for_agent(Some(&permissions), &draft(), &cat, &[]);
+        let row = by_name(&rows, "run");
+        assert_eq!(row.agent_rule, ScopeRule::Deny);
+        assert!(!row.agent_deny_is_default(), "{}", row.agent_label);
+        // An agent that allows it by default is not a default deny.
+        let (rows, _) = targets_for_agent(Some(&defaults()), &draft(), &cat, &[]);
+        assert!(!by_name(&rows, "run").agent_deny_is_default());
     }
 
     #[test]
