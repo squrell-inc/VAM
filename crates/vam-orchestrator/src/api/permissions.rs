@@ -197,6 +197,7 @@ fn agent_urn_from_permissions_rest(rest: &str) -> Result<String, ApiError> {
         .or_else(|| rest.strip_suffix("/permissions/explain"))
         .or_else(|| rest.strip_suffix("/permissions"))
         .ok_or_else(|| ApiError {
+            denials: Vec::new(),
             status: StatusCode::NOT_FOUND,
             code: VamErrorCode::NotFound,
             message: format!("no agent permissions at '{rest}'"),
@@ -220,6 +221,7 @@ pub(crate) async fn list_permission_presets(
 #[allow(dead_code)] // retained for 501 stubs on routes not yet implemented
 pub(crate) fn not_implemented(what: &str) -> Result<Response, ApiError> {
     Err(ApiError {
+        denials: Vec::new(),
         status: StatusCode::NOT_IMPLEMENTED,
         code: VamErrorCode::Unimplemented,
         message: format!("{what} is not implemented"),

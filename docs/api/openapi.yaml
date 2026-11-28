@@ -7450,3 +7450,64 @@ components:
         retryable:
           type: boolean
           example: false
+        denial:
+          allOf:
+            - $ref: "#/components/schemas/Denial"
+          description: >
+            Present when the refusal has a typed explanation: the first of `denials`. The
+            `message` text is the same with or without it. A client that does not know this
+            field keeps working from `code` and `message`.
+        denials:
+          type: array
+          description: >
+            Every typed denial of the refusal, in order (one per missing secret on a 412).
+            Present with `denial`.
+          items:
+            $ref: "#/components/schemas/Denial"
+    Denial:
+      type: object
+      description: >
+        Why a request was refused and what would fix it, written by the host from its own facts
+        (the rules, the agent's owner, the caller's role). Nothing a tool or the model wrote is
+        copied in. `callerCanApply` is a hint: the route still checks the caller's credential.
+        The same object is `data.denial` on `policy.decided` and `egress.decided` events and
+        `denial` on a `connection.needs_reauth` notification.
+      properties:
+        reason:
+          type: string
+          enum: [POLICY_RULE, EGRESS_RULE, SECRET_MISSING, CONNECTOR_NOT_CONNECTED, CONNECTOR_DISABLED, AGENT_NOT_GRANTED, VERSION_STALE, QUOTA, SPACE_BUSY]
+        subject:
+          type: string
+          description: The host identifier the refusal is about (a binding id, a host, a tool, a connector id, a version). At most 253 bytes.
+        text:
+          type: string
+          description: A fixed sentence for people.
+        decisionRef:
+          type: string
+          description: >
+            Present only when a fix exists that the caller cannot apply; names a stored denial
+            that a fix request can cite.
+        fix:
+          type: object
+          description: Absent when nobody can change the outcome.
+          properties:
+            change:
+              type: string
+              enum: [ALLOW_TOOL, ALLOW_HOST, SET_SECRET, CONNECT_CONNECTOR, ENABLE_CONNECTOR, REQUEST_AGENT_ACCESS, SET_SPACE_VERSION, RAISE_LIMIT, STOP_RUN]
+              description: Absent on a `VERSION_STALE` fix, whose step is to run on the version in `target`.
+            target:
+              type: string
+              description: What the change applies to (`<agent urn>#<host or tool>` for an allow, a binding id, a connector id, a version).
+            who:
+              type: string
+              enum: [SELF, AGENT_OWNER, ORG_ADMIN]
+            route:
+              type: object
+              description: The existing write route that applies the change, for API callers. Clients must map from `change`, not call this.
+              properties:
+                method:
+                  type: string
+                path:
+                  type: string
+            callerCanApply:
+              type: boolean

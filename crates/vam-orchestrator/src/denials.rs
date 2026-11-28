@@ -73,6 +73,14 @@ pub enum Text {
     BuiltIn,
     /// The tool needs a connector the node does not have.
     ConnectorUnknown,
+    /// A marketplace-installed agent's egress: its publisher sets the hosts.
+    InstalledHost,
+    /// The session's egress policy could not be built or evaluated; the request is refused.
+    EgressUnavailable,
+    /// The caller's version pin is not the one the Space is bound to.
+    VersionStale,
+    /// The run's inbox holds as many undelivered messages as it may.
+    InboxFull,
 }
 
 /// The host sentence for a denial. `subject` is a host identifier; `publisher` names the
@@ -94,7 +102,28 @@ pub fn host_text(text: Text, subject: &str, publisher: &str) -> String {
         Text::Fix(R::ConnectorNotConnected, C::ConnectConnector, W::Self_) => {
             format!("You can connect {subject} to continue.")
         }
+        Text::Fix(R::EgressRule, C::AllowHost, W::AgentOwner) => {
+            format!("The agent's owner can allow the host {subject} for this agent.")
+        }
+        Text::Fix(R::SecretMissing, C::SetSecret, W::Self_) => {
+            format!("You can set the secret {subject} for yourself.")
+        }
+        Text::Fix(R::SecretMissing, C::SetSecret, W::OrgAdmin) => {
+            format!("An org admin can set the secret {subject} for this organization.")
+        }
         Text::Fix(..) => String::new(),
+        Text::InstalledHost => format!(
+            "This agent was installed from {publisher}. Its publisher sets which hosts it may reach."
+        ),
+        Text::EgressUnavailable => {
+            "The egress policy for this session could not be evaluated, so the request was refused."
+                .into()
+        }
+        Text::VersionStale => format!("Run again on version {subject}, or omit the version."),
+        Text::InboxFull => {
+            "This run already has as many undelivered messages as it may. Ask an org admin if the limit needs raising."
+                .into()
+        }
         Text::AgentBlocked => format!("The agent's owner has blocked {subject} for this agent."),
         Text::OrgBlocked => {
             format!("An organization rule blocks {subject}. Org admins manage that rule.")
@@ -145,7 +174,7 @@ pub fn route_for(change: FixChange, target: &str) -> Option<FixRoute> {
         })
     };
     match change {
-        FixChange::AllowTool => {
+        FixChange::AllowTool | FixChange::AllowHost => {
             let (urn, _) = target.split_once('#')?;
             route(format!("/v1/agents/{urn}/permissions"))
         }
@@ -361,15 +390,53 @@ fn with_fix(
     scope: &str,
     row_target: &str,
     fix_target: &str,
-    (change, who): (FixChange, FixWho),
+    fix: (FixChange, FixWho),
     can_apply: bool,
     decided_by: &str,
     rules: Option<Rules>,
     text: Text,
 ) -> Denial {
+    with_fix_rows(
+        store,
+        session_id,
+        agent_urn,
+        agent_version,
+        reason,
+        subject,
+        scope,
+        row_target,
+        fix_target,
+        fix,
+        can_apply,
+        decided_by,
+        rules,
+        text,
+        true,
+    )
+}
+
+/// [`with_fix`], with `write_row` false for a caller that has already written enough rows.
+#[allow(clippy::too_many_arguments)]
+fn with_fix_rows(
+    store: &SqliteWorkflowStore,
+    session_id: &str,
+    agent_urn: &str,
+    agent_version: &str,
+    reason: DenialReason,
+    subject: &str,
+    scope: &str,
+    row_target: &str,
+    fix_target: &str,
+    (change, who): (FixChange, FixWho),
+    can_apply: bool,
+    decided_by: &str,
+    rules: Option<Rules>,
+    text: Text,
+    write_row: bool,
+) -> Denial {
     let subject = sanitize_subject(subject);
     let mut decision_ref = String::new();
-    if !can_apply {
+    if !can_apply && write_row {
         let (caller, run) = binding(store, session_id);
         if let Some(caller) = caller {
             let row = NewDenial {
@@ -566,6 +633,266 @@ pub fn connector_not_connected_denial(connector_id: &str) -> Denial {
         subject,
         decision_ref: String::new(),
     }
+}
+
+// ---- denials outside a tool intent -----------------------------------------------------------
+
+fn no_fix(reason: DenialReason, subject: &str, text: Text, publisher: &str) -> Denial {
+    let subject = sanitize_subject(subject);
+    Denial {
+        reason: reason as i32,
+        text: host_text(text, &subject, publisher),
+        subject,
+        fix: None,
+        decision_ref: String::new(),
+    }
+}
+
+fn secret_who(scope: &str) -> FixWho {
+    // A user-scope secret is the caller's own. `either` is satisfied by the user's own
+    // binding, so the caller can fix it themselves. Only an org-scope secret needs an admin.
+    if scope.trim().eq_ignore_ascii_case("org") {
+        FixWho::OrgAdmin
+    } else {
+        FixWho::Self_
+    }
+}
+
+fn secret_missing(binding: &str, who: FixWho, can_apply: bool, decision_ref: String) -> Denial {
+    let subject = sanitize_subject(binding);
+    Denial {
+        reason: DenialReason::SecretMissing as i32,
+        text: host_text(
+            Text::Fix(DenialReason::SecretMissing, FixChange::SetSecret, who),
+            &subject,
+            "",
+        ),
+        fix: Some(SuggestedFix {
+            change: FixChange::SetSecret as i32,
+            target: subject.clone(),
+            who: who as i32,
+            route: route_for(FixChange::SetSecret, &subject),
+            caller_can_apply: can_apply,
+        }),
+        subject,
+        decision_ref,
+    }
+}
+
+/// The denial for one missing secret when no caller is known: no row, no reference. `scope` is
+/// `org`, `user` or `either`.
+pub fn secret_missing_plain(binding: &str, scope: &str) -> Denial {
+    let who = secret_who(scope);
+    secret_missing(binding, who, who == FixWho::Self_, String::new())
+}
+
+/// One denial per missing secret of a run start. The caller can set a user-scope secret
+/// itself; an org-scope one needs an org admin, so a caller who is not one gets a stored row
+/// (`run_id` NULL, `session_id` empty: no session exists yet) and its id as `decision_ref`.
+pub fn secret_missing_denials(
+    store: &SqliteWorkflowStore,
+    caller_user_id: &str,
+    agent_urn: &str,
+    items: &[(String, String)],
+) -> Vec<Denial> {
+    let caller = crate::owner::resolved_owner(caller_user_id).to_string();
+    let is_admin = caller_is_org_admin(store, &caller);
+    items
+        .iter()
+        .map(|(binding, scope)| {
+            let who = secret_who(scope);
+            let can_apply = who == FixWho::Self_ || is_admin;
+            let mut decision_ref = String::new();
+            if !can_apply {
+                let subject = sanitize_subject(binding);
+                let row = NewDenial {
+                    run_id: None,
+                    session_id: "",
+                    caller_user_id: &caller,
+                    agent_urn,
+                    agent_version: "",
+                    reason: DenialReason::SecretMissing,
+                    subject: &subject,
+                    deciding_scope: "org",
+                    target: &subject,
+                    change: FixChange::SetSecret,
+                    who,
+                    decided_by: "admission",
+                    rules: None,
+                };
+                match store.insert_denial(&row) {
+                    Ok(id) => decision_ref = id,
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "could not store a denial; the refusal goes out without a decision reference"
+                    ),
+                }
+            }
+            secret_missing(binding, who, can_apply, decision_ref)
+        })
+        .collect()
+}
+
+/// The denial for a run asked on a version other than the one its Space is bound to. The
+/// caller fixes it by running on the bound version (or leaving the version out). There is no
+/// `change`: `SET_SPACE_VERSION` is reserved for the Space version work, and no route applies
+/// this fix, so `fix.target` carries the bound version for a client to name.
+pub fn version_stale_denial(bound: &str) -> Denial {
+    let subject = sanitize_subject(bound);
+    Denial {
+        reason: DenialReason::VersionStale as i32,
+        text: host_text(Text::VersionStale, &subject, ""),
+        fix: Some(SuggestedFix {
+            change: FixChange::Unspecified as i32,
+            target: subject.clone(),
+            who: FixWho::Self_ as i32,
+            route: None,
+            caller_can_apply: true,
+        }),
+        subject,
+        decision_ref: String::new(),
+    }
+}
+
+/// The denial for a run whose inbox is full: a quota, nothing the caller can change.
+pub fn inbox_full_denial(run_id: &str) -> Denial {
+    no_fix(DenialReason::Quota, run_id, Text::InboxFull, "")
+}
+
+// ---- egress ----------------------------------------------------------------------------------
+
+/// What decided an egress refusal, read from the rule on the `egress.decided` policy id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressKind {
+    /// The agent's `internet:*` default denies and no rule names the host.
+    AgentDefault,
+    /// A rule the agent's owner wrote for this host denies it.
+    AgentRule,
+    /// A platform or secret-destination rule, the IP floor, the port list: nobody sets it here.
+    Fixed,
+    /// The session's policy could not be built or evaluated.
+    Unavailable,
+    /// The name did not resolve: not a policy decision.
+    NameResolution,
+}
+
+/// Classifies a policy id of the form `rule=<rule>; <policy>` (the label `vam-network` writes).
+pub fn egress_kind(policy_label: &str) -> EgressKind {
+    let rule = policy_label
+        .strip_prefix("rule=")
+        .and_then(|rest| rest.rsplit_once("; "))
+        .map(|(rule, _)| rule)
+        .unwrap_or("");
+    match rule {
+        "agent rule internet:*" => EgressKind::AgentDefault,
+        r if r.starts_with("agent rule ") => EgressKind::AgentRule,
+        "egress policy unavailable" | "egress policy error" => EgressKind::Unavailable,
+        "name resolution" => EgressKind::NameResolution,
+        _ => EgressKind::Fixed,
+    }
+}
+
+/// A host name usable in a fix target: lower-case letters, digits, dot, dash, underscore.
+fn is_fixable_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_')
+        })
+}
+
+/// The denial for a refused host, or `None` when the refusal is not a policy decision (the name
+/// did not resolve). `host` is what the guest asked for and is untrusted: it is normalized,
+/// stripped of control characters and capped before it becomes a subject. The caller, run and
+/// agent come from the session binding.
+pub fn egress_denial(
+    store: &SqliteWorkflowStore,
+    session_id: &str,
+    principal_urn: Option<&str>,
+    host: &str,
+    policy_label: &str,
+) -> Option<Denial> {
+    build_egress_denial(store, session_id, principal_urn, host, policy_label, true)
+}
+
+/// [`egress_denial`] that stores no row (the caller has hit its per-session cap).
+pub fn egress_denial_without_row(
+    store: &SqliteWorkflowStore,
+    session_id: &str,
+    principal_urn: Option<&str>,
+    host: &str,
+    policy_label: &str,
+) -> Option<Denial> {
+    build_egress_denial(store, session_id, principal_urn, host, policy_label, false)
+}
+
+fn build_egress_denial(
+    store: &SqliteWorkflowStore,
+    session_id: &str,
+    principal_urn: Option<&str>,
+    host: &str,
+    policy_label: &str,
+    write_row: bool,
+) -> Option<Denial> {
+    let kind = egress_kind(policy_label);
+    let host = sanitize_subject(
+        host.trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+            .as_str(),
+    );
+    let plain = |text: Text, publisher: &str| {
+        Some(no_fix(DenialReason::EgressRule, &host, text, publisher))
+    };
+    match kind {
+        EgressKind::NameResolution => return None,
+        EgressKind::Unavailable => return plain(Text::EgressUnavailable, ""),
+        EgressKind::Fixed => return plain(Text::BuiltIn, ""),
+        EgressKind::AgentDefault | EgressKind::AgentRule => {}
+    }
+    let Some(urn) = crate::security::session_agent_urn(store, session_id, principal_urn)
+        .ok()
+        .flatten()
+    else {
+        return plain(Text::BuiltIn, "");
+    };
+    match store.agent_is_installed(&urn) {
+        Ok(false) => {}
+        Ok(true) => return plain(Text::InstalledHost, &publisher_of(&urn)),
+        Err(_) => return plain(Text::BuiltIn, ""),
+    }
+    if kind == EgressKind::AgentRule {
+        // The owner wrote this rule: text only, no request to undo it.
+        return plain(Text::AgentBlocked, "");
+    }
+    if !is_fixable_host(&host) {
+        return plain(Text::BuiltIn, "");
+    }
+    let (caller, _) = binding(store, session_id);
+    let can_apply = match (caller.as_deref(), store.agent_owner_user_id(&urn).ok()) {
+        (Some(caller), Some(owner)) => caller == owner,
+        _ => false,
+    };
+    Some(with_fix_rows(
+        store,
+        session_id,
+        &urn,
+        "",
+        DenialReason::EgressRule,
+        &host,
+        "agent",
+        &host,
+        &format!("{urn}#{host}"),
+        (FixChange::AllowHost, FixWho::AgentOwner),
+        can_apply,
+        "egress",
+        None,
+        Text::Fix(
+            DenialReason::EgressRule,
+            FixChange::AllowHost,
+            FixWho::AgentOwner,
+        ),
+        write_row,
+    ))
 }
 
 // ---- wire forms ------------------------------------------------------------------------------
@@ -1091,5 +1418,238 @@ mod tests {
             .is_empty());
         // An agent the catalog does not have has no owner to tell.
         assert!(fix_recipients(&st, FixWho::AgentOwner, URN).is_err());
+    }
+
+    fn session_of(st: &SqliteWorkflowStore, user: &str, session: &str) {
+        st.create_session(
+            session,
+            None,
+            &format!("vm-{session}"),
+            "ws",
+            "storage-default",
+        )
+        .expect("session");
+        st.connection
+            .lock()
+            .expect("lock")
+            .execute(
+                "UPDATE sessions SET owner_user_id = ?1 WHERE session_id = ?2",
+                [user, session],
+            )
+            .expect("owner");
+    }
+
+    fn rows(st: &SqliteWorkflowStore) -> i64 {
+        st.connection
+            .lock()
+            .expect("lock")
+            .query_row("SELECT COUNT(*) FROM denials", [], |r| r.get(0))
+            .expect("count")
+    }
+
+    #[test]
+    fn a_missing_secret_is_the_callers_to_set_unless_it_is_org_scope() {
+        let st = store();
+        st.create_user_with_role("member1", "member1", UserRole::Member)
+            .expect("member");
+        st.create_user_with_role("admin1", "admin1", UserRole::OrgAdmin)
+            .expect("admin");
+        let items = vec![
+            ("mine".to_string(), "user".to_string()),
+            ("either".to_string(), "either".to_string()),
+            ("shared".to_string(), "org".to_string()),
+        ];
+        let member = secret_missing_denials(&st, "member1", URN, &items);
+        let who: Vec<i32> = member
+            .iter()
+            .map(|d| d.fix.as_ref().expect("fix").who)
+            .collect();
+        assert_eq!(
+            who,
+            vec![
+                FixWho::Self_ as i32,
+                FixWho::Self_ as i32,
+                FixWho::OrgAdmin as i32
+            ]
+        );
+        assert!(member[0].fix.as_ref().unwrap().caller_can_apply);
+        assert!(member[0].decision_ref.is_empty());
+        let org = member[2].fix.as_ref().unwrap();
+        assert!(!org.caller_can_apply);
+        assert_eq!(org.target, "shared");
+        assert!(org.route.is_none(), "no write route is named for a secret");
+        assert!(member[2].decision_ref.starts_with("dnl_"));
+        assert_eq!(
+            rows(&st),
+            1,
+            "a row only for the fix the caller cannot apply"
+        );
+        let (run, session, change, who): (Option<String>, String, String, String) = st
+            .connection
+            .lock()
+            .expect("lock")
+            .query_row(
+                "SELECT run_id, session_id, change, who FROM denials WHERE id = ?1",
+                [&member[2].decision_ref],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("row");
+        assert_eq!(run, None);
+        assert_eq!(session, "");
+        assert_eq!((change.as_str(), who.as_str()), ("SET_SECRET", "ORG_ADMIN"));
+
+        // An org admin can set the org secret: no row, no reference.
+        let admin = secret_missing_denials(&st, "admin1", URN, &items);
+        assert!(admin[2].fix.as_ref().unwrap().caller_can_apply);
+        assert!(admin[2].decision_ref.is_empty());
+        assert_eq!(rows(&st), 1);
+    }
+
+    #[test]
+    fn egress_kinds_are_read_from_the_rule_on_the_policy_id() {
+        let k = egress_kind;
+        assert_eq!(
+            k("rule=agent rule internet:*; active-policy:terminate"),
+            EgressKind::AgentDefault
+        );
+        assert_eq!(
+            k("rule=agent rule *.pastebin.com; active-policy:terminate"),
+            EgressKind::AgentRule
+        );
+        assert_eq!(
+            k("rule=platform ip floor; active-policy:terminate"),
+            EgressKind::Fixed
+        );
+        assert_eq!(
+            k("rule=port allowlist; active-policy:terminate"),
+            EgressKind::Fixed
+        );
+        assert_eq!(
+            k("rule=secret destination *.x.com; active-policy:terminate"),
+            EgressKind::Fixed
+        );
+        assert_eq!(
+            k("rule=egress policy unavailable; active-policy:terminate"),
+            EgressKind::Unavailable
+        );
+        assert_eq!(
+            k("rule=name resolution; active-policy:terminate"),
+            EgressKind::NameResolution
+        );
+        assert_eq!(k("active-policy:terminate"), EgressKind::Fixed);
+    }
+
+    #[test]
+    fn egress_refusals_without_a_fix_have_no_fix_and_name_resolution_has_no_denial() {
+        let st = store();
+        let floor = egress_denial(
+            &st,
+            "s1",
+            None,
+            "169.254.169.254",
+            "rule=platform ip floor; active-policy:terminate",
+        )
+        .expect("denial");
+        assert_eq!(floor.reason, DenialReason::EgressRule as i32);
+        assert!(floor.fix.is_none() && floor.decision_ref.is_empty());
+        assert_eq!(floor.subject, "169.254.169.254");
+        assert!(egress_denial(&st, "s1", None, "x.test", "rule=name resolution; p").is_none());
+        let broken = egress_denial(
+            &st,
+            "s1",
+            None,
+            "x.test",
+            "rule=egress policy error; active-policy:terminate",
+        )
+        .expect("denial");
+        assert!(broken.fix.is_none() && !broken.text.is_empty());
+    }
+
+    #[test]
+    fn a_refused_host_gets_the_owner_fix_and_a_row_for_a_caller_who_is_not_the_owner() {
+        let st = store();
+        st.create_user_with_role("owner1", "owner1", UserRole::Member)
+            .expect("owner");
+        st.create_user_with_role("other1", "other1", UserRole::Member)
+            .expect("other");
+        let spec = vam_spec::v1::AgentSpec {
+            resource_id: Some(vam_spec::v1::ResourceId { urn: URN.into() }),
+            display_name: "Helper".into(),
+            role: "assistant".into(),
+            instruction_source: Some(
+                vam_spec::v1::agent_spec::InstructionSource::SystemInstructions("x".into()),
+            ),
+            ..Default::default()
+        };
+        st.publish_agent_draft_with_owner(&spec, "owner1")
+            .expect("agent");
+        session_of(&st, "other1", "s-other");
+        session_of(&st, "owner1", "s-owner");
+        let label = "rule=agent rule internet:*; active-policy:terminate";
+
+        // A caller who does not own the agent: AGENT_OWNER fix, a row, a reference. The host is
+        // the guest's: it is lower-cased and loses its trailing dot.
+        let d = egress_denial(&st, "s-other", Some(URN), "Example.COM.", label).expect("denial");
+        let fix = d.fix.as_ref().expect("fix");
+        assert_eq!(d.subject, "example.com");
+        assert_eq!(fix.change, FixChange::AllowHost as i32);
+        assert_eq!(fix.who, FixWho::AgentOwner as i32);
+        assert_eq!(fix.target, format!("{URN}#example.com"));
+        assert_eq!(
+            fix.route.as_ref().map(|r| r.path.as_str()),
+            Some(format!("/v1/agents/{URN}/permissions").as_str())
+        );
+        assert!(!fix.caller_can_apply);
+        assert!(d.decision_ref.starts_with("dnl_"));
+        assert_eq!(rows(&st), 1);
+
+        // The owner can apply it: no row.
+        let d = egress_denial(&st, "s-owner", Some(URN), "example.com", label).expect("denial");
+        assert!(d.fix.as_ref().expect("fix").caller_can_apply);
+        assert!(d.decision_ref.is_empty());
+        assert_eq!(rows(&st), 1);
+
+        // The cap stops rows, not the explanation.
+        let d = egress_denial_without_row(&st, "s-other", Some(URN), "b.example.com", label)
+            .expect("denial");
+        assert!(d.fix.is_some() && d.decision_ref.is_empty());
+        assert_eq!(rows(&st), 1);
+
+        // A host with characters a fix target cannot carry gets no fix.
+        let d = egress_denial(&st, "s-other", Some(URN), "a#b.example", label).expect("denial");
+        assert!(d.fix.is_none());
+
+        // An explicit deny rule is the owner's choice: text only.
+        let d = egress_denial(
+            &st,
+            "s-other",
+            Some(URN),
+            "bad.example",
+            "rule=agent rule bad.example; active-policy:terminate",
+        )
+        .expect("denial");
+        assert!(d.fix.is_none() && d.text.contains("has blocked"));
+        assert_eq!(rows(&st), 1);
+    }
+
+    #[test]
+    fn a_host_is_capped_and_cleaned_before_it_is_a_subject() {
+        let st = store();
+        let long = format!("{}.example", "a".repeat(400));
+        let d = egress_denial(&st, "s1", None, &long, "rule=port allowlist; p").expect("denial");
+        assert!(d.subject.len() <= 253);
+        let d = egress_denial(&st, "s1", None, "evil\n.example", "rule=port allowlist; p")
+            .expect("denial");
+        assert!(!d.subject.contains('\n'));
+    }
+
+    #[test]
+    fn version_stale_names_the_bound_version_without_a_change() {
+        let d = version_stale_denial("1.0.0");
+        let fix = d.fix.expect("fix");
+        assert_eq!(fix.change, FixChange::Unspecified as i32);
+        assert_eq!(fix.target, "1.0.0");
+        assert!(fix.caller_can_apply && fix.who == FixWho::Self_ as i32);
+        assert_eq!(d.text, "Run again on version 1.0.0, or omit the version.");
     }
 }

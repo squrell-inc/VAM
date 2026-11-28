@@ -512,13 +512,27 @@ pub fn record_connection_needs_reauth(
             via: None,
             title,
             body: clip(&body, MAX_BODY_CHARS),
-            action: json!({
-                "verb": kind.action_verb(),
-                "target": { "kind": "connector", "id": connector_id },
-                "api": "GET /v1/connectors",
-            }),
+            action: connection_needs_reauth_action(kind, connector_id),
         },
     )
+}
+
+/// The action of a `connection.needs_reauth` row. It carries the typed denial
+/// (CONNECTOR_NOT_CONNECTED, fix CONNECT_CONNECTOR by the member) so a client draws the connect
+/// card from the same type a refused tool call carries. It lives in the action JSON: no column.
+fn connection_needs_reauth_action(kind: Kind, connector_id: &str) -> Value {
+    let mut action = json!({
+        "verb": kind.action_verb(),
+        "target": { "kind": "connector", "id": connector_id },
+        "api": "GET /v1/connectors",
+    });
+    let denial = crate::denials::connector_not_connected_denial(connector_id);
+    if let (Some(denial), Some(object)) =
+        (crate::denials::denial_json(&denial), action.as_object_mut())
+    {
+        object.insert("denial".to_string(), denial);
+    }
+    action
 }
 
 /// Resolves the owner's open `connection.needs_reauth` row for a connector (`acted` on a
@@ -1039,10 +1053,13 @@ impl Row {
         );
         put("title", json!(self.title));
         put("body", json!(self.body));
-        put(
-            "action",
-            serde_json::from_str::<Value>(&self.action).unwrap_or(Value::Null),
-        );
+        // A typed denial in the action is lifted to its own field, so a client reads it at
+        // `denial` and the action keeps the verb, target and route it always had.
+        let mut action = serde_json::from_str::<Value>(&self.action).unwrap_or(Value::Null);
+        if let Some(denial) = action.as_object_mut().and_then(|a| a.remove("denial")) {
+            put("denial", denial);
+        }
+        put("action", action);
         put("count", json!(self.count));
         put("createdAt", json!(self.created_at));
         put("updatedAt", json!(self.updated_at));
@@ -2236,5 +2253,39 @@ mod tests {
             migrate_key_scopes(&c).unwrap();
             assert!(!get("k1").contains("notifications"));
         }
+    }
+
+    #[test]
+    fn a_needs_reauth_notification_carries_the_connect_denial_in_one_field() {
+        let s = store();
+        let outcome = {
+            let c = s.connection.lock().unwrap();
+            record_connection_needs_reauth(&c, "u", "microsoft-365", "Microsoft 365").unwrap()
+        };
+        let RecordOutcome::Inserted(id) = outcome else {
+            panic!("expected an insert")
+        };
+        let json = s.get_notification("u", &id).unwrap().to_json();
+        let denial = &json["denial"];
+        assert_eq!(denial["reason"], "CONNECTOR_NOT_CONNECTED");
+        assert_eq!(denial["subject"], "microsoft-365");
+        assert_eq!(denial["fix"]["change"], "CONNECT_CONNECTOR");
+        assert_eq!(denial["fix"]["who"], "SELF");
+        assert_eq!(denial["fix"]["callerCanApply"], true);
+        // The action keeps what it always had; the denial is not repeated inside it.
+        assert_eq!(json["action"]["verb"], "open");
+        assert_eq!(json["action"]["target"]["id"], "microsoft-365");
+        assert!(json["action"].get("denial").is_none());
+        // A notification of another kind has no denial field.
+        let other = s
+            .get_notification("u", &{
+                let RecordOutcome::Inserted(id) = put(&s, &new("u", "k", "a1")) else {
+                    panic!()
+                };
+                id
+            })
+            .unwrap()
+            .to_json();
+        assert!(other.get("denial").is_none());
     }
 }

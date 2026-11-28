@@ -626,6 +626,7 @@ async fn check_connection(
             json_http_response(StatusCode::OK, entry_for(&state, &auth, &def)?.to_string()),
         ),
         connectors::CheckOutcome::Unavailable(reason) => Err(ApiError {
+            denials: Vec::new(),
             status: StatusCode::BAD_GATEWAY,
             code: VamErrorCode::Unavailable,
             message: format!("could not check the connection: {reason}"),

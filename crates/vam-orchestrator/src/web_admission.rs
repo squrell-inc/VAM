@@ -249,7 +249,7 @@ pub fn parse_destination(args: Option<&Struct>) -> Result<(String, Url), Refusal
 pub fn check_agent_rule(authorizer: &dyn EgressAuthorizer, host: &str) -> Result<(), Refusal> {
     match authorizer.authorize(host) {
         EgressAuthorization::Allow { .. } => Ok(()),
-        EgressAuthorization::Deny { rule } => Err(Refusal::new(
+        EgressAuthorization::Deny { rule, .. } => Err(Refusal::new(
             "blocked",
             format!(
                 "{rule} does not allow {host}. Use a different source, or ask the user to \
@@ -490,6 +490,7 @@ mod tests {
             fn authorize(&self, _host: &str) -> EgressAuthorization {
                 EgressAuthorization::Deny {
                     rule: "agent rule internet:pastebin.com".into(),
+                    owner_can_allow: false,
                 }
             }
         }

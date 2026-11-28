@@ -37,5 +37,4 @@ guards:
   - vam:crates/vam-cli/src/http_error.rs
   - vam:crates/vam-orchestrator/src/api/error.rs
   - vam:crates/vam-orchestrator/src/denials.rs
-status: pending
-expectFail: { step: then.0, class: product }
+status: active

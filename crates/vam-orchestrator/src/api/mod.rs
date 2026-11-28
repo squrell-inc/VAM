@@ -697,6 +697,7 @@ pub(crate) async fn refuse_catalog_delete(
     let urn = percent_decode_path(rest.trim_start_matches('/'));
     state.store.require_not_installed(&urn, noun)?;
     Err(ApiError {
+        denials: Vec::new(),
         status: StatusCode::METHOD_NOT_ALLOWED,
         code: vam_spec::v1::VamErrorCode::Unimplemented,
         message: format!("{noun} '{urn}' cannot be deleted: the catalog keeps every release"),
@@ -1301,6 +1302,7 @@ async fn terminate_session(
             .await
         {
             return Err(ApiError {
+                denials: Vec::new(),
                 status: StatusCode::GATEWAY_TIMEOUT,
                 code: vam_spec::v1::VamErrorCode::Unavailable,
                 message: "stop_pending: the run has ended; its workspace is still being settled"
@@ -1337,6 +1339,7 @@ async fn terminate_session(
         }
         if !settled {
             return Err(ApiError {
+                denials: Vec::new(),
                 status: StatusCode::GATEWAY_TIMEOUT,
                 code: vam_spec::v1::VamErrorCode::Unavailable,
                 message: "stop_pending: the session is stopped; its workspace is still being \
@@ -2318,7 +2321,9 @@ async fn resolve_secret_requirements(
 /// Run-create admission: collect `required_secrets` across the agent's
 /// `skill_refs` and fail fast with binding + scope when required secrets are
 /// missing from the caller's vault. Missing skills are skipped here; skill
-/// resolution reports them separately.
+/// resolution reports them separately. A skill is read from its published package
+/// first (the one the guest runs), then from the legacy `skills` table. The refusal
+/// carries one typed denial per missing secret.
 fn admit_run_secret_requirements(
     state: &AppState,
     owner_user_id: &str,
@@ -2334,6 +2339,14 @@ fn admit_run_secret_requirements(
         if urn.is_empty() {
             continue;
         }
+        if let Some(from_package) = crate::skill_package_resolve::skill_required_secrets(
+            &state.store,
+            skill_ref,
+            owner_user_id,
+        )? {
+            requirements.extend(from_package);
+            continue;
+        }
         match state.store.get_skill(urn) {
             Ok(skill) => {
                 for tool in &skill.tools {
@@ -2344,9 +2357,28 @@ fn admit_run_secret_requirements(
             Err(e) => return Err(e.into()),
         }
     }
-    crate::secret_requirements::admit_requirements(&state.vault, owner_user_id, &requirements)
-        .map_err(ApiError::from)?;
-    Ok(())
+    match crate::secret_requirements::admit_requirements(&state.vault, owner_user_id, &requirements)
+    {
+        Ok(()) => Ok(()),
+        Err(OrchestratorError::MissingRequiredSecrets(missing)) => {
+            let agent_urn = agent
+                .resource_id
+                .as_ref()
+                .map(|r| r.urn.as_str())
+                .unwrap_or_default();
+            let denials = crate::denials::secret_missing_denials(
+                &state.store,
+                owner_user_id,
+                agent_urn,
+                &missing.items,
+            );
+            Err(
+                ApiError::from(OrchestratorError::MissingRequiredSecrets(missing))
+                    .with_denials(denials),
+            )
+        }
+        Err(other) => Err(other.into()),
+    }
 }
 
 pub(crate) fn to_proto_secret(meta: &StoreSecretMetadata) -> HostSecretMetadata {

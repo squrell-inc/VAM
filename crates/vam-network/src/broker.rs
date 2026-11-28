@@ -508,9 +508,17 @@ impl BrokerGate {
                 // No address means no IP floor to apply. If the session's rules
                 // refuse this host anyway, report that rule rather than the DNS
                 // failure, so the event names what the policy decided.
-                if let Some(EgressAuthorization::Deny { rule }) = self.authorize_host(host) {
+                if let Some(EgressAuthorization::Deny {
+                    rule,
+                    owner_can_allow,
+                }) = self.authorize_host(host)
+                {
                     return Err(Denial {
-                        error: GateError::Denied(denied_by_rule_message(host, &rule)),
+                        error: GateError::Denied(denied_by_rule_message(
+                            host,
+                            &rule,
+                            owner_can_allow,
+                        )),
                         rule,
                     });
                 }
@@ -562,8 +570,11 @@ impl BrokerGate {
                     }
                     rule
                 }
-                EgressAuthorization::Deny { rule } => {
-                    let reason = denied_by_rule_message(host, &rule);
+                EgressAuthorization::Deny {
+                    rule,
+                    owner_can_allow,
+                } => {
+                    let reason = denied_by_rule_message(host, &rule, owner_can_allow);
                     eprintln!("[egress:trace] Policy Check Failed: {}", reason);
                     return Err(Denial {
                         error: GateError::Denied(reason),
@@ -1250,8 +1261,27 @@ fn connect_gate_mode(host: &str, port: u16, passthrough_hosts: &[String]) -> Gat
     }
 }
 
-fn denied_by_rule_message(host: &str, rule: &str) -> String {
-    format!("Access to host '{host}' is blocked by active network policy (rule: {rule})")
+/// What the guest's proxy shows for a refusal (`proxy::one_line` keeps 200 bytes).
+const GUEST_REASON_CAP: usize = 200;
+/// Appended when the agent's owner can allow the host. A fixed phrase: it carries no host,
+/// rule or name.
+const OWNER_CAN_ALLOW_PHRASE: &str = "; the agent's owner can allow this host";
+
+fn denied_by_rule_message(host: &str, rule: &str, owner_can_allow: bool) -> String {
+    let mut message =
+        format!("Access to host '{host}' is blocked by active network policy (rule: {rule})");
+    if owner_can_allow {
+        // The phrase must survive the proxy's cap, so a long host or rule gives way to it.
+        let mut keep = GUEST_REASON_CAP.saturating_sub(OWNER_CAN_ALLOW_PHRASE.len());
+        if message.len() > keep {
+            while !message.is_char_boundary(keep) {
+                keep -= 1;
+            }
+            message.truncate(keep);
+        }
+        message.push_str(OWNER_CAN_ALLOW_PHRASE);
+    }
+    message
 }
 
 /// Rule recorded when the platform IP floor refuses a resolved address.
@@ -2334,6 +2364,7 @@ mod tests {
             if self.denied.iter().any(|d| d == host) {
                 EgressAuthorization::Deny {
                     rule: format!("fake deny {host}"),
+                    owner_can_allow: false,
                 }
             } else {
                 EgressAuthorization::Allow {
@@ -3326,5 +3357,25 @@ mod tests {
             assert_eq!(port("globex.ticketdesk.example"), Some(11));
             assert_eq!(port("evil.ticketdesk.example"), None);
         }
+    }
+
+    #[test]
+    fn the_owner_phrase_is_appended_and_survives_the_proxys_cap() {
+        let plain = denied_by_rule_message("example.com", "agent rule internet:*", false);
+        assert_eq!(
+            plain,
+            "Access to host 'example.com' is blocked by active network policy (rule: agent rule internet:*)"
+        );
+        let said = denied_by_rule_message("example.com", "agent rule internet:*", true);
+        assert_eq!(said, format!("{plain}{OWNER_CAN_ALLOW_PHRASE}"));
+        assert!(said.len() <= GUEST_REASON_CAP, "{}", said.len());
+        // A host and rule too long for the cap give way to the phrase, never the reverse.
+        let long_host = format!("{}.example", "a".repeat(240));
+        let long = denied_by_rule_message(&long_host, "agent rule internet:*", true);
+        assert!(long.len() <= GUEST_REASON_CAP, "{}", long.len());
+        assert!(long.ends_with(OWNER_CAN_ALLOW_PHRASE));
+        // A multi-byte host is cut on a character boundary.
+        let wide = denied_by_rule_message(&"é".repeat(200), "agent rule internet:*", true);
+        assert!(wide.len() <= GUEST_REASON_CAP && wide.ends_with(OWNER_CAN_ALLOW_PHRASE));
     }
 }

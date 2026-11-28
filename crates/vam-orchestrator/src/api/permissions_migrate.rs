@@ -52,6 +52,7 @@ fn agent_urn_from_migrate_path(rest: &str) -> Result<String, ApiError> {
     let raw = rest
         .strip_suffix("/permissions/migrate")
         .ok_or_else(|| ApiError {
+            denials: Vec::new(),
             status: StatusCode::NOT_FOUND,
             code: VamErrorCode::NotFound,
             message: format!("no draft of agent '{rest}' for this user"),

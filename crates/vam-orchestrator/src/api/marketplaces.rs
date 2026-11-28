@@ -343,6 +343,7 @@ async fn refresh_marketplace(
             .map_err(blocking_failed)??;
     if let Some(why) = done.refused {
         return Err(ApiError {
+            denials: Vec::new(),
             status: StatusCode::CONFLICT,
             code: VamErrorCode::FailedPrecondition,
             message: why,

@@ -36,6 +36,7 @@ use crate::session_end::{ParkedEnd, RunTracking, STOP_SETTLE_TIMEOUT};
 
 fn pending_error(message: &str) -> ApiError {
     ApiError {
+        denials: Vec::new(),
         status: StatusCode::GATEWAY_TIMEOUT,
         code: vam_spec::v1::VamErrorCode::Unavailable,
         message: format!("stop_pending: {message}"),

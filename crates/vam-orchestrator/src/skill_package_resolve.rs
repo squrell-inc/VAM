@@ -225,6 +225,97 @@ fn hsp_synthetic_skill_available(
     Ok(!store.list_hsp_broker_tools(broker_id)?.is_empty())
 }
 
+/// The `required_secrets` of every tool of the skill `skill_ref` names, read from its published
+/// package: the same package `resolve_agent_skill_refs` stages for the guest. `Ok(None)` when no
+/// package backs the ref (a legacy `skills` row, a seed skill or a missing skill); the caller
+/// decides what that means.
+pub fn skill_required_secrets(
+    store: &SqliteWorkflowStore,
+    skill_ref: &ResourceRef,
+    owner: &str,
+) -> Result<Option<Vec<vam_spec::v1::SecretRequirement>>, OrchestratorError> {
+    let Some(urn) = skill_ref
+        .resource_id
+        .as_ref()
+        .map(|r| r.urn.as_str())
+        .filter(|u| !u.is_empty())
+    else {
+        return Ok(None);
+    };
+    let package = match skill_ref.version.as_ref() {
+        Some(version) => {
+            let Ok(channel) = channel_for_ref_version(version) else {
+                return Ok(None);
+            };
+            store.get_skill_package_for_query_visible(urn, Some(version), channel, owner, false)
+        }
+        None => {
+            let pinned = match resolve_ref_for_owner(
+                store,
+                ArtifactKind::Skill,
+                skill_ref,
+                owner,
+                ResolveMode::Release,
+            ) {
+                Ok(pinned) => pinned,
+                Err(OrchestratorError::NotFound(_) | OrchestratorError::InvalidContract(_)) => {
+                    return Ok(None)
+                }
+                Err(err) => return Err(err),
+            };
+            store.get_skill_package_for_query_visible(
+                urn,
+                pinned.reference.version.as_ref(),
+                pinned.channel,
+                owner,
+                false,
+            )
+        }
+    };
+    let package = match package {
+        Ok(package) => package,
+        Err(OrchestratorError::NotFound(_) | OrchestratorError::InvalidContract(_)) => {
+            return Ok(None)
+        }
+        Err(err) => return Err(err),
+    };
+    let temp_dir = tempfile::tempdir().map_err(OrchestratorError::Io)?;
+    let Some(root) = unpack_package_to(&package, temp_dir.path())? else {
+        return Ok(None);
+    };
+    let manifest = vam_spec::package::load_skill_manifest(&root)
+        .map_err(|e| OrchestratorError::InvalidContract(e.0))?;
+    Ok(Some(
+        crate::secret_requirements::collect_skill_requirements(&[manifest]),
+    ))
+}
+
+/// Unpacks a package's archive under `dest` and returns the skill root, or `None` when its blob
+/// is not on this node.
+fn unpack_package_to(
+    package: &SkillPackageRecord,
+    dest: &Path,
+) -> Result<Option<PathBuf>, OrchestratorError> {
+    let catalog_root = skill_catalog_root(&drive9_root());
+    let blob_path = catalog_root.join(&package.blob_relpath);
+    let blob_path = if blob_path.is_file() {
+        blob_path
+    } else {
+        let owner = package
+            .blob_relpath
+            .split_once('/')
+            .map(|(owner, _)| owner)
+            .unwrap_or(crate::users::LOCAL_USER_ID);
+        migrate_legacy_skill_blob(&catalog_root, owner, &package.digest)?
+    };
+    if !blob_path.is_file() {
+        return Ok(None);
+    }
+    let archive_bytes = fs::read(&blob_path).map_err(OrchestratorError::Io)?;
+    unpack_tar_gz(&archive_bytes, dest)?;
+    Ok(Some(resolve_skill_root(dest)?))
+}
+
 fn unpack_package_to_staging(
     package: &SkillPackageRecord,
     staging_root: &Path,
@@ -1009,5 +1100,63 @@ mod tests {
         .expect_err("closed");
         assert!(matches!(err, OrchestratorError::InvalidContract(_)));
         assert!(err.to_string().contains("no published version"));
+    }
+
+    #[test]
+    fn required_secrets_are_read_from_the_published_package() {
+        let _drive9 = Drive9Fixture::new();
+        let store = store();
+        let manifest = format!(
+            r#"{{
+  "resourceId": {{"urn": "{ASSISTANT_URN}"}},
+  "version": {{"major": 1, "minor": 0, "patch": 0}},
+  "description": "Test skill",
+  "tools": [{{
+    "name": "needs_secret",
+    "description": "d",
+    "inputSchemaJson": "{{\"type\":\"object\"}}",
+    "sideEffect": "SIDE_EFFECT_CLASS_READ_ONLY",
+    "host_exec": {{"adapter_id": "echo", "config": {{}}}},
+    "required_secrets": [{{"name": "never-set-token", "required": true}}]
+  }}]
+}}"#
+        );
+        let archive = write_tar_gz(&[
+            ("SKILLS.md", minimal_skills_md(ASSISTANT_URN).as_bytes()),
+            ("manifest.json", manifest.as_bytes()),
+        ]);
+        let digest = real_digest_for("with-secret");
+        let mut record = package_record(&digest, SkillChannel::Released, "");
+        record.channel = SkillChannel::Released as i32;
+        store.put_skill_package(&record).expect("package");
+        _drive9.write_blob(&digest, &archive);
+
+        let pinned = ResourceRef {
+            version: Some(Version {
+                major: 1,
+                minor: 0,
+                patch: 0,
+                prerelease: String::new(),
+                build: String::new(),
+            }),
+            ..skill_ref(&digest, "")
+        };
+        let found = skill_required_secrets(&store, &pinned, LOCAL_USER_ID)
+            .expect("read")
+            .expect("a package backs the ref");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "never-set-token");
+        assert!(found[0].required);
+
+        // A skill with no package is `None`, not an error: skill resolution reports it.
+        let other = ResourceRef {
+            resource_id: Some(ResourceId {
+                urn: "urn:vam:skill:local.vam.dev/e2e/absent".to_string(),
+            }),
+            ..pinned
+        };
+        assert!(skill_required_secrets(&store, &other, LOCAL_USER_ID)
+            .expect("read")
+            .is_none());
     }
 }

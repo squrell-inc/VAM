@@ -121,6 +121,7 @@ fn map_log_error(err: ThreadLogError) -> ApiError {
         ThreadLogError::InvalidThread(msg) => OrchestratorError::InvalidContract(msg).into(),
         ThreadLogError::NotFound(msg) => OrchestratorError::NotFound(msg).into(),
         ThreadLogError::UnsupportedVersion { seq, version } => ApiError {
+            denials: Vec::new(),
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: VamErrorCode::InvalidArgument,
             message: format!("thread log record {seq} has unsupported version {version}"),
