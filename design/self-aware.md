@@ -257,10 +257,16 @@ with `Idempotency-Key`:
 | Nothing live, queued or parked on the Space (`workspace_busy` and `busy_run`, `api/inbox.rs:87`, `:145-148`, which cover the live session and the parked reservation, plus queued runs) | 409 `space_busy: run '<id>'` with a denial whose fix is "wait or stop that run" |
 | Thread compatibility (below) | not a refusal; the answer lists affected threads |
 
-The busy check and the pin write are one serialized step: they run under
-the same per-Space guard that run admission (`inbox::admit`,
-`api/inbox.rs:407`) holds, so no run can be admitted between the check and
-the write and a Space is never re-pinned while a run is starting.
+The busy check and the pin write are one serialized step. Today's main has
+no per-Space guard: `inbox::admit` (`api/inbox.rs:407`) checks busy state,
+and a run becomes visible to that check only later in `start_run`. S2 adds
+the guard: a per-Space lock (an in-process mutex keyed by Space id, backed by
+a `SELECT … FOR UPDATE` on the `spaces` row for multi-node) that run start
+takes before `inbox::admit` and holds until the starting run is recorded and
+visible to `workspace_busy`/`busy_run`. `set_space_agent_version` takes the
+same lock around its busy check and pin write. So no run is admitted between
+the check and the write, and a Space is never re-pinned while a run is
+starting.
 
 On success: `previous_agent_version := agent_version`, `agent_version :=
 target`, one audit record (`vam.v1.space.agent_version_changed`, through the
