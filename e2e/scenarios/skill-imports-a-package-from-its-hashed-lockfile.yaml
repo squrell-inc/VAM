@@ -1,0 +1,30 @@
+id: skill-imports-a-package-from-its-hashed-lockfile
+title: A skill whose requirements.txt hashes every package gets that package in its Python tool, with no network in the guest
+description: >
+  The skill carries a requirements.txt in which every line is pinned and hashed, and a Python
+  tool that imports the package and prints a marker the package computes. The node fetches the
+  wheel on the host from its package mirror (the run-level file:// fixture), checks its hash and
+  mounts it with the skill, so the tool result holds the marker.
+tags: [chat, release]
+needs: process
+given:
+  - org-admin
+  - agent-with-python-lockfile-skill
+when:
+  - chat: "e2e-step:lockfile Run the lockfile tool"
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "lockfile-python-55" } }
+guards:
+  - vam:crates/vam-orchestrator/src/skill_package_admit.rs
+  - vam:crates/vam-orchestrator/src/api/skill_packages.rs
+  - vam:crates/vam-runtime/src/exec.rs
+mock:
+  - when: { step: lockfile, toolName: lockfile_report }
+    reply: { text: Done. }
+  - when: { step: lockfile, toolName: load_skill }
+    reply: { toolCall: { name: lockfile_report, args: {} } }
+  - when: { step: lockfile, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-with-python-lockfile-skill-imports-a-package-from-its-hashed-lockfile } } }
+status: pending
+expectFail: { step: then.1, class: product }

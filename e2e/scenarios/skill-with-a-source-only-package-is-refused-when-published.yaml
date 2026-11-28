@@ -1,0 +1,21 @@
+id: skill-with-a-source-only-package-is-refused-when-published
+title: A skill whose lockfile needs a source build is refused when it is published, naming the project
+description: >
+  The skill's requirements.txt names a project the package mirror holds only as a source
+  archive. Nothing is built on the node, so the upload is refused with a 4xx that names the
+  project and says it is a source package. The skill is published by a step, so the refusal is
+  a product result and not a setup failure.
+tags: [release]
+needs: process
+given:
+  - org-admin
+  - skill-with-sdist-lockfile
+when:
+  - expect: { node: { fields: { status.base.name: vam/base:2 } } }
+then:
+  - publish-skill: { piece: skill-with-sdist-lockfile, refused: true, contains: [vamfixture-sdist-only, source] }
+guards:
+  - vam:crates/vam-orchestrator/src/skill_package_admit.rs
+  - vam:crates/vam-orchestrator/src/api/skill_packages.rs
+status: pending
+expectFail: { step: then.0, class: product }

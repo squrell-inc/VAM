@@ -343,7 +343,7 @@ Builds are serial. Each wave's `CI:` line lists its scenario ids.
 
 | Wave | Items | Turns green | Repo | Model | Budget | Depends on | CI | Status | PR |
 |---|---|---|---|---|---|---|---|---|---|
-| 0 | scenarios, fixtures | — (S1-S6 red; S7 on the lane in W4) | vam | Sonnet low | 75 min | approval | `CI: scenarios=<S1..S6 ids>` | [ ] | |
+| 0 | scenarios, fixtures | — (S1-S6 red; S7 on the lane in W4) | vam | Sonnet low | 75 min | approval | `CI: scenarios=<S1..S6 ids>` | [x] | |
 | 1 (sec) | VI-1.4, VI-1.5, upload refusal | S3 | vam | Sonnet high: egress, SSRF pinning and archive extraction are the security floor | 120 min | 0 | `CI: scenarios=<S3>` | [ ] | |
 | 2 | VI-1.6, VI-1.7, VI-1.8 (packages) | S1, S2, S4 | vam | Sonnet medium: three crates (orchestrator, storage, guest) and a proto field | 120 min | 1 | `CI: scenarios=<S1,S2,S4> lane=yes` | [ ] | |
 | 3 | VI-1.1, VI-1.8 (images) | S5, S6 | vam | Sonnet medium: new proto field and API | 90 min | 0 | `CI: scenarios=<S5,S6>` | [ ] | |
@@ -518,5 +518,6 @@ a PR whose resolved package list drifts from `packages.txt`.
 | Date | Phase | What landed (end with the scoreboard: scenarios green, red, fix cycles, wall time) |
 |---|---|---|
 | 2026-11-28 | — | Tracker opened from `design/vam-image.md` (proposed; owner to confirm decisions and Q12-Q14) |
+| 2026-11-28 | 1 W0 | Scenarios S1-S7, pieces, package-mirror and image fixtures, runner env landed. S6 is a new sibling `skill-refusal-names-every-image-the-node-holds` (the active original is cited as docs proof). Scoreboard: S1-S6 red at the named step, class product (0 green, 6 red right reason), S7 pending for the lane; 0 fix cycles |
 
 > Coordination note (2026-11-28): Apps P0 claims proto fields Space.app_id=8, RunSpec.app_id=14, RunStatus.app_id=24, CallerContext.app_id=11 and a new App message after ListSpacesResponse in orchestrator.proto. I1 adds only NodeStatus.images=17 (check NodeStatus numbers are still free at build time).

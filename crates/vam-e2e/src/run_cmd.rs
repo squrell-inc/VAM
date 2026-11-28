@@ -479,6 +479,12 @@ pub fn node(o: NodeOpts) -> i32 {
 /// where `scripts/e2e/run.sh` runs).
 const BASE_MANIFEST_FIXTURE: &str = "e2e/world/fixtures/base/standard.base.json";
 
+/// The `file://` package mirror every node is given as `VAMD_PACKAGE_MIRRORS`, and the image
+/// manifests a process node is given as `VAMD_IMAGES_DIR` (relative to the repo root). A node
+/// that does not read them yet ignores them.
+const PACKAGE_MIRROR_FIXTURE: &str = "e2e/world/fixtures/package-mirror";
+const IMAGES_FIXTURE: &str = "e2e/world/fixtures/images";
+
 /// The environment the node needs on this lane (assets and diagnostics on the microVM lane).
 pub fn node_env(firecracker: bool) -> Result<Vec<(String, String)>, String> {
     let mut extra_env = Vec::new();
@@ -500,6 +506,23 @@ pub fn node_env(firecracker: bool) -> Result<Vec<(String, String)>, String> {
                 abs.to_string_lossy().into_owned(),
             ));
         }
+        // The held images of a process node are fixture manifests too.
+        if let Ok(abs) = std::fs::canonicalize(IMAGES_FIXTURE) {
+            extra_env.push((
+                "VAMD_IMAGES_DIR".to_string(),
+                abs.to_string_lossy().into_owned(),
+            ));
+        }
+    }
+    // Skill packages come from a local mirror on every lane: no scenario reaches the internet.
+    if let Ok(abs) = std::fs::canonicalize(PACKAGE_MIRROR_FIXTURE) {
+        extra_env.push((
+            "VAMD_PACKAGE_MIRRORS".to_string(),
+            format!(
+                "pypi=file://{p}/pypi/simple,npm=file://{p}/npm",
+                p = abs.to_string_lossy()
+            ),
+        ));
     }
     Ok(extra_env)
 }

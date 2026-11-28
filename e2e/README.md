@@ -529,6 +529,26 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
 - A scenario may carry a `description`. A `needs: process` scenario needs a `mock:` block only
   when a step sends a model message (`chat`, `start-playbook`).
 
+## Skill packages and held images (run-level fixtures)
+
+- `e2e/world/fixtures/package-mirror/` is a `file://` mirror every node gets as `VAMD_PACKAGE_MIRRORS`
+  (`node_env` in `crates/vam-e2e/src/run_cmd.rs`): a PEP 691 JSON index under `pypi/simple/<project>/` with a
+  tiny pure-Python wheel (`vamfixture-hello`) and an sdist-only project (`vamfixture-sdist-only`), and an npm
+  tarball at `npm/vamfixture-hello/-/vamfixture-hello-1.0.0.tgz`. The wheel and tarball are small committed
+  binaries; the lockfiles below carry their sha256 and sha512 integrity. A node that does not read the variable
+  ignores it.
+- `e2e/world/fixtures/images/` holds manifests for `vam/python:1` and `vam/node:1` (no Java in any). A process
+  node gets the directory as `VAMD_IMAGES_DIR`, as it gets `VAM_BASE_MANIFEST`; the microVM lane puts its own
+  built images there and the runner sets nothing.
+- Lockfile fixtures: `lockfile-python/` (`requirements.txt`, every line hashed), `lockfile-js/` (`package.json`
+  and a version 3 `package-lock.json`), `lockfile-sdist/` (names the sdist-only project). Skill pieces
+  `skill-with-python-lockfile`, `skill-with-the-same-python-lockfile` (the same bytes, a second skill),
+  `skill-with-js-lockfile` (a Bun tool) and `skill-with-sdist-lockfile` (`deferred`); agent pieces
+  `agent-with-python-lockfile-skill`, `agent-with-the-same-python-lockfile-skill` and
+  `agent-with-js-lockfile-skill`. Each tool prints a marker the package computes, so no script text carries it.
+- `expect: { node: { fields } }` reads a held image as `status.images.name=<image>.<field>` (the same
+  `key=value` array pick as `status.base.runtimes.name=python.version`).
+
 ## Secrets, host-tool skills, floods and paging
 
 - World kind `secret` (`api-token`): an org secret with a random value the runner makes and keeps

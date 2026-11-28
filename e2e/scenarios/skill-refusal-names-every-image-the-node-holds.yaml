@@ -1,0 +1,25 @@
+id: skill-refusal-names-every-image-the-node-holds
+title: A skill that needs a runtime no held image has is refused when it is installed, naming every image the node holds
+description: >
+  The process node is given manifests for the base and for `vam/node:1` (the run-level fixture
+  directory). A skill that needs Python 3.11 or newer installs and releases; a skill that needs
+  Java 21 or newer is refused with a 4xx that names the base, the other held image and the
+  runtime. Both skills are published by steps, so a refusal is a product result and not a
+  setup failure.
+tags: [release]
+needs: process
+given:
+  - org-admin
+  - skill-needs-python
+  - skill-needs-java
+when:
+  - expect: { node: { fields: { status.base.name: vam/base:2 } } }
+then:
+  - publish-skill: { piece: skill-needs-python }
+  - publish-skill: { piece: skill-needs-java, refused: true, contains: [vam/base:2, vam/node:1, java] }
+guards:
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/skill_package_admit.rs
+  - vam:crates/vam-orchestrator/src/node_base.rs
+status: pending
+expectFail: { step: then.1, class: product }

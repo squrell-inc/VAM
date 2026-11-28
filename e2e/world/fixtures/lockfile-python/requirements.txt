@@ -1,0 +1,2 @@
+vamfixture-hello==1.0.0 \
+    --hash=sha256:ba5a8f0ad76889d0864d568cc3896dd5555f4d97d45017e1e334a2383e16c74a

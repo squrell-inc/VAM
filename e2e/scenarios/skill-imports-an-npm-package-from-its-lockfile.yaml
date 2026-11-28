@@ -1,0 +1,30 @@
+id: skill-imports-an-npm-package-from-its-lockfile
+title: A skill with a package-lock.json gets its npm package in its Bun tool, with no network in the guest
+description: >
+  The skill carries a package.json and a version 3 package-lock.json whose entry has an
+  integrity hash, and a Bun tool that requires the package and prints a marker the package
+  computes. The node fetches the tarball on the host from its package mirror, checks the
+  integrity and mounts it as node_modules beside the tool. Needs Bun on the guest tool PATH.
+tags: [chat, release]
+needs: process
+given:
+  - org-admin
+  - agent-with-js-lockfile-skill
+when:
+  - chat: "e2e-step:lockfile Run the lockfile tool"
+then:
+  - expect: { run: succeeded }
+  - expect: { thread: { role: tool, contains: "lockfile-js-55" } }
+guards:
+  - vam:crates/vam-orchestrator/src/skill_package_admit.rs
+  - vam:crates/vam-orchestrator/src/api/skill_packages.rs
+  - vam:crates/vam-runtime/src/exec.rs
+mock:
+  - when: { step: lockfile, toolName: lockfile_report }
+    reply: { text: Done. }
+  - when: { step: lockfile, toolName: load_skill }
+    reply: { toolCall: { name: lockfile_report, args: {} } }
+  - when: { step: lockfile, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-with-js-lockfile-skill-imports-an-npm-package-from-its-lockfile } } }
+status: pending
+expectFail: { step: then.1, class: product }

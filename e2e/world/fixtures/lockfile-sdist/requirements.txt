@@ -1,0 +1,2 @@
+vamfixture-sdist-only==1.0.0 \
+    --hash=sha256:1bdaa7f5307d93a041459d1e8520af1c52ea3c21874ff5d3c4bf1a20005eab38

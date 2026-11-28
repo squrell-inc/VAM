@@ -1,0 +1,24 @@
+id: an-installed-image-is-baked-before-its-first-run
+title: An image the node holds is verified and baked in the background before any run uses it
+description: >
+  The node holds a second image beside the base. Without a run, `GET /v1/node` reports that
+  image verified against its manifest, with its runtimes, and its golden snapshot as baked.
+  Needs a microVM: only there is there an image to boot and a snapshot to take. The lane
+  puts `vam/node:1` in `VAMD_IMAGES_DIR`; this file stays pending until the lane does.
+tags: [release]
+needs: firecracker
+given:
+  - org-admin
+when:
+  - expect:
+      node:
+        fields:
+          status.images.name=vam/node:1.verified: true
+          status.images.name=vam/node:1.runtimes.name=node.version: { present: true }
+          status.images.name=vam/node:1.golden: baked
+guards:
+  - vam:crates/vam-orchestrator/src/golden.rs
+  - vam:crates/vam-orchestrator/src/node_base.rs
+  - vam:scripts/e2e/firecracker-assets.sh
+status: pending
+expectFail: { step: when.0, class: product }
