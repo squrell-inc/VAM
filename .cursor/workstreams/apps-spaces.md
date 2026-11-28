@@ -3,7 +3,7 @@
 ```yaml
 status: active          # active | paused | done
 slug: apps-spaces
-current_phase: 0 (plan not drafted)
+current_phase: 0 (plan approved, wave 1 next)
 base_branch: feat/apps-spaces
 design_docs:
   - design/vam-apps-spaces.md   # read "Amendment 2026-11-28" first; it supersedes the phase list
@@ -146,16 +146,235 @@ Done phase sections are deleted; git history keeps them.
 **Goal:** The amendment is merged, the Cedar `App` entity is proven, the
 protos are additive and the scenario list for P2-P7 is recorded.  
 **Depends on:** none (owner answers given 2026-11-28)  
-**Plan:** not drafted  
+**Plan:** approved 2026-11-28 (breakdown below; owner answered "approved" to Q1-Q10)  
 **Exit:** amendment merged; `cargo test -p vam-security` proves a forbid-only
 App policy denies a tool its owner may use; AS-0.4 policy audit written;
 `cargo test -p vam-spec` passes with the additive protos.
 
-- [ ] Design amendment 2026-11-28 merged
+- [x] Design amendment 2026-11-28 merged (PRs 153 and 157)
 - [ ] AS-0.1 Proto: `App`, `Space.app_id`, `RunSpec.app_id`, `RunStatus.app_id`, `CallerContext.app_id = 11`
 - [ ] AS-0.3 Cedar `App` entity and one forbid-only test
 - [ ] AS-0.4 Policy audit (`principal ==` vs `in`)
 - [ ] Scenario names for P2-P7 confirmed
+
+**Frozen numbers (W1):** `Space.app_id = 8`, `RunSpec.app_id = 14`, `RunStatus.app_id = 24`, `CallerContext.app_id = 11`, `App` fields 1-8. Self-aware S2 starts new `Space` fields at 9.
+
+#### Phase 0 breakdown (approved 2026-11-28)
+
+Read-only breakdown, 2026-11-28, against `feat/apps-spaces` @ `f1c1431`. Format: `phase-playbook.md`
+§3 step 2, as `agent-access/p3-breakdown.md`. Item prefix `AS-0.n`. `Decide: NOW (proof: tracker
+exit; cost 1: two crates plus proto)`. `lane: no` for every wave: no guest or VM path changes
+behaviour, although `proto/` matches the full-tier lane filter (`scripts/ci/plan.sh:38`) on the
+release PR.
+
+##### Scenario delta
+
+**P0 turns no scenario green** (design §7 P0: "PDP and proto unit tests only"). So **no wave 0**:
+there is nothing to write as `pending`. P0's scenario work is to record the names below in the
+tracker. Existing scenarios that guard files P0 touches are re-run in W1:
+`space-and-thread-can-be-renamed-in-place` (guards `api/spaces.rs`),
+`broker-cannot-be-given-an-mcp-credential` (guards `caller_context.rs`) and
+`trigger-starts-a-run-as-the-grant-owner` (CallerContext stamping).
+
+**Names for P2 to P7** (design `:1050-1197`; all `process` unless marked). World pieces that exist:
+`org-admin`, `org-administrator`, `org-publisher`, `org-member`, `org-member-email`, `agent-plain`,
+`agent-with-guarded-tool`, `agent-with-shell-and-secret-skill`, `agent-with-egress-probe`. New
+pieces (none exists, so no clash): `shared-app`, and the variants below.
+
+| Phase | Scenario | Given (world pieces) | Flag |
+|---|---|---|---|
+| P2 | `a-developer-creates-a-shared-app-pinned-to-a-released-version` | `org-publisher`, `agent-plain` | — |
+| P2 | `an-app-cannot-be-created-for-an-agent-the-owner-may-not-use` | `org-member`, `agent-plain` + access-policy step | needs agent-access runner steps (not in `main`; P2 already depends on it) |
+| P2 | `an-app-key-cannot-reach-the-owners-other-agents-or-keys` | `shared-app` (new) | — |
+| P2 | `a-revoked-app-key-starts-nothing` | `shared-app` | — |
+| P2 | `an-org-admin-reassigns-an-app-and-the-new-owner-gets-its-runs` | `org-admin`, `shared-app` | — |
+| P2 | `agent-workspaces-are-isolated` | existing | unchanged, must stay green (file exists) |
+| P3 | `the-same-ref-returns-the-same-space` | `shared-app` | — |
+| P3 | `two-refs-get-two-private-spaces` | `shared-app` | — |
+| P3 | `an-app-key-cannot-open-another-apps-space` | two `shared-app` (aliases via `as:`) | — |
+| P3 | `an-app-key-without-spaces-create-cannot-make-a-space` | `shared-app` | — |
+| P4 | `an-app-key-run-lands-in-the-named-space-on-the-apps-pin` | `shared-app` | — |
+| P4 | `a-shared-app-run-without-a-space-is-refused` | `shared-app` | — |
+| P4 | `a-request-cannot-widen-an-app-key` | `shared-app` | — |
+| P4 | `an-app-run-is-refused-after-the-owners-access-is-revoked` | `shared-app`, access-policy step | agent-access steps |
+| P4 | `moving-the-app-pin-moves-every-space-and-a-live-run-finishes-on-the-old-version` | `shared-app`, two releases | pending Q10; 79 chars (allowed) |
+| P4 | `an-app-approval-reaches-the-app-owner` | `shared-app`, `agent-with-guarded-tool` | — |
+| P4 | `a-shared-app-run-reads-no-owner-secrets-before-bindings` | `shared-app`, `agent-with-shell-and-secret-skill` | — |
+| P5 | `an-app-limit-denies-a-tool-its-owner-may-use` | `shared-app-with-a-tool-limit` (new) | — |
+| P5 | `an-app-limit-denies-an-egress-host-its-owner-may-reach` | `shared-app`, `agent-with-egress-probe` | egress PEP principal note (issue 7) |
+| P5 | `a-shared-app-reads-only-its-bound-secrets` | `shared-app`, `agent-with-shell-and-secret-skill` | — |
+| P5 | `a-personal-app-keeps-all-owner-secrets` | `agent-with-shell-and-secret-skill` | — |
+| P6 | `a-space-read-shows-when-its-history-expires` | `shared-app-with-idle-ttl` (new) | proposed (Q9) |
+| P6 | `an-app-key-keeps-its-own-space` | `shared-app-with-idle-ttl` | proposed (Q9) |
+| P6 | `an-app-reports-runs-tokens-and-cost-per-space` | `shared-app`, two Spaces | proposed (Q9) |
+| P6 | `an-idle-shared-space-is-reaped-within-its-ttl` | `shared-app-with-idle-ttl` | — |
+| P6 | `a-kept-space-is-never-reaped` | `shared-app` | — |
+| P6 | `a-space-with-a-parked-run-is-not-reaped` | `shared-app`, `agent-with-guarded-tool` | — |
+| P6 | `deleting-a-space-erases-it-at-once` | `shared-app` | — |
+| P6 | `an-app-over-its-run-quota-is-refused-with-a-typed-reason` | `shared-app-with-a-run-quota` (new) | the typed reason comes from S1's `QUOTA` |
+| P7 | `the-sdk-creates-a-space-runs-and-follows-events` | `shared-app` | — |
+| P7 | `the-sdk-answers-an-approval-and-the-run-resumes` | `shared-app`, `agent-with-guarded-tool` | — |
+| P7 | `the-example-app-gives-two-visitors-two-private-spaces` | `shared-app` | — |
+| P7 | `the-sdk-reads-a-spaces-usage-and-expiry` | `shared-app-with-idle-ttl` | proposed (AS-7.5) |
+| P7 | `an-owner-creates-an-app-and-issues-a-key-in-the-app` | Squrell-App | `needs: ui` (exists, `scenario.rs:81-85`) |
+| P7 | `the-apps-screen-shows-each-apps-spaces-and-pin` | Squrell-App | `needs: ui` |
+
+Notes for P2's wave 0: `TAGS` has no `apps` (`scenario.rs:7-24`), so either use
+`workspace`/`members`/`permissions` or add `apps` (a one-line `vam-e2e` change). A piece cannot
+take parameters (only `as:`), which is why the variants are separate pieces.
+
+##### Items
+
+**AS-0.1 Additive proto** (W1).
+- `proto/vam/v1/orchestrator.proto`: after `ListSpacesResponse` (`:1204`), a section "Apps" with
+  `message App { string app_id = 1; string name = 2; string kind = 3; string agent_urn = 4;
+  string agent_version = 5; string owner_user_id = 6; google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp deactivated_at = 8; }`. `kind` holds `personal` or `shared`.
+  `deactivated_at` is absent while the App is active. `Space`: `string app_id = 8; // app_…;
+  empty until Apps fill it (a NULL row reads as the personal App)`.
+- `proto/vam/v1/workflow.proto`: `RunSpec` `string app_id = 14; // host-resolved; ignored until
+  Apps resolution, never trusted from a client` (after `:232`); `RunStatus` `string app_id = 24;`
+  (after `:365`).
+- `proto/vam/v1/hosted_services.proto`: `CallerContext` `string app_id = 11; // host-stamped;
+  empty for a personal run` (after `:140`).
+- Literals: `crates/vam-orchestrator/src/caller_context.rs:77-88` (`app_id: String::new()`, plus a
+  unit test that a stamped context has an empty `app_id`); `crates/vam-orchestrator/src/api/spaces.rs:33-43`;
+  `crates/vam-spec/examples/generate_baseline.rs:192` (do **not** run it).
+- New `crates/vam-spec/tests/app_contract.rs`: the four `app_id` numbers and `App` 1 to 8 are
+  locked (pattern from `encoding.rs:574-607`); `App` JSON round-trips through `json_to_proto` /
+  `proto_to_json` with `"kind":"shared"`; `Space`/`RunStatus` with an empty `app_id` print no
+  `appId`; `RunSpec` JSON with `appId` parses (documents the inert input).
+- Accept: `cargo test -p vam-spec`, `cargo check --workspace`, the three guarded scenarios green.
+
+**AS-0.3 Cedar App entity** (W2).
+- `crates/vam-security/schema/vam.cedarschema`: `entity App;` and `entity Agent in [App];`
+  (`User` unchanged).
+- `crates/vam-security/src/engine.rs`: `pub fn evaluate_in_app(&self, req: &EvaluationRequest,
+  app_id: &str) -> DecisionOutcome` on `CedarPolicyEngine` and `ArcSwapPolicyEngine`. It shares the
+  body of `evaluate` through a private `evaluate_with(req, Option<&str>)`, and `request_entities`
+  gains the principal entity (`Agent` uid with parent `App`) plus the `App` entity, built as JSON.
+  Deny with a diagnostic when the principal type is not `Agent`, or `app_id` fails `app_` plus 26
+  lowercase base32 characters (the `spaces::mint_id` alphabet, `spaces.rs:31-52`). `evaluate`'s
+  behaviour is byte-identical, and an empty Tool list still uses `Entities::empty()` when no App
+  is given. Docs comment: forbid-only App limits are written `forbid (principal in App::"<id>",
+  …)`. Validating that a limit is forbid-only is P5 (AS-5.1).
+- `crates/vam-security/tests/pdp_tests.rs`: the four tests in Outcomes, and a strict-validation
+  test showing that `forbid (principal in App::"app_…", …)` compiles against the default schema.
+  The wave checks whether Cedar 4.12 (`Cargo.lock`) needs the parent entity present, and keeps
+  the `App` entity in the store either way.
+- Accept: `cargo test -p vam-security`, `cargo test -p vam-orchestrator security::` (the sample
+  policies still compile against the schema, `security.rs:4315-4325`), `cargo check --workspace`.
+
+**AS-0.4 Policy audit** (W2). A new subsection "AS-0.4 Policy audit (2026-11-28)" at the end of
+amendment 2026-11-28 in `design/vam-apps-spaces.md`, built from issue 7: the list with file:line,
+the verdict "no meaning change", the App-limit shape rule (forbid-only, `principal in App::"<id>"`,
+never `==`), and the three P5 notes (egress principal, legacy converter, `App::` in agent
+policies). It also notes the P5 alternative of a fourth Tool attribute `app_rule` beside
+`agent_rule/source_rule/org_rule` (`pdp.rs:96-104`). That is a breaking schema change for every
+`ToolEntity::new`, so the hierarchy stays the plan.
+
+**AS-0.5 Scenario names and tracker** (close, phase session, docs-only PR). Copy the table above into
+the P2 to P7 sections of the tracker, and record the numbers and the stale-line fixes.
+
+##### Waves
+
+| Wave | Items | Turns green | Repo | Model | Budget | Depends on | CI | lane |
+|---|---|---|---|---|---|---|---|---|
+| 0 | none: no scenario turns green in P0 | — | — | — | — | — | — | — |
+| 1 | AS-0.1 | none (re-runs 3 guarded scenarios) | vam | Sonnet 5.5 medium (new proto and API schema across `vam-spec` and `vam-orchestrator`) | 60 min | approval | `CI: scenarios=space-and-thread-can-be-renamed-in-place,broker-cannot-be-given-an-mcp-credential,trigger-starts-a-run-as-the-grant-owner tests=workspace` | no |
+| 2 | AS-0.3, AS-0.4 | none | vam | Sonnet 5.5 high (the Cedar policy boundary; plan goes to the owner) | 90 min | 1 | `CI: tests=workspace` (`vam-security` forces it anyway) | no |
+| review | phase close, read-only, W2 diff | — | — | Opus 5.5 high (Q8) | 20 min | 2 | — | — |
+| close | AS-0.5, ticks, progress row | — | vam | phase session (Sonnet medium) | 20 min | review | docs-only (runs `docs.yml`) | no |
+
+W1 and W2 touch different crates, but they run one at a time (playbook §3). W1 goes first so the
+numbers are in the branch before S1 or I1 reach their proto items. Each PR targets
+`feat/apps-spaces`, is titled `AS-0 W<n>: <summary>`, and says "Do not merge". Commits follow
+AGENTS.md:256: the maintainer's identity with `git commit -s`, and no `Co-Authored-By`, session
+links or "Generated with" lines.
+
+**Files per wave.**
+- W1: `proto/vam/v1/{orchestrator,workflow,hosted_services}.proto`, `crates/vam-orchestrator/src/caller_context.rs`,
+  `crates/vam-orchestrator/src/api/spaces.rs`, `crates/vam-spec/examples/generate_baseline.rs`,
+  `crates/vam-spec/tests/app_contract.rs` (new).
+- W2: `crates/vam-security/schema/vam.cedarschema`, `crates/vam-security/src/engine.rs`,
+  `crates/vam-security/tests/pdp_tests.rs`, `design/vam-apps-spaces.md` (audit section).
+- Close: `.cursor/workstreams/apps-spaces.md`, `.cursor/workstreams/README.md` row,
+  `design/vam-apps-spaces.md` (stale lines).
+
+##### Lane collisions (wave 1 siblings)
+
+| Lane | Proto files and numbers it may take | Other shared files | P0's position |
+|---|---|---|---|
+| S1 typed denials (`/mnt/project-files/self-aware/s1-breakdown.md` SA-1.1 to 1.5) | `common.proto`: new `Denial`, `DenialReason`, `SuggestedFix`, `FixChange`, `FixWho` (new messages, so no numbers on existing ones); packed into the existing `ErrorStatus.details` (`common.proto:172-177`); `events.proto`: `denial` on `PolicyDecidedPayload` and `EgressDecidedPayload` (their next free numbers); **regenerates `baseline/vam_descriptor.bin`** | `security.rs`, `api/mod.rs`, `api/error.rs`, `docs/api/openapi.yaml`, `vam-runtime/src/agent.rs`, possibly `encoding.rs` lock tests | P0 touches none of these files, does not run `generate_baseline`, and puts its lock test in a new file. It edits one line of `generate_baseline.rs` (a literal), which S1 runs but is not planned to edit. No overlap. |
+| I1 curated bases (`.cursor/workstreams/vam-image.md` Phase 1) | `orchestrator.proto` `NodeStatus` (next free 17, for `status.images[]`) and `NodeBase`/new image message (`:81-133`); maybe `skills.proto` `SkillManifest` (next free 14, lockfile) | `golden.rs`, `node_base.rs`, `skill_package_resolve.rs`, `scripts/base/`, `vam-runtime` exec, `vam-cli` node init | Same file `orchestrator.proto`, different messages about 1,000 lines apart, no shared numbers, no name clash (`App` vs image names). W1 lands first. I1 rebases on a clean text merge. |
+| S2 (later, not wave 1) | new fields on `vam.v1.Space` (`design/self-aware.md:252`) | `run_start.rs`, `catalog_resolve.rs` | P0 takes `Space` 8; S2 starts at 9 (Q10). |
+| Agent access (when released to `main`) | `orchestrator.proto` `GetMeResponse` (`:704-718`) and new access messages; regenerates the baseline | `openapi.yaml` | No shared message or number. P0 leaves the baseline alone, so merging `main` later has no binary conflict. |
+
+##### Test commands
+
+```bash
+cargo test -p vam-spec                       # conformance (one-way vs baseline), examples_json, openapi_yaml, app_contract; builds generate_baseline
+cargo test -p vam-spec --test conformance    # the only proto drift check
+cargo test -p vam-spec --test examples_json  # the CI `checks` job step
+cargo test -p vam-security                   # pdp_tests incl. the App forbid tests
+cargo test -p vam-orchestrator caller_context api::spaces security::
+cargo test -p vam-schedule                   # CallerContext consumer (uses ..Default)
+cargo check --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+scripts/e2e/run.sh --scenarios space-and-thread-can-be-renamed-in-place,broker-cannot-be-given-an-mcp-credential,trigger-starts-a-run-as-the-grant-owner   # W1
+scripts/ci/local.sh --fast --base origin/feat/apps-spaces
+```
+
+There is no OpenAPI drift check beyond `openapi_yaml.rs`'s named paths, no `buf`/proto lint, and
+no generated docs. `cargo run -p vam-e2e -- check` runs only on the close PR (via `docs.yml`).
+
+##### Risks
+
+- **Inert `appId` input (Q4).** A client can send it and get no error. Nothing reads it before P4,
+  and P4 must treat it as a request, never as a fact. Write this into P4's AS-4.3 acceptance.
+- **Cedar dangling parents.** If 4.12 refuses a parent that is not in the store, the `App` entity
+  is added (planned anyway). Strict validation of `principal in App::` on an action whose
+  principals are `[Agent, User]` is possible for `Agent`, so it is accepted. W2 proves both in
+  tests.
+- **An unused `evaluate_in_app` until P5.** No fail-open risk: nothing calls it, and `evaluate` is
+  unchanged. The risk moves to P5, where the PEP must call it at every site: tool (`security.rs:952,
+  :1529`), path limb (`:1009`), advertise (`advertise.rs:289-340`), and the egress set (issue 7).
+  P5's deny matrix (AS-5.4) is the proof.
+- **The schema now accepts `App::` in agent policies** (issue 7). It is inert until P5, and P5
+  refuses it at publish (Q6).
+- **Text merge in `orchestrator.proto` with I1 and agent access.** Different hunks. W1 is small
+  and lands early.
+- **Generated module churn.** Editing any `vam.v1` file regenerates the single module that also
+  holds `agentic_spec.proto`'s types. They are unchanged, and nothing generated is committed. The
+  baseline is not regenerated.
+- **Tracker size.** The scenario tables add about 3K tokens to `apps-spaces.md`, still under the
+  40K rule (AGENTS.md §2.1).
+
+##### Tracker, progress log and design edits at close
+
+- Tracker P0: tick all five boxes. Set `Plan: approved <date>` and mark P0 done. AS-0.1 line gets
+  the numbers (`Space.app_id = 8`, `RunSpec.app_id = 14`, `RunStatus.app_id = 24`,
+  `CallerContext.app_id = 11`, `App` 1 to 8). Paste the scenario table into P2 to P7.
+  `current_phase: 2 (blocked: agent access not in main)`, and the README row to match. Then
+  delete the P0 section per playbook §7, leaving a "Done phases" row.
+- Progress log row: `2026-MM-DD | 0 | AS-0.1 proto (PR …), AS-0.3 Cedar App entity and AS-0.4
+  audit (PR …), scenario names P2-P7 recorded. Scoreboard: 0 green (none planned), 0 red, <n> fix
+  cycles, <wall time>`.
+- Design `vam-apps-spaces.md`: the AS-0.4 section (W2). §7 P0 AS-0.1 gets the concrete numbers
+  (`:1026-1030`). §1 "Not on main" (`:807-809`) drops "a Cedar `App` entity", since the schema
+  has it and the PEP does not yet. Amendment 2026-10-29 §4 `:238-239` points at
+  `encoding.rs:574-607` and `vam-spec/tests/app_contract.rs` instead of `triggered-runs.md`. The
+  §7 P2 table's Given "restricted agent" becomes `agent-plain` plus an access-policy step. One
+  line under §2 says the original AS-0.2 `identity_requirement` flags are deferred to P4 (Q5).
+- Coordinator note (Q10), so the S1, S2 and I1 sessions see the reserved numbers.
+
+##### What must not be touched
+
+`crates/vam-orchestrator/src/api/run_start.rs`, `catalog_resolve.rs`, `manager.rs`,
+`proto/vam/v1/agentic_spec.proto`, `proto/vam/v1/baseline/*`, `docs/api/openapi.yaml`,
+`docs/src/content/docs/**`, `crates/vam-orchestrator/src/security.rs`, `api/mod.rs`,
+`common.proto`, `events.proto`. If a wave finds it needs one of these, it stops and the phase
+session asks the owner.
 
 ### Phase 2 — Apps
 
