@@ -23,8 +23,8 @@ then:
 guards:
   - vam:crates/vam-cli/src/main.rs
   - vam:crates/vam-cli/src/cmd/catalog.rs
+  - vam:crates/vam-cli/src/cmd/access.rs
   - vam:crates/vam-cli/src/client.rs
   - vam:crates/vam-cli/src/http_error.rs
   - vam:crates/vam-cli/src/cmd/run.rs
-status: pending
-expectFail: { step: then.0, class: product }
+status: active

@@ -104,6 +104,16 @@ pub enum AgentCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Agents you may ask for or use, with your access state.
+    Browse(super::access::ListArgs),
+    /// Add an agent that is open to you; vamd says whether it is approved at once.
+    Add(super::access::AskArgs),
+    /// Ask an agent's admins for access (the same call as `add`); vamd decides which it is.
+    Request(super::access::AskArgs),
+    /// Withdraw your request for an agent, or leave one you were approved for.
+    Leave(super::access::LeaveArgs),
+    /// Set who sees an agent and how members get access (agent admin or org admin).
+    AccessPolicy(super::access::PolicyArgs),
     Ls,
 }
 
@@ -403,6 +413,10 @@ pub async fn run_agent(host: Option<String>, token: Option<String>, cmd: AgentCm
             super::permissions::run_migrate(&c, &agent, force, idempotency_key.as_deref(), json)
                 .await?
         }
+        AgentCmd::Browse(a) => super::access::run_browse(&c, a).await?,
+        AgentCmd::Add(a) | AgentCmd::Request(a) => super::access::run_ask(&c, a).await?,
+        AgentCmd::Leave(a) => super::access::run_leave(&c, a).await?,
+        AgentCmd::AccessPolicy(a) => super::access::run_policy(&c, a).await?,
         AgentCmd::Ls => {
             let body = c.get("/v1/agents").await?;
             client::print_json(&body);
