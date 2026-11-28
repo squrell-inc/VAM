@@ -2105,7 +2105,23 @@ fn string_value(text: &str) -> prost_types::Value {
 async fn resolve_short_name(c: &Client, name: &str) -> Result<String> {
     let body = c.get("/v1/agents").await?;
     let listed: ListAgentsResponse = client::parse_json("vam.v1.ListAgentsResponse", &body)?;
-    resolve_installed_agent(name, &installed_agents(&listed))
+    match resolve_installed_agent(name, &installed_agents(&listed)) {
+        Err(e) if output::classify(&e).0 == ExitCode::NotFound => {
+            // A visible agent the caller may not run yet is not "not installed": point at the
+            // request. A hidden or missing one keeps the not-found text above.
+            let rows = super::access::browse_all(c).await.unwrap_or_default();
+            match super::access::urns_named(&rows, name).as_slice() {
+                [urn] => Err(output::fail(
+                    ExitCode::Auth,
+                    format!(
+                        "Wrong: agent_access_required: you have no access to '{urn}' yet.\nExpected: access to this agent, which an admin of it grants.\nFix: vam agent request {urn}."
+                    ),
+                )),
+                _ => Err(e),
+            }
+        }
+        other => other,
+    }
 }
 
 fn installed_agents(listed: &ListAgentsResponse) -> Vec<InstalledAgent> {

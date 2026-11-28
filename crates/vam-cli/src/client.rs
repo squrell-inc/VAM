@@ -538,6 +538,13 @@ fn next_token(page: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The path of the page after `token`: `?` or `&` by whether `path` already has a query, and the
+/// token percent-encoded.
+fn next_page_path(path: &str, token: &str) -> String {
+    let sep = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{sep}pageToken={}", encode_path_segment(token))
+}
+
 /// `GET path` for a paged list (runs, sessions, approvals). Without `all` it returns the first
 /// page and says on stderr that more exist; with `all` it follows `nextPageToken` and returns
 /// one merged answer. A node that does not page answers one page and that is all there is.
@@ -557,7 +564,7 @@ pub async fn list_paged(c: &Client, path: &str, array_key: &str, all: bool) -> R
     }
     let mut pages = vec![page];
     while pages.len() < MAX_PAGES {
-        let body = c.get(&format!("{path}?pageToken={token}")).await?;
+        let body = c.get(&next_page_path(path, &token)).await?;
         let page: serde_json::Value = serde_json::from_str(&body).context("read a list page")?;
         let next = next_token(&page);
         pages.push(page);
@@ -585,6 +592,18 @@ mod paging_tests {
             "statuses",
         );
         assert_eq!(m, json!({"statuses": [1, 2, 3]}));
+    }
+
+    #[test]
+    fn next_page_path_joins_by_query_and_encodes_the_token() {
+        assert_eq!(
+            next_page_path("/v1/approvals", "t"),
+            "/v1/approvals?pageToken=t"
+        );
+        assert_eq!(
+            next_page_path("/v1/access-requests?state=all", "a=b"),
+            "/v1/access-requests?state=all&pageToken=a%3Db"
+        );
     }
 
     #[test]

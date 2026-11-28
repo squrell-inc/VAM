@@ -82,6 +82,9 @@ fn hint(method: &str, path: &str, status: u16, body: &ApiBody) -> (String, Strin
             "vam login --username <NAME> --password-from-env <VAR>".into(),
         );
     }
+    if let Some(h) = access_hint(method, path, status, body) {
+        return h;
+    }
     if status == 403 {
         return (
             "a credential allowed to call this route".into(),
@@ -224,6 +227,140 @@ fn hint(method: &str, path: &str, status: u16, body: &ApiBody) -> (String, Strin
     )
 }
 
+/// Hints for the agent access routes. They depend only on the path and the message, and vamd
+/// words a hidden agent and a missing one the same, so a hint never tells them apart.
+fn access_hint(method: &str, path: &str, status: u16, body: &ApiBody) -> Option<(String, String)> {
+    let msg = body.message.to_ascii_lowercase();
+    let seg = segments(path);
+    let first = seg.get(1).map(String::as_str).unwrap_or("");
+    let third = seg.get(2).map(String::as_str);
+    let fourth = seg.get(3).map(String::as_str);
+    let on_agent_access =
+        first == "agents" && matches!(fourth, Some("access" | "access-policy" | "admins"));
+    let on_requests = first == "access-requests";
+    if status == 403 && msg.starts_with("agent_access_required:") {
+        let urn = quoted_after(&body.message, "access to").unwrap_or_else(|| "<URN>".into());
+        return Some((
+            "access to this agent, which an admin of it grants".into(),
+            format!("vam agent request {urn}"),
+        ));
+    }
+    if status == 403 && msg.contains("only an agent admin or org admin") {
+        return Some((
+            "an admin of this agent or an org admin".into(),
+            "ask an admin of this agent or an org admin".into(),
+        ));
+    }
+    if status == 409 && msg.contains("different request") {
+        return Some((
+            "a new key for a different request, or the same request with the same key".into(),
+            "use a new key with --idempotency-key <NEW-KEY>, or leave the flag out".into(),
+        ));
+    }
+    if status == 404 && method == "DELETE" && on_agent_access && msg.contains("no access request") {
+        return Some((
+            "an agent you have a request for or access to".into(),
+            "vam access mine".into(),
+        ));
+    }
+    if status == 404 && fourth == Some("access") && msg.contains("no approved access") {
+        let urn = third.unwrap_or("<URN>");
+        return Some((
+            "a user with approved access to this agent".into(),
+            format!("vam access requests --state approved --agent {urn}"),
+        ));
+    }
+    if status == 404 && on_agent_access {
+        return Some((
+            "an agent that browse lists".into(),
+            "vam agent browse".into(),
+        ));
+    }
+    if status == 404 && on_requests {
+        return Some((
+            "a request id that the request list shows".into(),
+            "vam access requests".into(),
+        ));
+    }
+    if status == 409 && on_requests {
+        return Some((
+            "a request that is still pending".into(),
+            "vam access requests --state all".into(),
+        ));
+    }
+    if status == 409 && on_agent_access {
+        return Some((
+            "an agent you have not been added to".into(),
+            "vam access mine".into(),
+        ));
+    }
+    None
+}
+
+/// Every `vam ...` command the access hints can print, with their placeholders filled.
+pub fn access_hint_commands() -> Vec<String> {
+    let cases: [(&str, &str, u16, &str); 8] = [
+        (
+            "POST",
+            "/v1/agents/u/access",
+            403,
+            "agent_access_required: request access to 'u'",
+        ),
+        (
+            "DELETE",
+            "/v1/agents/u/access",
+            404,
+            "you have no access request for agent 'u'",
+        ),
+        (
+            "POST",
+            "/v1/agents/u/access",
+            404,
+            "agents 'u' not found in catalog",
+        ),
+        (
+            "POST",
+            "/v1/agents/u/access",
+            409,
+            "agent 'u' is already usable",
+        ),
+        (
+            "POST",
+            "/v1/agents/u/access/x/revoke",
+            404,
+            "user 'x' has no approved access to agent 'u'",
+        ),
+        (
+            "POST",
+            "/v1/access-requests/r/decide",
+            404,
+            "access request 'r' not found",
+        ),
+        (
+            "POST",
+            "/v1/access-requests/r/decide",
+            409,
+            "access request 'r' is denied, not pending",
+        ),
+        (
+            "POST",
+            "/v1/agents/u/access",
+            409,
+            "Idempotency-Key was already used for a different request",
+        ),
+    ];
+    cases
+        .iter()
+        .map(|(m, p, s, msg)| {
+            let body = ApiBody {
+                message: (*msg).to_string(),
+                retryable: false,
+            };
+            access_hint(m, p, *s, &body).expect("a hint").1
+        })
+        .collect()
+}
+
 /// Hints for `POST /v1/me/password`. A wrong current password is a 403 and must not read as
 /// "log in again"; an API key is a 403 too, and that one does need a password session.
 fn password_change_hint(status: u16, msg: &str) -> Option<(String, String)> {
@@ -317,6 +454,11 @@ fn command_for(method: &str, path: &str) -> String {
         ("POST", "sessions", Some(id), Some("resume")) => format!("vam session resume {id}"),
         ("POST", "sessions", Some(id), Some("terminate")) => format!("vam session terminate {id}"),
         ("POST", "sessions", Some(id), Some("snapshots")) => format!("vam session snapshot {id}"),
+        ("POST", "agents", Some(urn), Some("access")) => format!("vam agent request {urn}"),
+        ("DELETE", "agents", Some(urn), Some("access")) => format!("vam agent leave {urn}"),
+        ("PUT", "agents", Some(urn), Some("access-policy")) => {
+            format!("vam agent access-policy {urn} --visibility org --mode approval")
+        }
         ("POST", "approvals", Some(id), Some("decide")) => {
             format!("vam approve decide {id} --decision approved")
         }
@@ -343,6 +485,8 @@ fn list_command(path: &str) -> String {
         "policies" => "vam policy ls".into(),
         "skills" => "vam skill ls".into(),
         "approvals" => "vam approve ls".into(),
+        "access-requests" => "vam access requests".into(),
+        "catalog" => "vam agent browse".into(),
         "keys" => "vam keys list".into(),
         "secrets" => "vam secrets list".into(),
         "workspaces" => "vam workspace ls".into(),
@@ -638,5 +782,145 @@ mod tests {
         assert!(!text.contains("422"), "{text}");
         assert!(text.contains("Wrong: name is required."), "{text}");
         assert!(text.contains("Fix: vam agent put <FILE>."), "{text}");
+    }
+
+    const URN: &str = "urn:vam:agent:local.vam.dev/ns/plain";
+
+    fn explain_access(method: &str, path: &str, status: u16, message: &str) -> String {
+        explain(method, path, status, &body("x", message, false))
+    }
+
+    #[test]
+    fn a_locked_agent_names_the_request_command_not_login() {
+        let text = explain_access(
+            "POST",
+            "/v1/agents/u/access",
+            403,
+            &format!("agent_access_required: request access to '{URN}'"),
+        );
+        assert!(
+            text.contains(&format!("Fix: vam agent request {URN}.")),
+            "{text}"
+        );
+        assert!(!text.contains("vam login"), "{text}");
+        let text = explain_access(
+            "PUT",
+            "/v1/agents/u/access-policy",
+            403,
+            "only an agent admin or org admin may change access to 'u'",
+        );
+        assert!(
+            text.contains("ask an admin of this agent or an org admin"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn replay_conflict_asks_for_a_new_key_and_other_conflicts_for_the_lists() {
+        let text = explain_access(
+            "POST",
+            "/v1/access-requests/r/decide",
+            409,
+            "Idempotency-Key was already used for a different request",
+        );
+        assert!(
+            text.contains("new key") && !text.contains("--idempotency-key <KEY>"),
+            "{text}"
+        );
+        let text = explain_access(
+            "POST",
+            "/v1/access-requests/r/decide",
+            409,
+            "access request 'r' is denied, not pending",
+        );
+        assert!(text.contains("vam access requests --state all"), "{text}");
+        let text = explain_access(
+            "POST",
+            "/v1/agents/u/access",
+            409,
+            "agent 'u' is already usable",
+        );
+        assert!(text.contains("vam access mine"), "{text}");
+    }
+
+    #[test]
+    fn not_found_hints_follow_the_route() {
+        let t = explain_access(
+            "DELETE",
+            "/v1/agents/u/access",
+            404,
+            "you have no access request for agent 'u'",
+        );
+        assert!(t.contains("Fix: vam access mine."), "{t}");
+        let t = explain_access(
+            "GET",
+            "/v1/agents/u/admins",
+            404,
+            "agents 'u' not found in catalog",
+        );
+        assert!(t.contains("Fix: vam agent browse."), "{t}");
+        let t = explain_access(
+            "POST",
+            "/v1/access-requests/r/decide",
+            404,
+            "access request 'r' not found",
+        );
+        assert!(t.contains("Fix: vam access requests."), "{t}");
+        let t = explain_access(
+            "POST",
+            "/v1/agents/u/access/x/revoke",
+            404,
+            "user 'x' has no approved access to agent 'u'",
+        );
+        assert!(
+            t.contains("vam access requests --state approved --agent u"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn hidden_and_missing_agents_print_byte_equal_hints() {
+        // vamd answers both with one text; the hint reads only the path and that text.
+        let hidden = explain_access(
+            "POST",
+            "/v1/agents/hidden-urn/access",
+            404,
+            "agents 'hidden-urn' not found in catalog",
+        );
+        let missing = explain_access(
+            "POST",
+            "/v1/agents/hidden-urn/access",
+            404,
+            "agents 'hidden-urn' not found in catalog",
+        );
+        assert_eq!(hidden, missing);
+        let a = access_hint(
+            "POST",
+            "/v1/agents/x/access",
+            404,
+            &ApiBody {
+                message: "agents 'x' not found in catalog".into(),
+                retryable: false,
+            },
+        );
+        let b = access_hint(
+            "POST",
+            "/v1/agents/y/access",
+            404,
+            &ApiBody {
+                message: "agents 'y' not found in catalog".into(),
+                retryable: false,
+            },
+        );
+        assert_eq!(a, b, "the hint never names the agent");
+        assert!(!hidden.contains("agent_access_required"));
+    }
+
+    #[test]
+    fn list_command_knows_access_requests() {
+        assert_eq!(
+            list_command("/v1/access-requests?state=all"),
+            "vam access requests"
+        );
     }
 }

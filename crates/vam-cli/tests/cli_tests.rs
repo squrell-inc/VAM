@@ -522,6 +522,93 @@ fn list_paged_follows_the_token_only_with_all() {
 }
 
 #[test]
+fn list_paged_joins_the_token_to_a_path_with_a_query() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(true);
+    let server = MockServer::start();
+    let first = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/v1/access-requests")
+            .query_param("state", "all")
+            .is_true(|req| !req.query_params().iter().any(|(k, _)| k == "pageToken"));
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"requests":[{"n":1}],"pagination":{"nextPageToken":"tok-2"}}"#);
+    });
+    let second = server.mock(|when, then| {
+        when.method(httpmock::Method::GET)
+            .path("/v1/access-requests")
+            .query_param("state", "all")
+            .query_param("pageToken", "tok-2");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"requests":[{"n":2}],"pagination":{"nextPageToken":""}}"#);
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let cfg = vam_cli::config::resolve(Some(server.base_url()), Some("vam_sk_test".into()))
+            .await
+            .unwrap();
+        let c = vam_cli::client::Client::new(&cfg).unwrap();
+        let every =
+            vam_cli::client::list_paged(&c, "/v1/access-requests?state=all", "requests", true)
+                .await
+                .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&every).unwrap();
+        assert_eq!(v["requests"].as_array().unwrap().len(), 2);
+    });
+    assert_eq!(first.calls(), 1);
+    assert_eq!(second.calls(), 1);
+    vam_cli::output::set_json(false);
+}
+
+#[test]
+fn request_prints_what_vamd_decided_and_sends_the_key() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    vam_cli::output::set_json(false);
+    let server = MockServer::start();
+    let urn = "urn:vam:agent:local.vam.dev/ns/plain";
+    let mock = server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path(format!(
+                "/v1/agents/{}/access",
+                vam_cli::client::encode_path_segment(urn)
+            ))
+            .header("idempotency-key", "k1")
+            .body(r#"{"message":"please"}"#);
+        then.status(202)
+            .header("content-type", "application/json")
+            .body(format!(
+                r#"{{"request":{{"requestId":"acr_9","urn":"{urn}","state":"pending"}}}}"#
+            ));
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let cfg = ResolvedConfig {
+            host: server.base_url(),
+            api_key: "vam_sk_test".into(),
+        };
+        let c = Client::new(&cfg).unwrap();
+        let out = c
+            .post_raw_json(
+                &format!(
+                    "/v1/agents/{}/access",
+                    vam_cli::client::encode_path_segment(urn)
+                ),
+                r#"{"message":"please"}"#,
+                "k1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            vam_cli::cmd::access::format_decision(&out),
+            format!("request acr_9 pending: an admin of {urn} decides")
+        );
+    });
+    mock.assert();
+}
+
+#[test]
 fn approve_decide_parked_tool_hitl() {
     let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     vam_cli::output::set_json(false);

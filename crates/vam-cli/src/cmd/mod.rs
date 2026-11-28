@@ -1,3 +1,4 @@
+pub mod access;
 mod agent_check;
 pub mod approve;
 pub mod catalog;
