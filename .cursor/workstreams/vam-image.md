@@ -112,7 +112,7 @@ its runtimes; the installed `vam/node:1` reports its golden snapshot baked with 
 started (only if question 10 is confirmed); golden restore median on the default image within
 2x of ~217 ms (`machine-base` escalation rule).
 
-- [ ] VI-1.4, VI-1.5: lockfile reading and fetch-only, hash-checked package fetch into a
+- [x] VI-1.4, VI-1.5: lockfile reading and fetch-only, hash-checked package fetch into a
   content-addressed cache, through the operator's mirrors (security wave)
 - [ ] VI-1.6, VI-1.7: packages resolved at publish, recorded on the package, linked into the
   staged skill; derived trees kept out of turn commits; `PYTHONPATH` in the guest
@@ -208,7 +208,7 @@ is ignored until the waves read it.
 |---|---|---|---|---|---|---|
 | S1 | `skill-imports-a-package-from-its-hashed-lockfile` | new | process | `org-admin`, `agent-with-python-lockfile-skill` (new), `skill-with-python-lockfile` (new: `requirements.txt`, every line hashed, python3 tool) | `then`: tool result lacks the marker the package computes (import fails) | W2 |
 | S2 | `skill-imports-an-npm-package-from-its-lockfile` | new | process | `org-admin`, `agent-with-js-lockfile-skill` (new), `skill-with-js-lockfile` (new: `package.json` + `package-lock.json` v3, bun tool) | `then`: tool result lacks the marker (module not found) | W2 |
-| S3 | `skill-with-a-source-only-package-is-refused-when-published` | new | process | `org-admin`, `skill-with-sdist-lockfile` (new, `deferred`) | `then.1`: `publish-skill { refused: true, contains: [<project name>, source] }` gets 2xx | W1 |
+| S3 | `skill-with-a-source-only-package-is-refused-when-published` | new | process | `org-admin`, `skill-with-sdist-lockfile` (new, `deferred`) | `then.1`: `publish-skill { refused: true, contains: [<project name>, source] }` gets 2xx | W2 |
 | S4 | `second-agent-with-the-same-lockfile-reuses-the-cached-packages` | new | process | `org-admin`, `skill-with-python-lockfile`, `skill-with-the-same-python-lockfile` (new), two agent pieces | `then`: second package's record lacks `packages.source: cache` (`api-call contains`); both tools import | W2 |
 | S5 | `node-reports-each-image-it-holds` | new | process | `org-admin` | `when`: `status.images` absent; expects each image's name, runtimes (node on `vam/node:1`), the default flagged, `status.base` unchanged | W3 |
 | S6 | `skill-needing-a-runtime-the-base-lacks-is-refused-at-install` | changed: `contains` adds `vam/node:1` (the refusal names every held image) | process | as today | `then.2`: refusal names only the base | W3 |
@@ -344,8 +344,8 @@ Builds are serial. Each wave's `CI:` line lists its scenario ids.
 | Wave | Items | Turns green | Repo | Model | Budget | Depends on | CI | Status | PR |
 |---|---|---|---|---|---|---|---|---|---|
 | 0 | scenarios, fixtures | — (S1-S6 red; S7 on the lane in W4) | vam | Sonnet low | 75 min | approval | `CI: scenarios=<S1..S6 ids>` | [x] | |
-| 1 (sec) | VI-1.4, VI-1.5, upload refusal | S3 | vam | Sonnet high: egress, SSRF pinning and archive extraction are the security floor | 120 min | 0 | `CI: scenarios=<S3>` | [ ] | |
-| 2 | VI-1.6, VI-1.7, VI-1.8 (packages) | S1, S2, S4 | vam | Sonnet medium: three crates (orchestrator, storage, guest) and a proto field | 120 min | 1 | `CI: scenarios=<S1,S2,S4> lane=yes` | [ ] | |
+| 1 (sec) | VI-1.4, VI-1.5 | — (no scenario can go green: a lockfile is read only from `skill_package_admit.rs`, W2; S1-S4 stay red/pending, W1 is proven by unit tests on the W0 fixtures) | vam | Sonnet high: egress, SSRF pinning and archive extraction are the security floor | 120 min | 0 | `CI: tests=workspace` | [x] | |
+| 2 | VI-1.6, VI-1.7, VI-1.8 (packages), upload refusal (S3) | S1, S2, S3, S4 | vam | Sonnet medium: three crates (orchestrator, storage, guest) and a proto field | 120 min | 1 | `CI: scenarios=<S1,S2,S3,S4> lane=yes` | [ ] | |
 | 3 | VI-1.1, VI-1.8 (images) | S5, S6 | vam | Sonnet medium: new proto field and API | 90 min | 0 | `CI: scenarios=<S5,S6>` | [ ] | |
 | 4 | VI-1.2 | — (lane builds `vam/node:1`; S7 still red for its golden field) | vam | Sonnet medium: scripts, CLI and CI together | 120 min | 3 | `CI: lane=yes` | [ ] | |
 | 5 (concurrency) | VI-1.3, VI-1.8 (golden) | S7 | vam | Sonnet high: VMM lifecycle and a background queue beside live runs | 120 min | 4 | `CI: scenarios=<S7> lane=yes` | [ ] | |
@@ -519,5 +519,6 @@ a PR whose resolved package list drifts from `packages.txt`.
 |---|---|---|
 | 2026-11-28 | — | Tracker opened from `design/vam-image.md` (proposed; owner to confirm decisions and Q12-Q14) |
 | 2026-11-28 | 1 W0 | Scenarios S1-S7, pieces, package-mirror and image fixtures, runner env landed. S6 is a new sibling `skill-refusal-names-every-image-the-node-holds` (the active original is cited as docs proof). Scoreboard: S1-S6 red at the named step, class product (0 green, 6 red right reason), S7 pending for the lane; 0 fix cycles |
+| 2026-11-28 | 1 W1 | VI-1.4 lockfile reading and VI-1.5 verified fetch and cache landed as `crates/vam-orchestrator/src/skill_deps/` (pure parsers for requirements.txt, pylock.toml, package-lock.json v2/v3; `VAMD_PACKAGE_MIRRORS` https or `file://` only; guarded HTTP with per-hop pin, allowlist, no proxy; link-free wheel and tgz unpackers; content-addressed cache with atomic publish). Owner decisions applied: S3 and the upload refusal move to W2; yanked files and `http://` mirrors refused; W0 runner builds the mirror URL with `Url::from_directory_path` (comma written `%2C` by hand, since the URL crate leaves it raw). Scoreboard: 0 scenarios green (none can turn green in W1), S1-S4 stay red/pending, 162 unit tests green, 0 fix cycles beyond the first test run |
 
 > Coordination note (2026-11-28): Apps P0 claims proto fields Space.app_id=8, RunSpec.app_id=14, RunStatus.app_id=24, CallerContext.app_id=11 and a new App message after ListSpacesResponse in orchestrator.proto. I1 adds only NodeStatus.images=17 (check NodeStatus numbers are still free at build time).

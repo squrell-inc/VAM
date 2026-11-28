@@ -516,15 +516,24 @@ pub fn node_env(firecracker: bool) -> Result<Vec<(String, String)>, String> {
     }
     // Skill packages come from a local mirror on every lane: no scenario reaches the internet.
     if let Ok(abs) = std::fs::canonicalize(PACKAGE_MIRROR_FIXTURE) {
-        extra_env.push((
-            "VAMD_PACKAGE_MIRRORS".to_string(),
-            format!(
-                "pypi=file://{p}/pypi/simple,npm=file://{p}/npm",
-                p = abs.to_string_lossy()
-            ),
-        ));
+        if let Some(value) = package_mirrors_value(&abs) {
+            extra_env.push(("VAMD_PACKAGE_MIRRORS".to_string(), value));
+        }
     }
     Ok(extra_env)
+}
+
+/// The `VAMD_PACKAGE_MIRRORS` value for a mirror directory: `file://` URLs built with
+/// `Url::from_directory_path`, which percent-encodes the path (a `%`, `#`, `?` or space in a repo
+/// path would otherwise make an invalid value). It leaves a comma alone, and a comma is the list
+/// separator, so it is written `%2C` by hand.
+fn package_mirrors_value(mirror: &std::path::Path) -> Option<String> {
+    let url = |sub: &str| {
+        reqwest::Url::from_directory_path(mirror.join(sub))
+            .ok()
+            .map(|u| u.to_string().replace(',', "%2C"))
+    };
+    Some(format!("pypi={},npm={}", url("pypi/simple")?, url("npm")?))
 }
 
 /// For a persistent state dir: the node's admin key (kept in `<dir>/node-key`, mode 0600, made
@@ -1196,5 +1205,26 @@ mod tests {
             .unwrap_err()
             .contains("not a file"));
         let _ = std::fs::remove_dir_all(t);
+    }
+
+    #[test]
+    fn package_mirrors_value_percent_encodes_the_path() {
+        let plain = package_mirrors_value(std::path::Path::new("/repo/mirror")).expect("value");
+        assert_eq!(
+            plain,
+            "pypi=file:///repo/mirror/pypi/simple/,npm=file:///repo/mirror/npm/"
+        );
+        // A repo path with %, #, ? and a comma stays one valid value: the comma is %2C.
+        let odd =
+            package_mirrors_value(std::path::Path::new("/r/a,b%c#d?e f/mirror")).expect("value");
+        assert_eq!(
+            odd.matches(',').count(),
+            1,
+            "only the separator is a raw comma: {odd}"
+        );
+        for raw in ["%2C", "%25", "%23", "%3F"] {
+            assert!(odd.contains(raw), "{raw} in {odd}");
+        }
+        assert!(!odd.contains('#') && !odd.contains('?') && !odd.contains(' '));
     }
 }
