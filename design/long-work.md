@@ -27,9 +27,11 @@ result. While the job runs:
 - The agent treats its **context as a cache**: the plan and its notes live
   in files, are restated each turn, and are re-read after every
   compaction.
-- **Waits longer than 30 s cost nothing** (no VM between wakes): an event
-  first, then a broker-side condition, then a timer with backoff and a
-  maximum number of wakes. Shorter waits keep the VM up (§6).
+- **Long waits cost nothing** (no VM between wakes) once the task parks:
+  an event first, then a broker-side condition, then a timer with backoff
+  and a maximum number of wakes. A timer wait longer than 30 s parks at
+  once; other waits park after the 300 s keep-warm; nothing parks while a
+  background process or worker runs (§3, §6).
 - **Background processes** and **in-VM workers** (sub-agents) let one task
   do slow or parallel work without a new VM.
 - **Watchdogs** turn a stalled or runaway job into a notification, not a
@@ -208,9 +210,13 @@ needs lives only in the conversation.**
 
 ## 6. Waits that cost nothing
 
-"Cost nothing" means no VM and no active time between wakes. It holds for
-every wait longer than 30 s; a wait of 30 s or less keeps the VM up and
-counts active time, because parking and resuming would cost more.
+"Cost nothing" means no VM and no active time between wakes, and it holds
+only while the task is parked (§3). A `timer` wait longer than 30 s parks
+at the turn boundary; a `timer` wait of 30 s or less keeps the VM up and
+counts active time, because parking and resuming would cost more. Event and
+broker waits park after the 300 s keep-warm, so they cost up to 300 s of VM
+first. No wait parks while a background process or worker runs (§8); that
+time counts as active time.
 
 Per decision 16 the guest only asks; `vamd` holds deadlines; brokers own
 vendor watching and standing schedules. Order of preference:
