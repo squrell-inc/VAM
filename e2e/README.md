@@ -743,6 +743,20 @@ open list, and after those and every decision it reads the whole list.
 - `medianToActSecs`: median of `actedAt - createdAt`; the scenario script's own pace, so recorded and never scored.
 - Both of the last two read `"unmeasured"` while no action record has been seen (the routes answer 404).
 
+### Fix requests (`crates/vam-e2e/src/fixes.rs`)
+
+- `fix-request: { from: latest-denial, as, tool, status, contains, fields, ref, remember, sameMessageAs }`
+  sends `POST /v1/fix-requests` with `{ "decisionRef": <ref> }` as `as` (the bootstrap key when omitted). The
+  reference is the `decisionRef` of the newest `policy.decided` or `egress.decided` event of the latest run that
+  carries a `denial` (at `denial` or `data.denial`) with one; the step waits for it up to the step budget, and a run
+  with none fails as `product`. `tool` only takes an event naming that tool. `ref: <text>` sends that literal
+  reference instead (one no denial has). `status` is one number or a list of allowed ones; `contains` and `fields`
+  judge the answer body. `remember: <name>` keeps the answer's `message`; `sameMessageAs: <name>` needs the answer's
+  `message` to equal the one kept (a member refused another member's reference gets the missing-reference text).
+- `expect: { notifications: { kind: fix.requested } }` is a known kind. As for every kind, rows are matched
+  only when their `runId` is one of the scenario's runs (or with `run: latest`); `notification-summary` has no such
+  filter.
+
 ## Channels (`crates/vam-e2e/src/channels.rs`)
 
 Slack through the fake transport of `vam-notify-broker` (the `notify-broker` piece; `scripts/e2e/run.sh` builds the

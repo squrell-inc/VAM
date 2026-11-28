@@ -1,0 +1,10 @@
+{
+  "spec": {
+    "agentRef": {
+      "resourceId": { "urn": "urn:vam:agent:local.vam.dev/e2e/agent-bound-to-one-version" },
+      "version": { "major": 9, "minor": 0, "patch": 0 }
+    },
+    "workspaceRefUri": "volume://agent-bound-to-one-version-org-member",
+    "inputs": { "prompt": "Run again" }
+  }
+}

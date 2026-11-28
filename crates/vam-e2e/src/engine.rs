@@ -258,6 +258,8 @@ pub mod cli;
 pub mod connectors;
 #[path = "effects.rs"]
 pub mod effects;
+#[path = "fixes.rs"]
+pub mod fixes;
 #[path = "identity.rs"]
 pub mod identity;
 #[path = "marketplace.rs"]
@@ -2534,6 +2536,7 @@ impl Engine {
             Step::PutDraft(x) => self.put_draft(x, &s.id),
             Step::SetRole(x) => self.set_role(x),
             Step::CreateUser(x) => self.create_user(x, &s.id),
+            Step::FixRequest(x) => self.fix_request(x),
         }
     }
 }

@@ -1,0 +1,41 @@
+id: cli-prints-the-fix-from-the-error-body
+title: The CLI prints a Fix line for the refused version mismatch, taken from the error body's typed denial
+description: >
+  A member's Space is bound to version 1.0.0 of an agent by a first chat. A run file then asks the
+  same Space for another version through the CLI, and the node answers 409. The CLI's output has
+  the refusal text, and a `Fix:` line that names the bound version 1.0.0, which only the typed
+  denial in the body supplies. Today the CLI prints a generic `Fix: vam run <agent> -p "..."` for
+  any failed precondition; that line names no version, so it does not satisfy this scenario.
+tags: [chat, members]
+needs: process
+given:
+  - org-member
+  - agent-bound-to-one-version
+mock:
+  - when: { step: first }
+    reply: { text: Bound. }
+when:
+  - chat: { text: "e2e-step:first Bind the space", as: org-member, draft: false }
+  - expect: { run: succeeded }
+  - cli:
+      as: org-member
+      root: { from: space-bound }
+      cwd: root
+      args: [run, --file, run.json]
+      exit: fail
+      contains: ["does not match workspace-bound version"]
+then:
+  - cli:
+      as: org-member
+      root: { same: true }
+      cwd: root
+      args: [run, --file, run.json]
+      exit: fail
+      contains: ["does not match workspace-bound version"]
+      matches: ["(?m)^Fix: .*1\\.0\\.0"]
+guards:
+  - vam:crates/vam-cli/src/http_error.rs
+  - vam:crates/vam-orchestrator/src/api/error.rs
+  - vam:crates/vam-orchestrator/src/denials.rs
+status: pending
+expectFail: { step: then.0, class: product }

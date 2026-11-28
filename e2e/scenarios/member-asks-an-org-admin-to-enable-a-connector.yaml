@@ -1,0 +1,47 @@
+id: member-asks-an-org-admin-to-enable-a-connector
+title: A member refused for a connector nobody enabled asks an org admin to enable it, and asking twice notifies the admin once
+description: >
+  A member runs an agent whose skill needs a connector that is not enabled. The tool is refused
+  with a typed denial: reason connector disabled, fix by an org admin, with a reference to the
+  stored decision. The member sends that reference to `POST /v1/fix-requests`. The org
+  administrator then has exactly one `fix.requested` notification. Asking again answers 200 and
+  the administrator still has one.
+tags: [chat, connectors, members, notifications]
+needs: process
+given:
+  - org-member
+  - org-administrator
+  - agent-with-m365-probe
+when:
+  - chat: { text: "e2e-step:ask Search my mail", as: org-member }
+  - expect: { run: succeeded }
+  - expect:
+      event: policy.decided
+      tool: m365_probe_search
+      fields:
+        disposition: DENY
+        denial.reason: CONNECTOR_DISABLED
+        denial.fix.who: ORG_ADMIN
+        denial.fix.change: ENABLE_CONNECTOR
+        denial.decisionRef: { present: true }
+  - fix-request: { from: latest-denial, as: org-member, status: [200, 201] }
+then:
+  - expect: { notifications: { as: org-administrator, kind: fix.requested, count: 1, within: 20s } }
+  - expect: { notification-summary: { as: org-administrator, unread: 1 } }
+  - fix-request: { from: latest-denial, as: org-member, status: 200 }
+  - expect: { notifications: { as: org-administrator, kind: fix.requested, count: 1 } }
+  - expect: { notification-summary: { as: org-administrator, unread: 1 } }
+guards:
+  - vam:crates/vam-orchestrator/src/connector_park.rs
+  - vam:crates/vam-orchestrator/src/notifications.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+  - vam:crates/vam-orchestrator/src/denials.rs
+mock:
+  - when: { step: ask, lastRole: tool, contains: ask your admin }
+    reply: { text: Ask your administrator to enable Microsoft 365. }
+  - when: { step: ask, toolName: load_skill }
+    reply: { toolCall: { name: m365_probe_search, args: { method: GET, path: /v1.0/me/messages } } }
+  - when: { step: ask, stepStart: true }
+    reply: { toolCall: { name: load_skill, args: { skill: skill-m365-probe-member-asks-an-org-admin-to-enable-a-connector } } }
+status: pending
+expectFail: { step: when.2, class: product }

@@ -1,0 +1,12 @@
+piece: agent-bound-to-one-version
+kind: agent
+release: true
+fixedUrn: true
+body:
+  spec:
+    resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/agent-bound-to-one-version" }
+    displayName: Plain agent at a fixed address
+    description: Plain chat agent whose address is fixed so a run file can name it
+    role: Tester
+    systemInstructions: Answer briefly. Finish with task_complete.
+    allowAnyPlaybook: true

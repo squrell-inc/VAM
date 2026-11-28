@@ -127,6 +127,7 @@ pub const KINDS: &[&str] = &[
     "trigger.fired",
     "trigger.skipped",
     "connection.needs_reauth",
+    "fix.requested",
 ];
 
 /// Problems with a notifications step or expect, for `vam-e2e check`. `orgs` are the aliases of
