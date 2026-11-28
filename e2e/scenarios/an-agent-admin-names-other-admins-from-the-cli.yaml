@@ -19,7 +19,7 @@ when:
   - cli: { as: admin, args: [agent, admins, add, "{{urn:agent-inline-probe:pub}}", "{member.username}"], root: { from: version/empty }, exit: ok }
   - cli: { as: member2, args: [agent, admins, rm, "{{urn:agent-inline-probe:pub}}", "{pub.username}"], root: { from: version/empty }, exit: ok }
 then:
-  - cli: { as: member, args: [--json, agent, admins, ls, "{{urn:agent-inline-probe:pub}}"], root: { from: version/empty }, exit: ok, contains: ["{member.userId}", "{member2.userId}"], absent: ["{pub.userId}"] }
+  - cli: { as: member, args: [--json, agent, admins, ls, "{{urn:agent-inline-probe:pub}}"], root: { from: version/empty }, exit: ok, contains: ["{member.userId}", "{member2.userId}"], absent: ["{pub.username}"] }
   - cli: { as: pub, args: [agent, admins, ls, "{{urn:agent-inline-probe:pub}}"], root: { from: version/empty }, exitCode: 3, contains: ["only an agent admin"] }
   - cli: { as: member, args: [agent, admins, rm, "{{urn:agent-inline-probe:pub}}", "{member2.userId}", --idempotency-key, r1], root: { from: version/empty }, exit: ok }
   - cli: { as: member, args: [agent, admins, rm, "{{urn:agent-inline-probe:pub}}", "{member2.userId}", --idempotency-key, r1], root: { from: version/empty }, exit: ok }
@@ -28,5 +28,6 @@ guards:
   - vam:crates/vam-cli/src/cmd/catalog.rs
   - vam:crates/vam-cli/src/client.rs
   - vam:crates/vam-cli/src/http_error.rs
-status: pending
-expectFail: { step: when.2, class: product }
+  - vam:crates/vam-cli/src/cmd/admins.rs
+  - vam:crates/vam-cli/src/cmd/access.rs
+status: active

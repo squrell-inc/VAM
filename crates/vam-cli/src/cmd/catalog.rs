@@ -114,6 +114,11 @@ pub enum AgentCmd {
     Leave(super::access::LeaveArgs),
     /// Set who sees an agent and how members get access (agent admin or org admin).
     AccessPolicy(super::access::PolicyArgs),
+    /// The admins of an agent: list, add, remove.
+    Admins {
+        #[command(subcommand)]
+        command: super::admins::AdminsCmd,
+    },
     Ls,
 }
 
@@ -417,6 +422,7 @@ pub async fn run_agent(host: Option<String>, token: Option<String>, cmd: AgentCm
         AgentCmd::Add(a) | AgentCmd::Request(a) => super::access::run_ask(&c, a).await?,
         AgentCmd::Leave(a) => super::access::run_leave(&c, a).await?,
         AgentCmd::AccessPolicy(a) => super::access::run_policy(&c, a).await?,
+        AgentCmd::Admins { command } => super::admins::run(&c, command).await?,
         AgentCmd::Ls => {
             let body = c.get("/v1/agents").await?;
             client::print_json(&body);

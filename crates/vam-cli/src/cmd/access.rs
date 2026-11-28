@@ -60,6 +60,65 @@ pub struct PolicyArgs {
 pub enum AccessCmd {
     /// Your own access requests, newest first: one page, or `--all`.
     Mine(ListArgs),
+    /// Requests for the agents you administer (all agents for an org admin); pending by default.
+    Requests(RequestsArgs),
+    /// Approve a pending request.
+    Approve(ApproveArgs),
+    /// Deny a pending request; the member sees the reason.
+    Deny(DenyArgs),
+    /// End a member's approved access to an agent.
+    Revoke(RevokeArgs),
+}
+
+#[derive(Args)]
+pub struct RequestsArgs {
+    /// Which requests to list.
+    #[arg(long, default_value = "pending", value_parser = ["pending", "approved", "denied", "revoked", "withdrawn", "all"])]
+    pub state: String,
+    /// Only requests for this agent URN (filtered here, per page).
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// Follow every page.
+    #[arg(long)]
+    pub all: bool,
+    /// Rows per page (vamd default 50, at most 1000).
+    #[arg(long)]
+    pub page_size: Option<u32>,
+}
+
+#[derive(Args)]
+pub struct ApproveArgs {
+    /// The request id (`vam access requests`).
+    pub id: String,
+    /// A note the member sees.
+    #[arg(long)]
+    pub reason: Option<String>,
+    #[arg(long, help = IDEM_HELP)]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Args)]
+pub struct DenyArgs {
+    /// The request id (`vam access requests`).
+    pub id: String,
+    /// Why; the member sees it.
+    #[arg(long)]
+    pub reason: String,
+    #[arg(long, help = IDEM_HELP)]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Args)]
+pub struct RevokeArgs {
+    /// An agent URN, or its short name.
+    pub agent: String,
+    /// A user id, or a username with approved access to the agent.
+    pub user: String,
+    /// Why; the member sees it.
+    #[arg(long)]
+    pub reason: String,
+    #[arg(long, help = IDEM_HELP)]
+    pub idempotency_key: Option<String>,
 }
 
 fn list_path(base: &str, page_size: Option<u32>) -> String {
@@ -239,7 +298,7 @@ fn pick(name: &str, urns: Vec<String>) -> Result<String> {
 }
 
 /// A URN stays as given; any other word is a short name matched through browse (Q2).
-async fn resolve_agent(c: &Client, arg: &str) -> Result<String> {
+pub(crate) async fn resolve_agent(c: &Client, arg: &str) -> Result<String> {
     let arg = arg.trim();
     if arg.starts_with("urn:") {
         return Ok(arg.to_string());
@@ -330,7 +389,209 @@ pub async fn run(host: Option<String>, token: Option<String>, cmd: AccessCmd) ->
             }
             Ok(())
         }
+        AccessCmd::Requests(args) => run_requests(c, args).await,
+        AccessCmd::Approve(a) => {
+            let reason = a.reason.as_deref().map(str::trim).filter(|r| !r.is_empty());
+            decide(c, &a.id, "approve", reason, a.idempotency_key).await
+        }
+        AccessCmd::Deny(a) => {
+            let reason = require_reason(&a.reason)?;
+            decide(c, &a.id, "deny", Some(&reason), a.idempotency_key).await
+        }
+        AccessCmd::Revoke(a) => run_revoke(c, a).await,
     }
+}
+
+fn require_reason(reason: &str) -> Result<String> {
+    let r = reason.trim();
+    if r.is_empty() {
+        return Err(fail(
+            ExitCode::Usage,
+            "Wrong: --reason is empty.\nExpected: a reason the member sees.\nFix: pass --reason \"...\".",
+        ));
+    }
+    Ok(r.to_string())
+}
+
+/// Keep only the rows of `urn` in a `requests` page.
+fn filter_agent(body: &str, urn: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<Value>(body) else {
+        return body.to_string();
+    };
+    if let Some(rows) = v.get_mut("requests").and_then(Value::as_array_mut) {
+        rows.retain(|r| r.get("urn").and_then(Value::as_str) == Some(urn));
+    }
+    v.to_string()
+}
+
+/// The admin queue: `REQUEST AGENT USER STATE REQUESTED MESSAGE`.
+pub fn format_requests(body: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return body.to_string();
+    };
+    let rows = v["requests"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        return "no access requests".to_string();
+    }
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| {
+            let user = match text(r, "username") {
+                "" => text(r, "userId"),
+                name => name,
+            };
+            vec![
+                text(r, "requestId").to_string(),
+                text(r, "urn").to_string(),
+                user.to_string(),
+                text(r, "state").to_string(),
+                text(r, "requestedAt").to_string(),
+                text(r, "message").to_string(),
+            ]
+        })
+        .collect();
+    table(
+        &["REQUEST", "AGENT", "USER", "STATE", "REQUESTED", "MESSAGE"],
+        &rows,
+    )
+}
+
+async fn run_requests(c: &Client, args: RequestsArgs) -> Result<()> {
+    let mut path = format!("/v1/access-requests?state={}&adminOf=me", args.state);
+    if let Some(n) = args.page_size {
+        path.push_str(&format!("&pageSize={n}"));
+    }
+    let mut body = client::list_paged(c, &path, "requests", args.all).await?;
+    if let Some(urn) = args.agent.as_deref() {
+        body = filter_agent(&body, urn.trim());
+    }
+    if output::is_json() {
+        client::print_json(&body);
+    } else {
+        println!("{}", format_requests(&body));
+    }
+    Ok(())
+}
+
+/// What a decide or revoke answered, as `request <id> <state>`.
+fn format_outcome(body: &str, id: &str, fallback: &str) -> String {
+    let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let r = &v["request"];
+    let id = match text(r, "requestId") {
+        "" => id,
+        x => x,
+    };
+    let state = match text(r, "state") {
+        "" => fallback,
+        x => x,
+    };
+    format!("request {} {}", clean(id), clean(state))
+}
+
+async fn decide(
+    c: &Client,
+    id: &str,
+    decision: &str,
+    reason: Option<&str>,
+    key: Option<String>,
+) -> Result<()> {
+    let mut body = json!({ "decision": decision });
+    if let Some(r) = reason {
+        body["reason"] = json!(r);
+    }
+    let path = format!("/v1/access-requests/{}/decide", encode_path_segment(id));
+    let key = resolve_idempotency_key(key);
+    let out = c.post_raw_json(&path, &body.to_string(), &key).await?;
+    if output::is_json() {
+        client::print_json(&out);
+    } else {
+        let fallback = if decision == "approve" {
+            "approved"
+        } else {
+            "denied"
+        };
+        println!("{}", format_outcome(&out, id, fallback));
+    }
+    Ok(())
+}
+
+/// `(userId, username)` pairs from the admin queue rows.
+pub(crate) fn user_pairs(rows: &[Value]) -> Vec<(String, String)> {
+    rows.iter()
+        .filter_map(|r| {
+            let id = r.get("userId").and_then(Value::as_str)?;
+            Some((id.to_string(), text(r, "username").to_string()))
+        })
+        .collect()
+}
+
+/// Every row of `GET /v1/access-requests` for `state`, all pages.
+pub(crate) async fn queue_rows(c: &Client, state: &str) -> Result<Vec<Value>> {
+    let path = format!("/v1/access-requests?state={state}&adminOf=me&pageSize=1000");
+    let body = client::list_paged(c, &path, "requests", true).await?;
+    let v: Value = serde_json::from_str(&body)?;
+    Ok(v["requests"].as_array().cloned().unwrap_or_default())
+}
+
+/// A generated user id: `usr_` plus 26 characters. Usernames never take that shape.
+pub(crate) fn looks_like_user_id(s: &str) -> bool {
+    s.strip_prefix("usr_").is_some_and(|rest| {
+        rest.len() == 26 && rest.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'))
+    })
+}
+
+/// The id of `who` in `pairs`: the same id, else the username in any letter case.
+pub(crate) fn find_user(pairs: &[(String, String)], who: &str) -> Option<String> {
+    pairs
+        .iter()
+        .find(|(id, _)| id == who)
+        .or_else(|| {
+            pairs
+                .iter()
+                .find(|(_, name)| !name.is_empty() && name.eq_ignore_ascii_case(who))
+        })
+        .map(|(id, _)| id.clone())
+}
+
+async fn run_revoke(c: &Client, a: RevokeArgs) -> Result<()> {
+    let reason = require_reason(&a.reason)?;
+    let urn = resolve_agent(c, &a.agent).await?;
+    let who = a.user.trim();
+    let user_id = if looks_like_user_id(who) {
+        who.to_string()
+    } else {
+        let rows: Vec<Value> = queue_rows(c, "approved")
+            .await?
+            .into_iter()
+            .filter(|r| r.get("urn").and_then(Value::as_str) == Some(urn.as_str()))
+            .collect();
+        find_user(&user_pairs(&rows), who).ok_or_else(|| {
+            fail(
+                ExitCode::NotFound,
+                format!(
+                    "Wrong: no member with approved access to {} matches '{}'.\nExpected: a user id, or the username of a member listed as approved.\nFix: vam access requests --state approved --agent {}.",
+                    clean(&urn),
+                    clean(who),
+                    clean(&urn)
+                ),
+            )
+        })?
+    };
+    let path = format!(
+        "/v1/agents/{}/access/{}/revoke",
+        encode_path_segment(&urn),
+        encode_path_segment(&user_id)
+    );
+    let key = resolve_idempotency_key(a.idempotency_key);
+    let out = c
+        .post_raw_json(&path, &json!({ "reason": reason }).to_string(), &key)
+        .await?;
+    if output::is_json() {
+        client::print_json(&out);
+    } else {
+        println!("{}", format_outcome(&out, "", "revoked"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -361,6 +622,46 @@ mod tests {
         assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out}");
         assert!(out.contains("reason: abc"));
         assert!(out.starts_with("URN"));
+    }
+
+    #[test]
+    fn users_resolve_by_id_then_name_in_any_case() {
+        let pairs = vec![
+            ("usr_a".to_string(), "Ada".to_string()),
+            ("usr_b".to_string(), String::new()),
+        ];
+        assert_eq!(find_user(&pairs, "usr_b").as_deref(), Some("usr_b"));
+        assert_eq!(find_user(&pairs, "aDa").as_deref(), Some("usr_a"));
+        assert_eq!(find_user(&pairs, ""), None);
+        assert_eq!(find_user(&pairs, "bob"), None);
+        assert!(looks_like_user_id("usr_abcdefghijklmnopqrstuvwxyz"));
+        assert!(!looks_like_user_id("usr_short"));
+        assert!(!looks_like_user_id("ada"));
+    }
+
+    #[test]
+    fn requests_filter_by_agent_and_print_the_queue() {
+        let body = json!({"requests":[
+            {"requestId":"acr_1","urn":"urn:a","userId":"u1","username":"ada","state":"pending","requestedAt":"t","message":"hi\u{1b}"},
+            {"requestId":"acr_2","urn":"urn:b","userId":"u2","state":"pending","requestedAt":"t"}]})
+        .to_string();
+        let only = filter_agent(&body, "urn:b");
+        let out = format_requests(&only);
+        assert!(out.contains("acr_2") && !out.contains("acr_1"), "{out}");
+        let all = format_requests(&body);
+        assert!(all.starts_with("REQUEST"), "{all}");
+        assert!(all.contains("ada") && all.contains("u2") && !all.contains('\u{1b}'));
+        assert_eq!(format_requests(r#"{"requests":[]}"#), "no access requests");
+    }
+
+    #[test]
+    fn outcome_wording() {
+        let b = r#"{"request":{"requestId":"acr_1","state":"revoked"}}"#;
+        assert_eq!(format_outcome(b, "", "x"), "request acr_1 revoked");
+        assert_eq!(
+            format_outcome("", "acr_9", "denied"),
+            "request acr_9 denied"
+        );
     }
 
     #[test]
