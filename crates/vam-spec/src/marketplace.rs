@@ -9,8 +9,13 @@
 //!   "listings": [ { "id": "microsoft-365", "displayName": "Microsoft 365",
 //!     "description": "…", "connector": "urn:vam:connector:hub.squrell.cloud/squrell/microsoft-365",
 //!     "artifacts": [ { "kind": "skill", "path": "listings/microsoft-365/skills/m365-mail" } ],
-//!     "ref": "microsoft-365-v1.0.0", "requiresNode": ">=0.1.0" } ] }
+//!     "ref": "microsoft-365-v1.0.0", "requiresNode": ">=0.1.0",
+//!     "access": { "default": { "visibility": "org", "mode": "open" } } } ] }
 //! ```
+//!
+//! `access` is optional. It is the access an agent of the listing starts with on its first install
+//! (visibility `org` or `restricted`, mode `everyone`, `open` or `approval`); without it a first
+//! install starts as `org` + `approval`. A `restricted` agent cannot be open to `everyone`.
 //!
 //! Parsing and the rules here need no node: marketplace CI, `vam catalog validate` and vamd (when
 //! it refreshes a marketplace, CN-4.4) call the same functions. What depends on the node (which
@@ -67,6 +72,39 @@ pub struct Listing {
     pub git_ref: String,
     /// Node versions that can run the listing, e.g. `>=0.1.0`.
     pub requires_node: String,
+    /// The access the agents of the listing start with on their first install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<ListingAccess>,
+}
+
+/// The `access` object of a listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListingAccess {
+    pub default: AccessDefault,
+}
+
+/// The access an installed agent starts with: who can see it and how a member gets to use it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessDefault {
+    pub visibility: AccessVisibility,
+    pub mode: AccessMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessVisibility {
+    Org,
+    Restricted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessMode {
+    Everyone,
+    Open,
+    Approval,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,6 +238,16 @@ fn listing_problems(l: &Listing) -> Vec<String> {
     }
     if let Err(why) = NodeRequirement::parse(&l.requires_node) {
         out.push(format!("requiresNode '{}': {why}", l.requires_node));
+    }
+    if let Some(a) = &l.access {
+        if a.default.visibility == AccessVisibility::Restricted
+            && a.default.mode == AccessMode::Everyone
+        {
+            out.push(
+                "access.default: a restricted agent cannot be open to everyone: use mode 'open' or 'approval'"
+                    .into(),
+            );
+        }
     }
     out
 }

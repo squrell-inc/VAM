@@ -327,8 +327,10 @@ impl SqliteWorkflowStore {
     /// marketplace state to its boot state, so scenarios give the same result alone, in a batch
     /// and in any order. It deletes every catalog row of tier `marketplace` (and the origin and
     /// install records), the read state of the preconfigured marketplace, and re-enables it. It
-    /// does not touch the pins or the cache, and it never runs in a default `vamd`. Access policy
-    /// rows (agent access, A5) are not catalog rows and are left as they are.
+    /// does not touch the pins or the cache, and it never runs in a default `vamd`. For each
+    /// marketplace-tier agent it deletes, its agent access policy and agent admin rows (agent
+    /// access, A5) go too, in the same transaction, so a reinstall starts from the listing's
+    /// default again. Access requests and grants are left as they are.
     #[cfg(feature = "process-guest")]
     pub fn reset_marketplace_installs(&self) -> Result<usize, OrchestratorError> {
         let mut c = self
@@ -337,6 +339,15 @@ impl SqliteWorkflowStore {
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         let tx = c.transaction()?;
         let mut removed = 0usize;
+        for table in ["agent_access_policy", "agent_admins"] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE urn IN
+                       (SELECT urn FROM agents WHERE catalog_tier = ?1)"
+                ),
+                [crate::catalog_tier::CATALOG_TIER_MARKETPLACE],
+            )?;
+        }
         for table in [
             "agents",
             "playbooks",

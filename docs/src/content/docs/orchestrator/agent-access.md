@@ -58,7 +58,17 @@ Access is checked once, when an agent is admitted. A playbook, skill or policy t
 
 ### Who is an admin
 
-An agent admin is a row in the agent's admin list. The user who first releases an agent is added as its admin (`a-publisher-who-releases-an-agent-decides-who-may-use-it`). An agent installed from a marketplace has none, and starts as `(org, approval)`; the org admins decide its requests (`a-member-must-request-an-agent-the-admin-installed`). Org admins, meaning keys with `users:admin`, are admins of every agent without a row.
+An agent admin is a row in the agent's admin list. The user who first releases an agent is added as its admin (`a-publisher-who-releases-an-agent-decides-who-may-use-it`). An agent installed from a marketplace has none; the org admins decide its requests (`a-member-must-request-an-agent-the-admin-installed`). Org admins, meaning keys with `users:admin`, are admins of every agent without a row.
+
+### What a marketplace install starts with
+
+The first install of an agent writes its policy, and nothing writes it again. A listing in `marketplace.json` may carry the default in an optional `access` object:
+
+```json
+"access": { "default": { "visibility": "org", "mode": "open" } }
+```
+
+`visibility` is `org` or `restricted`; `mode` is `everyone`, `open` or `approval`. `restricted` with `everyone` is refused, as it is on the policy route, and so is any other key (a listing cannot name admins). Without `access`, the agent starts as `(org, approval)`. The default is applied to each agent of the listing the first time that agent is installed, including an agent a later update adds. An update never changes a policy, and an install from before this field keeps having no row. The node honors the field of any marketplace it trusts, and the admin can change the policy afterwards (`a-marketplace-listing-sets-the-access-of-the-agents-it-installs`, `a-listing-update-keeps-the-access-an-admin-chose`).
 
 The admin check is that rule and nothing else. A key with only `catalog:write`, `publish:grant` or `keys:admin` is not an admin (`an-agent-admin-adds-a-second-admin-who-can-then-decide`).
 

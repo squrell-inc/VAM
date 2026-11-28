@@ -24,5 +24,4 @@ guards:
   - vam:crates/vam-orchestrator/src/marketplace/import.rs
   - vam:crates/vam-orchestrator/src/marketplace/mod.rs
   - vam:crates/vam-orchestrator/src/agent_access.rs
-status: pending
-expectFail: { step: when.0, class: product }
+status: active
