@@ -153,6 +153,7 @@ export default defineConfig({
 									{ label: 'Member agents', slug: 'orchestrator/member-agents' },
 									{ label: 'Users, keys and ownership', slug: 'orchestrator/user-isolation' },
 									{ label: 'Notifications', slug: 'orchestrator/notifications' },
+									{ label: 'Denials and fixes', slug: 'orchestrator/denials' },
 								],
 							},
 							{

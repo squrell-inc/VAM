@@ -10,6 +10,8 @@ proves:
   - generated-id-and-email-login-survive-a-restart
   - vamd-refuses-plain-http-by-default
   - api-rate-limits-a-flood
+  - member-asks-an-org-admin-to-enable-a-connector
+  - missing-secret-refusal-names-the-secret-to-set
   - node-reports-the-isolation-it-runs
   - node-status-shows-the-node-and-cli-versions
   - oversize-response-with-a-secret-never-reaches-the-guest
@@ -53,6 +55,7 @@ request and response shapes, is the OpenAPI file the node serves.
 | Runs | `/v1/runs` (an agent or playbook by reference only: `inlineAgent` and `inlinePlaybook` are refused with 400, so save with `PUT /v1/agents` or `PUT /v1/playbooks` first), and `messages`, `stop`, `cancel`, `events` under `/v1/runs/{id}` |
 | Approvals | `/v1/approvals`, `/v1/approvals/{id}/decide` |
 | Secrets | `/v1/secrets`, `/v1/org/secrets` |
+| Fix requests | `POST /v1/fix-requests` |
 | Node | `/v1/health`, `/v1/node` |
 
 The run routes sit behind one wildcard, `/v1/runs/*rest` (`api/mod.rs:221-224`), and are told apart
@@ -107,6 +110,10 @@ a `pageToken` from another list, is a 400.
 Each error type maps to one status in `api/error.rs:37-250`: 400 bad request, 401 and 403 auth,
 404 missing or foreign row, 409 conflict (it also answers a member past the draft agent cap, see [Member agents](/orchestrator/member-agents/#error-messages)), 412 failed precondition, 502 upstream failure, 503
 node cannot take the call, 504 a stop still settling.
+
+A refusal that has a fix adds optional `denial` (the first) and `denials` (the list) to the error body. The message text is unchanged. Most errors have neither. See [Denials and fixes](/orchestrator/denials/).
+
+`POST /v1/fix-requests` takes `{"decisionRef"}` and asks the person who can apply a refusal's fix. It answers 201, or 200 for a repeat within 24 hours, and 404 for any reference that is not the caller's. Scope `runs:write`.
 
 ## Users, ids and login names
 
