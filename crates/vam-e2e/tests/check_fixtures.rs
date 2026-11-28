@@ -935,9 +935,6 @@ fn cli_exit_code_and_placeholders_are_checked() {
         &mk("\"{{urn:no-such-piece}}\"", "exit: ok"),
     );
     f.expect_error("step-alias", "no-such-piece");
-    let f = declared_fx(
-        Some(TEST_FILE),
-        &mk("\"{nobody.userId}\"", "exit: ok"),
-    );
+    let f = declared_fx(Some(TEST_FILE), &mk("\"{nobody.userId}\"", "exit: ok"));
     f.expect_error("step-alias", "nobody");
 }

@@ -806,9 +806,9 @@ mod tests {
             serde_yaml::from_str("{ args: [x], root: { from: a }, exit: ok }").unwrap();
         assert_eq!(x.exit_code, None);
         assert_eq!(x.exit_kind(), CliExit::Ok);
-        assert!(serde_yaml::from_str::<CliStep>(
-            "{ args: [x], root: { from: a }, exitCode: 256 }"
-        )
-        .is_err());
+        assert!(
+            serde_yaml::from_str::<CliStep>("{ args: [x], root: { from: a }, exitCode: 256 }")
+                .is_err()
+        );
     }
 }
