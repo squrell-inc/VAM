@@ -78,6 +78,7 @@ pub fn stamp_caller_context(
         space_id,
         thread_id,
         run_source,
+        app_id: String::new(),
         tenant_id,
         user_id,
         agent_urn,
@@ -307,6 +308,35 @@ mod tests {
             ..Default::default()
         };
         assert!(assert_identity_satisfied(Some(&req), Some(&stamped)).is_ok());
+    }
+
+    #[test]
+    fn stamped_context_has_an_empty_app_id() {
+        let store = SqliteWorkflowStore::in_memory().unwrap();
+        store.create_user("alice", "alice").unwrap();
+        store
+            .create_session_with_owner(
+                "sess-alice",
+                None,
+                "vm",
+                "alice--assistant",
+                "storage-default",
+                "alice",
+            )
+            .unwrap();
+        store
+            .persist_run_spec_with_owner(
+                "run-alice",
+                "{}",
+                Some("sess-alice"),
+                "urn:vam:agent:local.vam.dev/acme/tester",
+                None,
+                "User::\"alice\"",
+                "alice",
+            )
+            .unwrap();
+        let caller = stamp_caller_context(&store, "sess-alice", "run-alice", None, None).unwrap();
+        assert!(caller.app_id.is_empty());
     }
 
     #[test]

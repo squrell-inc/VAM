@@ -39,6 +39,7 @@ fn space_message(row: &SpaceRow) -> Space {
         created_at: Some(ts(row.created_at)),
         last_active_at: Some(ts(row.last_active_at)),
         created_by_grant_id: row.created_by_grant_id.clone().unwrap_or_default(),
+        app_id: String::new(),
     }
 }
 
