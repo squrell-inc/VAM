@@ -1261,3 +1261,91 @@ harness H2-H4 wait for it (D5).
    read data that exists today (`run_metering`, `spaces.last_active_at`)
    and add no metering. Cost is the estimate from model prices, not an
    invoice; the docs say so.
+
+#### AS-0.4 Policy audit (2026-11-28)
+
+Generated against the tree at the W2 commit (AS-0.3 and AS-0.4). Cedar is
+`cedar-policy =4.12.0`.
+
+1. **Verdict.** No existing policy changes meaning. The principal stays the
+   `Agent` entity. `principal == Agent::"x"` compares the entity uid and
+   ignores ancestors, so an `Agent` that now has an `App` parent still
+   matches; the HITL overlay test
+   (`hitl_overlay_principal_equality_still_matches_an_agent_with_an_app_parent`)
+   proves it, with the same matching policy ids with and without an App.
+   Unconstrained `principal` is unchanged. No policy anywhere uses
+   `principal in` except the App limits the new tests write.
+2. **The list** (re-run
+   `grep -rn "principal ==\|principal in" crates examples brokers`):
+   - Production: the HITL overlay,
+     `crates/vam-security/src/advertise.rs:232, :241`
+     (`hitl_execute_overlay`, `:213-251`).
+   - Examples (13 statements, all `== Agent::`):
+     `examples/sqlite-assistant/policy.cedar:8,28,34`;
+     `examples/jira-assistant/policy.cedar:8,26`;
+     `examples/linear-mcp-assistant/policy.cedar:10,29`;
+     `examples/chaos-assistant/policy.cedar:8,14,20,26,32,38`.
+     `bun-assistant`, `hsp-echo-ts` and `hsp-files-ts` use plain `principal`.
+   - Tests only, `== Agent::`:
+     `crates/vam-security/src/advertise.rs:479, :484`;
+     `crates/vam-security/tests/pdp_tests.rs:11, :301`;
+     `crates/vam-orchestrator/src/security.rs:3280, :4345`;
+     `crates/vam-orchestrator/tests/hsp_catalog.rs:177`;
+     `crates/vam-orchestrator/tests/adversarial_vsock_tests.rs:1027`;
+     `crates/vam-cli/tests/cli_tests.rs:307, :312`.
+   - Tests only, `== User::` (bundle digest tests):
+     `crates/vam-orchestrator/src/catalog_publish.rs:1695, :1929, :2001, :2008`;
+     `crates/vam-orchestrator/tests/api_tests.rs:6567, :6588`.
+   - Generated, unconstrained `principal` (not `==`): egress
+     `crates/vam-security/src/platform_policy.rs:122-170` (`principal,` at
+     `:126`); `crates/vam-orchestrator/src/policy_legacy.rs:510`;
+     `crates/vam-orchestrator/src/host_tools.rs:4662`.
+   - `crates/vam-security/src/legacy_shapes.rs:41` mentions `principal ==` in
+     a doc comment only.
+
+   The six sites the breakdown's "tests only" list omitted, all `==`, none
+   changing meaning: `hsp_catalog.rs:177`, `adversarial_vsock_tests.rs:1027`,
+   `cli_tests.rs:307, :312`, `api_tests.rs:6567, :6588`.
+3. **The App-limit shape rule.** Forbid-only, written
+   `forbid (principal in App::"app_<26 base32>", ...)`, never `==`. Strict
+   validation already rejects `principal == App::...`
+   (`app_forbid_policy_validates_against_the_default_schema`). Checking that
+   a limit contains no permit is P5 (AS-5.1).
+4. **Notes for P5.**
+   a. Egress evaluates with the fixed principal `Agent::"egress"`
+      (`platform_policy.rs:184`, request built in `evaluate_egress`, `:177`,
+      engine built per call at `:178`). An App egress limit must be compiled
+      into that run's set and evaluated with `evaluate_in_app`; it cannot rely
+      on `principal in` from an agent policy.
+   b. `legacy_shapes::principal_scope` treats `in` as `Unknown`
+      (`legacy_shapes.rs:222-239`, `Unknown` at `:234` and `:237`). That is
+      fine because App limits never pass through that converter.
+   c. The schema now accepts `App::` in agent and org policies
+      (`catalog_publish.rs:1459`, `:1487`, `:1541` compile against the same
+      schema). It stays inert until a principal has an App parent (P5), and
+      P5 refuses it at publish (Q6).
+   d. The PEP holds `Arc<dyn PolicyDecisionPoint>`
+      (`crates/vam-orchestrator/src/security.rs:643`). `evaluate_in_app` is an
+      inherent method of `CedarPolicyEngine` and `ArcSwapPolicyEngine`, so it
+      is not callable through that trait object. P5 chooses a downcast to the
+      concrete engine or a defaulted trait method.
+5. **Rejected alternative.** A fourth Tool attribute `app_rule` beside
+   `agent_rule/source_rule/org_rule` (`pdp.rs:96-104`,
+   `vam.cedarschema:6-11`): a breaking schema change for every
+   `ToolEntity::new` caller and every Tool entity JSON. The hierarchy
+   (`Agent in [App]`) stays the plan.
+6. **What W2 proved.** In `crates/vam-security/tests/pdp_tests.rs`:
+   `app_forbid_denies_a_tool_the_owner_permits_in_that_app_only`,
+   `app_forbid_does_not_apply_without_an_app_or_in_another_app`,
+   `hitl_overlay_principal_equality_still_matches_an_agent_with_an_app_parent`,
+   `app_evaluation_fails_closed_for_user_principals_and_malformed_ids`,
+   `app_forbid_policy_validates_against_the_default_schema`,
+   `agent_ids_with_quotes_cannot_escape_the_entity_json`,
+   `arc_swap_engine_evaluates_in_app_and_follows_hot_reload`,
+   `evaluate_ignores_apps_and_keeps_the_legacy_store`,
+   `app_evaluation_denies_on_a_schema_without_app`. On Cedar 4.12.0 a dangling
+   `App` parent is accepted, but the `App` entity is still supplied so the
+   store stays valid if a later Cedar refuses dangling parents. A `User`
+   entity with an `App` parent is rejected by the schema, so a `User` cannot
+   be placed in an App. `evaluate` is unchanged: same checks, order, messages
+   and entity store.

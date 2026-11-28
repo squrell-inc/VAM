@@ -2,7 +2,8 @@ use ed25519_dalek::SigningKey;
 use vam_security::{
     mint_capability_token, verify_capability_token, ApprovalSigner, ArcSwapPolicyEngine,
     AuditLedger, CapabilityClaims, CedarPolicyEngine, DecisionOutcome, EvaluationContext,
-    EvaluationRequest, InMemoryReplayStore, PolicyDecisionPoint, PolicyMode,
+    EvaluationRequest, InMemoryReplayStore, PolicyDecisionPoint, PolicyMode, ScopeRule, ToolEntity,
+    DEFAULT_CEDAR_SCHEMA,
 };
 
 const SQL_POLICY: &str = r#"
@@ -576,4 +577,255 @@ fn test_audit_ledger_chain_and_forking() {
     );
     AuditLedger::verify_chain(&forked_chain, &verifying_key)
         .expect("Forked audit chain must verify");
+}
+
+// ---------------------------------------------------------------------------
+// AS-0.3: Cedar `App` entity, `evaluate_in_app`
+// ---------------------------------------------------------------------------
+
+const APP_A: &str = "app_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+const APP_B: &str = "app_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+const APP_AGENT: &str = "Agent::\"urn:vam:agent:examples.local/vam/demo\"";
+// Cedar names policies by position in the set: `policy0`, `policy1`, ...
+const APP_OWNER_PERMIT: &str = r#"
+permit (
+    principal == Agent::"urn:vam:agent:examples.local/vam/demo",
+    action == Action::"ExecuteTool",
+    resource == Tool::"shell"
+);
+"#;
+const APP_A_LIMIT: &str = r#"
+forbid (
+    principal in App::"app_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+    action == Action::"ExecuteTool",
+    resource == Tool::"shell"
+);
+"#;
+const PERMIT_ALL: &str = "permit (principal, action, resource);";
+
+fn shell_tool() -> ToolEntity {
+    ToolEntity::new(
+        "shell",
+        ScopeRule::Allow,
+        ScopeRule::None,
+        ScopeRule::None,
+        "builtin:shell",
+    )
+}
+
+fn exec_req(principal: &str, tool: &str, with_entity: bool) -> EvaluationRequest {
+    EvaluationRequest {
+        principal: principal.to_string(),
+        action: "Action::\"ExecuteTool\"".to_string(),
+        resource: format!("Tool::\"{tool}\""),
+        context: EvaluationContext::default(),
+        entities: if with_entity {
+            vec![shell_tool()]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn app_engine(policy: &str, mode: PolicyMode) -> CedarPolicyEngine {
+    CedarPolicyEngine::from_default_schema(policy, mode, 1).expect("policy must compile")
+}
+
+#[test]
+fn app_forbid_denies_a_tool_the_owner_permits_in_that_app_only() {
+    let policy = format!("{APP_OWNER_PERMIT}\n{APP_A_LIMIT}");
+    let engine = app_engine(&policy, PolicyMode::Enforce);
+    for with_entity in [false, true] {
+        let req = exec_req(APP_AGENT, "shell", with_entity);
+        let out = engine.evaluate_in_app(&req, APP_A);
+        assert!(out.is_denied(), "entity={with_entity}: {out:?}");
+        assert!(
+            out.matching_policies().iter().any(|p| p == "policy1"),
+            "entity={with_entity}: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn app_forbid_does_not_apply_without_an_app_or_in_another_app() {
+    let policy = format!("{APP_OWNER_PERMIT}\n{APP_A_LIMIT}");
+    let engine = app_engine(&policy, PolicyMode::Enforce);
+    let req = exec_req(APP_AGENT, "shell", false);
+    assert!(engine.evaluate(&req).is_allowed());
+    assert!(engine.evaluate_in_app(&req, APP_B).is_allowed());
+
+    // A different tool inside App A is not covered by the limit on `shell`.
+    let other = format!("permit (principal, action, resource);\n{APP_A_LIMIT}");
+    let engine = app_engine(&other, PolicyMode::Enforce);
+    let req = exec_req(APP_AGENT, "echo", false);
+    assert!(engine.evaluate_in_app(&req, APP_A).is_allowed());
+
+    // ArcSwapPolicyEngine gives the same answers.
+    let swap = ArcSwapPolicyEngine::new(app_engine(&policy, PolicyMode::Enforce));
+    let req = exec_req(APP_AGENT, "shell", false);
+    assert!(swap.evaluate(&req).is_allowed());
+    assert!(swap.evaluate_in_app(&req, APP_B).is_allowed());
+    assert!(swap.evaluate_in_app(&req, APP_A).is_denied());
+}
+
+#[test]
+fn hitl_overlay_principal_equality_still_matches_an_agent_with_an_app_parent() {
+    let urn = "urn:vam:agent:examples.local/vam/demo";
+    let overlay = vam_security::hitl_execute_overlay(urn, &["shell"]);
+    let base = vam_security::compose_policy("", &overlay);
+    let engine = app_engine(&base, PolicyMode::Enforce);
+
+    let unapproved = exec_req(APP_AGENT, "shell", false);
+    assert!(engine.evaluate(&unapproved).is_denied());
+    assert!(engine.evaluate_in_app(&unapproved, APP_A).is_denied());
+
+    let mut approved = exec_req(APP_AGENT, "shell", false);
+    approved.context.hitl_approved = Some(true);
+    let plain = engine.evaluate(&approved);
+    let in_app = engine.evaluate_in_app(&approved, APP_A);
+    assert!(plain.is_allowed(), "{plain:?}");
+    assert!(in_app.is_allowed(), "{in_app:?}");
+    assert!(!plain.matching_policies().is_empty());
+    assert_eq!(plain.matching_policies(), in_app.matching_policies());
+
+    // An App limit tightens a HITL-approved tool: forbid wins.
+    let limited = app_engine(
+        &vam_security::compose_policy(&base, APP_A_LIMIT),
+        PolicyMode::Enforce,
+    );
+    assert!(limited.evaluate(&approved).is_allowed());
+    let out = limited.evaluate_in_app(&approved, APP_A);
+    assert!(out.is_denied(), "{out:?}");
+    // Overlay holds policy0 and policy1; the App limit is policy2.
+    assert!(out.matching_policies().iter().any(|p| p == "policy2"));
+}
+
+#[test]
+fn app_evaluation_fails_closed_for_user_principals_and_malformed_ids() {
+    let a25 = "a".repeat(25);
+    let bad_ids = [
+        String::new(),
+        "app_".to_string(),
+        format!("APP_{}a", a25),
+        format!("app_{a25}"),
+        format!("app_{a25}aa"),
+        format!("app_{a25}1"),
+        format!("app_{a25}8"),
+        format!("sp_{a25}a"),
+        format!("app_{a25}\""),
+        format!("app_{a25}\n"),
+        format!("app_{a25}\u{e9}"),
+    ];
+    for mode in [PolicyMode::Enforce, PolicyMode::Shadow] {
+        let engine = app_engine(PERMIT_ALL, mode);
+
+        // Sanity: a valid id with an Agent principal is allowed.
+        let agent_req = exec_req(APP_AGENT, "shell", false);
+        assert!(engine.evaluate_in_app(&agent_req, APP_A).is_allowed());
+
+        for principal in ["User::\"owner\"", "Vam::Agent::\"x\""] {
+            let out = engine.evaluate_in_app(&exec_req(principal, "shell", false), APP_A);
+            assert!(out.is_denied(), "{mode:?} {principal}: {out:?}");
+            assert!(out.diagnostic_message().contains("Agent"), "{out:?}");
+            assert!(out.matching_policies().is_empty());
+        }
+
+        for id in &bad_ids {
+            let out = engine.evaluate_in_app(&agent_req, id);
+            assert!(out.is_denied(), "{mode:?} id {id:?}: {out:?}");
+            assert!(out.diagnostic_message().contains("invalid App id"));
+            assert!(out.matching_policies().is_empty());
+        }
+
+        // A malformed principal keeps its existing message through the app path.
+        let out = engine.evaluate_in_app(&exec_req("not a uid", "shell", false), APP_A);
+        assert!(out.is_denied());
+        assert!(out
+            .diagnostic_message()
+            .contains("Malformed principal EntityUid"));
+    }
+}
+
+#[test]
+fn app_forbid_policy_validates_against_the_default_schema() {
+    assert!(CedarPolicyEngine::from_default_schema(APP_A_LIMIT, PolicyMode::Enforce, 1).is_ok());
+    let both = format!("{APP_OWNER_PERMIT}\n{APP_A_LIMIT}");
+    assert!(CedarPolicyEngine::from_default_schema(&both, PolicyMode::Enforce, 1).is_ok());
+
+    let equality = r#"forbid (
+        principal == App::"app_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        action == Action::"ExecuteTool",
+        resource == Tool::"shell"
+    );"#;
+    assert!(CedarPolicyEngine::from_default_schema(equality, PolicyMode::Enforce, 1).is_err());
+
+    let old_schema =
+        DEFAULT_CEDAR_SCHEMA.replace("entity App;\nentity Agent in [App];", "entity Agent;");
+    assert_ne!(old_schema, DEFAULT_CEDAR_SCHEMA);
+    assert!(CedarPolicyEngine::new(&old_schema, APP_A_LIMIT, PolicyMode::Enforce, 1).is_err());
+}
+
+#[test]
+fn agent_ids_with_quotes_cannot_escape_the_entity_json() {
+    let policy = r#"
+forbid (
+    principal in App::"app_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+    action == Action::"ExecuteTool",
+    resource == Tool::"shell"
+);
+permit (principal, action, resource);
+"#;
+    let engine = app_engine(policy, PolicyMode::Enforce);
+    for principal in ["Agent::\"a\\\"b\"", "Agent::\"urn:x\\\\y\""] {
+        let out = engine.evaluate_in_app(&exec_req(principal, "shell", false), APP_A);
+        assert!(out.is_denied(), "{principal}: {out:?}");
+        assert!(
+            out.matching_policies().iter().any(|p| p == "policy0"),
+            "{principal}: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn arc_swap_engine_evaluates_in_app_and_follows_hot_reload() {
+    let swap = ArcSwapPolicyEngine::new(app_engine(APP_OWNER_PERMIT, PolicyMode::Enforce));
+    let req = exec_req(APP_AGENT, "shell", false);
+    assert!(swap.evaluate_in_app(&req, APP_A).is_allowed());
+
+    let policy = format!("{APP_OWNER_PERMIT}\n{APP_A_LIMIT}");
+    let v2 = CedarPolicyEngine::from_default_schema(&policy, PolicyMode::Enforce, 2).unwrap();
+    swap.hot_reload(v2).unwrap();
+    assert!(swap.evaluate_in_app(&req, APP_A).is_denied());
+    assert!(swap.evaluate_in_app(&req, APP_B).is_allowed());
+    assert_eq!(swap.generation(), 2);
+}
+
+#[test]
+fn evaluate_ignores_apps_and_keeps_the_legacy_store() {
+    let policy = format!("{APP_OWNER_PERMIT}\n{APP_A_LIMIT}");
+    let engine = app_engine(&policy, PolicyMode::Enforce);
+    assert!(engine
+        .evaluate(&exec_req(APP_AGENT, "shell", false))
+        .is_allowed());
+    assert!(engine
+        .evaluate(&exec_req(APP_AGENT, "shell", true))
+        .is_allowed());
+}
+
+#[test]
+fn app_evaluation_denies_on_a_schema_without_app() {
+    let schema = r#"
+entity Agent;
+entity Tool;
+action "ExecuteTool" appliesTo { principal: [Agent], resource: [Tool], context: {} };
+"#;
+    let engine = CedarPolicyEngine::new(schema, PERMIT_ALL, PolicyMode::Enforce, 1)
+        .expect("minimal schema must compile");
+    let req = exec_req(APP_AGENT, "shell", false);
+    let out = engine.evaluate_in_app(&req, APP_A);
+    assert!(out.is_denied(), "{out:?}");
+    assert!(out
+        .diagnostic_message()
+        .contains("Failed to load request entities"));
+    assert!(engine.evaluate(&req).is_allowed());
 }
