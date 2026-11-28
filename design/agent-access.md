@@ -1,6 +1,6 @@
 # Agent access: per-agent visibility, Add and Request, agent admins
 
-Proposal for open work, 2026-11-26; nothing built. Decisions A1–A9 were **approved by the owner on
+Proposal for open work, 2026-11-26; built in Phases 0-5 on `feat/agent-access`, release pending. Decisions A1–A9 were **approved by the owner on
 2026-11-27 with the recommended answers** (§2.4). Tracker: `.cursor/workstreams/agent-access.md`. Branch: `feat/agent-access`. What the
 node does today is in `docs/src/content/docs/orchestrator/catalog.md`, `orchestrator/member-agents.md`
 and `orchestrator/user-isolation.md`.

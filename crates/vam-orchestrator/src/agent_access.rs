@@ -2354,11 +2354,26 @@ mod hidden_write_routes_tests {
             let missing = masked(put(&s, MISSING, "u2", false), MISSING);
             assert_eq!(hidden, missing);
             assert_eq!(hidden.0, StatusCode::BAD_REQUEST);
-            // Where the domain check passes there is no missing answer to give (a PUT of a
-            // missing URN would write), so the 409 stays.
-            let orphan = masked(put(&s, ORPHAN, "u2", false), ORPHAN);
-            assert_eq!(orphan.0, StatusCode::CONFLICT, "{orphan:?}");
         }
+    }
+
+    #[test]
+    fn put_of_a_hidden_orphan_installed_agent_equals_a_missing_urn_for_a_member() {
+        let s = world();
+        // Restricted mode (a member): the marketplace is gone, so the domain check passes and the
+        // answer is the namespace 400 a missing URN gets, not the 409 that told hidden from
+        // missing (the earlier version of this test pinned that 409 for both modes).
+        let hidden = masked(put_restricted(&s, ORPHAN, "u2", false), ORPHAN);
+        let missing = masked(
+            put_restricted(&s, ORPHAN_MISSING, "u2", false),
+            ORPHAN_MISSING,
+        );
+        assert_eq!(hidden, missing);
+        assert_eq!(hidden.0, StatusCode::BAD_REQUEST, "{hidden:?}");
+        // Full mode (`catalog:write`): a PUT of a missing URN would write, so there is no
+        // missing answer to give and the 409 stays.
+        let orphan = masked(put_full(&s, ORPHAN, "u2", false), ORPHAN);
+        assert_eq!(orphan.0, StatusCode::CONFLICT, "{orphan:?}");
     }
 
     #[test]
