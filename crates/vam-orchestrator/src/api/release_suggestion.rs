@@ -36,6 +36,13 @@ pub(crate) fn release_suggestion(
             // Agent access: after the publish grant and before the owner check, which would
             // otherwise answer a Hidden agent with 403 "only the artifact owner" and leak it.
             require_publish_grant(auth)?;
+            // Hidden answers as a missing URN does, the domain refusal included.
+            state.store.refuse_hidden_agent(
+                urn,
+                auth.owner_user_id(),
+                auth.has_users_admin(),
+                || crate::owner::catalog_owner_not_found("agent", urn),
+            )?;
             crate::agent_access::require_usable(
                 &state.store,
                 urn,

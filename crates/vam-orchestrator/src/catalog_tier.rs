@@ -119,11 +119,26 @@ pub(crate) fn reject_caller_installed_urn(
     noun: &str,
 ) -> Result<(), OrchestratorError> {
     if is_installed_urn(connection, urn)? {
-        return Err(OrchestratorError::Conflict(format!(
-            "{noun} '{urn}' was installed from a marketplace and is read-only: nobody edits, \
-             releases or deletes it; the Marketplace page updates it"
-        )));
+        return Err(installed_error(urn, noun));
     }
+    reject_reserved_domain(connection, urn, noun)
+}
+
+/// The 409 an installed URN answers a caller's write with (M2).
+fn installed_error(urn: &str, noun: &str) -> OrchestratorError {
+    OrchestratorError::Conflict(format!(
+        "{noun} '{urn}' was installed from a marketplace and is read-only: nobody edits, \
+         releases or deletes it; the Marketplace page updates it"
+    ))
+}
+
+/// M3: refuses a URN under the `publisherDomain` of a trusted marketplace, installed or not (400).
+/// A missing URN in such a domain gets this answer too, so a hidden agent can share it.
+pub(crate) fn reject_reserved_domain(
+    connection: &Connection,
+    urn: &str,
+    noun: &str,
+) -> Result<(), OrchestratorError> {
     let Some(domain) = vam_spec::marketplace::urn_domain(urn) else {
         return Ok(());
     };
@@ -143,6 +158,89 @@ pub(crate) fn reject_caller_installed_urn(
         )));
     }
     Ok(())
+}
+
+/// What a route answers for an agent the access rule hides from the caller: exactly what it
+/// answers for a URN that does not exist. The domain check runs first, as it does for a missing
+/// URN, then `missing` builds the route's own missing-URN error from the constructor the route
+/// already uses (no new text here).
+///
+/// Generic over the error type because the delete route's missing answer is an HTTP 405 that
+/// has no [`OrchestratorError`] variant.
+pub(crate) fn hidden_answer<E: From<OrchestratorError>>(
+    connection: &Connection,
+    urn: &str,
+    noun: &str,
+    missing: impl FnOnce() -> E,
+) -> E {
+    match reject_reserved_domain(connection, urn, noun) {
+        Err(e) => e.into(),
+        Ok(()) => missing(),
+    }
+}
+
+/// True when the access rule hides the agent `urn` from `caller` (`org_admin` is `users:admin`
+/// on the key; an org admin is never hidden).
+pub(crate) fn agent_hidden_from(
+    connection: &Connection,
+    urn: &str,
+    caller: &str,
+    org_admin: bool,
+) -> Result<bool, OrchestratorError> {
+    Ok(
+        crate::agent_access::agent_access_on(connection, urn, caller, org_admin, false)?
+            == crate::agent_access::AgentAccess::Hidden,
+    )
+}
+
+/// [`reject_caller_installed_urn`] for an agent write (PUT, either mode): an installed agent the
+/// rule hides from the caller answers as a missing URN would. Inside a marketplace domain that
+/// is the 400 domain refusal. Where the domain check passes (the marketplace was removed since):
+///
+/// - restricted mode (`restricted`, `agents:draft` without `catalog:write`): the namespace 400 a
+///   missing URN outside the caller's namespace gets, taken in the same order as the restricted
+///   save takes it (skipped when the caller owns a row at the URN). A marketplace can never
+///   install under the registry domain, so this is always that 400.
+/// - full mode (`catalog:write`): the 409 stays, because a PUT of a missing URN would succeed
+///   and there is no missing answer to give.
+pub(crate) fn reject_caller_installed_agent(
+    connection: &Connection,
+    urn: &str,
+    caller: &str,
+    org_admin: bool,
+    restricted: bool,
+) -> Result<(), OrchestratorError> {
+    if is_installed_urn(connection, urn)? && agent_hidden_from(connection, urn, caller, org_admin)?
+    {
+        return Err(hidden_answer(connection, urn, "agent", || {
+            hidden_orphan_put_answer(connection, urn, caller, restricted)
+        }));
+    }
+    reject_caller_installed_urn(connection, urn, "agent")
+}
+
+/// The answer of a PUT on a hidden installed agent whose marketplace domain no longer owns it
+/// (see [`reject_caller_installed_agent`]).
+fn hidden_orphan_put_answer(
+    connection: &Connection,
+    urn: &str,
+    caller: &str,
+    restricted: bool,
+) -> OrchestratorError {
+    if restricted {
+        let table = crate::catalog::CatalogKind::Agent.table();
+        match crate::owner::caller_owns_any_row(connection, table, urn, caller) {
+            Ok(false) => {
+                if let Err(e) = crate::member_draft::require_own_namespace(connection, caller, urn)
+                {
+                    return e;
+                }
+            }
+            Ok(true) => {}
+            Err(e) => return e,
+        }
+    }
+    installed_error(urn, "agent")
 }
 
 /// Migration `catalog_tier_marketplace` (CN-4.5): the tier `CHECK` of a catalog table created
@@ -266,6 +364,26 @@ impl crate::workflow::SqliteWorkflowStore {
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         reject_caller_installed_urn(&connection, urn, noun)
+    }
+
+    /// Refuses with `missing()` when the access rule hides the agent `urn` from `caller`
+    /// (see [`hidden_answer`]); `Ok` otherwise, for the caller to go on with its own checks.
+    /// `org_admin` is `users:admin` on the key, so an org admin is never refused here.
+    pub(crate) fn refuse_hidden_agent<E: From<OrchestratorError>>(
+        &self,
+        urn: &str,
+        caller: &str,
+        org_admin: bool,
+        missing: impl FnOnce() -> E,
+    ) -> Result<(), E> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        if agent_hidden_from(&connection, urn, caller, org_admin)? {
+            return Err(hidden_answer(&connection, urn, "agent", missing));
+        }
+        Ok(())
     }
 
     /// Add `catalog_tier` on versioned catalog tables; widen its `CHECK` to allow `marketplace`

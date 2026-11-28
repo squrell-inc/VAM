@@ -204,4 +204,41 @@ mod tests {
     fn keys_admin_may_release() {
         require_publish_grant(&auth_with_scopes(&["keys:admin"])).expect("operator bypass");
     }
+
+    /// AA-5.9 (design §2.3): the access rule reads only `users:admin`. A key with `keys:admin` and
+    /// no `users:admin` passes the catalog write and release checks but is Hidden on a restricted
+    /// agent, as any member is.
+    #[test]
+    fn keys_admin_without_users_admin_is_hidden_on_a_restricted_agent() {
+        use crate::agent_access::{agent_access, AccessMode, AgentAccess, Visibility};
+        const URN: &str = "urn:vam:agent:local.vam.dev/acme/gated";
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        store.initialize_catalog_schema().expect("catalog schema");
+        store.create_user("boss", "boss").expect("user");
+        store
+            .put_agent_access_policy(URN, Visibility::Restricted, AccessMode::Approval, "boss")
+            .expect("policy");
+
+        let keys_admin = auth_with_scopes(&["keys:admin", "catalog:write", "publish:grant"]);
+        assert!(keys_admin.has_keys_admin() && !keys_admin.has_users_admin());
+        assert!(
+            require_publish_grant(&keys_admin).is_ok(),
+            "the write checks pass"
+        );
+        let rule = |auth: &AuthContext| {
+            agent_access(
+                &store,
+                URN,
+                auth.owner_user_id(),
+                auth.has_users_admin(),
+                false,
+            )
+            .expect("rule")
+        };
+        assert_eq!(rule(&keys_admin), AgentAccess::Hidden);
+
+        // `users:admin` is what makes an org admin, and only that.
+        let users_admin = auth_with_scopes(&["users:admin"]);
+        assert_eq!(rule(&users_admin), AgentAccess::Usable);
+    }
 }

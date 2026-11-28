@@ -488,7 +488,8 @@ pub(crate) fn seed_first_admin_on(
     Ok(added > 0)
 }
 
-/// A5: the default of a marketplace install. Writes `(org, approval)` for `urn` only when the
+/// A5: the default of a marketplace install. Writes `default` (the listing's `access.default`;
+/// absent means `(org, approval)`) for `urn` only when the
 /// agent has no released row in `agents` yet, so it runs before the install's own write. An
 /// update (or a pre-upgrade install getting its first update) finds its released row and writes
 /// nothing, and an existing policy is never replaced. A draft is not an install: marketplace
@@ -498,9 +499,24 @@ pub(crate) fn seed_first_admin_on(
 pub(crate) fn write_install_default_on(
     connection: &Connection,
     urn: &str,
+    default: Option<vam_spec::marketplace::AccessDefault>,
     by: &str,
     at: i64,
 ) -> Result<bool, OrchestratorError> {
+    use vam_spec::marketplace::{AccessMode as M, AccessVisibility as V};
+    let (visibility, mode) = default.map_or(("org", "approval"), |d| {
+        (
+            match d.visibility {
+                V::Org => "org",
+                V::Restricted => "restricted",
+            },
+            match d.mode {
+                M::Everyone => "everyone",
+                M::Open => "open",
+                M::Approval => "approval",
+            },
+        )
+    });
     let known: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM agents WHERE urn = ?1 AND channel = 'released')",
         params![urn],
@@ -511,8 +527,8 @@ pub(crate) fn write_install_default_on(
     }
     let added = connection.execute(
         "INSERT OR IGNORE INTO agent_access_policy (urn, visibility, access_mode, updated_by, updated_at)
-         VALUES (?1, 'org', 'approval', ?2, ?3)",
-        params![urn, resolved_owner(by), at],
+         VALUES (?1, ?4, ?5, ?2, ?3)",
+        params![urn, resolved_owner(by), at, visibility, mode],
     )?;
     Ok(added > 0)
 }
@@ -1911,14 +1927,14 @@ mod enforcement_tests {
         let s = store();
         let c = s.connection.lock().unwrap();
         // `DRAFT_ONLY` has only a draft row: a first install still gets `(org, approval)`.
-        assert!(write_install_default_on(&c, DRAFT_ONLY, "adm", 1).unwrap());
+        assert!(write_install_default_on(&c, DRAFT_ONLY, None, "adm", 1).unwrap());
         let p = read_policy(&c, DRAFT_ONLY).unwrap().unwrap();
         assert_eq!(
             (p.visibility, p.mode),
             (Visibility::Org, AccessMode::Approval)
         );
         // `URN` has a released row: an update or pre-upgrade install gets nothing.
-        assert!(!write_install_default_on(&c, URN, "adm", 1).unwrap());
+        assert!(!write_install_default_on(&c, URN, None, "adm", 1).unwrap());
         assert!(read_policy(&c, URN).unwrap().is_none());
     }
 
@@ -2155,6 +2171,238 @@ mod enforcement_tests {
             format!("agent_access_required: request access to '{URN}'")
         );
         assert!(!api.retryable);
+    }
+}
+
+/// Phase 5 wave 2 (AA-5.6): an installed agent the rule hides answers the write routes as a
+/// missing URN does, at the helpers each route runs in the order it runs them. Visible and org
+/// admin callers keep the 409 and the owner 403. The routes themselves are proved over HTTP by
+/// `hidden_agent_answers_the_write_routes_like_a_missing_urn` (user-tier agent) and by the
+/// scenario `a-hidden-agent-answers-like-a-missing-one-on-every-catalog-route` (installed).
+#[cfg(test)]
+mod hidden_write_routes_tests {
+    use super::*;
+    use crate::api::error::ApiError;
+    use axum::http::StatusCode;
+    use vam_spec::v1::{AgentSpec, ResourceId};
+
+    const DOMAIN: &str = "market.example";
+    const HIDDEN: &str = "urn:vam:agent:market.example/c/hidden";
+    const SHOWN: &str = "urn:vam:agent:market.example/c/shown";
+    const MISSING: &str = "urn:vam:agent:market.example/c/no-such-agent";
+    /// Under no marketplace's domain (the marketplace was removed since the install).
+    const ORPHAN: &str = "urn:vam:agent:gone.example/c/hidden";
+    const ORPHAN_MISSING: &str = "urn:vam:agent:gone.example/c/no-such-agent";
+
+    fn spec(urn: &str) -> AgentSpec {
+        AgentSpec {
+            resource_id: Some(ResourceId {
+                urn: urn.to_string(),
+            }),
+            display_name: "Hidden".to_string(),
+            description: "hidden writes".to_string(),
+            role: "assistant".to_string(),
+            instruction_source: Some(
+                vam_spec::v1::agent_spec::InstructionSource::SystemInstructions("x".to_string()),
+            ),
+            ..Default::default()
+        }
+    }
+
+    /// Installed `HIDDEN` and `ORPHAN` restricted, `SHOWN` visible; `u2` is nobody's admin and
+    /// `adm` the org admin.
+    fn world() -> SqliteWorkflowStore {
+        let s = SqliteWorkflowStore::in_memory().expect("store");
+        s.initialize_catalog_schema().expect("catalog schema");
+        for user in ["u2", "adm"] {
+            s.create_user(user, user).expect("user");
+        }
+        {
+            let c = s.connection.lock().unwrap();
+            c.execute(
+                "INSERT INTO node_marketplaces (id, url, name, publisher_domain, trust,
+                     preconfigured, enabled, created_at, created_by)
+                 VALUES ('m-1', 'https://git.example.com/a/b', 'Community', ?1, 'unverified',
+                     0, 1, 1, 'u')",
+                [DOMAIN],
+            )
+            .unwrap();
+            for urn in [HIDDEN, SHOWN, ORPHAN] {
+                c.execute(
+                    "INSERT INTO agents (urn, major, minor, patch, prerelease, channel, revision,
+                         digest, spec_bytes, created_at, updated_at, owner_user_id, catalog_tier)
+                     VALUES (?1, 1, 0, 0, '', 'released', 1, 'd', x'00', 1, 1,
+                         'local', 'marketplace')",
+                    [urn],
+                )
+                .unwrap();
+            }
+        }
+        for urn in [HIDDEN, ORPHAN] {
+            s.put_agent_access_policy(urn, Visibility::Restricted, AccessMode::Approval, "adm")
+                .unwrap();
+        }
+        s.put_agent_access_policy(SHOWN, Visibility::Org, AccessMode::Approval, "adm")
+            .unwrap();
+        s
+    }
+
+    fn masked(e: impl Into<ApiError>, urn: &str) -> (StatusCode, String) {
+        let e: ApiError = e.into();
+        (e.status, e.message.replace(urn, "<urn>"))
+    }
+
+    fn not_deletable(urn: &str) -> ApiError {
+        ApiError {
+            status: StatusCode::METHOD_NOT_ALLOWED,
+            code: vam_spec::v1::VamErrorCode::Unimplemented,
+            message: format!("agent '{urn}' cannot be deleted: the catalog keeps every release"),
+            retryable: false,
+        }
+    }
+
+    /// `release_agent_wildcard`, after the publish grant.
+    fn release(s: &SqliteWorkflowStore, urn: &str, who: &str, admin: bool) -> OrchestratorError {
+        s.refuse_hidden_agent(urn, who, admin, || {
+            crate::owner::catalog_owner_not_found("agent", urn)
+        })
+        .and_then(|()| s.require_not_installed(urn, "agent"))
+        .and_then(|()| s.require_catalog_owner("agents", urn, who, "agent"))
+        .expect_err("refused")
+    }
+
+    /// The agent arm of `release_suggestion`, after the publish grant.
+    fn suggestion(s: &SqliteWorkflowStore, urn: &str, who: &str, admin: bool) -> OrchestratorError {
+        s.refuse_hidden_agent(urn, who, admin, || {
+            crate::owner::catalog_owner_not_found("agent", urn)
+        })
+        .and_then(|()| require_usable(s, urn, who, admin, false, || unreachable!("hidden is done")))
+        .and_then(|()| s.require_not_installed(urn, "agent"))
+        .and_then(|()| s.require_catalog_owner("agents", urn, who, "agent"))
+        .expect_err("refused")
+    }
+
+    /// `refuse_catalog_delete` for an agent, after `catalog:write`.
+    fn delete(s: &SqliteWorkflowStore, urn: &str, who: &str, admin: bool) -> ApiError {
+        s.refuse_hidden_agent(urn, who, admin, || not_deletable(urn))
+            .and_then(|()| {
+                s.require_not_installed(urn, "agent")
+                    .map_err(ApiError::from)
+            })
+            .err()
+            .unwrap_or_else(|| not_deletable(urn))
+    }
+
+    fn put_full(s: &SqliteWorkflowStore, urn: &str, who: &str, admin: bool) -> OrchestratorError {
+        s.publish_agent_draft_as(&spec(urn), who, admin)
+            .expect_err("refused")
+    }
+
+    fn put_restricted(
+        s: &SqliteWorkflowStore,
+        urn: &str,
+        who: &str,
+        admin: bool,
+    ) -> OrchestratorError {
+        s.publish_agent_draft_restricted_as(&spec(urn), who, 10, admin)
+            .expect_err("refused")
+    }
+
+    #[test]
+    fn release_and_suggestion_of_a_hidden_installed_agent_equal_a_missing_urn() {
+        let s = world();
+        for route in [release, suggestion] {
+            // Inside the marketplace's domain both are the 400 domain refusal.
+            let hidden = masked(route(&s, HIDDEN, "u2", false), HIDDEN);
+            let missing = masked(route(&s, MISSING, "u2", false), MISSING);
+            assert_eq!(hidden, missing);
+            assert_eq!(hidden.0, StatusCode::BAD_REQUEST);
+            assert!(
+                hidden.1.contains("trusted marketplace 'Community'"),
+                "{hidden:?}"
+            );
+            // With the marketplace gone it is the route's own 404.
+            let hidden = masked(route(&s, ORPHAN, "u2", false), ORPHAN);
+            let missing = masked(route(&s, ORPHAN_MISSING, "u2", false), ORPHAN_MISSING);
+            assert_eq!(hidden, missing);
+            assert_eq!(hidden.0, StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[test]
+    fn delete_of_a_hidden_installed_agent_equals_a_missing_urn() {
+        let s = world();
+        let hidden = masked(delete(&s, HIDDEN, "u2", false), HIDDEN);
+        let missing = masked(delete(&s, MISSING, "u2", false), MISSING);
+        assert_eq!(hidden, missing);
+        assert_eq!(
+            hidden.0,
+            StatusCode::BAD_REQUEST,
+            "400 inside a marketplace domain"
+        );
+        let hidden = masked(delete(&s, ORPHAN, "u2", false), ORPHAN);
+        let missing = masked(delete(&s, ORPHAN_MISSING, "u2", false), ORPHAN_MISSING);
+        assert_eq!(hidden, missing);
+        assert_eq!(hidden.0, StatusCode::METHOD_NOT_ALLOWED, "else the 405");
+    }
+
+    #[test]
+    fn put_of_a_hidden_installed_agent_equals_a_missing_urn_in_both_modes() {
+        let s = world();
+        for put in [put_full, put_restricted] {
+            let hidden = masked(put(&s, HIDDEN, "u2", false), HIDDEN);
+            let missing = masked(put(&s, MISSING, "u2", false), MISSING);
+            assert_eq!(hidden, missing);
+            assert_eq!(hidden.0, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn put_of_a_hidden_orphan_installed_agent_equals_a_missing_urn_for_a_member() {
+        let s = world();
+        // Restricted mode (a member): the marketplace is gone, so the domain check passes and the
+        // answer is the namespace 400 a missing URN gets, not the 409 that told hidden from
+        // missing (the earlier version of this test pinned that 409 for both modes).
+        let hidden = masked(put_restricted(&s, ORPHAN, "u2", false), ORPHAN);
+        let missing = masked(
+            put_restricted(&s, ORPHAN_MISSING, "u2", false),
+            ORPHAN_MISSING,
+        );
+        assert_eq!(hidden, missing);
+        assert_eq!(hidden.0, StatusCode::BAD_REQUEST, "{hidden:?}");
+        // Full mode (`catalog:write`): a PUT of a missing URN would write, so there is no
+        // missing answer to give and the 409 stays.
+        let orphan = masked(put_full(&s, ORPHAN, "u2", false), ORPHAN);
+        assert_eq!(orphan.0, StatusCode::CONFLICT, "{orphan:?}");
+    }
+
+    #[test]
+    fn visible_and_org_admin_callers_keep_the_409_and_the_owner_403() {
+        let s = world();
+        let kind = |e: OrchestratorError| match e {
+            OrchestratorError::Conflict(_) => "409",
+            OrchestratorError::PermissionDenied(_) => "403",
+            OrchestratorError::AgentAccessRequired { .. } => "access",
+            OrchestratorError::InvalidContract(_) => "400",
+            OrchestratorError::NotFound(_) => "404",
+            other => panic!("{other:?}"),
+        };
+        // Visible: the installed row's 409 on release, PUT and delete.
+        assert_eq!(kind(release(&s, SHOWN, "u2", false)), "409");
+        assert_eq!(kind(suggestion(&s, SHOWN, "u2", false)), "access");
+        assert_eq!(kind(put_full(&s, SHOWN, "u2", false)), "409");
+        assert_eq!(kind(put_restricted(&s, SHOWN, "u2", false)), "409");
+        assert_eq!(delete(&s, SHOWN, "u2", false).status, StatusCode::CONFLICT);
+        // An org admin is never hidden: the 409 on the restricted installed agent too.
+        assert_eq!(kind(release(&s, HIDDEN, "adm", true)), "409");
+        assert_eq!(kind(suggestion(&s, HIDDEN, "adm", true)), "409");
+        assert_eq!(kind(put_full(&s, HIDDEN, "adm", true)), "409");
+        assert_eq!(kind(put_restricted(&s, HIDDEN, "adm", true)), "409");
+        assert_eq!(delete(&s, HIDDEN, "adm", true).status, StatusCode::CONFLICT);
+        // An agent admin of the hidden agent is not hidden either.
+        assert!(s.seed_first_admin(HIDDEN, "u2").unwrap());
+        assert_eq!(kind(release(&s, HIDDEN, "u2", false)), "409");
+        assert_eq!(kind(put_full(&s, HIDDEN, "u2", false)), "409");
     }
 }
 

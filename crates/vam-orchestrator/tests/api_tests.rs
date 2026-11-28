@@ -13553,3 +13553,139 @@ async fn browse_and_the_lists_show_each_caller_only_what_they_may_see() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
     }
 }
+
+// ---- Agent access, Phase 5 wave 2: a hidden agent answers like a missing one on write routes ----
+
+/// The answers of the write routes for `urn` (release, release suggestion, delete), the URN
+/// masked so a hidden agent's answers and a missing URN's compare byte for byte.
+async fn write_route_answers(
+    w: &AccessWorld,
+    who: &str,
+    urn: &str,
+    tag: &str,
+) -> Vec<(&'static str, (StatusCode, String))> {
+    let release = access_call(
+        &w.app,
+        "POST",
+        &format!("/v1/agents/{urn}/release"),
+        who,
+        Some(&format!("rel-{tag}")),
+        Some(serde_json::json!({ "version": { "major": 1, "minor": 1, "patch": 0 } })),
+    )
+    .await;
+    let suggestion = access_call(
+        &w.app,
+        "GET",
+        &format!("/v1/agents/{urn}/release-suggestion"),
+        who,
+        None,
+        None,
+    )
+    .await;
+    let delete = access_call(
+        &w.app,
+        "DELETE",
+        &format!("/v1/agents/{urn}"),
+        who,
+        Some(&format!("del-{tag}")),
+        None,
+    )
+    .await;
+    vec![
+        ("release", masked(release, urn)),
+        ("suggestion", masked(suggestion, urn)),
+        ("delete", masked(delete, urn)),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_agent_answers_the_write_routes_like_a_missing_urn() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/hidden-writes");
+    let missing = "urn:vam:agent:local.vam.dev/acme/no-such-agent";
+
+    // Unrestricted: a publisher who is not the owner is refused as the owner's (403), as today.
+    let open = write_route_answers(&w, &w.publisher, w.urn, "open").await;
+    assert_eq!(open[0].1 .0, StatusCode::FORBIDDEN, "{:?}", open[0]);
+    assert!(
+        open[0].1 .1.contains("only the artifact owner"),
+        "{:?}",
+        open[0]
+    );
+
+    // Restricted: the same publisher gets the answers a missing URN gets, route by route.
+    w.policy("restricted", "approval", "pol-r").await;
+    let hidden = write_route_answers(&w, &w.publisher, w.urn, "hid").await;
+    let gone = write_route_answers(&w, &w.publisher, missing, "gone").await;
+    assert_eq!(hidden, gone);
+    assert_eq!(hidden[0].1 .0, StatusCode::NOT_FOUND, "release: {hidden:?}");
+    assert_eq!(
+        hidden[1].1 .0,
+        StatusCode::NOT_FOUND,
+        "suggestion: {hidden:?}"
+    );
+    assert_eq!(
+        hidden[2].1 .0,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "delete: {hidden:?}"
+    );
+
+    // A caller without `publish:grant` is refused for that first, hidden or missing.
+    for urn in [w.urn, missing] {
+        let (status, body) = access_call(
+            &w.app,
+            "POST",
+            &format!("/v1/agents/{urn}/release"),
+            &w.alice,
+            Some("rel-member"),
+            Some(serde_json::json!({ "version": { "major": 1, "minor": 1, "patch": 0 } })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body.contains("publish:grant") || body.contains("catalog:write"),
+            "{body}"
+        );
+    }
+
+    // The PUT on a URN another user owns stays a 403 (owner answer Q2): the caller already
+    // holds `catalog:write`, and only the installed case is made to answer as a missing URN.
+    let spec = serde_json::json!({ "spec": {
+        "resourceId": { "urn": w.urn }, "displayName": "x", "description": "x",
+        "role": "Tester", "systemInstructions": "x" } });
+    let (status, body) = access_call(
+        &w.app,
+        "PUT",
+        "/v1/agents",
+        &w.publisher,
+        Some("put-foreign"),
+        Some(spec),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // An org admin is never hidden: the owner answer of a visible agent is unchanged.
+    let admin = write_route_answers(&w, &w.admin, w.urn, "adm").await;
+    assert_ne!(admin[0].1 .0, StatusCode::NOT_FOUND, "{admin:?}");
+    assert_eq!(admin[2].1 .0, StatusCode::METHOD_NOT_ALLOWED, "{admin:?}");
+
+    // Visible (org, approval): release is the owner's 403, the suggestion asks for access.
+    w.policy("org", "approval", "pol-v").await;
+    let visible = write_route_answers(&w, &w.publisher, w.urn, "vis").await;
+    assert_eq!(visible[0].1 .0, StatusCode::FORBIDDEN, "{visible:?}");
+    assert!(
+        visible[0].1 .1.contains("only the artifact owner"),
+        "{visible:?}"
+    );
+    assert_eq!(visible[1].1 .0, StatusCode::FORBIDDEN, "{visible:?}");
+    assert!(
+        visible[1].1 .1.contains("agent_access_required:"),
+        "{visible:?}"
+    );
+    assert_eq!(
+        visible[2].1 .0,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "{visible:?}"
+    );
+}

@@ -3,7 +3,9 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 
 use crate::api::auth::{require_idempotency_key, AuthContext};
-use crate::api::catalog_auth::{require_catalog_read, require_release_authorization};
+use crate::api::catalog_auth::{
+    require_catalog_read, require_publish_grant, require_release_authorization,
+};
 use crate::api::error::{json_response, parse_json_body, ApiError};
 use crate::api::{ensure_ready, json_http_response, percent_decode_path, AppState};
 use crate::catalog::CatalogVersionRow;
@@ -42,6 +44,14 @@ pub(crate) async fn release_agent_wildcard(
     // Authorize before the body is read: a caller without `catalog:write` gets 403 whatever it sent.
     state.pdp.authorize(&auth, "PutCatalog", "catalog:write")?;
     let (version, note) = parse_release_request(&body)?;
+    // Agent access: a Hidden agent answers as a missing URN does, so this runs after the
+    // publish grant (a missing URN is refused for that first) and before the owner check.
+    require_publish_grant(&auth)?;
+    state
+        .store
+        .refuse_hidden_agent(&urn, auth.owner_user_id(), auth.has_users_admin(), || {
+            crate::owner::catalog_owner_not_found("agent", &urn)
+        })?;
     require_release_authorization(&state.store, &auth, "agents", &urn, "agent")?;
     let _idempotency = require_idempotency_key(&headers).map_err(ApiError::from)?;
     let meta = release_meta(&note, &auth);

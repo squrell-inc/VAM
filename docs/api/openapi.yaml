@@ -7542,6 +7542,21 @@ components:
                 description: The commit the tag is pinned to.
               requiresNode:
                 type: string
+              access:
+                type: object
+                description: The access the listing's agents start with on a first install (the index's `access`). Absent when the index sets none, which means org visibility with approval.
+                required: [default]
+                properties:
+                  default:
+                    type: object
+                    required: [visibility, mode]
+                    properties:
+                      visibility:
+                        type: string
+                        enum: [org, restricted]
+                      mode:
+                        type: string
+                        enum: [everyone, open, approval]
               connector:
                 type: string
               installed:

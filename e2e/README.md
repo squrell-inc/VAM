@@ -1081,6 +1081,13 @@ same commit SHAs in every scenario: a node that remembers a tag's commit must no
   `with-a-connector`, `claims-the-squrell-name` (an artifact under `hub.squrell.cloud`) and `claims-the-org-name`
   (an artifact under `local.vam.dev`, the e2e registry domain). Overlay `marketplace-community-broken/` (an index
   that is not JSON).
+- `marketplace-access`: added by an admin, domain `access.community.example`. Three listings of one agent each
+  (`open-helper`, `quiet-helper`, `kept-helper`, URNs `urn:vam:agent:access.community.example/community/<name>`,
+  shape copied from `helpful-notes`), each with an index `access.default`: `open-notes` `{org, open}`,
+  `quiet-notes` `{restricted, approval}`, `kept-notes` `{org, open}`; tags `<id>-v1.0.0`. Overlay
+  `marketplace-access-update/` is the tag `kept-notes-v1.1.0`: its index says `{org, everyone}` and the agent
+  description changes. Used by the agent-access scenarios only; an index with `access` is refused by a build
+  that does not know the field.
 - `marketplace-connector-kit` (domain `kit.community.example`, starts empty) and `marketplace-kit-broken` (domain
   `kitbroken.community.example`, one listing `kit-broken`): see "API keys and the connector kit".
 - `marketplace-community-connectors`: added by an admin, domain `connectors.community.example`. Six listings that ship a

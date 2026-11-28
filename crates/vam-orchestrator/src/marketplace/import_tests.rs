@@ -609,6 +609,102 @@ fn an_update_never_writes_or_replaces_the_agents_policy() {
     );
 }
 
+/// The squrell index with `access` on its listing, the ref `tag`, and without the agent when
+/// `drop_agent` (the playbook and skill do not need it).
+fn index_with_access(access: serde_json::Value, tag: &str, drop_agent: bool) -> String {
+    let raw = std::fs::read_to_string(
+        crate::marketplace::testutil::fixtures().join("marketplace-squrell/marketplace.json"),
+    )
+    .unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    v["listings"][0]["access"] = access;
+    v["listings"][0]["ref"] = tag.into();
+    if drop_agent {
+        v["listings"][0]["artifacts"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|a| a["kind"] != "agent");
+    }
+    serde_json::to_string_pretty(&v).unwrap()
+}
+
+fn restricted_open() -> serde_json::Value {
+    serde_json::json!({"default": {"visibility": "restricted", "mode": "open"}})
+}
+
+#[test]
+fn a_first_install_applies_the_listings_access_default() {
+    let Some(w) = squrell(|r| {
+        let idx = index_with_access(restricted_open(), SQ_TAG, false);
+        r.write(&[("marketplace.json", &idx)]);
+        r.tag(SQ_TAG);
+    }) else {
+        return;
+    };
+    let shown = marketplace::listings_view(&w.store.marketplace("squrell").unwrap().unwrap());
+    assert_eq!(
+        shown[0]["access"],
+        serde_json::json!({"default": {"visibility": "restricted", "mode": "open"}})
+    );
+    w.install("squrell", "microsoft-365", Mode::Install)
+        .unwrap();
+    assert_eq!(
+        policy_of(&w, AGENT),
+        Some(("restricted".into(), "open".into(), "admin".into()))
+    );
+}
+
+#[test]
+fn an_update_keeps_the_access_an_admin_chose_whatever_the_listing_says() {
+    let Some(mut w) = squrell(|r| {
+        let idx = index_with_access(restricted_open(), SQ_TAG, false);
+        r.write(&[("marketplace.json", &idx)]);
+        r.tag(SQ_TAG);
+    }) else {
+        return;
+    };
+    w.install("squrell", "microsoft-365", Mode::Install)
+        .unwrap();
+    w.store
+        .put_agent_access_policy(
+            AGENT,
+            crate::agent_access::Visibility::Org,
+            crate::agent_access::AccessMode::Approval,
+            "boss",
+        )
+        .unwrap();
+    tag_an_agent_update(&mut w);
+    w.install("squrell", "microsoft-365", Mode::Update).unwrap();
+    assert_eq!(
+        policy_of(&w, AGENT),
+        Some(("org".into(), "approval".into(), "boss".into()))
+    );
+}
+
+#[test]
+fn an_agent_added_by_an_update_gets_the_listings_default() {
+    let Some(mut w) = squrell(|r| {
+        let idx = index_with_access(restricted_open(), SQ_TAG, true);
+        r.write(&[("marketplace.json", &idx)]);
+        r.tag(SQ_TAG);
+    }) else {
+        return;
+    };
+    w.install("squrell", "microsoft-365", Mode::Install)
+        .unwrap();
+    assert_eq!(w.count("agents", AGENT), 0);
+    assert_eq!(policy_of(&w, AGENT), None);
+    let idx = index_with_access(restricted_open(), "microsoft-365-v1.1.0", false);
+    w.repo.write(&[("marketplace.json", &idx)]);
+    w.repo.tag("microsoft-365-v1.1.0");
+    refresh_blocking(&w.store, &w.cfg, "squrell").unwrap();
+    w.install("squrell", "microsoft-365", Mode::Update).unwrap();
+    assert_eq!(
+        policy_of(&w, AGENT),
+        Some(("restricted".into(), "open".into(), "admin".into()))
+    );
+}
+
 #[test]
 fn an_install_from_before_the_upgrade_gets_no_policy_at_its_first_update() {
     let Some(mut w) = squrell(|_| {}) else { return };

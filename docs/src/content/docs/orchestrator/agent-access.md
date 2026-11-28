@@ -22,11 +22,23 @@ proves:
   - an-agent-admin-decides-requests-from-the-cli
   - an-agent-admin-names-other-admins-from-the-cli
   - the-cli-tells-a-member-how-to-ask-for-an-agent
+  - a-marketplace-listing-sets-the-access-of-the-agents-it-installs
+  - a-listing-update-keeps-the-access-an-admin-chose
+  - a-hidden-agent-answers-like-a-missing-one-on-every-catalog-route
+  - a-playbook-run-in-a-bound-space-is-admitted-as-the-spaces-agent
+  - an-owners-draft-stays-usable-and-a-foreign-draft-pin-is-not-found
+  - catalog-and-key-scopes-never-make-an-agent-admin
+  - a-demoted-or-deactivated-admin-is-handled-by-the-rule
+  - access-follows-the-agent-across-its-releases
   - crates/vam-orchestrator/src/agent_access.rs::sql_predicate_matches_rule
   - crates/vam-orchestrator/src/agent_access.rs::a_request_reaches_the_agents_admins_only_with_a_fixed_text
   - crates/vam-orchestrator/src/agent_access.rs::with_no_active_admin_the_org_admins_and_the_operator_are_told
   - crates/vam-orchestrator/src/agent_access.rs::a_replayed_request_notifies_once
   - crates/vam-orchestrator/src/api/agent_access.rs::handler_json_parses_as_its_proto_message
+  - crates/vam-orchestrator/src/agent_access.rs::hidden_write_routes_tests::put_of_a_hidden_installed_agent_equals_a_missing_urn_in_both_modes
+  - crates/vam-orchestrator/src/api/catalog_auth.rs::keys_admin_without_users_admin_is_hidden_on_a_restricted_agent
+  - crates/vam-orchestrator/src/notify_delivery/tests.rs::an_access_request_names_the_command_that_approves_it_by_request_id
+  - crates/vam-orchestrator/src/notifications_tool.rs::an_access_request_names_the_command_that_approves_it_by_request_id
   - crates/vam-spec/tests/openapi_yaml.rs::openapi_has_agent_access_routes
 ---
 
@@ -58,7 +70,17 @@ Access is checked once, when an agent is admitted. A playbook, skill or policy t
 
 ### Who is an admin
 
-An agent admin is a row in the agent's admin list. The user who first releases an agent is added as its admin (`a-publisher-who-releases-an-agent-decides-who-may-use-it`). An agent installed from a marketplace has none, and starts as `(org, approval)`; the org admins decide its requests (`a-member-must-request-an-agent-the-admin-installed`). Org admins, meaning keys with `users:admin`, are admins of every agent without a row.
+An agent admin is a row in the agent's admin list. The user who first releases an agent is added as its admin (`a-publisher-who-releases-an-agent-decides-who-may-use-it`). An agent installed from a marketplace has none; the org admins decide its requests (`a-member-must-request-an-agent-the-admin-installed`). Org admins, meaning keys with `users:admin`, are admins of every agent without a row.
+
+### What a marketplace install starts with
+
+The first install of an agent writes its policy, and nothing writes it again. A listing in `marketplace.json` may carry the default in an optional `access` object:
+
+```json
+"access": { "default": { "visibility": "org", "mode": "open" } }
+```
+
+`visibility` is `org` or `restricted`; `mode` is `everyone`, `open` or `approval`. `restricted` with `everyone` is refused, as it is on the policy route, and so is any other key (a listing cannot name admins). Without `access`, the agent starts as `(org, approval)`. The default is applied to each agent of the listing the first time that agent is installed, including an agent a later update adds. An update never changes a policy, and an install from before this field keeps having no row. The node honors the field of any marketplace it trusts, and the admin can change the policy afterwards (`a-marketplace-listing-sets-the-access-of-the-agents-it-installs`, `a-listing-update-keeps-the-access-an-admin-chose`).
 
 The admin check is that rule and nothing else. A key with only `catalog:write`, `publish:grant` or `keys:admin` is not an admin (`an-agent-admin-adds-a-second-admin-who-can-then-decide`).
 
@@ -95,8 +117,13 @@ Two [notification](/orchestrator/notifications/) kinds follow the requests.
 | `access.requested` | The agent's active admins. With none, the active org admins and the operator. Never the requester. | A request is raised, or the admin list changes while it is pending. |
 | `access.decided` | The member | An admin approves, denies or revokes. |
 
-The title is fixed, `<username> asks to use <agent>`. The member's `message` is shown on the request in the queue and is never copied into a notification or a Slack post. One decision closes every admin's copy of `access.requested` as `acted`; a withdraw closes them as `withdrawn`. Slack gets a link and no buttons. `PUT /v1/agents/{urn}/admins` brings the copies of the pending requests on that agent in line with the new list, in the same transaction: a removed admin's copy closes as `expired`, a new admin gets a copy, and with no active admin left the org admins and the operator get copies and any copy held by someone who is no longer a recipient closes. A holder who can no longer decide a copy (removed admin, demoted org admin) may clear it with `POST /v1/notifications/{id}/acted`; a holder who still can decide gets `decide_required`. A PUT that changes nothing, and a replayed PUT, emit nothing. When a denial or revoke leaves a restricted agent hidden from the member, `access.decided` names the agent by the last segment of its URN, as `/v1/me/access` leaves out its name. Proved by `an-access-request-notifies-the-agents-admins-and-the-decision-notifies-the-member` and `a-request-for-an-agent-with-no-admin-goes-to-the-org-admins`.
+The title is fixed, `<username> asks to use <agent>`. The member's `message` is shown on the request in the queue and is never copied into a notification or a Slack post. One decision closes every admin's copy of `access.requested` as `acted`; a withdraw closes them as `withdrawn`. Slack gets a link and no buttons. The record's CLI line, in Slack and in the notifications tool, is `vam access approve <request id>`, the command that decides it. `PUT /v1/agents/{urn}/admins` brings the copies of the pending requests on that agent in line with the new list, in the same transaction: a removed admin's copy closes as `expired`, a new admin gets a copy, and with no active admin left the org admins and the operator get copies and any copy held by someone who is no longer a recipient closes. A holder who can no longer decide a copy (removed admin, demoted org admin) may clear it with `POST /v1/notifications/{id}/acted`; a holder who still can decide gets `decide_required`. A PUT that changes nothing, and a replayed PUT, emit nothing. When a denial or revoke leaves a restricted agent hidden from the member, `access.decided` names the agent by the last segment of its URN, as `/v1/me/access` leaves out its name. Proved by `an-access-request-notifies-the-agents-admins-and-the-decision-notifies-the-member` and `a-request-for-an-agent-with-no-admin-goes-to-the-org-admins`.
 
-## Not proved here
+## Other routes that name a hidden agent
 
-`PUT /v1/agents` and `POST /v1/agents/{urn}/release` can still tell a `catalog:write` holder that a hidden URN exists. `DELETE /v1/agents/{urn}` by a `catalog:write` holder on a hidden installed agent answers 409 where a missing URN answers 405. The released playbooks and skills a hidden agent uses are still listed under their own names. No scenario covers these.
+A hidden agent answers `POST /v1/agents/{urn}/release`, `GET /v1/agents/{urn}/release-suggestion` and `DELETE /v1/agents/{urn}` exactly as a missing URN does, for every caller the access rule hides it from. The caller's scopes are checked first, as for a missing URN, so a key without `publish:grant` is told so whether the agent is hidden or not. Then a release and a suggestion answer the route's own 404 (`agent '<urn>' not found`) and a delete answers the 405 (`cannot be deleted: the catalog keeps every release`). Inside the domain of a trusted marketplace all three, and `PUT /v1/agents`, answer the 400 that names the domain, the same for an agent that marketplace installed and for a URN that does not exist, so a hidden installed agent cannot be told from a missing one. A visible agent and an org admin keep today's answers: 409 for an installed agent, 403 `only the artifact owner may publish this agent` for a release by another user (`a-hidden-agent-answers-like-a-missing-one-on-every-catalog-route`). The one exception is a hidden installed agent whose marketplace has since been removed: a caller with `catalog:write` still gets the 409 on `PUT /v1/agents` there, because a save of a missing URN would succeed for that caller and there is no missing answer to give. A member (`agents:draft` without `catalog:write`) gets the same 400 a missing URN outside their namespace gets.
+
+Two cases are accepted, not hidden:
+
+- `PUT /v1/agents` on a URN that another user owns and that no marketplace installed answers 403 to a `catalog:write` holder. That caller can already write the catalog, and a save of a free URN succeeds, so the answer tells them the URN is taken. Owner decision, 2026-11-28.
+- The released playbooks and skills a hidden agent uses still show in `GET /v1/playbooks` and `GET /v1/skills` under their own names. Only agents carry access; a playbook or skill inherits the access of the agent that uses it, and is checked once, at agent admission. Its name is not secret, the agent is.

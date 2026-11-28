@@ -1052,10 +1052,24 @@ impl SqliteWorkflowStore {
             .ok_or_else(|| release_no_draft_error(kind_noun(kind), urn))
     }
 
+    /// [`Self::publish_agent_draft_as`] for a caller the access rule never hides an agent
+    /// from (an org admin, or an internal write).
     pub fn publish_agent_draft_with_owner(
         &self,
         spec: &AgentSpec,
         owner_user_id: &str,
+    ) -> Result<AgentSpec, OrchestratorError> {
+        self.publish_agent_draft_as(spec, owner_user_id, true)
+    }
+
+    /// The `PUT /v1/agents` save in full mode. `org_admin` is `users:admin` on the key: an
+    /// installed agent the access rule hides from any other caller answers as a missing URN
+    /// would (agent access, see [`crate::catalog_tier::reject_caller_installed_agent`]).
+    pub fn publish_agent_draft_as(
+        &self,
+        spec: &AgentSpec,
+        owner_user_id: &str,
+        org_admin: bool,
     ) -> Result<AgentSpec, OrchestratorError> {
         let mut spec = spec.clone();
         apply_publish_permission_defaults(&mut spec);
@@ -1076,6 +1090,13 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        crate::catalog_tier::reject_caller_installed_agent(
+            &connection,
+            urn,
+            owner,
+            org_admin,
+            false,
+        )?;
         let row = upsert_spec_draft(
             &connection,
             CatalogKind::Agent,
@@ -1107,6 +1128,19 @@ impl SqliteWorkflowStore {
         owner_user_id: &str,
         max_drafts: usize,
     ) -> Result<AgentSpec, OrchestratorError> {
+        self.publish_agent_draft_restricted_as(spec, owner_user_id, max_drafts, true)
+    }
+
+    /// [`Self::publish_agent_draft_restricted`] with the caller's `users:admin` flag, which
+    /// decides whether the access rule can hide an installed agent from them (as in
+    /// [`Self::publish_agent_draft_as`]).
+    pub fn publish_agent_draft_restricted_as(
+        &self,
+        spec: &AgentSpec,
+        owner_user_id: &str,
+        max_drafts: usize,
+        org_admin: bool,
+    ) -> Result<AgentSpec, OrchestratorError> {
         crate::member_draft::require_no_refused_fields(spec)?;
         let mut spec = spec.clone();
         apply_publish_permission_defaults(&mut spec);
@@ -1129,7 +1163,13 @@ impl SqliteWorkflowStore {
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         let table = CatalogKind::Agent.table();
-        crate::catalog_tier::reject_caller_installed_urn(&connection, urn, "agent")?;
+        crate::catalog_tier::reject_caller_installed_agent(
+            &connection,
+            urn,
+            owner,
+            org_admin,
+            true,
+        )?;
         if !crate::owner::caller_owns_any_row(&connection, table, urn, owner)? {
             crate::member_draft::require_own_namespace(&connection, owner, urn)?;
         }
