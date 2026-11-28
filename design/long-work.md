@@ -233,7 +233,9 @@ max_wakes}, reason}`:
   deadline) and resumes once with "time reached"; whether it parks follows
   the next rule.
 - A wait longer than 30 s parks at the turn boundary with no keep-warm
-  hold (§3), so no VM runs until the wake; a wait of 30 s or less keeps
+  hold (§3), so no VM runs until the wake, unless a background process or
+  worker is running (then the task stays up, counting active time, until
+  it can park); a wait of 30 s or less keeps
   the VM up and counts active time. The rule is the same with or without
   `recheck`, and applies to each delay of a backoff.
 - With `recheck`, each wake is a **check turn**: the model runs its check
@@ -459,8 +461,9 @@ without a step timeout; a crash loses the process and the model is told.
 sweeper; a steer ends a wait early.
 
 **Exit:** a timer wait resumes the task (design §VII.3 exit); a re-check
-stops at its maximum wakes; no VM runs between wakes longer than 30 s
-(they park at the turn boundary with no keep-warm hold).
+stops at its maximum wakes; with no background process or worker
+running, no VM runs between wakes longer than 30 s (they park at the turn
+boundary with no keep-warm hold).
 
 | Scenario | Change | Layer | Given | Why |
 |---|---|---|---|---|

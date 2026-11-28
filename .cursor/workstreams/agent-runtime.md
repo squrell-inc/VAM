@@ -1122,7 +1122,7 @@ above and change none of it.
 - [ ] Timer waits: `wait_until`, `waiting(timer)`, backoff re-checks with
   a maximum number of wakes.
   (5c: deadline sweeper; a wait longer than 30 s parks with no keep-warm
-  hold; a wait past the task deadline is refused; a steer wakes a parked
+  hold when no background process or worker runs; a wait past the task deadline is refused; a steer wakes a parked
   task.)
 - [ ] Observability and watchdogs (5e): worker rows and per-lane cost,
   heartbeat, no-progress and spend-velocity watchdogs; stalls notify.
