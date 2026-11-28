@@ -3,7 +3,7 @@
 ```yaml
 status: active          # active | paused | done
 slug: apps-spaces
-current_phase: 0 (built, PRs 161 and 164 await merge)
+current_phase: 2 (Phase 0 closed 2026-11-29; P2 waits for agent access in main)
 base_branch: feat/apps-spaces
 design_docs:
   - design/vam-apps-spaces.md   # read "Amendment 2026-11-28" first; it supersedes the phase list
@@ -479,4 +479,4 @@ Work that must not be pulled into this tracker.
 | Date | Phase | What landed (end with the scoreboard: scenarios green, red, fix cycles, wall time) |
 |---|---|---|
 | 2026-11-28 | — | Tracker opened; design amendment 2026-11-28 written (C1-C3 and owner decisions approved). Scoreboard: none yet |
-| 2026-11-28 | 0 | Phase 0 built: W1 additive proto (PR 161), W2 Cedar App entity and audit (PR 164, Opus review GO, nothing blocking), both into `feat/apps-spaces`, awaiting owner merge. Frozen numbers: Space 8, RunSpec 14, RunStatus 24, CallerContext 11, App 1-8. Scoreboard: 0 scenarios turned green (none planned), 3 guarded scenarios green, 0 red, 0 fix cycles, about 3 h wall time |
+| 2026-11-28 | 0 | Phase 0 built: W1 additive proto (PR 161), W2 Cedar App entity and audit (PR 164, Opus review GO, nothing blocking), merged into `feat/apps-spaces` 2026-11-29 at the owner's ask (head ab35415). Frozen numbers: Space 8, RunSpec 14, RunStatus 24, CallerContext 11, App 1-8. Scoreboard: 0 scenarios turned green (none planned), 3 guarded scenarios green, 0 red, 0 fix cycles, about 3 h wall time |
