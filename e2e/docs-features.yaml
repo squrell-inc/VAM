@@ -885,7 +885,7 @@ features:
       - a-publisher-saves-a-draft-agent-and-runs-it-by-ref
   - id: agent-access
     area: "Agents and specs"
-    surface: "API GET /v1/catalog/agents; POST, DELETE /v1/agents/{urn}/access; GET /v1/me/access; GET /v1/access-requests; POST /v1/access-requests/{id}/decide; POST /v1/agents/{urn}/access/{userId}/revoke; GET, PUT /v1/agents/{urn}/admins; PUT /v1/agents/{urn}/access-policy; GET /v1/me adminOfAgents, pendingAccessRequests; notifications access.requested, access.decided; CLI vam agent browse|add|request|leave|admins|access-policy, vam access mine|requests|approve|deny|revoke, vam users ls"
+    surface: "API GET /v1/catalog/agents; POST, DELETE /v1/agents/{urn}/access; GET /v1/me/access; GET /v1/access-requests; POST /v1/access-requests/{id}/decide; POST /v1/agents/{urn}/access/{userId}/revoke; GET, PUT /v1/agents/{urn}/admins; PUT /v1/agents/{urn}/access-policy; marketplace.json access.default; GET /v1/me adminOfAgents, pendingAccessRequests; notifications access.requested, access.decided; CLI vam agent browse|add|request|leave|admins|access-policy, vam access mine|requests|approve|deny|revoke, vam users ls"
     dev: [getting-started/cli]
     arch: [orchestrator/agent-access, orchestrator/catalog, orchestrator/notifications]
     proves:
@@ -903,3 +903,11 @@ features:
       - an-agent-admin-decides-requests-from-the-cli
       - an-agent-admin-names-other-admins-from-the-cli
       - the-cli-tells-a-member-how-to-ask-for-an-agent
+      - a-marketplace-listing-sets-the-access-of-the-agents-it-installs
+      - a-listing-update-keeps-the-access-an-admin-chose
+      - a-hidden-agent-answers-like-a-missing-one-on-every-catalog-route
+      - a-playbook-run-in-a-bound-space-is-admitted-as-the-spaces-agent
+      - an-owners-draft-stays-usable-and-a-foreign-draft-pin-is-not-found
+      - catalog-and-key-scopes-never-make-an-agent-admin
+      - a-demoted-or-deactivated-admin-is-handled-by-the-rule
+      - access-follows-the-agent-across-its-releases
