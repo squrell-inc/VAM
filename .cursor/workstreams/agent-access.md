@@ -686,12 +686,202 @@ Hand-off: Phase 4 done. Squrell-App PRs #18 to #22 merged into `feature/agent-ac
 covered by scenarios.  
 **Depends on:** Phase 2 (A9 answered by its breakdown); the vam-marketplace part after the VAM release
 that carries the field (see Execution plan, lane C)  
-**Plan:** approved 2026-11-27, below  
+**Plan:** breakdown approved by the owner 2026-11-28 (all nine recommendations, Q1-Q9), detail below  
 **Exit:** hardening scenarios green (name leaks, standalone refs, draft runs, credential confusion,
 yanked version, admin vs catalog scopes, demoted owner); vam-marketplace schema documents the field.
 
-- [ ] Manifest field and install copy
-- [ ] Hardening scenarios
+- [ ] W0 scenarios H1 to H8 and the `marketplace-access` piece
+- [ ] W1 manifest field and install copy (AA-5.1 to 5.5)
+- [ ] W2 (sec) hardening fixes (AA-5.6 to 5.9)
+- [ ] Close: Opus whole-feature review, fix wave, records (AA-5.10), release in order
+- [ ] W3 vam-marketplace docs and pin, after the VAM release and vamd deploy
+
+#### Phase 5 breakdown (approved 2026-11-28)
+
+Owner answers: Q1 A9 reconfirmed (listing-level `access.default`, no admins); Q2 accept `PUT` telling a
+`catalog:write` holder a foreign URN is taken; Q3 Hidden answers exactly what a missing URN gets on that
+route; Q4 honor the field from any marketplace; Q5 `deactivated` flag on admins is the cleanup list; Q6 fix
+the CLI hint now, username lookup and `?agent=` to backlog; Q7 already-passing proofs land `active`; Q8
+vam-marketplace gets docs and pin only; Q9 fix app nit N6 with the `src-tauri` cargo test before PR 23.
+Full text: the owner's page and `p5-breakdown.md`. Detail follows.
+
+
+Read-only breakdown by the Opus breakdown agent, 2026-11-28. Item prefix `AA-5.n`. Format: playbook §3.
+
+#### A. Verified citations and drift notes
+
+- **Install default (P1 W3, landed):** `agent_access.rs:498-517`; call `import.rs:1053-1057` sits
+  before `insert_release`, so the released-row check sees the pre-write state. Tests
+  `import_tests.rs:567` (first install only) and `:631` (keeps an existing row);
+  `agent_access.rs:1910`.
+- **Install vs update:** `import.rs:171-195` (`Mode::Install` refuses an installed listing,
+  `Mode::Update` refuses a missing one); the policy write does not look at the mode.
+- **requiresNode precedent:** spec check `marketplace.rs:201-203`; refresh `mod.rs:388-420`; import
+  `import.rs:156-165`; view `mod.rs:913`; OpenAPI `openapi.yaml:7543`.
+- **§7 name leaks, current state:** list and read through `get_agent_record_visible`
+  (`catalog.rs:972-990`); `/versions` keeps only an own draft and refuses with the no-versions text
+  (`catalog.rs:710-733`); outcomes same text (`api/outcomes.rs:38-51`); release-suggestion
+  (`api/release_suggestion.rs:36-46`, residual in issue 8); composition (`api/composition.rs:70-77`);
+  permissions view (`permissions_view.rs:645`; the no-version path reads the caller's own draft only,
+  `catalog_publish.rs:851-871`, and `PUT .../permissions` answers the no-draft 404 before the body,
+  `api/permissions.rs:157-159`).
+- **Standalone `playbookRef`:** with no `agentRef`, admission reads the Space row's agent, then the
+  workspace file's (`api/run_start.rs:240-277`), before any Space or binding (`:305-308`); with no
+  Space id the run uses the agent-less default Space (`spaces.rs:245-273`). Covered in code.
+- **Space bound after admission (P1 fix):** admission `run_start.rs:308`, bind `:393`. Proved by S1
+  (`POST /v1/spaces` 404) and S2 (`GET /v1/spaces` lacks the URN after a refused run).
+- **Credential confusion:** `has_users_admin` reads only `users:admin` (`api/auth.rs:44-50`);
+  `has_keys_admin` is used only by the keys routes (`api/mod.rs:492,514`) and the catalog write and
+  publish checks (`api/catalog_auth.rs:59-91`), never by the rule. Admin check
+  `agent_access.rs:311-338` (never `pdp.authorize` or a scope).
+- **Deactivated:** recipients skip deactivated admins and fall back to org admins
+  (`notifications.rs:585-614`); `PUT .../admins` accepts a kept deactivated id
+  (`agent_access.rs:1082-1105`).
+- **Drift:** P1's `owner.rs:405-408` is now `:410-412`. P2 review "409 vs 405" misses the 400 case
+  (issue 7). Tracker Phase 5 "Plan approved" has no plan. `docs-features.yaml:886-907` row has no P5
+  proofs.
+
+#### B. Scenario delta
+
+New world piece `marketplace-access` (`kind: git-marketplace`, added by an admin, domain
+`access.community.example`, fixture `e2e/world/fixtures/marketplace-access/`): three listings of one
+agent each, agent shape copied from `marketplace-community` `helpful-notes`. `open-notes`
+`{org, open}`, `quiet-notes` `{restricted, approval}`, `kept-notes` `{org, open}`; tags
+`<id>-v1.0.0`. Overlay `marketplace-access-update/`: `kept-notes` index says `{org, everyone}`, ref
+`kept-notes-v1.1.0`, agent description changed. No other scenario uses these URNs. W0 documents the
+piece in `e2e/README.md` (Marketplace).
+
+| Scenario | Change | Layer | Given | Steps (short) | Status at W0, red step | Green by |
+|---|---|---|---|---|---|---|
+| H1 `a-marketplace-listing-sets-the-access-of-the-agents-it-installs` | new | process | org-admin, org-member, marketplace-access | add, refresh, `expect listings` `access.default.mode: open`; install open-notes and quiet-notes; member browse lists open-notes, lacks quiet-notes; member `POST .../access` 200 `approved`, chat succeeds; member `GET` quiet-notes 404 exact missing text | pending, `when.1` refresh (unknown field), product | W1 |
+| H2 `a-listing-update-keeps-the-access-an-admin-chose` | new | process | org-admin, org-member, marketplace-access | add, refresh, install kept-notes; admin policy `{org, approval}`; `git-tag` overlay; refresh; update; `expect listings` installed ref v1.1.0; member `POST .../access` 202 `pending` | pending, `when.1`, product | W1 |
+| H3 `a-hidden-agent-answers-like-a-missing-one-on-every-catalog-route` | new | process | org-admin, org-publisher as pub, org-publisher as pub2, org-member, agent-inline-probe, marketplace-access | pub releases and restricts; for member and pub2, pairs of hidden URN and `.../no-such-agent` with exact `fields.message` and status: `/versions`, `/outcomes`, `/release-suggestion`, `/permissions/effective?version=1.0.0`, `POST /v1/agent-checks`; then pub2 release 1.1.0 (404 pair), DELETE (405 pair); then admin installs quiet-notes and pub2 release, release-suggestion, DELETE, PUT on it vs `urn:vam:agent:access.community.example/x/no-such-agent` (400 pair) | pending, first release step, product | W2 |
+| H4 `a-playbook-run-in-a-bound-space-is-admitted-as-the-spaces-agent` | new | process | org-admin, org-member, agent-plain, playbook-one-step | approval policy, request, approve, `POST /v1/spaces` remember id, revoke; `POST /v1/runs {playbookRef, spaceId}` 403 `agent_access_required:`; restrict; same 404 missing text | active | W0 |
+| H5 `an-owners-draft-stays-usable-and-a-foreign-draft-pin-is-not-found` | new | process | org-admin, org-member as m1, org-member-email as m2, agent-member-draft-with-host-echo, skill-host-echo | m1 `put-draft`; admin policy `{restricted, approval}` on it; m1 chat `draft: true` succeeds; m2 `POST /v1/runs` pinned `1.0.0-draft` 404, equal to the same pin on a missing URN | active | W0 |
+| H6 `catalog-and-key-scopes-never-make-an-agent-admin` | new | process | org-admin, org-publisher as pub, org-member-with-a-narrow-key as nk, org-member, agent-plain | admin approval policy, admins `[nk]`; member requests; pub: policy 403, admins GET and PUT 403, decide 404, chat 403; nk (no catalog scope) decides 200 and sets policy 200; member `login`, then `credential: session` read 200 (session carries the user's access) | active | W0 |
+| H7 `a-demoted-or-deactivated-admin-is-handled-by-the-rule` | new | process | org-admin, org-publisher as pub, org-member, org-member-email as m2, agent-inline-probe | pub releases (seeded admin), approval policy; `set-role pub member`; member requests; pub decides 200, release 1.1.0 403 `publish:grant`; admin deactivates pub; `GET .../admins` `deactivated: true`; m2 requests; admin's `/v1/notifications?kind=access.requested` holds it | active | W0 |
+| H8 `access-follows-the-agent-across-its-releases` | new | process | org-admin, org-publisher as pub, org-member, agent-inline-probe | pub releases 1.0.0, approval policy, member approved; pub releases 1.1.0; member runs pinned 1.0.0 and latest; revoke; both 403 | active | W0 |
+
+Unit tests that stand in for scenarios: bad `access` values (vam-spec); `keys:admin` alone (AA-5.9);
+hidden vs missing per route, org admin and Visible unchanged (AA-5.6).
+
+#### C. Waves, items, gates, models
+
+Gates (every wave, in its own worktree, builds never in parallel):
+`cargo fmt --all --check`; `cargo test -p <crates touched>`; `cargo run -p vam-e2e -- check`;
+`scripts/e2e/run.sh --scenarios <ids>`; `scripts/ci/local.sh --fast --base origin/feat/agent-access`;
+`cd docs && pnpm build` when a page changes. Clippy only through `local.sh --full` or Actions:
+`cargo +1.97.0 clippy --workspace --all-targets -- -D warnings`, and again with
+`--features vam-runtime/process-guest,vam-orchestrator/process-guest` (AA-5.4 is
+`cfg(feature = "process-guest")`). PR body `CI:` line lists the scenario ids (not H-numbers; the P3
+lesson).
+
+**W0 scenarios** (Sonnet low, ~60 min). H1 to H8, the `marketplace-access` fixture and overlay, README
+piece entry. Gate: `vam-e2e check`; `run.sh --scenarios` all eight (H1, H2, H3 red at the named step,
+class `product`; H4 to H8 green). Risks: `{{urn:<piece>}}` may cover agent pieces only (README
+"Roles and drafts"), so H4 may need the playbook URN literal or a one-line runner extension; the
+RunSpec JSON for `POST /v1/runs` (`agentRef.version.prerelease`, `playbookRef`) must match proto
+names. `CI: scenarios=<eight ids>`.
+
+**W1 manifest field** (Sonnet medium: `vam-spec` forces workspace tests; the install path). Turns
+green H1, H2.
+- AA-5.1 `vam-spec`: `Listing.access: Option<ListingAccess>` (`serde(default,
+  skip_serializing_if)`), `ListingAccess { default: AccessDefault }` and `AccessDefault { visibility,
+  mode }`, all `deny_unknown_fields`, lowercase enums; `listing_problems` refuses
+  `(restricted, everyone)` with the route's wording; module doc example. Unit tests: absent, each
+  valid pair, the refused pair, unknown value, `admins` key.
+- AA-5.2 `marketplace/store.rs` `ListingState.access`; copy at `mod.rs:325-336`; `listings_view_with`
+  adds `access`; OpenAPI property on the listing item.
+- AA-5.3 `write_install_default_on` takes the pair (absent = `(org, approval)`); `import.rs` passes
+  `listing.access`. Tests next to `import_tests.rs:567-640`: default applied; absent field; update
+  never overwrites; agent added by an update gets it; pre-upgrade install keeps no row.
+- AA-5.4 reset seam (`installs.rs:332-385`): delete `agent_access_policy` and `agent_admins` rows of
+  the marketplace-tier agent URNs it deletes, same transaction; update the doc comment.
+- AA-5.5 docs: `orchestrator/agent-access.md:61` (install default, the field, first install only);
+  `getting-started/cli.md:443` one clause (validate checks `access.default`).
+- Gate: `cargo test -p vam-spec`, `cargo test --workspace` (forced), `run.sh --scenarios` H1, H2,
+  `a-member-must-request-an-agent-the-admin-installed`, `admin-installs-the-squrell-listing-at-its-tag`,
+  `newer-tag-shows-update-available-until-the-admin-updates`. `CI: scenarios=... tests=workspace`.
+- Risks: refresh reads the index at the head, the tag may differ; an index typo now fails the whole
+  read (same as `requiresNode` today).
+
+**W2 (sec) hardening** (Sonnet high: name leaks are the security floor). Turns green H3. Plan goes to
+the owner.
+- AA-5.6 one helper in `catalog_tier.rs`: split `reject_caller_installed_urn` into the installed check
+  and `reject_reserved_domain`; `hidden_answer(conn, urn, noun, missing)` runs the domain check then
+  returns the route's own missing error. Apply when the rule says Hidden for the caller (pass
+  `has_users_admin`; org admins are never Hidden): release (`api/catalog_release.rs:33-52`, before
+  `require_release_authorization`); release-suggestion agent arm (`release_suggestion.rs:36-47`);
+  `refuse_catalog_delete` for agents (`api/mod.rs:711-726`, missing answer = the 405); PUT full and
+  restricted (`catalog_publish.rs:1055-1150`, installed case only; plumb the flag from
+  `api/mod.rs:595-622`). Unit tests: per route, hidden and missing give equal status, code and message;
+  Visible and org admin keep 409 and 403.
+- AA-5.7 `access.requested` CLI line: `vam access approve <request id>` in `notify_delivery.rs:1506-1509`
+  and `notifications_tool.rs:162-166`, with a test each.
+- AA-5.8 docs: rewrite "Not proved here" (`agent-access.md:100-102`) to the accepted PUT case and the
+  §2.1 playbook and skill names; add H1 to H8 to `proves`; `docs-features.yaml` row: P5 proofs and
+  `marketplace.json access.default` in `surface`.
+- AA-5.9 unit test: `keys:admin` without `users:admin` is Hidden on a restricted agent.
+- Gate: `cargo test -p vam-orchestrator`, `vam-e2e check`, `pnpm build`, `run.sh --scenarios` H3 plus
+  all 27 agent access scenarios and the marketplace scenarios listed above. Risks: the PUT path holds
+  the store lock, so the rule must use the `_on(connection)` variants; `noun` and texts must come from
+  the existing constructors, never new strings.
+
+**W3 vam-marketplace** (Sonnet low, after the VAM release and the vamd deploy). README "Add a listing"
+step 2, the field table in `docs/reference-listing-notion.md:115-122`, `VAM_COMMIT` = the VAM release
+merge commit (`validate.yml:27`). Gate: that repo's CI (builds `vam-cli` at the pin) green; review by
+`@squrell-inc/marketplace` (`CODEOWNERS`).
+
+**Phase close** (Opus high, read-only, ~30 min): the whole feature against design §7, issues 6 to 9,
+release order. One fix wave (Sonnet medium) if needed. AA-5.10 records: tracker (Phase 2 to 5 closed,
+done table, frozen P5 field with commit; PR #146 merged or closed), `design/agent-access.md` header and
+`design/README.md:25` "built", `.cursor/workstreams/README.md:24`; delete the tracker and its README
+row once the release merges (playbook §7).
+
+| Wave | Items | Turns green | Model | Budget | Depends on |
+|---|---|---|---|---|---|
+| 0 | scenarios, piece | H4 to H8 (H1 to H3 red) | Sonnet low | 60 min | approval |
+| 1 | AA-5.1 to 5.5 | H1, H2 | Sonnet medium | 90 min | 0 |
+| 2 (sec) | AA-5.6 to 5.9 | H3 | Sonnet high | 90 min | 1 (H3 uses the piece and AA-5.4) |
+| close | review, fix wave, AA-5.10 | all 8 active | Opus high, Sonnet medium | 60 min | 2 |
+| 3 | vam-marketplace | none (CI) | Sonnet low | 30 min | VAM release, vamd deployed |
+
+Adjusted from the tracker: W0 lands five already-passing proofs `active` (Q7); W2 depends on W1, not
+only W0; W3 also waits for the vamd deploy.
+
+#### D. Risks
+
+- **Whole-index failure on older nodes.** Any `access` key in a live index stops every older node
+  from reading it (issue 1). `requiresNode` cannot help: parsing fails first.
+- **Scenario order.** Until AA-5.4 lands, a marketplace URN's policy carries across scenarios in one
+  run; W0 must not change the policy of a URN another scenario installs.
+- **Accepted residuals.** PUT tells a `catalog:write` holder a foreign URN exists (Q2); a hidden
+  installed URN whose marketplace was removed equals a missing URN only because the same code runs.
+- **Squrell-App** release still needs the `src-tauri` cargo test on a Tauri machine.
+- **Public repos.** VAM and vam-marketplace are public; land W2 before the release so `main` never
+  carries the "Not proved here" leak text.
+
+#### E. What must not be touched
+
+No change to the rule (`decide_access`, `agent_access.rs:212-232`), the frozen error texts (prefix
+`agent_access_required:`, the existing not-found constructors), the design §6 JSON, the routes of
+Phase 2, `orchestrator.proto` or the baseline, HSP brokers, or how marketplaces are trusted and
+installed (`users:admin`, A3). No scenario `then` is edited; no locked decision changes. The vendored
+`marketplace-squrell` fixture stays as is. Squrell-App is not touched in this phase except N6 if Q9
+is accepted (its own lane).
+
+#### F. Release order
+
+1. W0 to W2 and the close fix wave merged into `feat/agent-access`; Actions green; tracker closed.
+2. Owner's word: one release PR `feat/agent-access` into VAM `main` (full CI, release gate, merge
+   commit). Re-check `git rev-list --left-right --count origin/main...origin/feat/agent-access` first.
+3. Deploy vamd (staging, then production). Staging may try a branch index carrying `access` with
+   `VAMD_SQURELL_MARKETPLACE_INDEX_REF` (`orchestrator/overview.md:104`).
+4. Squrell-App: N6 and the `src-tauri` cargo test, then merge PR #23 (a push to `main` deploys the app).
+5. W3: vam-marketplace PR (docs, pin), reviewed by `CODEOWNERS`.
+6. Only once every node that reads the Squrell index runs the release may a live listing carry
+   `access` (an owner decision per listing).
+7. Team checklist from H1 to H8; archive the tracker.
 
 ## Execution plan
 
