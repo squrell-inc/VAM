@@ -1,0 +1,30 @@
+id: the-cli-tells-a-member-how-to-ask-for-an-agent
+title: The CLI tells a member how to ask for an agent they may not run
+description: >
+  A refused run names the request command, in text and in the JSON failure document. An agent the member cannot see answers exactly as one that does not exist and points to browse, never to the access error.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - agent-plain
+  - agent-inline-probe
+when:
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - put-draft: { piece: agent-inline-probe, as: pub, status: 200 }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 200, body: { version: { major: 1, minor: 0, patch: 0 } } }
+  - identity-request: { as: pub, credential: key, method: put, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access-policy", status: 200, body: { visibility: restricted, mode: approval } }
+then:
+  - cli: { as: member, args: [run, "{{urn:agent-plain}}", -p, "e2e-step:hi Hello"], root: { from: version/empty }, exitCode: 3, contains: ["agent_access_required", "vam agent request {{urn:agent-plain}}"] }
+  - cli: { as: member, args: [--json, run, "{{urn:agent-plain}}", -p, "e2e-step:hi Hello"], root: { from: version/empty }, exitCode: 3, contains: ['"exitCode":3', '"httpStatus":403'] }
+  - cli: { as: member, args: [agent, request, "{{urn:agent-inline-probe:pub}}"], root: { from: version/empty }, exitCode: 4, contains: ["not found in catalog", "vam agent browse"], absent: ["agent_access_required"] }
+  - cli: { as: member, args: [agent, request, urn:vam:agent:local.vam.dev/e2e/no-such-agent], root: { from: version/empty }, exitCode: 4, contains: ["vam agent browse"] }
+guards:
+  - vam:crates/vam-cli/src/main.rs
+  - vam:crates/vam-cli/src/cmd/catalog.rs
+  - vam:crates/vam-cli/src/cmd/access.rs
+  - vam:crates/vam-cli/src/client.rs
+  - vam:crates/vam-cli/src/http_error.rs
+  - vam:crates/vam-cli/src/cmd/run.rs
+status: active

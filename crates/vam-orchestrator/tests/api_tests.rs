@@ -11511,3 +11511,2181 @@ fn node_build_maps_a_fixed_build_info() {
         ("0.3.0", "3f9c2ab", "2026-11-20", "release")
     );
 }
+
+// ---- Agent access, Phase 1 wave 2: the rule at every admission site, over HTTP ----
+
+async fn access_call(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    secret: &str,
+    idem: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, String) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {secret}"));
+    if let Some(idem) = idem {
+        request = request.header("Idempotency-Key", idem);
+    }
+    let body = match body {
+        Some(json) => {
+            request = request.header("content-type", "application/json");
+            Body::from(json.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = app
+        .clone()
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response_body(response).await)
+}
+
+/// A route's answer for `urn` with the URN replaced, so a Hidden agent's answer and a missing
+/// URN's answer compare byte for byte.
+fn masked(answer: (StatusCode, String), urn: &str) -> (StatusCode, String) {
+    (answer.0, answer.1.replace(urn, "<urn>"))
+}
+
+#[tokio::test]
+async fn a_restricted_agent_is_hidden_and_a_visible_one_asks_for_access_at_every_site() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    store.initialize_catalog_schema().unwrap();
+    seed_test_playbook(&store);
+    let admin = mint_user_key(&store, "boss", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let alice = mint_user_key(&store, "alice", UserRole::Member, MEMBER_SCOPES);
+    let bob = mint_user_key(&store, "bob", UserRole::Member, MEMBER_SCOPES);
+    let publisher = mint_user_key(&store, "pubby", UserRole::Publisher, PUBLISHER_SCOPES);
+    let urn = "urn:vam:agent:local.vam.dev/acme/gated-agent";
+    let missing = "urn:vam:agent:local.vam.dev/acme/no-such-agent";
+    seed_released_agent(&store, urn);
+    let app = test_app(app_state_http_only(store.clone()));
+    let policy_path = format!("/v1/agents/{urn}/access-policy");
+    let get = |secret: &str, uri: String| {
+        let app = app.clone();
+        let secret = secret.to_string();
+        async move { access_call(&app, "GET", &uri, &secret, None, None).await }
+    };
+    let run = |secret: &str, idem: &str| {
+        let app = app.clone();
+        let secret = secret.to_string();
+        let idem = idem.to_string();
+        async move {
+            access_call(
+                &app,
+                "POST",
+                "/v1/runs",
+                &secret,
+                Some(&idem),
+                Some(sample_released_run_body(
+                    urn,
+                    "assistant",
+                    &idem,
+                    &format!("urn:vam:run:local.vam.dev/acme/run-{idem}"),
+                )),
+            )
+            .await
+        }
+    };
+
+    // No policy row: today's behaviour (upgrade changes nothing).
+    assert_eq!(
+        get(&alice, format!("/v1/agents/{urn}")).await.0,
+        StatusCode::OK
+    );
+    assert!(get(&alice, "/v1/agents".to_string()).await.1.contains(urn));
+
+    // The route's answers for a URN that does not exist.
+    let missing_get = masked(get(&alice, format!("/v1/agents/{missing}")).await, missing);
+    let missing_versions = masked(
+        get(&alice, format!("/v1/agents/{missing}/versions")).await,
+        missing,
+    );
+    let missing_outcomes = masked(
+        get(&alice, format!("/v1/agents/{missing}/outcomes")).await,
+        missing,
+    );
+    let missing_perms = masked(
+        get(
+            &alice,
+            format!("/v1/agents/{missing}/permissions/effective?version=1.0.0"),
+        )
+        .await,
+        missing,
+    );
+    let missing_suggestion = masked(
+        get(
+            &publisher,
+            format!("/v1/agents/{missing}/release-suggestion"),
+        )
+        .await,
+        missing,
+    );
+    let missing_space = masked(
+        access_call(
+            &app,
+            "POST",
+            "/v1/spaces",
+            &alice,
+            Some("sp-missing"),
+            Some(serde_json::json!({ "agentUrn": missing })),
+        )
+        .await,
+        missing,
+    );
+    let missing_add = masked(
+        access_call(
+            &app,
+            "POST",
+            &format!("/v1/agents/{missing}/access"),
+            &alice,
+            Some("add-missing"),
+            Some(serde_json::json!({})),
+        )
+        .await,
+        missing,
+    );
+    let missing_policy = masked(
+        access_call(
+            &app,
+            "PUT",
+            &format!("/v1/agents/{missing}/access-policy"),
+            &alice,
+            Some("pol-missing"),
+            Some(serde_json::json!({ "visibility": "org", "mode": "open" })),
+        )
+        .await,
+        missing,
+    );
+    let missing_check = masked(
+        access_call(
+            &app,
+            "POST",
+            "/v1/agent-checks",
+            &alice,
+            Some("chk-missing"),
+            Some(
+                serde_json::json!({ "agentRef": { "resourceId": { "urn": missing },
+                "version": { "major": 1 } } }),
+            ),
+        )
+        .await,
+        missing,
+    );
+    for (what, answer) in [
+        ("get", &missing_get),
+        ("versions", &missing_versions),
+        ("outcomes", &missing_outcomes),
+        ("permissions", &missing_perms),
+        ("suggestion", &missing_suggestion),
+        ("space", &missing_space),
+        ("add", &missing_add),
+        ("policy", &missing_policy),
+        ("check", &missing_check),
+    ] {
+        assert_eq!(answer.0, StatusCode::NOT_FOUND, "{what}: {}", answer.1);
+    }
+    assert!(
+        missing_get
+            .1
+            .contains("agents '<urn>' not found in catalog"),
+        "{}",
+        missing_get.1
+    );
+
+    // The admin restricts it: 200, the stored policy back in design §6 JSON.
+    let (status, body) = access_call(
+        &app,
+        "PUT",
+        &policy_path,
+        &admin,
+        Some("pol-1"),
+        Some(serde_json::json!({ "visibility": "restricted", "mode": "approval" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let policy: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(policy["policy"]["urn"], urn);
+    assert_eq!(policy["policy"]["visibility"], "restricted");
+    assert_eq!(policy["policy"]["mode"], "approval");
+    assert_eq!(policy["policy"]["updatedBy"], "boss");
+    assert!(policy["policy"]["updatedAt"]
+        .as_str()
+        .unwrap()
+        .ends_with('Z'));
+
+    // Hidden: every site answers byte for byte as the missing URN does on that route.
+    let space_count = |secret: String| {
+        let app = app.clone();
+        async move {
+            let (_, body) = access_call(&app, "GET", "/v1/spaces", &secret, None, None).await;
+            body
+        }
+    };
+    let spaces_before = space_count(alice.clone()).await;
+    assert_eq!(
+        masked(get(&alice, format!("/v1/agents/{urn}")).await, urn),
+        missing_get
+    );
+    assert_eq!(
+        masked(get(&alice, format!("/v1/agents/{urn}/versions")).await, urn),
+        missing_versions
+    );
+    assert_eq!(
+        masked(get(&alice, format!("/v1/agents/{urn}/outcomes")).await, urn),
+        missing_outcomes
+    );
+    assert_eq!(
+        masked(
+            get(
+                &alice,
+                format!("/v1/agents/{urn}/permissions/effective?version=1.0.0")
+            )
+            .await,
+            urn
+        ),
+        missing_perms
+    );
+    // The owner check of the release suggestion would answer 403 and leak the agent.
+    assert_eq!(
+        masked(
+            get(&publisher, format!("/v1/agents/{urn}/release-suggestion")).await,
+            urn
+        ),
+        missing_suggestion
+    );
+    assert_eq!(
+        masked(
+            access_call(
+                &app,
+                "POST",
+                "/v1/spaces",
+                &alice,
+                Some("sp-hidden"),
+                Some(serde_json::json!({ "agentUrn": urn })),
+            )
+            .await,
+            urn
+        ),
+        missing_space
+    );
+    assert_eq!(
+        masked(
+            access_call(
+                &app,
+                "POST",
+                &format!("/v1/agents/{urn}/access"),
+                &alice,
+                Some("add-hidden"),
+                Some(serde_json::json!({})),
+            )
+            .await,
+            urn
+        ),
+        missing_add
+    );
+    assert_eq!(
+        masked(
+            access_call(
+                &app,
+                "PUT",
+                &policy_path,
+                &alice,
+                Some("pol-hidden"),
+                Some(serde_json::json!({ "visibility": "org", "mode": "open" })),
+            )
+            .await,
+            urn
+        ),
+        missing_policy
+    );
+    assert_eq!(
+        masked(
+            access_call(
+                &app,
+                "POST",
+                "/v1/agent-checks",
+                &alice,
+                Some("chk-hidden"),
+                Some(
+                    serde_json::json!({ "agentRef": { "resourceId": { "urn": urn },
+                    "version": { "major": 1 } } })
+                ),
+            )
+            .await,
+            urn
+        ),
+        missing_check
+    );
+    let (status, body) = run(&alice, "run-hidden").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("not found in catalog"), "{body}");
+    assert!(!get(&alice, "/v1/agents".to_string()).await.1.contains(urn));
+    assert_eq!(
+        space_count(alice.clone()).await,
+        spaces_before,
+        "no Space was created"
+    );
+    // The admin and the agent's own admin (its first releaser, A6) still read it.
+    assert_eq!(
+        get(&admin, format!("/v1/agents/{urn}")).await.0,
+        StatusCode::OK
+    );
+
+    // Visible (org, approval): 403 with the marker, never listed, nothing created.
+    let (status, _) = access_call(
+        &app,
+        "PUT",
+        &policy_path,
+        &admin,
+        Some("pol-2"),
+        Some(serde_json::json!({ "visibility": "org", "mode": "approval" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let expected = serde_json::json!({
+        "code": "PermissionDenied",
+        "message": format!("agent_access_required: request access to '{urn}'"),
+        "retryable": false
+    });
+    for (what, answer) in [
+        ("get", get(&alice, format!("/v1/agents/{urn}")).await),
+        (
+            "versions",
+            get(&alice, format!("/v1/agents/{urn}/versions")).await,
+        ),
+        (
+            "outcomes",
+            get(&alice, format!("/v1/agents/{urn}/outcomes")).await,
+        ),
+        (
+            "permissions",
+            get(
+                &alice,
+                format!("/v1/agents/{urn}/permissions/effective?version=1.0.0"),
+            )
+            .await,
+        ),
+        (
+            "space",
+            access_call(
+                &app,
+                "POST",
+                "/v1/spaces",
+                &alice,
+                Some("sp-visible"),
+                Some(serde_json::json!({ "agentUrn": urn })),
+            )
+            .await,
+        ),
+        ("run", run(&alice, "run-visible").await),
+        (
+            "check",
+            access_call(
+                &app,
+                "POST",
+                "/v1/agent-checks",
+                &alice,
+                Some("chk-visible"),
+                Some(
+                    serde_json::json!({ "agentRef": { "resourceId": { "urn": urn },
+                    "version": { "major": 1 } } }),
+                ),
+            )
+            .await,
+        ),
+    ] {
+        assert_eq!(answer.0, StatusCode::FORBIDDEN, "{what}: {}", answer.1);
+        let json: serde_json::Value = serde_json::from_str(&answer.1).unwrap();
+        assert_eq!(json, expected, "{what}");
+    }
+    assert!(!get(&alice, "/v1/agents".to_string()).await.1.contains(urn));
+    assert_eq!(
+        space_count(alice.clone()).await,
+        spaces_before,
+        "no Space was created"
+    );
+    // The release suggestion needs the owner, but access is checked first: a publisher who is
+    // not the owner and cannot use the Visible agent gets the access refusal, not an owner one.
+    let (status, body) = get(&publisher, format!("/v1/agents/{urn}/release-suggestion")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.contains("agent_access_required:"), "{body}");
+
+    // Policy writes: catalog:write and publish:grant are not agent admin; a member is not either.
+    for (who, secret) in [("publisher", &publisher), ("member", &alice)] {
+        let (status, body) = access_call(
+            &app,
+            "PUT",
+            &policy_path,
+            secret,
+            Some("pol-nonadmin"),
+            Some(serde_json::json!({ "visibility": "org", "mode": "open" })),
+        )
+        .await;
+        // Visible to the caller (org): 403 with the admin text.
+        assert_eq!(status, StatusCode::FORBIDDEN, "{who}: {body}");
+        assert!(
+            body.contains(&format!(
+                "only an agent admin or org admin may change access to '{urn}'"
+            )),
+            "{who}: {body}"
+        );
+    }
+    // Bad values and the refused combination: 400. A write needs an Idempotency-Key.
+    for bad in [
+        serde_json::json!({ "visibility": "restricted", "mode": "everyone" }),
+        serde_json::json!({ "visibility": "public", "mode": "open" }),
+        serde_json::json!({ "visibility": "org" }),
+    ] {
+        let (status, body) = access_call(
+            &app,
+            "PUT",
+            &policy_path,
+            &admin,
+            Some("pol-bad"),
+            Some(bad),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    let (status, _) = access_call(
+        &app,
+        "PUT",
+        &policy_path,
+        &admin,
+        None,
+        Some(serde_json::json!({ "visibility": "org", "mode": "open" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Request (approval): 202 pending, a second one 409; the grant row is not yet approved.
+    let add_path = format!("/v1/agents/{urn}/access");
+    let (status, body) = access_call(
+        &app,
+        "POST",
+        &add_path,
+        &alice,
+        Some("req-alice"),
+        Some(serde_json::json!({ "message": "please" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(request["request"]["state"], "pending");
+    assert_eq!(request["request"]["message"], "please");
+    assert_eq!(request["request"]["userId"], "alice");
+    assert_eq!(request["request"]["urn"], urn);
+    assert!(request["request"]["requestId"]
+        .as_str()
+        .unwrap()
+        .starts_with("acr_"));
+    assert!(request["request"].get("decidedAt").is_none());
+    let (status, _) = access_call(
+        &app,
+        "POST",
+        &add_path,
+        &alice,
+        Some("req-alice-2"),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(run(&alice, "run-pending").await.0, StatusCode::FORBIDDEN);
+    let too_long = "x".repeat(1001);
+    let (status, _) = access_call(
+        &app,
+        "POST",
+        &add_path,
+        &bob,
+        Some("req-bob-long"),
+        Some(serde_json::json!({ "message": too_long })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Add (open): 200 approved at once, a second one 409 "already usable", the run starts.
+    let (status, _) = access_call(
+        &app,
+        "PUT",
+        &policy_path,
+        &admin,
+        Some("pol-3"),
+        Some(serde_json::json!({ "visibility": "org", "mode": "open" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = access_call(
+        &app,
+        "POST",
+        &add_path,
+        &bob,
+        Some("add-bob"),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let added: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(added["request"]["state"], "approved");
+    assert_eq!(
+        added["request"]["decidedAt"],
+        added["request"]["requestedAt"]
+    );
+    let (status, body) = access_call(
+        &app,
+        "POST",
+        &add_path,
+        &bob,
+        Some("add-bob-2"),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        body.contains(&format!("agent '{urn}' is already usable")),
+        "{body}"
+    );
+    assert!(get(&bob, "/v1/agents".to_string()).await.1.contains(urn));
+    assert_eq!(run(&bob, "run-bob").await.0, StatusCode::ACCEPTED);
+    // Bob's task ends, so the next start below is a fresh run (202), not a message into this one.
+    store
+        .complete_run_with_result(
+            "urn:vam:run:local.vam.dev/acme/run-run-bob",
+            "SUCCEEDED",
+            "{}",
+        )
+        .unwrap();
+    for session in store.load_all_sessions().unwrap() {
+        store
+            .update_observed_state(
+                &session.session_id,
+                vam_orchestrator::session::ObservedState::Terminated,
+            )
+            .unwrap();
+    }
+
+    // Revoke by the store (the route has its own test): the next start is refused, an agent
+    // read for the admitted session is not.
+    store
+        .revoke_access(urn, "bob", "boss", Some("left the team"))
+        .unwrap();
+    let (status, body) = run(&bob, "run-revoked").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("agent_access_required:"), "{body}");
+    store.get_agent_admitted(urn, "bob", false).unwrap();
+
+    // Opening the agent to everyone again makes it usable for all: 409 on Add.
+    let (status, _) = access_call(
+        &app,
+        "PUT",
+        &policy_path,
+        &admin,
+        Some("pol-4"),
+        Some(serde_json::json!({ "visibility": "org", "mode": "everyone" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Admission passes: bob's earlier run has finished, so the start is accepted as a new run.
+    let (st, b) = run(&bob, "run-everyone").await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{b}");
+}
+
+#[tokio::test]
+async fn a_legacy_session_on_a_bound_space_is_an_admission_and_a_refused_run_binds_nothing() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    store.initialize_catalog_schema().unwrap();
+    seed_test_playbook(&store);
+    let admin = mint_user_key(&store, "boss", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let alice = mint_user_key(&store, "alice", UserRole::Member, MEMBER_SCOPES);
+    let urn = "urn:vam:agent:local.vam.dev/acme/bound-agent";
+    seed_released_agent(&store, urn);
+    let app = test_app(app_state_http_only(store.clone()));
+    // Alice holds a Space bound to the agent (made while it was open to all).
+    let space = store
+        .create_space_once("alice", "bound-space", urn, "notes")
+        .unwrap();
+    let (status, body) = access_call(
+        &app,
+        "PUT",
+        &format!("/v1/agents/{urn}/access-policy"),
+        &admin,
+        Some("pol"),
+        Some(serde_json::json!({ "visibility": "org", "mode": "approval" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = access_call(
+        &app,
+        "POST",
+        "/v1/sessions",
+        &alice,
+        Some("sess-1"),
+        Some(serde_json::json!({ "workspaceId": space.space_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("agent_access_required:"), "{body}");
+    let (_, sessions) = access_call(&app, "GET", "/v1/sessions", &alice, None, None).await;
+    assert!(
+        !sessions.contains("sess-"),
+        "no session was created: {sessions}"
+    );
+
+    // A run into that Space by space id alone (no agent named) is refused the same way.
+    let (status, body) = access_call(
+        &app,
+        "POST",
+        "/v1/runs",
+        &alice,
+        Some("run-space"),
+        Some(serde_json::json!({ "spec": {
+            "runId": { "urn": "urn:vam:run:local.vam.dev/acme/run-space" },
+            "spaceId": space.space_id,
+            "playbookRef": {
+                "resourceId": { "urn": "urn:vam:playbook:local.vam.dev/acme/test-pb" },
+                "version": { "major": 1, "minor": 0, "patch": 0 },
+                "digest": { "algorithm": "ALGORITHM_SHA256",
+                    "hexHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }
+            },
+            "inputs": { "fields": { "prompt": { "stringValue": "hi" } } },
+            "idempotencyKey": "run-space"
+        } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("agent_access_required:"), "{body}");
+}
+
+/// Q2, site 13: a revoke ends the user's right to steer or queue into a run that is still live.
+#[tokio::test]
+async fn a_revoked_user_cannot_steer_or_queue_into_a_live_run() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    store.initialize_catalog_schema().unwrap();
+    let admin = mint_user_key(&store, "boss", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let alice = mint_user_key(&store, "alice", UserRole::Member, MEMBER_SCOPES);
+    seed_released_agent(&store, INBOX_AGENT);
+    let app = test_app(app_state_http_only(store.clone()));
+    let policy = |mode: &str, idem: &str| {
+        let (mode, idem, admin, app) = (
+            mode.to_string(),
+            idem.to_string(),
+            admin.clone(),
+            app.clone(),
+        );
+        async move {
+            access_call(
+                &app,
+                "PUT",
+                &format!("/v1/agents/{INBOX_AGENT}/access-policy"),
+                &admin,
+                Some(&idem),
+                Some(serde_json::json!({ "visibility": "org", "mode": mode })),
+            )
+            .await
+        }
+    };
+    // Alice has access (open mode, she adds herself) and a run of hers is live.
+    assert_eq!(policy("open", "pol-open").await.0, StatusCode::OK);
+    let (status, body) = access_call(
+        &app,
+        "POST",
+        &format!("/v1/agents/{INBOX_AGENT}/access"),
+        &alice,
+        Some("add-alice"),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    live_task(&store, "revoked-ws", "main", "alice");
+    let steer = |key: &str, mode: Option<&str>| {
+        let mut body = steer_body(
+            "revoked-ws",
+            "main",
+            key,
+            serde_json::json!({"prompt": "more"}),
+        );
+        if let Some(mode) = mode {
+            body["spec"]["inboxMode"] = serde_json::json!(mode);
+        }
+        let (key, alice, app) = (key.to_string(), alice.clone(), app.clone());
+        async move { post_json(&app, "/v1/runs", &alice, &key, body).await }
+    };
+    let (status, body) = steer("steer-before", None).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(store.list_inbox_messages(INBOX_RUN).unwrap().len(), 1);
+    let runs_before = store.list_runs_for_owner("alice").unwrap().len();
+
+    // An admin revokes her access while the run is still live.
+    let (status, body) = access_call(
+        &app,
+        "POST",
+        &format!("/v1/agents/{INBOX_AGENT}/access/alice/revoke"),
+        &admin,
+        Some("revoke-alice"),
+        Some(serde_json::json!({ "reason": "left the team" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(policy("approval", "pol-approval").await.0, StatusCode::OK);
+
+    // Steer and queue (on /v1/runs and by run id) are refused, and nothing is written.
+    let by_id = format!("/v1/runs/{}/messages", encode_run_path(INBOX_RUN));
+    let mut refused = vec![
+        ("steer", steer("steer-after", None).await),
+        ("queue", steer("queue-after", Some("QUEUE")).await),
+    ];
+    for (key, mode) in [("msg-steer", "STEER"), ("msg-queue", "QUEUE")] {
+        let answer = post_json(
+            &app,
+            &by_id,
+            &alice,
+            key,
+            serde_json::json!({ "text": "still there?", "mode": mode }),
+        )
+        .await;
+        refused.push((key, answer));
+    }
+    for (what, (status, body)) in refused {
+        assert_eq!(status, StatusCode::FORBIDDEN, "{what}: {body}");
+        assert!(
+            body.to_string().contains("agent_access_required:"),
+            "{what}: {body}"
+        );
+    }
+    assert_eq!(
+        store.list_inbox_messages(INBOX_RUN).unwrap().len(),
+        1,
+        "only the message from before the revoke exists"
+    );
+    assert!(store.list_queued().unwrap().is_empty(), "nothing queued");
+    assert_eq!(
+        store.list_runs_for_owner("alice").unwrap().len(),
+        runs_before,
+        "no run started"
+    );
+}
+
+// ---- Agent access, Phase 1 wave 3: decide and revoke ----
+
+fn json_of(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).unwrap_or_else(|e| panic!("not JSON ({e}): {body}"))
+}
+
+/// A store with one released agent and the usual keys; `carol` is an agent admin of it (A6), not
+/// an org admin.
+struct AccessWorld {
+    store: Arc<SqliteWorkflowStore>,
+    app: axum::Router,
+    urn: &'static str,
+    admin: String,
+    alice: String,
+    bob: String,
+    carol: String,
+    publisher: String,
+}
+
+fn access_world(urn: &'static str) -> AccessWorld {
+    let store = Arc::new(SqliteWorkflowStore::in_memory().unwrap());
+    store.initialize_catalog_schema().unwrap();
+    seed_test_playbook(&store);
+    let admin = mint_user_key(&store, "boss", UserRole::OrgAdmin, ORG_ADMIN_SCOPES);
+    let alice = mint_user_key(&store, "alice", UserRole::Member, MEMBER_SCOPES);
+    let bob = mint_user_key(&store, "bob", UserRole::Member, MEMBER_SCOPES);
+    let carol = mint_user_key(&store, "carol", UserRole::Member, MEMBER_SCOPES);
+    let publisher = mint_user_key(&store, "pubby", UserRole::Publisher, PUBLISHER_SCOPES);
+    seed_released_agent(&store, urn);
+    store.seed_first_admin(urn, "carol").unwrap();
+    let app = test_app(app_state_http_only(store.clone()));
+    AccessWorld {
+        store,
+        app,
+        urn,
+        admin,
+        alice,
+        bob,
+        carol,
+        publisher,
+    }
+}
+
+impl AccessWorld {
+    async fn call(
+        &self,
+        method: &str,
+        uri: &str,
+        who: &str,
+        idem: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
+        access_call(&self.app, method, uri, who, Some(idem), Some(body)).await
+    }
+
+    async fn policy(&self, visibility: &str, mode: &str, idem: &str) {
+        let (status, body) = self
+            .call(
+                "PUT",
+                &format!("/v1/agents/{}/access-policy", self.urn),
+                &self.admin,
+                idem,
+                serde_json::json!({ "visibility": visibility, "mode": mode }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// `who` asks for access; returns the request id.
+    async fn request(&self, who: &str, idem: &str) -> String {
+        let (status, body) = self
+            .call(
+                "POST",
+                &format!("/v1/agents/{}/access", self.urn),
+                who,
+                idem,
+                serde_json::json!({ "message": "please" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        json_of(&body)["request"]["requestId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn decide(
+        &self,
+        who: &str,
+        id: &str,
+        idem: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
+        self.call(
+            "POST",
+            &format!("/v1/access-requests/{id}/decide"),
+            who,
+            idem,
+            body,
+        )
+        .await
+    }
+
+    async fn revoke(
+        &self,
+        who: &str,
+        user: &str,
+        idem: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
+        self.call(
+            "POST",
+            &format!("/v1/agents/{}/access/{user}/revoke", self.urn),
+            who,
+            idem,
+            body,
+        )
+        .await
+    }
+
+    async fn run(&self, who: &str, idem: &str) -> (StatusCode, String) {
+        access_call(
+            &self.app,
+            "POST",
+            "/v1/runs",
+            who,
+            Some(idem),
+            Some(sample_released_run_body(
+                self.urn,
+                "assistant",
+                idem,
+                &format!("urn:vam:run:local.vam.dev/acme/run-{idem}"),
+            )),
+        )
+        .await
+    }
+
+    fn state_of(&self, request_id: &str) -> String {
+        self.store
+            .get_access_request(request_id)
+            .unwrap()
+            .unwrap()
+            .state
+            .as_str()
+            .to_string()
+    }
+}
+
+#[tokio::test]
+async fn only_an_agent_admin_decides_a_request_and_a_decision_is_final() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/decide-agent");
+    w.policy("org", "approval", "pol").await;
+    let acr = w.request(&w.alice, "req-alice").await;
+    let acr_bob = w.request(&w.bob, "req-bob").await;
+    assert_eq!(w.run(&w.alice, "run-before").await.0, StatusCode::FORBIDDEN);
+
+    // An unknown id and a caller who is no admin of the agent get the same 404, so an id says
+    // nothing about the agent behind it. A key with catalog:write and publish:grant is no admin.
+    let unknown = "acr_does_not_exist";
+    let approve = serde_json::json!({ "decision": "approve" });
+    let (status, unknown_body) = w
+        .decide(&w.admin, unknown, "d-unknown", approve.clone())
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{unknown_body}");
+    assert!(
+        unknown_body.contains(&format!("access request '{unknown}' not found")),
+        "{unknown_body}"
+    );
+    for (who, secret) in [
+        ("publisher", &w.publisher),
+        ("member", &w.bob),
+        ("requester", &w.alice),
+    ] {
+        let (status, body) = w.decide(secret, &acr, "d-nonadmin", approve.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{who}: {body}");
+        assert_eq!(
+            body.replace(&acr, unknown),
+            unknown_body,
+            "{who}: same text as an unknown id"
+        );
+    }
+    // Hidden agent: the same answer for a non-admin.
+    w.policy("restricted", "approval", "pol-hidden").await;
+    let (status, body) = w
+        .decide(&w.publisher, &acr, "d-hidden", approve.clone())
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body.replace(&acr, unknown), unknown_body);
+    w.policy("org", "approval", "pol-back").await;
+    assert_eq!(w.state_of(&acr), "pending", "no refused call decided it");
+
+    // A write needs an Idempotency-Key.
+    let (status, _) = access_call(
+        &w.app,
+        "POST",
+        &format!("/v1/access-requests/{acr}/decide"),
+        &w.admin,
+        None,
+        Some(approve.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Bad bodies are 400 and leave the request pending: deny needs a reason.
+    for bad in [
+        serde_json::json!({ "decision": "deny" }),
+        serde_json::json!({ "decision": "deny", "reason": "   " }),
+        serde_json::json!({ "decision": "deny", "reason": 5 }),
+        serde_json::json!({ "decision": "maybe" }),
+        serde_json::json!({ "reason": "no decision" }),
+        serde_json::json!({ "decision": "deny", "reason": "x".repeat(1001) }),
+    ] {
+        let (status, body) = w.decide(&w.admin, &acr, "d-bad", bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    assert_eq!(w.state_of(&acr), "pending");
+
+    // The agent's own admin (no users:admin) denies with a reason: 200, state denied.
+    let (status, body) = w
+        .decide(
+            &w.carol,
+            &acr_bob,
+            "d-deny",
+            serde_json::json!({ "decision": "deny", "reason": "not this quarter" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let denied = json_of(&body);
+    assert_eq!(denied["request"]["state"], "denied");
+    assert_eq!(denied["request"]["reason"], "not this quarter");
+    assert_eq!(denied["request"]["decidedBy"], "carol");
+    assert_eq!(denied["request"]["userId"], "bob");
+    assert!(denied["request"]["decidedAt"].is_string());
+    assert_eq!(w.run(&w.bob, "run-denied").await.0, StatusCode::FORBIDDEN);
+    // A denial is final for that request, and the user may ask again.
+    let (status, _) = w
+        .decide(&w.admin, &acr_bob, "d-again", approve.clone())
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let again = w.request(&w.bob, "req-bob-2").await;
+    assert_ne!(again, acr_bob);
+
+    // The org admin approves alice: 200, and her next start is admitted.
+    let (status, body) = w
+        .decide(
+            &w.admin,
+            &acr,
+            "d-approve",
+            serde_json::json!({ "decision": "approve", "reason": "welcome" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let approved = json_of(&body);
+    assert_eq!(approved["request"]["state"], "approved");
+    assert_eq!(approved["request"]["decidedBy"], "boss");
+    assert_eq!(approved["request"]["requestId"], acr);
+    assert_eq!(approved["request"]["urn"], w.urn);
+    assert_eq!(
+        w.run(&w.alice, "run-approved").await.0,
+        StatusCode::ACCEPTED
+    );
+    // Deciding twice is 409 whichever way.
+    for body in [
+        approve.clone(),
+        serde_json::json!({ "decision": "deny", "reason": "late" }),
+    ] {
+        let (status, text) = w.decide(&w.admin, &acr, "d-twice", body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{text}");
+    }
+    assert_eq!(w.state_of(&acr), "approved");
+}
+
+#[tokio::test]
+async fn a_revoke_stops_the_next_start_and_leaves_an_admitted_run_alone() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/revoke-agent");
+    let missing = "urn:vam:agent:local.vam.dev/acme/no-such-agent";
+    w.policy("org", "approval", "pol").await;
+    let acr = w.request(&w.alice, "req-alice").await;
+    let (status, body) = w
+        .decide(
+            &w.admin,
+            &acr,
+            "d-1",
+            serde_json::json!({ "decision": "approve" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Alice is admitted: her run is live (a running session) when the revoke lands.
+    let run_urn = "urn:vam:run:local.vam.dev/acme/run-run-admitted";
+    assert_eq!(
+        w.run(&w.alice, "run-admitted").await.0,
+        StatusCode::ACCEPTED
+    );
+    let state_before = w.store.get_run_state(run_urn).unwrap();
+    assert!(
+        !["SUCCEEDED", "FAILED", "CANCELLED"].contains(&state_before.as_str()),
+        "{state_before}"
+    );
+    // A pending request is not revoked: it is decided.
+    let _pending = w.request(&w.bob, "req-bob").await;
+
+    let reason = serde_json::json!({ "reason": "left the team" });
+    // Only an agent admin: a publisher and the user themself get 403 on a visible agent.
+    for (who, secret) in [("publisher", &w.publisher), ("member", &w.alice)] {
+        let (status, body) = w
+            .revoke(secret, "alice", "rv-nonadmin", reason.clone())
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{who}: {body}");
+        assert!(
+            body.contains(&format!(
+                "only an agent admin or org admin may change access to '{}'",
+                w.urn
+            )),
+            "{who}: {body}"
+        );
+    }
+    // On a hidden agent the same caller gets the missing-URN 404, byte for byte.
+    let (miss_status, miss_body) = w
+        .call(
+            "POST",
+            &format!("/v1/agents/{missing}/access/alice/revoke"),
+            &w.publisher,
+            "rv-missing",
+            reason.clone(),
+        )
+        .await;
+    assert_eq!(miss_status, StatusCode::NOT_FOUND);
+    w.policy("restricted", "approval", "pol-hidden").await;
+    let (status, body) = w
+        .revoke(&w.publisher, "alice", "rv-hidden", reason.clone())
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body.replace(w.urn, missing), miss_body);
+    w.policy("org", "approval", "pol-back").await;
+
+    // A reason is required; an unknown user, a pending user and a slash in the id are refused.
+    for bad in [
+        serde_json::json!({}),
+        serde_json::json!({ "reason": "  " }),
+        serde_json::json!({ "reason": 1 }),
+    ] {
+        let (status, body) = w.revoke(&w.admin, "alice", "rv-bad", bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    let (status, _) = access_call(
+        &w.app,
+        "POST",
+        &format!("/v1/agents/{}/access/alice/revoke", w.urn),
+        &w.admin,
+        None,
+        Some(reason.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = w.revoke(&w.admin, "a/b", "rv-slash", reason.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    for user in ["zed", "bob"] {
+        let (status, body) = w.revoke(&w.admin, user, "rv-none", reason.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{user}: {body}");
+    }
+    assert_eq!(w.state_of(&acr), "approved", "no refused call revoked it");
+
+    // The agent's own admin revokes: 200, state revoked, with who and why.
+    let (status, body) = w.revoke(&w.carol, "alice", "rv-ok", reason.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let revoked = json_of(&body);
+    assert_eq!(revoked["request"]["state"], "revoked");
+    assert_eq!(revoked["request"]["reason"], "left the team");
+    assert_eq!(revoked["request"]["decidedBy"], "carol");
+    assert_eq!(revoked["request"]["userId"], "alice");
+    assert_eq!(revoked["request"]["requestId"], acr);
+
+    // The next start is refused; a second revoke finds no approved row.
+    let (status, body) = w.run(&w.alice, "run-after").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("agent_access_required:"), "{body}");
+    let (status, _) = w
+        .revoke(&w.admin, "alice", "rv-twice", reason.clone())
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // The run admitted before the revoke is neither stopped nor orphaned: its state is
+    // unchanged and the session's agent reads (boot, resume, per-call policy) still answer.
+    assert_eq!(w.store.get_run_state(run_urn).unwrap(), state_before);
+    let spec = w.store.get_agent_admitted(w.urn, "alice", false).unwrap();
+    assert_eq!(spec.display_name, "Test Agent");
+    // The revoke is history, not a ban: alice may ask again.
+    assert!(w.request(&w.alice, "req-alice-2").await.starts_with("acr_"));
+}
+
+// ---- Agent access, Phase 2 wave 1: replay, withdraw, admins, browse and the lists ----
+
+/// `access_call` as its own task under a 5 s timeout: a handler that deadlocks on the store's
+/// mutex fails the test instead of hanging it. Needs a multi-thread runtime.
+async fn timed_call(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    secret: &str,
+    idem: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, String) {
+    let (app, method, uri, secret, idem) = (
+        app.clone(),
+        method.to_string(),
+        uri.to_string(),
+        secret.to_string(),
+        idem.map(str::to_string),
+    );
+    let task = tokio::spawn(async move {
+        access_call(&app, &method, &uri, &secret, idem.as_deref(), body).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("the route deadlocked or hung (5 s)")
+        .expect("route task")
+}
+
+impl AccessWorld {
+    async fn tcall(
+        &self,
+        method: &str,
+        uri: &str,
+        who: &str,
+        idem: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
+        timed_call(&self.app, method, uri, who, Some(idem), Some(body)).await
+    }
+
+    fn access_uri(&self) -> String {
+        format!("/v1/agents/{}/access", self.urn)
+    }
+
+    fn admins_uri(&self) -> String {
+        format!("/v1/agents/{}/admins", self.urn)
+    }
+
+    async fn get(&self, uri: &str, who: &str) -> (StatusCode, String) {
+        timed_call(&self.app, "GET", uri, who, None, None).await
+    }
+
+    async fn delete_access(&self, who: &str, idem: &str) -> (StatusCode, String) {
+        timed_call(
+            &self.app,
+            "DELETE",
+            &self.access_uri(),
+            who,
+            Some(idem),
+            None,
+        )
+        .await
+    }
+
+    fn rows_of(&self, user: &str) -> usize {
+        self.store
+            .list_access(
+                user,
+                false,
+                vam_orchestrator::agent_access::AccessScope::Mine,
+                None,
+                None,
+                100,
+            )
+            .unwrap()
+            .len()
+    }
+
+    async fn put_admins(
+        &self,
+        who: &str,
+        idem: &str,
+        ids: serde_json::Value,
+    ) -> (StatusCode, String) {
+        self.tcall(
+            "PUT",
+            &self.admins_uri(),
+            who,
+            idem,
+            serde_json::json!({ "userIds": ids }),
+        )
+        .await
+    }
+}
+
+fn missing_agent() -> &'static str {
+    "urn:vam:agent:local.vam.dev/acme/no-such-agent"
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_access_write_replays_its_first_answer_and_none_deadlocks() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/replay-agent");
+
+    // PUT access-policy.
+    let policy = serde_json::json!({ "visibility": "org", "mode": "approval" });
+    let uri = format!("/v1/agents/{}/access-policy", w.urn);
+    let one = w
+        .tcall("PUT", &uri, &w.admin, "k-pol", policy.clone())
+        .await;
+    assert_eq!(one.0, StatusCode::OK, "{}", one.1);
+    assert_eq!(w.tcall("PUT", &uri, &w.admin, "k-pol", policy).await, one);
+
+    // POST access: one row however many times the same key arrives.
+    let add = serde_json::json!({ "message": "please" });
+    let one = w
+        .tcall("POST", &w.access_uri(), &w.alice, "k-add", add.clone())
+        .await;
+    assert_eq!(one.0, StatusCode::ACCEPTED, "{}", one.1);
+    let acr = json_of(&one.1)["request"]["requestId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        w.tcall("POST", &w.access_uri(), &w.alice, "k-add", add.clone())
+            .await,
+        one
+    );
+    assert_eq!(w.rows_of("alice"), 1);
+    // Another body under the key is a 409 whose text says so.
+    let other = w
+        .tcall(
+            "POST",
+            &w.access_uri(),
+            &w.alice,
+            "k-add",
+            serde_json::json!({ "message": "other" }),
+        )
+        .await;
+    assert_eq!(other.0, StatusCode::CONFLICT, "{}", other.1);
+    assert!(
+        other
+            .1
+            .contains("Idempotency-Key was already used for a different request"),
+        "{}",
+        other.1
+    );
+
+    // POST decide: the retry answers the first 200, not the 409 a second decision would be.
+    let approve = serde_json::json!({ "decision": "approve" });
+    let one = w.decide(&w.admin, &acr, "k-dec", approve.clone()).await;
+    assert_eq!(one.0, StatusCode::OK, "{}", one.1);
+    assert_eq!(w.decide(&w.admin, &acr, "k-dec", approve).await, one);
+    assert_eq!(w.state_of(&acr), "approved");
+
+    // POST revoke: the retry answers the first 200, not the 404 an approved-row check would give.
+    let reason = serde_json::json!({ "reason": "left" });
+    let one = w.revoke(&w.carol, "alice", "k-rev", reason.clone()).await;
+    assert_eq!(one.0, StatusCode::OK, "{}", one.1);
+    assert_eq!(w.revoke(&w.carol, "alice", "k-rev", reason).await, one);
+    assert_eq!(w.state_of(&acr), "revoked");
+    assert_eq!(w.rows_of("alice"), 1, "the replays added no row");
+
+    // PUT admins.
+    let one = w
+        .put_admins(&w.admin, "k-adm", serde_json::json!(["carol", "bob"]))
+        .await;
+    assert_eq!(one.0, StatusCode::OK, "{}", one.1);
+    assert_eq!(
+        w.put_admins(&w.admin, "k-adm", serde_json::json!(["carol", "bob"]))
+            .await,
+        one
+    );
+    // The same ids in another order are another request.
+    let swapped = w
+        .put_admins(&w.admin, "k-adm", serde_json::json!(["bob", "carol"]))
+        .await;
+    assert_eq!(swapped.0, StatusCode::CONFLICT, "{}", swapped.1);
+
+    // DELETE access: 204 with no body, and the retry is the same 204 though no row is left.
+    let pending = w
+        .tcall("POST", &w.access_uri(), &w.alice, "k-add-2", add)
+        .await;
+    assert_eq!(pending.0, StatusCode::ACCEPTED, "{}", pending.1);
+    let one = w.delete_access(&w.alice, "k-del").await;
+    assert_eq!(one, (StatusCode::NO_CONTENT, String::new()));
+    assert_eq!(w.delete_access(&w.alice, "k-del").await, one);
+    assert_eq!(w.rows_of("alice"), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replay_never_answers_a_caller_who_lost_the_right_to_ask() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/lost-right-agent");
+    w.policy("org", "approval", "pol").await;
+
+    // A replayed Add after the agent was restricted (and the request denied) is the Hidden 404.
+    let add = serde_json::json!({ "message": "please" });
+    let first = w
+        .tcall("POST", &w.access_uri(), &w.bob, "k-b", add.clone())
+        .await;
+    assert_eq!(first.0, StatusCode::ACCEPTED, "{}", first.1);
+    let id = json_of(&first.1)["request"]["requestId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let deny = serde_json::json!({ "decision": "deny", "reason": "no" });
+    assert_eq!(
+        w.decide(&w.admin, &id, "k-deny", deny).await.0,
+        StatusCode::OK
+    );
+    w.policy("restricted", "approval", "pol-r").await;
+    let replay = w
+        .tcall("POST", &w.access_uri(), &w.bob, "k-b", add.clone())
+        .await;
+    let missing = w
+        .tcall(
+            "POST",
+            &format!("/v1/agents/{}/access", missing_agent()),
+            &w.bob,
+            "k-missing",
+            add.clone(),
+        )
+        .await;
+    assert_eq!(replay.0, StatusCode::NOT_FOUND, "{}", replay.1);
+    assert_eq!(masked(replay, w.urn), masked(missing, missing_agent()));
+    w.policy("org", "approval", "pol-back").await;
+
+    // A replayed decide after the decider lost the admin row is the unknown-id 404, and a
+    // replayed PUT admins after removing yourself is a 403.
+    let acr = w.request(&w.alice, "k-a").await;
+    let approve = serde_json::json!({ "decision": "approve" });
+    let decided = w.decide(&w.carol, &acr, "k-d", approve.clone()).await;
+    assert_eq!(decided.0, StatusCode::OK, "{}", decided.1);
+    let removed = w
+        .put_admins(&w.carol, "k-self", serde_json::json!(["bob"]))
+        .await;
+    assert_eq!(removed.0, StatusCode::OK, "{}", removed.1);
+    let again = w
+        .put_admins(&w.carol, "k-self", serde_json::json!(["bob"]))
+        .await;
+    assert_eq!(again.0, StatusCode::FORBIDDEN, "{}", again.1);
+    assert!(
+        again.1.contains("only an agent admin or org admin"),
+        "{}",
+        again.1
+    );
+    let replay = w.decide(&w.carol, &acr, "k-d", approve.clone()).await;
+    let unknown = w
+        .decide(&w.carol, "acr_does_not_exist", "k-u", approve)
+        .await;
+    assert_eq!(replay.0, StatusCode::NOT_FOUND, "{}", replay.1);
+    assert_eq!(
+        replay.1.replace(&acr, "<id>"),
+        unknown.1.replace("acr_does_not_exist", "<id>")
+    );
+    // The org admin is still an admin and decides after `[]`.
+    let cleared = w
+        .put_admins(&w.admin, "k-clear", serde_json::json!([]))
+        .await;
+    assert_eq!(cleared.0, StatusCode::OK, "{}", cleared.1);
+    assert_eq!(json_of(&cleared.1)["admins"], serde_json::json!([]));
+    let acr2 = w.request(&w.bob, "k-a2").await;
+    let (status, body) = w
+        .decide(
+            &w.admin,
+            &acr2,
+            "k-d2",
+            serde_json::json!({ "decision": "approve" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_replay_key_is_scoped_to_the_caller_and_bounded() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/key-agent");
+    w.policy("org", "approval", "pol").await;
+
+    // Another user with the same key and the same body takes the normal path.
+    let add = serde_json::json!({ "message": "please" });
+    let a = w
+        .tcall("POST", &w.access_uri(), &w.alice, "same", add.clone())
+        .await;
+    let b = w
+        .tcall("POST", &w.access_uri(), &w.bob, "same", add.clone())
+        .await;
+    assert_eq!((a.0, b.0), (StatusCode::ACCEPTED, StatusCode::ACCEPTED));
+    assert_ne!(
+        json_of(&a.1)["request"]["requestId"],
+        json_of(&b.1)["request"]["requestId"]
+    );
+    assert_eq!(w.rows_of("alice") + w.rows_of("bob"), 2);
+
+    // 255 bytes is fine; 256, a blank, a space inside and non-ASCII are 400; none is missing.
+    let policy = serde_json::json!({ "visibility": "org", "mode": "open" });
+    let uri = format!("/v1/agents/{}/access-policy", w.urn);
+    let ok = w
+        .tcall("PUT", &uri, &w.admin, &"k".repeat(255), policy.clone())
+        .await;
+    assert_eq!(ok.0, StatusCode::OK, "{}", ok.1);
+    for bad in [
+        "k".repeat(256),
+        "has space".to_string(),
+        "caf\u{e9}".to_string(),
+    ] {
+        let (status, body) = w.tcall("PUT", &uri, &w.admin, &bad, policy.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    let (status, _) = access_call(&w.app, "PUT", &uri, &w.admin, None, Some(policy.clone())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A 400 is never stored: the corrected body under the same key is processed.
+    let (status, _) = w
+        .tcall(
+            "PUT",
+            &uri,
+            &w.admin,
+            "fix",
+            serde_json::json!({ "visibility": "org", "mode": "sometimes" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = w.tcall("PUT", &uri, &w.admin, "fix", policy).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_calls_with_the_same_key_make_one_write() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/race-agent");
+    w.policy("org", "approval", "pol").await;
+    let add = serde_json::json!({ "message": "please" });
+    let uri = w.access_uri();
+    let (one, two) = tokio::join!(
+        w.tcall("POST", &uri, &w.alice, "race", add.clone()),
+        w.tcall("POST", &uri, &w.alice, "race", add.clone()),
+    );
+    assert_eq!(one.0, StatusCode::ACCEPTED, "{}", one.1);
+    assert_eq!(one, two, "both calls answer the one write");
+    assert_eq!(w.rows_of("alice"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn withdraw_and_leave_answer_by_the_callers_own_row() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/leave-agent");
+    w.policy("org", "approval", "pol").await;
+    let hidden_text = |answer: (StatusCode, String)| masked(answer, w.urn);
+
+    // A pending request on an agent that has since turned restricted still ends with 204: the
+    // URN is already in the caller's own list.
+    let acr = w.request(&w.alice, "k-add").await;
+    w.policy("restricted", "approval", "pol-r").await;
+    assert_eq!(
+        w.delete_access(&w.alice, "k-del").await,
+        (StatusCode::NO_CONTENT, String::new())
+    );
+    assert_eq!(w.state_of(&acr), "withdrawn");
+    // With no row left: Hidden answers the missing-URN text, a missing URN the same.
+    let hidden = w.delete_access(&w.alice, "k-del-2").await;
+    let missing = timed_call(
+        &w.app,
+        "DELETE",
+        &format!("/v1/agents/{}/access", missing_agent()),
+        &w.alice,
+        Some("k-del-m"),
+        None,
+    )
+    .await;
+    assert_eq!(hidden.0, StatusCode::NOT_FOUND, "{}", hidden.1);
+    assert_eq!(hidden_text(hidden), masked(missing, missing_agent()));
+    // A Visible agent with no row answers its own text.
+    w.policy("org", "approval", "pol-back").await;
+    let (status, body) = w.delete_access(&w.alice, "k-del-3").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(
+        body.contains(&format!("you have no access request for agent '{}'", w.urn)),
+        "{body}"
+    );
+
+    // Withdraw, then the decision is a 409; an open agent: Add, leave, the next start is refused,
+    // leaving again is a 404 and the user may Add again.
+    let acr = w.request(&w.alice, "k-add-2").await;
+    assert_eq!(
+        w.delete_access(&w.alice, "k-del-4").await.0,
+        StatusCode::NO_CONTENT
+    );
+    let (status, _) = w
+        .decide(
+            &w.admin,
+            &acr,
+            "k-dec",
+            serde_json::json!({ "decision": "approve" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    w.policy("org", "open", "pol-open").await;
+    let add = serde_json::json!({});
+    assert_eq!(
+        w.tcall("POST", &w.access_uri(), &w.alice, "k-add-3", add.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(w.run(&w.alice, "run-in").await.0, StatusCode::ACCEPTED);
+    assert_eq!(
+        w.delete_access(&w.alice, "k-del-5").await.0,
+        StatusCode::NO_CONTENT
+    );
+    let (status, body) = w.run(&w.alice, "run-out").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("agent_access_required:"), "{body}");
+    assert_eq!(
+        w.delete_access(&w.alice, "k-del-6").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        w.tcall("POST", &w.access_uri(), &w.alice, "k-add-4", add)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replacing_the_admins_moves_the_copies_of_pending_requests() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/admin-copies");
+    w.policy("org", "approval", "pol").await;
+    let open = |user: &str| {
+        w.store
+            .list_notifications(
+                user,
+                &vam_orchestrator::notifications::ListFilter {
+                    open_only: true,
+                    kind: Some("access.requested".into()),
+                    ..Default::default()
+                },
+                None,
+                50,
+            )
+            .unwrap()
+    };
+    w.request(&w.alice, "req").await;
+    assert_eq!(open("carol").len(), 1);
+
+    // carol hands the agent to bob: her copy closes, bob is told, and the same list again (a
+    // new key, so not a replay) adds nothing.
+    for (who, key) in [(&w.carol, "swap"), (&w.admin, "again")] {
+        let (status, body) = w.put_admins(who, key, serde_json::json!(["bob"])).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    assert!(open("carol").is_empty());
+    assert_eq!(open("bob").len(), 1);
+    assert_eq!(open("bob")[0].count, 1);
+
+    // An empty list leaves the org admins to decide, and tells them.
+    let (status, body) = w.put_admins(&w.admin, "none", serde_json::json!([])).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(open("bob").is_empty());
+    assert_eq!(open("boss").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_admins_are_read_and_replaced_by_admins_only() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/admins-agent");
+    w.policy("org", "approval", "pol").await;
+    // A key with only catalog:write is no admin, nor is a member, nor a publisher.
+    let ckey = mint_user_key(
+        &w.store,
+        "ckey",
+        UserRole::Member,
+        &["runs:write", "catalog:write"],
+    );
+    mint_user_key(&w.store, "dora", UserRole::Member, MEMBER_SCOPES);
+    for (who, secret) in [
+        ("catalog key", &ckey),
+        ("member", &w.alice),
+        ("publisher", &w.publisher),
+    ] {
+        let (status, body) = w.get(&w.admins_uri(), secret).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{who}: {body}");
+        assert!(
+            body.contains(&format!(
+                "only an agent admin or org admin may see the admins of '{}'",
+                w.urn
+            )),
+            "{who}: {body}"
+        );
+        let (status, body) = w
+            .put_admins(secret, "k-nonadmin", serde_json::json!(["alice"]))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{who}: {body}");
+    }
+    // An admin and an org admin read the list.
+    for secret in [&w.carol, &w.admin] {
+        let (status, body) = w.get(&w.admins_uri(), secret).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // The fixture's release seeded `local` (A6); carol was added by herself.
+        let listed = json_of(&body);
+        let carol = listed["admins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["userId"] == "carol")
+            .expect("carol is listed");
+        assert_eq!(carol["username"], "carol");
+        assert_eq!(carol["addedBy"], "carol");
+        assert!(carol["addedAt"].is_string());
+        assert!(carol.get("deactivated").is_none());
+    }
+    // Bad lists are 400 whoever asks, and change nothing.
+    let many: Vec<String> = (0..51).map(|i| format!("u{i}")).collect();
+    for bad in [
+        serde_json::json!(many),
+        serde_json::json!(["bob", "bob"]),
+        serde_json::json!([1]),
+        serde_json::json!([""]),
+        serde_json::json!("bob"),
+        serde_json::json!(null),
+    ] {
+        let (status, body) = w.put_admins(&w.carol, "k-bad", bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    let (status, body) = w
+        .tcall(
+            "PUT",
+            &w.admins_uri(),
+            &w.carol,
+            "k-bad",
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // 50 ids is the limit (all must exist, so a list of unknown ids gets the id error, not the
+    // length one).
+    let fifty: Vec<String> = (0..50).map(|i| format!("u{i}")).collect();
+    let (status, body) = w
+        .put_admins(&w.carol, "k-50", serde_json::json!(fifty))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("cannot be an agent admin"), "{body}");
+    // Unknown id and a deactivated one are the same text.
+    let (status, unknown) = w
+        .put_admins(&w.carol, "k-un", serde_json::json!(["carol", "nobody"]))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{unknown}");
+    assert!(
+        unknown.contains("user 'nobody' cannot be an agent admin"),
+        "{unknown}"
+    );
+    let (status, _) = access_call(
+        &w.app,
+        "POST",
+        "/v1/users/dora/deactivate",
+        &w.admin,
+        Some("deact-dora"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, gone) = w
+        .put_admins(&w.carol, "k-gone", serde_json::json!(["carol", "dora"]))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{gone}");
+    assert_eq!(
+        unknown.replace("nobody", "<id>"),
+        gone.replace("dora", "<id>")
+    );
+    // The caller may remove themself; ids come back in the order they were added.
+    let (status, body) = w
+        .put_admins(&w.carol, "k-ok", serde_json::json!(["bob", "carol"]))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = w
+        .put_admins(&w.carol, "k-self", serde_json::json!(["bob"]))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let admins = json_of(&body);
+    assert_eq!(admins["admins"].as_array().unwrap().len(), 1);
+    assert_eq!(admins["admins"][0]["addedBy"], "carol");
+    assert_eq!(
+        w.get(&w.admins_uri(), &w.carol).await.0,
+        StatusCode::FORBIDDEN
+    );
+    // A kept admin who was deactivated since still round trips through GET and PUT.
+    let (status, body) = w
+        .put_admins(&w.admin, "k-dora", serde_json::json!(["bob"]))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    w.store.seed_first_admin(w.urn, "dora").unwrap();
+    let (status, body) = w.get(&w.admins_uri(), &w.admin).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed = json_of(&body);
+    let dora_row = listed["admins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["userId"] == "dora")
+        .expect("dora is listed");
+    assert_eq!(dora_row["deactivated"], true);
+    let ids: Vec<_> = listed["admins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["userId"].clone())
+        .collect();
+    let (status, body) = w
+        .put_admins(&w.admin, "k-round", serde_json::json!(ids))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_agents_answer_the_missing_text_on_admins_and_leave() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/hidden-admins-agent");
+    w.policy("restricted", "approval", "pol").await;
+    let missing_admins = format!("/v1/agents/{}/admins", missing_agent());
+    let get_missing = w.get(&missing_admins, &w.alice).await;
+    assert_eq!(get_missing.0, StatusCode::NOT_FOUND);
+    assert!(
+        get_missing.1.contains(&format!(
+            "agents '{}' not found in catalog",
+            missing_agent()
+        )),
+        "{}",
+        get_missing.1
+    );
+    let get_hidden = w.get(&w.admins_uri(), &w.alice).await;
+    assert_eq!(
+        masked(get_hidden, w.urn),
+        masked(get_missing, missing_agent())
+    );
+    let put_missing = timed_call(
+        &w.app,
+        "PUT",
+        &missing_admins,
+        &w.alice,
+        Some("k-pm"),
+        Some(serde_json::json!({ "userIds": ["alice"] })),
+    )
+    .await;
+    let put_hidden = w
+        .put_admins(&w.alice, "k-ph", serde_json::json!(["alice"]))
+        .await;
+    assert_eq!(put_hidden.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        masked(put_hidden, w.urn),
+        masked(put_missing, missing_agent())
+    );
+}
+
+fn token_of(kind: &str, parts: &[&str]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(format!("v1\n{kind}\n{}", parts.join("\n")))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn browse_and_the_lists_show_each_caller_only_what_they_may_see() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    // a < b < c by URN; b is restricted.
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/browse-a");
+    let b = "urn:vam:agent:local.vam.dev/acme/browse-b";
+    let c = "urn:vam:agent:local.vam.dev/acme/browse-c";
+    seed_released_agent(&w.store, b);
+    seed_released_agent(&w.store, c);
+    w.policy("org", "approval", "pol-a").await;
+    let put = |urn: &str, v: &str, m: &str, k: &str| {
+        let uri = format!("/v1/agents/{urn}/access-policy");
+        let body = serde_json::json!({ "visibility": v, "mode": m });
+        let (app, secret, k) = (w.app.clone(), w.admin.clone(), k.to_string());
+        async move { access_call(&app, "PUT", &uri, &secret, Some(&k), Some(body)).await }
+    };
+    assert_eq!(
+        put(b, "restricted", "approval", "pol-b").await.0,
+        StatusCode::OK
+    );
+    assert_eq!(put(c, "org", "open", "pol-c").await.0, StatusCode::OK);
+
+    let browse = |who: &str, query: &str| {
+        let uri = format!("/v1/catalog/agents{query}");
+        let who = who.to_string();
+        let app = w.app.clone();
+        async move { timed_call(&app, "GET", &uri, &who, None, None).await }
+    };
+    // A member sees a and c, never b; each row has its state and canAdmin.
+    let (status, body) = browse(&w.alice, "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page = json_of(&body);
+    let urns: Vec<_> = page["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["urn"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(urns, [w.urn, c]);
+    assert_eq!(page["pagination"]["nextPageToken"], "");
+    let a_row = &page["agents"][0];
+    assert_eq!(a_row["access"]["state"], "none");
+    assert!(a_row["access"].get("requestId").is_none());
+    assert_eq!(a_row["canAdmin"], false);
+    assert_eq!(a_row["visibility"], "org");
+    assert_eq!(a_row["mode"], "approval");
+    assert_eq!(a_row["displayName"], "Test Agent");
+    assert_eq!(a_row["catalogTier"], "user");
+    assert!(a_row["latestVersion"].is_string());
+    // The request, then a denial with its reason.
+    let acr = w.request(&w.alice, "k-req").await;
+    let (_, body) = browse(&w.alice, "").await;
+    assert_eq!(json_of(&body)["agents"][0]["access"]["state"], "pending");
+    assert_eq!(json_of(&body)["agents"][0]["access"]["requestId"], acr);
+    let deny = serde_json::json!({ "decision": "deny", "reason": "not now" });
+    assert_eq!(
+        w.decide(&w.admin, &acr, "k-deny", deny).await.0,
+        StatusCode::OK
+    );
+    let (_, body) = browse(&w.alice, "").await;
+    let row = &json_of(&body)["agents"][0];
+    assert_eq!(row["access"]["state"], "denied");
+    assert_eq!(row["access"]["reason"], "not now");
+    assert!(row["access"]["decidedAt"].is_string());
+    // `c` is open: usable only after an Add, but `none` before it.
+    assert_eq!(json_of(&body)["agents"][1]["access"]["state"], "none");
+    // An org admin lists all three with canAdmin; the agent's own admin sees a and c only.
+    let (_, body) = browse(&w.admin, "").await;
+    let all = json_of(&body);
+    assert_eq!(all["agents"].as_array().unwrap().len(), 3);
+    assert!(all["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["canAdmin"] == true));
+    let (_, body) = browse(&w.carol, "").await;
+    let carol = json_of(&body);
+    let rows = carol["agents"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["canAdmin"], true, "carol administers a");
+    assert_eq!(rows[1]["canAdmin"], false);
+
+    // Paging: one agent per page, none twice, the last page's token is "".
+    let mut seen = Vec::new();
+    let mut query = "?pageSize=1".to_string();
+    loop {
+        let (status, body) = browse(&w.admin, &query).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page = json_of(&body);
+        seen.push(page["agents"][0]["urn"].as_str().unwrap().to_string());
+        let next = page["pagination"]["nextPageToken"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        if next.is_empty() {
+            break;
+        }
+        query = format!("?pageSize=1&pageToken={next}");
+    }
+    assert_eq!(seen, [w.urn, b, c]);
+    // A token naming the hidden URN, or a missing one, lists the same rows as one naming the
+    // visible URN before it; a token of another list, a two-part token and junk are 400.
+    let after_a = browse(
+        &w.alice,
+        &format!("?pageToken={}", token_of("catalog-agents", &[w.urn])),
+    )
+    .await;
+    let after_hidden = browse(
+        &w.alice,
+        &format!("?pageToken={}", token_of("catalog-agents", &[b])),
+    )
+    .await;
+    let after_missing = browse(
+        &w.alice,
+        &format!(
+            "?pageToken={}",
+            token_of(
+                "catalog-agents",
+                &["urn:vam:agent:local.vam.dev/acme/browse-bb"]
+            )
+        ),
+    )
+    .await;
+    assert_eq!(after_a.0, StatusCode::OK);
+    assert_eq!(after_a, after_hidden);
+    assert_eq!(after_hidden, after_missing);
+    for bad in [
+        format!("?pageToken={}", token_of("my-access", &["1", "acr_x"])),
+        format!("?pageToken={}", token_of("my-access", &[w.urn])),
+        format!("?pageToken={}", token_of("catalog-agents", &["a", "b"])),
+        "?pageToken=bogus".to_string(),
+        "?pageSize=-1".to_string(),
+    ] {
+        let (status, body) = browse(&w.alice, &bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+
+    // My requests: newest first, both rows, the name only while the agent is not hidden.
+    let _ = w.request(&w.alice, "k-req-2").await;
+    let (status, body) = w.get("/v1/me/access", &w.alice).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mine = json_of(&body);
+    assert_eq!(mine["requests"].as_array().unwrap().len(), 2);
+    assert_eq!(mine["requests"][0]["agentDisplayName"], "Test Agent");
+    assert_eq!(mine["pagination"]["nextPageToken"], "");
+    let (_, body) = w.get("/v1/me/access?pageSize=1", &w.alice).await;
+    let first = json_of(&body);
+    let next = first["pagination"]["nextPageToken"].as_str().unwrap();
+    assert!(!next.is_empty());
+    let (status, body) = w
+        .get(
+            &format!("/v1/me/access?pageSize=1&pageToken={next}"),
+            &w.alice,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(
+        json_of(&body)["requests"][0]["requestId"],
+        first["requests"][0]["requestId"]
+    );
+    let (status, _) = w
+        .get(
+            &format!(
+                "/v1/me/access?pageToken={}",
+                token_of("catalog-agents", &[w.urn])
+            ),
+            &w.alice,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    w.policy("restricted", "approval", "pol-a-r").await;
+    let (_, body) = w.get("/v1/me/access", &w.alice).await;
+    let mine = json_of(&body);
+    assert_eq!(
+        mine["requests"].as_array().unwrap().len(),
+        2,
+        "her own rows stay listed"
+    );
+    assert!(mine["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r.get("agentDisplayName").is_none()));
+    assert!(mine["requests"][0]["requestId"].is_string());
+    w.policy("org", "approval", "pol-a-back").await;
+
+    // The queue: a member sees nothing, the agent's admin sees its rows, an org admin all.
+    let (status, body) = w.get("/v1/access-requests", &w.bob).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json_of(&body)["requests"], serde_json::json!([]));
+    let (_, body) = w
+        .get("/v1/access-requests?state=pending&adminOf=me", &w.carol)
+        .await;
+    let queue = json_of(&body);
+    assert_eq!(
+        queue["requests"].as_array().unwrap().len(),
+        1,
+        "one pending row"
+    );
+    assert_eq!(queue["requests"][0]["username"], "alice");
+    assert_eq!(queue["requests"][0]["agentDisplayName"], "Test Agent");
+    let (_, body) = w.get("/v1/access-requests?state=all", &w.carol).await;
+    assert_eq!(json_of(&body)["requests"].as_array().unwrap().len(), 2);
+    let (_, body) = w.get("/v1/access-requests?state=denied", &w.admin).await;
+    assert_eq!(json_of(&body)["requests"].as_array().unwrap().len(), 1);
+    let (_, body) = w
+        .get("/v1/access-requests?state=pending", &w.publisher)
+        .await;
+    assert_eq!(json_of(&body)["requests"], serde_json::json!([]));
+    for bad in ["?state=bogus", "?adminOf=all", "?adminOf="] {
+        let (status, body) = w.get(&format!("/v1/access-requests{bad}"), &w.carol).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+}
+
+// ---- Agent access, Phase 5 wave 2: a hidden agent answers like a missing one on write routes ----
+
+/// The answers of the write routes for `urn` (release, release suggestion, delete), the URN
+/// masked so a hidden agent's answers and a missing URN's compare byte for byte.
+async fn write_route_answers(
+    w: &AccessWorld,
+    who: &str,
+    urn: &str,
+    tag: &str,
+) -> Vec<(&'static str, (StatusCode, String))> {
+    let release = access_call(
+        &w.app,
+        "POST",
+        &format!("/v1/agents/{urn}/release"),
+        who,
+        Some(&format!("rel-{tag}")),
+        Some(serde_json::json!({ "version": { "major": 1, "minor": 1, "patch": 0 } })),
+    )
+    .await;
+    let suggestion = access_call(
+        &w.app,
+        "GET",
+        &format!("/v1/agents/{urn}/release-suggestion"),
+        who,
+        None,
+        None,
+    )
+    .await;
+    let delete = access_call(
+        &w.app,
+        "DELETE",
+        &format!("/v1/agents/{urn}"),
+        who,
+        Some(&format!("del-{tag}")),
+        None,
+    )
+    .await;
+    vec![
+        ("release", masked(release, urn)),
+        ("suggestion", masked(suggestion, urn)),
+        ("delete", masked(delete, urn)),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_agent_answers_the_write_routes_like_a_missing_urn() {
+    let _process = PROCESS_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _state = isolate_state();
+    let w = access_world("urn:vam:agent:local.vam.dev/acme/hidden-writes");
+    let missing = "urn:vam:agent:local.vam.dev/acme/no-such-agent";
+
+    // Unrestricted: a publisher who is not the owner is refused as the owner's (403), as today.
+    let open = write_route_answers(&w, &w.publisher, w.urn, "open").await;
+    assert_eq!(open[0].1 .0, StatusCode::FORBIDDEN, "{:?}", open[0]);
+    assert!(
+        open[0].1 .1.contains("only the artifact owner"),
+        "{:?}",
+        open[0]
+    );
+
+    // Restricted: the same publisher gets the answers a missing URN gets, route by route.
+    w.policy("restricted", "approval", "pol-r").await;
+    let hidden = write_route_answers(&w, &w.publisher, w.urn, "hid").await;
+    let gone = write_route_answers(&w, &w.publisher, missing, "gone").await;
+    assert_eq!(hidden, gone);
+    assert_eq!(hidden[0].1 .0, StatusCode::NOT_FOUND, "release: {hidden:?}");
+    assert_eq!(
+        hidden[1].1 .0,
+        StatusCode::NOT_FOUND,
+        "suggestion: {hidden:?}"
+    );
+    assert_eq!(
+        hidden[2].1 .0,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "delete: {hidden:?}"
+    );
+
+    // A caller without `publish:grant` is refused for that first, hidden or missing.
+    for urn in [w.urn, missing] {
+        let (status, body) = access_call(
+            &w.app,
+            "POST",
+            &format!("/v1/agents/{urn}/release"),
+            &w.alice,
+            Some("rel-member"),
+            Some(serde_json::json!({ "version": { "major": 1, "minor": 1, "patch": 0 } })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body.contains("publish:grant") || body.contains("catalog:write"),
+            "{body}"
+        );
+    }
+
+    // The PUT on a URN another user owns stays a 403 (owner answer Q2): the caller already
+    // holds `catalog:write`, and only the installed case is made to answer as a missing URN.
+    let spec = serde_json::json!({ "spec": {
+        "resourceId": { "urn": w.urn }, "displayName": "x", "description": "x",
+        "role": "Tester", "systemInstructions": "x" } });
+    let (status, body) = access_call(
+        &w.app,
+        "PUT",
+        "/v1/agents",
+        &w.publisher,
+        Some("put-foreign"),
+        Some(spec),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // An org admin is never hidden: the owner answer of a visible agent is unchanged.
+    let admin = write_route_answers(&w, &w.admin, w.urn, "adm").await;
+    assert_ne!(admin[0].1 .0, StatusCode::NOT_FOUND, "{admin:?}");
+    assert_eq!(admin[2].1 .0, StatusCode::METHOD_NOT_ALLOWED, "{admin:?}");
+
+    // Visible (org, approval): release is the owner's 403, the suggestion asks for access.
+    w.policy("org", "approval", "pol-v").await;
+    let visible = write_route_answers(&w, &w.publisher, w.urn, "vis").await;
+    assert_eq!(visible[0].1 .0, StatusCode::FORBIDDEN, "{visible:?}");
+    assert!(
+        visible[0].1 .1.contains("only the artifact owner"),
+        "{visible:?}"
+    );
+    assert_eq!(visible[1].1 .0, StatusCode::FORBIDDEN, "{visible:?}");
+    assert!(
+        visible[1].1 .1.contains("agent_access_required:"),
+        "{visible:?}"
+    );
+    assert_eq!(
+        visible[2].1 .0,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "{visible:?}"
+    );
+}

@@ -77,6 +77,8 @@ something need an `Idempotency-Key` header (`require_idempotency_key`, `api/auth
 cross-user read is a 404, the same as a missing row. See
 [Users, keys and ownership](/orchestrator/user-isolation/).
 
+The six writes of [Agent access](/orchestrator/agent-access/) replay: the same `Idempotency-Key` and the same request from the same user return the first answer byte for byte and change nothing again; the same key with another request is a 409. The key is 1 to 255 printable characters and is kept for 24 hours.
+
 ## Rate limits
 
 Limits are on by default (`api/rate_limit.rs:60-72`):

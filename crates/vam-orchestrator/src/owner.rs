@@ -84,6 +84,12 @@ const OWNER_STAMP_TABLES: &[&str] = &[
     "skill_packages",
 ];
 
+/// The owner lookup's answer for a URN with no row. A Hidden agent answers the release
+/// suggestion route with exactly this (agent access), so both share this constructor.
+pub(crate) fn catalog_owner_not_found(label: &str, urn: &str) -> OrchestratorError {
+    OrchestratorError::NotFound(format!("{label} '{urn}' not found"))
+}
+
 impl SqliteWorkflowStore {
     /// Add `owner_user_id` (FK → `users`) on control-plane rows; backfill
     /// remaining NULLs. Idempotent. Session/run list/get are owner-scoped;
@@ -380,7 +386,7 @@ impl SqliteWorkflowStore {
             .query_row(&sql, [urn], |row| row.get::<_, Option<String>>(0))
             .map_err(|e| {
                 if e == rusqlite::Error::QueryReturnedNoRows {
-                    OrchestratorError::NotFound(format!("{label} '{urn}' not found"))
+                    catalog_owner_not_found(label, urn)
                 } else {
                     OrchestratorError::Database(e)
                 }

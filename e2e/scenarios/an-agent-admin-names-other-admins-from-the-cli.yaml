@@ -1,0 +1,33 @@
+id: an-agent-admin-names-other-admins-from-the-cli
+title: An agent admin names other admins from the CLI
+description: >
+  Admins are listed, added by user id or username, added by an org admin and removed by one another. A name nobody has is refused with a hint, a user who is no longer an admin cannot list them, and removing someone twice changes nothing.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - { piece: org-member-email, as: member2 }
+  - agent-inline-probe
+when:
+  - put-draft: { piece: agent-inline-probe, as: pub, status: 200 }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 200, body: { version: { major: 1, minor: 0, patch: 0 } } }
+  - cli: { as: pub, args: [agent, admins, ls, "{{urn:agent-inline-probe:pub}}"], root: { from: version/empty }, exit: ok, contains: ["{pub.username}"] }
+  - cli: { as: pub, args: [agent, admins, add, "{{urn:agent-inline-probe:pub}}", "{member2.userId}"], root: { from: version/empty }, exit: ok, contains: ["{member2.username}"] }
+  - cli: { as: pub, args: [agent, admins, add, "{{urn:agent-inline-probe:pub}}", nobody-e2e], root: { from: version/empty }, exitCode: 4, contains: ["user id"] }
+  - cli: { as: admin, args: [agent, admins, add, "{{urn:agent-inline-probe:pub}}", "{member.username}"], root: { from: version/empty }, exit: ok }
+  - cli: { as: member2, args: [agent, admins, rm, "{{urn:agent-inline-probe:pub}}", "{pub.username}"], root: { from: version/empty }, exit: ok }
+then:
+  - cli: { as: member, args: [--json, agent, admins, ls, "{{urn:agent-inline-probe:pub}}"], root: { from: version/empty }, exit: ok, contains: ["{member.userId}", "{member2.userId}"], absent: ["{pub.username}"] }
+  - cli: { as: pub, args: [agent, admins, ls, "{{urn:agent-inline-probe:pub}}"], root: { from: version/empty }, exitCode: 3, contains: ["only an agent admin"] }
+  - cli: { as: member, args: [agent, admins, rm, "{{urn:agent-inline-probe:pub}}", "{member2.userId}", --idempotency-key, r1], root: { from: version/empty }, exit: ok }
+  - cli: { as: member, args: [agent, admins, rm, "{{urn:agent-inline-probe:pub}}", "{member2.userId}", --idempotency-key, r1], root: { from: version/empty }, exit: ok }
+guards:
+  - vam:crates/vam-cli/src/main.rs
+  - vam:crates/vam-cli/src/cmd/catalog.rs
+  - vam:crates/vam-cli/src/client.rs
+  - vam:crates/vam-cli/src/http_error.rs
+  - vam:crates/vam-cli/src/cmd/admins.rs
+  - vam:crates/vam-cli/src/cmd/access.rs
+status: active

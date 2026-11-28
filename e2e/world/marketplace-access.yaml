@@ -1,0 +1,7 @@
+piece: marketplace-access
+kind: git-marketplace
+# An admin-added marketplace whose listings carry `access.default`: open-notes, quiet-notes, kept-notes.
+fixture: marketplace-access
+url: https://access.community.example/vam-marketplace
+publisherDomain: access.community.example
+tags: [open-notes-v1.0.0, quiet-notes-v1.0.0, kept-notes-v1.0.0]

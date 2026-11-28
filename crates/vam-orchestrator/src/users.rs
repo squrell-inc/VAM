@@ -1047,20 +1047,7 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
-        connection
-            .query_row(
-                "SELECT user_id, username, tenant_id, created_at, password_hash, password_updated_at, role, deactivated_at, namespace
-                 FROM users WHERE user_id = ?1",
-                [user_id],
-                parse_user_row,
-            )
-            .map_err(|e| {
-                if e == rusqlite::Error::QueryReturnedNoRows {
-                    OrchestratorError::NotFound(format!("user '{}' not found", user_id))
-                } else {
-                    OrchestratorError::Database(e)
-                }
-            })
+        get_user_on(&connection, user_id)
     }
 
     /// Look a user up by login name, ignoring ASCII letter case.
@@ -1454,6 +1441,27 @@ pub fn validate_username(value: &str) -> Result<&str, OrchestratorError> {
         )));
     }
     Ok(trimmed)
+}
+
+/// [`SqliteWorkflowStore::get_user`] on a connection the caller already holds.
+pub(crate) fn get_user_on(
+    connection: &rusqlite::Connection,
+    user_id: &str,
+) -> Result<UserRecord, OrchestratorError> {
+    connection
+        .query_row(
+            "SELECT user_id, username, tenant_id, created_at, password_hash, password_updated_at, role, deactivated_at, namespace
+             FROM users WHERE user_id = ?1",
+            [user_id],
+            parse_user_row,
+        )
+        .map_err(|e| {
+            if e == rusqlite::Error::QueryReturnedNoRows {
+                OrchestratorError::NotFound(format!("user '{}' not found", user_id))
+            } else {
+                OrchestratorError::Database(e)
+            }
+        })
 }
 
 fn unix_timestamp() -> i64 {

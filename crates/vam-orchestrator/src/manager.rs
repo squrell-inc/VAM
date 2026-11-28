@@ -1233,7 +1233,7 @@ async fn handle_create_session(
                 });
 
             let mut agent = match &run_spec {
-                Some(spec) => crate::catalog_resolve::load_agent_for_run(
+                Some(spec) => crate::catalog_resolve::load_admitted_agent(
                     &store,
                     spec,
                     &agent_urn,
@@ -1241,7 +1241,7 @@ async fn handle_create_session(
                     false,
                 )?,
                 None => store
-                    .get_agent_visible(&agent_urn, &session_owner, false)
+                    .get_agent_admitted(&agent_urn, &session_owner, false)
                     .or_else(|_| store.get_agent(&agent_urn))?,
             };
             if let Some(spec) = &run_spec {

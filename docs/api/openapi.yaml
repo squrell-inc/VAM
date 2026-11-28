@@ -1780,6 +1780,414 @@ paths:
               schema:
                 $ref: "#/components/schemas/GetAgentResponse"
 
+  /v1/catalog/agents:
+    get:
+      summary: Browse the agents the caller may ask for or use
+      description: |
+        Released agents only, sorted by URN, one row per agent (its latest released version).
+        Needs `catalog:read`. An agent the caller cannot see (restricted, with no approved row and
+        no admin right) is left out on every page, so browsing never names it. `access.state` is
+        `none`, `pending`, `approved`, `denied` or `revoked`; an agent usable for any reason shows
+        `approved`, and `withdrawn` or no row shows `none`. `access.requestId`, `decidedAt` and
+        `reason` appear only when a row backs the state. `canAdmin` is always present. A token
+        from another list answers 400.
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListCatalogAgentsResponse"
+        "400":
+          description: A `pageToken` that is not a token of this list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The key lacks `catalog:read`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/agents/{urn}/access-policy:
+    put:
+      summary: Set who may see and use an agent
+      description: |
+        Needs an admin of the agent (an `agent_admins` row) or an org admin (`users:admin`).
+        `catalog:write`, `publish:grant` and `keys:admin` alone do not make an admin. The policy is
+        `(visibility, mode)`: `org` or `restricted`; `everyone`, `open` or `approval`.
+        `restricted` with `everyone` answers 400. Replays under the same `Idempotency-Key`
+        (see the 409 below). A hidden agent answers 404 with the text of a missing URN.
+      parameters:
+        - $ref: "#/components/parameters/AgentUrnPath"
+        - $ref: "#/components/parameters/ReplayKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutAgentAccessPolicyRequest"
+            example:
+              visibility: org
+              mode: approval
+      responses:
+        "200":
+          description: The policy now in force.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PutAgentAccessPolicyResponse"
+        "400":
+          description: A bad body, or a bad `Idempotency-Key`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller is not an admin of the agent and not an org admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          $ref: "#/components/responses/AgentNotFound"
+        "409":
+          $ref: "#/components/responses/ReplayConflict"
+
+  /v1/agents/{urn}/access:
+    post:
+      summary: Add an agent, or request access to it
+      description: |
+        Needs `catalog:read`. With mode `open` the access is granted at once (200, `approved`);
+        with `approval` a request is raised (202, `pending`) and the agent's admins are notified
+        (`access.requested`; the member's `message` is never copied into the notification).
+        A live row already (pending or approved) and an agent already usable answer 409. A hidden
+        agent answers 404 with the text of a missing URN. Replays under the same
+        `Idempotency-Key`: the retry returns the first answer and raises no second notification.
+      parameters:
+        - $ref: "#/components/parameters/AgentUrnPath"
+        - $ref: "#/components/parameters/ReplayKeyHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestAgentAccessRequest"
+      responses:
+        "200":
+          description: Granted at once (mode `open`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestAgentAccessResponse"
+        "202":
+          description: Pending until an admin decides (mode `approval`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestAgentAccessResponse"
+        "400":
+          description: A `message` over 1000 characters, or a bad `Idempotency-Key`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The key lacks `catalog:read`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          $ref: "#/components/responses/AgentNotFound"
+        "409":
+          description: |
+            The agent is already usable or already has a pending request, or the
+            `Idempotency-Key` was used for a different request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    delete:
+      summary: Withdraw a pending request or leave an approved agent
+      description: |
+        Ends the caller's own live row (`withdrawn`); 204 with no body. Keyed on the caller's own
+        row, so it works even after the agent turned restricted. Every admin's open
+        `access.requested` notification closes with reason `withdrawn`. Leaving takes effect at the
+        next admission; a session already admitted keeps running. With no live row the answer is
+        404, `you have no access request for agent '<urn>'`, or the missing-URN text for a missing
+        or hidden agent.
+      parameters:
+        - $ref: "#/components/parameters/AgentUrnPath"
+        - $ref: "#/components/parameters/ReplayKeyHeader"
+      responses:
+        "204":
+          description: Withdrawn or left. No body.
+        "403":
+          description: The key lacks `catalog:read`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: |
+            No live row, or a missing or hidden agent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          $ref: "#/components/responses/ReplayConflict"
+
+  /v1/agents/{urn}/access/{userId}/revoke:
+    post:
+      summary: Revoke a member's approved access
+      description: |
+        Needs an admin of the agent or an org admin. `reason` is required. The member is told
+        (`access.decided`, `revoked`). It takes effect at the next admission; a session admitted
+        before keeps running. 404 when the user has no approved access.
+      parameters:
+        - $ref: "#/components/parameters/AgentUrnPath"
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/ReplayKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeAgentAccessRequest"
+      responses:
+        "200":
+          description: The request, now `revoked`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokeAgentAccessResponse"
+        "400":
+          description: A missing or over-long `reason`, or a bad `Idempotency-Key`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller is not an admin of the agent and not an org admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: |
+            A missing or hidden agent (`agents '<urn>' not found in catalog`), or the user has no
+            approved access (`user '<id>' has no approved access to agent '<urn>'`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          $ref: "#/components/responses/ReplayConflict"
+
+  /v1/agents/{urn}/admins:
+    get:
+      summary: List the admins of an agent
+      description: |
+        Needs an admin of the agent or an org admin (403 for anyone else). A hidden agent answers
+        404 with the text of a missing URN. Ordered by `addedAt`. `deactivated` appears only when
+        true.
+      parameters:
+        - $ref: "#/components/parameters/AgentUrnPath"
+      responses:
+        "200":
+          description: The admins.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListAgentAdminsResponse"
+        "403":
+          description: |
+            The key lacks `catalog:read`, or the caller is not an admin of the agent and not an
+            org admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          $ref: "#/components/responses/AgentNotFound"
+    put:
+      summary: Replace the admins of an agent
+      description: |
+        Needs an admin of the agent or an org admin. `userIds` is the whole new list: 0 to 50
+        distinct ids; each id new to the list must be an existing, active user (400 `user '<id>'
+        cannot be an agent admin`, the same text for unknown and deactivated). An empty list
+        leaves org admins deciding. Open `access.requested` notifications of the pending requests
+        follow the new list: a removed admin's copy closes (`expired`), a new admin gets one, and
+        with no admin left the org admins do. Answers the `GET` shape. The last write wins; read, change,
+        write is not atomic across two editors.
+      parameters:
+        - $ref: "#/components/parameters/AgentUrnPath"
+        - $ref: "#/components/parameters/ReplayKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutAgentAdminsRequest"
+      responses:
+        "200":
+          description: The admins now in force.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListAgentAdminsResponse"
+        "400":
+          description: A bad body, an id that cannot be an admin, or a bad `Idempotency-Key`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The caller is not an admin of the agent and not an org admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          $ref: "#/components/responses/AgentNotFound"
+        "409":
+          $ref: "#/components/responses/ReplayConflict"
+
+  /v1/me/access:
+    get:
+      summary: The caller's own access requests
+      description: |
+        Every row of the caller, all states, newest first. `agentDisplayName` is left out when the
+        agent is hidden from the caller now.
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListAccessRequestsResponse"
+        "400":
+          description: A `pageToken` that is not a token of this list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The key lacks `catalog:read`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/access-requests:
+    get:
+      summary: Access requests for the agents the caller administers
+      description: |
+        Every row for an org admin, else the rows of the agents the caller has an admin row for.
+        A caller who administers nothing gets an empty list (200). Newest first.
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, approved, denied, revoked, withdrawn, all]
+            default: pending
+        - name: adminOf
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [me]
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListAccessRequestsResponse"
+        "400":
+          description: A bad `state`, `adminOf` or `pageToken`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: The key lacks `catalog:read`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/access-requests/{id}/decide:
+    post:
+      summary: Approve or deny an access request
+      description: |
+        Needs an admin of the request's agent or an org admin. Anyone else, and an unknown id, get
+        the same 404, so ids reveal nothing about hidden agents. `reason` is required on deny.
+        409 when the request is not pending. Deciding closes every admin's open `access.requested`
+        notification (`acted`) and tells the member (`access.decided`).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "acr_01"
+        - $ref: "#/components/parameters/ReplayKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DecideAccessRequestRequest"
+            example:
+              decision: deny
+              reason: not now
+      responses:
+        "200":
+          description: The request, decided.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecideAccessRequestResponse"
+        "400":
+          description: A bad `decision`, a missing `reason` on deny, or a bad `Idempotency-Key`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: No such request, or the caller cannot decide it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: |
+            The request is not pending (decided, or withdrawn by the member), or the
+            `Idempotency-Key` was used for a different request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /v1/agents/{urn}/permissions:
     get:
       summary: Get an agent draft's permissions
@@ -4296,6 +4704,24 @@ components:
       description: "Supply token with 'Authorization: Bearer <api_key_or_session_token>'"
 
   responses:
+    AgentNotFound:
+      description: |
+        No such agent, or an agent hidden from the caller. Both answer the same text,
+        `agents '<urn>' not found in catalog`, byte for byte.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    ReplayConflict:
+      description: The `Idempotency-Key` was already used for a different request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+          example:
+            code: Conflict
+            message: Idempotency-Key was already used for a different request
+            retryable: false
     RateLimited:
       description: |
         Rate limit exceeded. `Retry-After` is the wait in seconds and `X-VAM-Rate-Limited-Reason`
@@ -4341,6 +4767,26 @@ components:
       schema:
         type: string
       description: The opaque `pagination.nextPageToken` of the previous page.
+    AgentUrnPath:
+      name: urn
+      in: path
+      required: true
+      schema:
+        type: string
+      description: The agent URN, percent-encoded.
+      example: "urn:vam:agent:local.vam.dev/acme/sql-developer"
+    ReplayKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+      description: |
+        1 to 255 characters from 0x21 to 0x7E. The same key and the same request from the same
+        user return the first answer byte for byte, with no second side effect; the same key with
+        another request answers 409. Keys are kept for 24 hours and never cross users.
     IdempotencyKeyHeader:
       name: Idempotency-Key
       in: header
@@ -4446,6 +4892,14 @@ components:
         marketplaceDomain:
           type: string
           description: Squrell marketplace domain (`VAMD_MARKETPLACE_DOMAIN`). Omitted when none is set (proto3 JSON drops empty strings).
+        adminOfAgents:
+          type: array
+          items:
+            type: string
+          description: URNs of the agents the caller administers by an explicit admin row (never by `users:admin`) that still have a released version, sorted. Omitted when empty.
+        pendingAccessRequests:
+          type: integer
+          description: Pending access requests the caller can decide (every one for an org admin). Omitted when zero.
 
     NodeStatus:
       type: object
@@ -7088,6 +7542,21 @@ components:
                 description: The commit the tag is pinned to.
               requiresNode:
                 type: string
+              access:
+                type: object
+                description: The access the listing's agents start with on a first install (the index's `access`). Absent when the index sets none, which means org visibility with approval.
+                required: [default]
+                properties:
+                  default:
+                    type: object
+                    required: [visibility, mode]
+                    properties:
+                      visibility:
+                        type: string
+                        enum: [org, restricted]
+                      mode:
+                        type: string
+                        enum: [everyone, open, approval]
               connector:
                 type: string
               installed:
@@ -7450,3 +7919,169 @@ components:
         retryable:
           type: boolean
           example: false
+
+    AgentAccessPolicy:
+      type: object
+      properties:
+        urn: { type: string }
+        visibility: { type: string, enum: [org, restricted] }
+        mode: { type: string, enum: [everyone, open, approval] }
+        updatedBy: { type: string }
+        updatedAt: { type: string, format: date-time }
+
+    PutAgentAccessPolicyRequest:
+      type: object
+      required: [visibility, mode]
+      properties:
+        visibility: { type: string, enum: [org, restricted] }
+        mode:
+          type: string
+          enum: [everyone, open, approval]
+          description: "`restricted` cannot be `everyone`."
+
+    PutAgentAccessPolicyResponse:
+      type: object
+      properties:
+        policy:
+          $ref: "#/components/schemas/AgentAccessPolicy"
+
+    AccessRequest:
+      type: object
+      properties:
+        requestId: { type: string, example: "acr_01" }
+        urn: { type: string }
+        agentDisplayName:
+          type: string
+          description: Left out when the agent is hidden from the reader now.
+        userId: { type: string }
+        username: { type: string }
+        state:
+          type: string
+          enum: [pending, approved, denied, revoked, withdrawn]
+        message:
+          type: string
+          description: The member's own words. Shown on the request, never copied into a notification.
+        requestedAt: { type: string, format: date-time }
+        decidedBy: { type: string }
+        decidedAt: { type: string, format: date-time }
+        reason: { type: string }
+
+    AccessState:
+      type: object
+      properties:
+        state:
+          type: string
+          enum: [none, pending, approved, denied, revoked]
+        requestId:
+          type: string
+          description: Only when a row backs the state.
+        decidedAt: { type: string, format: date-time }
+        reason: { type: string }
+
+    CatalogAgent:
+      type: object
+      properties:
+        urn: { type: string }
+        displayName: { type: string }
+        description: { type: string }
+        catalogTier: { type: string, enum: [user, platform, marketplace] }
+        latestVersion: { type: string, example: "1.2.0" }
+        visibility: { type: string, enum: [org, restricted] }
+        mode: { type: string, enum: [everyone, open, approval] }
+        access:
+          $ref: "#/components/schemas/AccessState"
+        canAdmin:
+          type: boolean
+          description: Always present.
+
+    ListCatalogAgentsResponse:
+      type: object
+      properties:
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogAgent"
+        pagination:
+          $ref: "#/components/schemas/PaginationResponse"
+
+    RequestAgentAccessRequest:
+      type: object
+      properties:
+        message:
+          type: string
+          maxLength: 1000
+
+    RequestAgentAccessResponse:
+      type: object
+      properties:
+        request:
+          $ref: "#/components/schemas/AccessRequest"
+
+    DecideAccessRequestRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [approve, deny] }
+        reason:
+          type: string
+          maxLength: 1000
+          description: Required on deny.
+
+    DecideAccessRequestResponse:
+      type: object
+      properties:
+        request:
+          $ref: "#/components/schemas/AccessRequest"
+
+    RevokeAgentAccessRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          maxLength: 1000
+
+    RevokeAgentAccessResponse:
+      type: object
+      properties:
+        request:
+          $ref: "#/components/schemas/AccessRequest"
+
+    ListAccessRequestsResponse:
+      type: object
+      properties:
+        requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccessRequest"
+        pagination:
+          $ref: "#/components/schemas/PaginationResponse"
+
+    AgentAdmin:
+      type: object
+      properties:
+        userId: { type: string }
+        username: { type: string }
+        addedBy: { type: string }
+        addedAt: { type: string, format: date-time }
+        deactivated:
+          type: boolean
+          description: Present only when true.
+
+    ListAgentAdminsResponse:
+      type: object
+      properties:
+        admins:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentAdmin"
+
+    PutAgentAdminsRequest:
+      type: object
+      required: [userIds]
+      properties:
+        userIds:
+          type: array
+          maxItems: 50
+          items: { type: string }
+          description: The whole new list; 0 to 50 distinct, active user ids.

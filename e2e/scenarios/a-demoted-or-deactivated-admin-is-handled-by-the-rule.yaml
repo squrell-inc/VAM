@@ -1,0 +1,33 @@
+id: a-demoted-or-deactivated-admin-is-handled-by-the-rule
+title: A demoted admin still decides, a deactivated one is marked in the list, and requests then reach the org admins
+description: >
+  The publisher who released an agent is its admin. After the org demotes them to member they still decide a request for it but can no longer release a version. After the org deactivates them the admins list marks them deactivated, and a new request is delivered to the org admins.
+tags: [members, permissions, notifications]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - { piece: org-member-email, as: m2 }
+  - agent-inline-probe
+when:
+  - put-draft: { piece: agent-inline-probe, as: pub, status: 200 }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 200, body: { version: { major: 1, minor: 0, patch: 0 } } }
+  - identity-request: { as: pub, credential: key, method: put, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - set-role: { as: pub, role: member }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr } }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 200, body: { decision: approve } }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 403, contains: "catalog:write", body: { version: { major: 1, minor: 1, patch: 0 } } }
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/users/{pub.userId}/deactivate", status: 200 }
+  - identity-request: { as: admin, credential: key, method: get, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/admins", status: 200, fields: { admins.0.deactivated: true } }
+  - identity-request: { as: m2, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr2 } }
+then:
+  - identity-request: { as: admin, credential: key, path: "/v1/notifications?kind=access.requested&state=open", status: 200, contains: "{{acr2}}" }
+  # cleanup: withdraw the open request so it does not stay in the shared org admin's inbox for later scenarios
+  - identity-request: { as: m2, credential: key, method: delete, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 204 }
+guards:
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/agent_access.rs
+  - vam:crates/vam-orchestrator/src/notifications.rs
+  - vam:crates/vam-orchestrator/src/api/users_admin.rs
+status: active

@@ -160,8 +160,18 @@ fn host_fields(r: &crate::notifications::Row) -> Value {
 }
 
 fn cli_line(r: &crate::notifications::Row) -> String {
-    match (&r.approval_id, r.is_decision()) {
-        (Some(approval), true) => format!("vam approve decide {approval}"),
+    // An access request is decided by its request id (the action's target), not an approval.
+    let request_id = (r.kind == "access.requested")
+        .then(|| serde_json::from_str::<Value>(&r.action).ok())
+        .flatten()
+        .and_then(|a| {
+            a.pointer("/target/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    match (&r.approval_id, r.is_decision(), request_id) {
+        (Some(approval), true, _) => format!("vam approve decide {approval}"),
+        (_, _, Some(request_id)) => format!("vam access approve {request_id}"),
         _ => format!("vam notifications show {}", r.id),
     }
 }
@@ -277,6 +287,39 @@ mod tests {
             )
             .unwrap();
         assert!(read.is_none() && shown.is_none());
+    }
+
+    #[test]
+    fn an_access_request_names_the_command_that_approves_it_by_request_id() {
+        let (store, run) = setup();
+        {
+            let c = store.connection.lock().unwrap();
+            let n = NewNotification {
+                user_id: crate::users::LOCAL_USER_ID.into(),
+                kind: Kind::AccessRequested,
+                severity: Severity::Action,
+                subject_key: "acr_7".into(),
+                run_id: None,
+                space_id: None,
+                thread_id: None,
+                approval_id: None,
+                grant_id: None,
+                receipt_digest: None,
+                agent_urn: "urn:vam:agent:local.vam.dev/acme/gated".into(),
+                agent_label: "gated".into(),
+                via: None,
+                title: "bob asks to use gated".into(),
+                body: "Open the request to approve or deny it.".into(),
+                action: json!({"verb":"decide","target":{"kind":"access_request","id":"acr_7"}}),
+            };
+            crate::notifications::record(&c, &n).expect("record");
+        }
+        let text = super::run(&store, &run, &args(json!({}))).unwrap();
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["notifications"][0]["action"]["cli"],
+            "vam access approve acr_7"
+        );
     }
 
     #[test]

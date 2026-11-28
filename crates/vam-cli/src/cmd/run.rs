@@ -2105,7 +2105,37 @@ fn string_value(text: &str) -> prost_types::Value {
 async fn resolve_short_name(c: &Client, name: &str) -> Result<String> {
     let body = c.get("/v1/agents").await?;
     let listed: ListAgentsResponse = client::parse_json("vam.v1.ListAgentsResponse", &body)?;
-    resolve_installed_agent(name, &installed_agents(&listed))
+    match resolve_installed_agent(name, &installed_agents(&listed)) {
+        Err(e) if output::classify(&e).0 == ExitCode::NotFound => {
+            // A visible agent the caller may not run yet is not "not installed": point at the
+            // request. A hidden or missing one keeps the not-found text above.
+            let rows = super::access::browse_all(c).await.unwrap_or_default();
+            match super::access::urns_named(&rows, name).as_slice() {
+                [urn] => {
+                    let pending = rows.iter().any(|r| {
+                        r.get("urn").and_then(|u| u.as_str()) == Some(urn.as_str())
+                            && r.pointer("/access/state").and_then(|x| x.as_str())
+                                == Some("pending")
+                    });
+                    let fix = if pending {
+                        "vam access mine".to_string()
+                    } else {
+                        format!("vam agent request {}", super::access::clean(urn))
+                    };
+                    Err(output::fail_http(
+                        ExitCode::Auth,
+                        format!(
+                            "Wrong: agent_access_required: you have no access to '{}' yet.\nExpected: access to this agent, which an admin of it grants.\nFix: {fix}.",
+                            super::access::clean(urn)
+                        ),
+                        403,
+                    ))
+                }
+                _ => Err(e),
+            }
+        }
+        other => other,
+    }
 }
 
 fn installed_agents(listed: &ListAgentsResponse) -> Vec<InstalledAgent> {

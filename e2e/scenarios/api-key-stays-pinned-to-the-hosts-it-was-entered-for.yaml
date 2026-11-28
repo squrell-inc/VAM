@@ -21,6 +21,7 @@ when:
   - marketplace-refresh: { marketplace: marketplace-community-connectors, as: org-admin }
   - expect: { listings: { marketplace: marketplace-community-connectors, listing: notesdesk-connector, as: org-admin, fields: { installed: null, summary.connectors.0.provider: api_key, summary.connectors.0.bindings.0.hosts.0: api.notesdesk.example }, absent: [summary.connectors.0.bindings.0.hosts.1] } }
   - marketplace-install: { marketplace: marketplace-community-connectors, listing: notesdesk-connector, as: org-admin }
+  - identity-request: { as: org-admin, credential: key, method: put, path: "/v1/agents/urn:vam:agent:connectors.community.example/community/notesdesk-assistant/access-policy", status: 200, body: { visibility: org, mode: everyone } }
   - connector-node: { id: notesdesk, enabled: true, as: org-administrator }
   - connector-connect: { id: notesdesk, apiKey: { piece: mock-notesdesk-server, which: current }, as: org-member }
   - expect: { connectors: { id: notesdesk, as: org-member, fields: { state: connected } } }

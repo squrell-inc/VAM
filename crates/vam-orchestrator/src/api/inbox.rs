@@ -578,7 +578,33 @@ pub(super) async fn send_run_message(
         ))
         .into());
     }
-    let (spec, _) = stored_spec(state, run_id)?;
+    let (spec, agent_urn) = stored_spec(state, run_id)?;
+    // Agent access applies to a message into a live run as it does to a start: a revoke ends it
+    // (403 `agent_access_required:`) before anything is stored or queued.
+    if let Some(urn) = agent_urn.filter(|u| !u.is_empty()) {
+        let (owner, org_admin) = (auth.owner_user_id(), auth.has_users_admin());
+        // An agent that is no longer in the catalog has no policy to apply; the run goes on.
+        match state
+            .store
+            .get_agent_record_admitted(&urn, owner, org_admin)
+        {
+            Ok(record) => {
+                let own_draft = record.channel == vam_spec::v1::SkillChannel::Draft as i32
+                    && crate::owner::resolved_owner(&record.owner_user_id)
+                        == crate::owner::resolved_owner(owner);
+                crate::agent_access::require_usable(
+                    &state.store,
+                    &urn,
+                    owner,
+                    org_admin,
+                    own_draft,
+                    || crate::catalog::catalog_not_found("agents", &urn),
+                )?;
+            }
+            Err(OrchestratorError::NotFound(_)) => {}
+            Err(other) => return Err(other.into()),
+        }
+    }
     let thread_ref = crate::run_context::extract_thread_ref(&spec)
         .unwrap_or_else(|_| crate::run_context::DEFAULT_THREAD_REF.to_string());
     let workspace_id =

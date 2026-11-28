@@ -453,6 +453,17 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
 - `set-role: { as, role: publisher | member }`: as the bootstrap key, `POST` (publisher) or `DELETE` (member)
   `/v1/users/{id}/publish-grant` for the identity. A non-2xx answer is class `harness`, because the role change is
   arrangement, not the behaviour under test.
+- `identity-request` also takes `body` and `remember`. `body` is a YAML mapping sent as the JSON request body, every
+  string expanded with the placeholders below; without it a POST sends `{}` and the other methods send no body.
+  `remember: { field, as }` keeps the string, number or bool at the dotted `field` of the JSON answer (after the status
+  and the matchers pass; a missing field is class `product`) as `{{<as>}}`, for later `path`, `contains`, `lacks`,
+  `fields` values and `body` (a remembered word is percent-encoded in a `path`). `{{urn:<agent piece>}}` (no `:<as>`)
+  is the URN of a given agent piece, in the same places. `check` refuses a `{{urn:<piece>}}` whose piece is not in
+  `given`, and a `remember` with an empty `field` or `as`.
+- `identity-request: { idempotencyKey: <string> }` (writes only): sends the `Idempotency-Key` header as
+  `e2e-<runTag>-<scenario>-<string>`, unique per run on a shared node and the same everywhere in one scenario, so a
+  second step with the same string is a retry of the first. Without it every write gets a fresh key, as before.
+  `check` refuses an empty or odd string (1 to 100 of letters, digits, `-`, `_`, `.`) and the field on a `get`.
 
 ## Receipt expectations and offline verify
 
@@ -486,6 +497,12 @@ without a `username` a refused create is class `harness`. `world/org-member-emai
   `product`); `copyCli: <path in tree>` (runs a copy of `vam` placed there); and `files: { <path>:
   { contains, absent, unchanged } }` (assertions on files in the tree; `unchanged` compares with the
   file before the step).
+  `exitCode: <0..=255>` asserts the exact exit status; with it `exit` may be left out (it then
+  means `fail`, or `ok` for code 0), and `check` refuses `exit: ok` with a non-zero code (and
+  `exit: fail` with 0). A `cli` step without `exit` or `exitCode` is refused. `args`, `contains`,
+  `absent` and `matches` also expand `{{urn:<piece>}}` (a given agent piece), `{{urn:<piece>:<as>}}`
+  (the URN a `put-draft` as `<as>` wrote) and `{<alias>.userId}` / `{<alias>.username}` (an `org`
+  piece of `given`); `check` refuses a piece or alias that is not in `given`.
   Fields for commands that act on the user's machine or a release: `home: tree` (`HOME` is the
   scratch tree itself, not a directory beside it, so a command that edits login files can be
   judged); `env: { NAME: value }` (extra variables on top of `PATH` and `HOME`; `{{root}}` and
@@ -1064,6 +1081,13 @@ same commit SHAs in every scenario: a node that remembers a tag's commit must no
   `with-a-connector`, `claims-the-squrell-name` (an artifact under `hub.squrell.cloud`) and `claims-the-org-name`
   (an artifact under `local.vam.dev`, the e2e registry domain). Overlay `marketplace-community-broken/` (an index
   that is not JSON).
+- `marketplace-access`: added by an admin, domain `access.community.example`. Three listings of one agent each
+  (`open-helper`, `quiet-helper`, `kept-helper`, URNs `urn:vam:agent:access.community.example/community/<name>`,
+  shape copied from `helpful-notes`), each with an index `access.default`: `open-notes` `{org, open}`,
+  `quiet-notes` `{restricted, approval}`, `kept-notes` `{org, open}`; tags `<id>-v1.0.0`. Overlay
+  `marketplace-access-update/` is the tag `kept-notes-v1.1.0`: its index says `{org, everyone}` and the agent
+  description changes. Used by the agent-access scenarios only; an index with `access` is refused by a build
+  that does not know the field.
 - `marketplace-connector-kit` (domain `kit.community.example`, starts empty) and `marketplace-kit-broken` (domain
   `kitbroken.community.example`, one listing `kit-broken`): see "API keys and the connector kit".
 - `marketplace-community-connectors`: added by an admin, domain `connectors.community.example`. Six listings that ship a

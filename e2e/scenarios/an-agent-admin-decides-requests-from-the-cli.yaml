@@ -1,0 +1,40 @@
+id: an-agent-admin-decides-requests-from-the-cli
+title: An agent admin decides access requests from the CLI
+description: >
+  The publisher of an approval agent sees two requests in the notifications and the request list, approves one, denies the other with a reason, and revokes the approved member. A replayed write answers the same, a changed one under the same key is refused, and every refusal names the next command.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-member, as: member }
+  - { piece: org-member-email, as: member2 }
+  - agent-inline-probe
+when:
+  - put-draft: { piece: agent-inline-probe, as: pub, status: 200 }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 200, body: { version: { major: 1, minor: 0, patch: 0 } } }
+  - cli: { as: pub, args: [agent, access-policy, "{{urn:agent-inline-probe:pub}}", --visibility, org, --mode, approval], root: { from: version/empty }, exit: ok }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 202, body: { message: "one" }, remember: { field: request.requestId, as: acr1 } }
+  - identity-request: { as: member2, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access", status: 202, body: { message: "two" }, remember: { field: request.requestId, as: acr2 } }
+  - cli: { as: pub, args: [notifications, --kind, access.requested], root: { from: version/empty }, exit: ok, contains: ["vam access approve {{acr1}}"] }
+  - cli: { as: pub, args: [access, requests], root: { from: version/empty }, exit: ok, contains: ["{{acr1}}", "{{acr2}}"] }
+  - cli: { as: pub, args: [access, approve, "{{acr1}}", --idempotency-key, a1], root: { from: version/empty }, exit: ok, contains: ["approved"] }
+  - cli: { as: pub, args: [access, deny, "{{acr2}}"], root: { from: version/empty }, exitCode: 2, contains: ["--reason"] }
+then:
+  - cli: { as: pub, args: [access, approve, "{{acr1}}", --idempotency-key, a1], root: { from: version/empty }, exit: ok, contains: ["approved"] }
+  - cli: { as: pub, args: [access, deny, "{{acr2}}", --reason, "not now", --idempotency-key, a1], root: { from: version/empty }, exitCode: 5, contains: ["different request", "new key"] }
+  - cli: { as: pub, args: [access, deny, "{{acr2}}", --reason, "not now"], root: { from: version/empty }, exit: ok }
+  - cli: { as: pub, args: [access, approve, "{{acr2}}"], root: { from: version/empty }, exitCode: 5, contains: ["not pending", "vam access requests"] }
+  - cli: { as: pub, args: [access, approve, acr_nope], root: { from: version/empty }, exitCode: 4, contains: ["vam access requests"] }
+  - cli: { as: member2, args: [agent, browse], root: { from: version/empty }, exit: ok, contains: ["denied", "not now"] }
+  - cli: { as: pub, args: [access, revoke, "{{urn:agent-inline-probe:pub}}", "{member.username}", --reason, done], root: { from: version/empty }, exit: ok, contains: ["revoked"] }
+  - cli: { as: member, args: [access, mine], root: { from: version/empty }, exit: ok, contains: ["revoked"] }
+  - cli: { as: pub, args: [access, revoke, "{{urn:agent-inline-probe:pub}}", "{member.username}"], root: { from: version/empty }, exitCode: 2, contains: ["--reason"] }
+guards:
+  - vam:crates/vam-cli/src/main.rs
+  - vam:crates/vam-cli/src/cmd/catalog.rs
+  - vam:crates/vam-cli/src/client.rs
+  - vam:crates/vam-cli/src/http_error.rs
+  - vam:crates/vam-cli/src/cmd/notifications.rs
+  - vam:crates/vam-cli/src/cmd/access.rs
+status: active

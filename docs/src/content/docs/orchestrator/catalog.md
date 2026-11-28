@@ -11,6 +11,7 @@ proves:
   - crates/vam-orchestrator/tests/agent_check_tests.rs
   - crates/vam-orchestrator/tests/allowed_models_tests.rs
   - crates/vam-orchestrator/tests/api_tests.rs
+  - a-member-browses-the-agents-they-may-ask-for
 ---
 
 The catalog holds the things a run is made from: agents, skills, skill packages, playbooks and
@@ -27,6 +28,8 @@ policies. Each entry is named by a URN. The host stores them in SQLite, stamped 
 
 Routes: `api/mod.rs:167-197`.
 
+A member browses the released agents they may ask for or use with `GET /v1/catalog/agents` (paged, sorted by URN). An agent hidden from the caller is not listed (`a-member-browses-the-agents-they-may-ask-for`).
+
 ## Drafts and releases
 
 An owner keeps one draft of an entry. A **release** snapshots that draft at a version and needs
@@ -36,6 +39,10 @@ drafts and every released version; an org admin reading with `users:admin` also 
 people's drafts. A member owns the draft agents they save, and only the owner and a caller with `users:admin` can read them (`member-draft-agent-is-private-and-in-the-members-namespace`). The rules for those drafts are on [Member agents](/orchestrator/member-agents/). A run that names an agent without a version uses the latest release. A member
 can chat with a released agent (`member-chats-with-a-released-agent`), and a released agent's
 approvals are once-only (`released-agent-approvals-are-once-only`).
+
+## Who may use an agent
+
+Each agent has an access policy, `(visibility, mode)`, set by an admin of the agent or an org admin. With no policy an agent is open to the whole org. A restricted agent is hidden from members who have no approved access: every route answers as if it did not exist. Members add an open agent at once and request an approval-mode agent, and an admin decides. The routes, the notifications and the rules are on [Agent access](/orchestrator/agent-access/).
 
 ## Outcomes per version
 

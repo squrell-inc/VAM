@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+pub mod agent_access;
 pub mod allowed_models;
 pub mod auth;
 pub mod catalog_auth;
@@ -173,10 +174,20 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/agents/{*rest}",
             get(get_agent_wildcard)
-                .put(permissions::put_draft_permissions)
+                .put(agent_access::put_agent_wildcard)
                 .post(post_agent_wildcard)
                 .delete(delete_agent_wildcard),
         )
+        .route(
+            "/v1/access-requests/{id}/decide",
+            post(agent_access::post_decide),
+        )
+        .route(
+            "/v1/access-requests",
+            get(agent_access::get_access_requests),
+        )
+        .route("/v1/me/access", get(agent_access::get_my_access))
+        .route("/v1/catalog/agents", get(agent_access::get_catalog_agents))
         .route("/v1/policies", put(put_policy).get(list_policies))
         .route(
             "/v1/policies/{*rest}",
@@ -595,14 +606,17 @@ async fn put_agent(
         .spec
         .ok_or_else(|| OrchestratorError::InvalidContract("spec is required".into()))?;
     let saved = match mode {
-        crate::api::catalog_auth::AgentWriteMode::Full => state
-            .store
-            .publish_agent_draft_with_owner(&spec, auth.owner_user_id())?,
+        crate::api::catalog_auth::AgentWriteMode::Full => state.store.publish_agent_draft_as(
+            &spec,
+            auth.owner_user_id(),
+            auth.has_users_admin(),
+        )?,
         crate::api::catalog_auth::AgentWriteMode::Restricted => {
-            state.store.publish_agent_draft_restricted(
+            state.store.publish_agent_draft_restricted_as(
                 &spec,
                 auth.owner_user_id(),
                 crate::member_draft::member_draft_agents_max(),
+                auth.has_users_admin(),
             )?
         }
     };
@@ -630,6 +644,14 @@ async fn post_agent_wildcard(
         return permissions_migrate::migrate_legacy_draft(state, auth, path, headers, force, body)
             .await;
     }
+    // `…/access/{userId}/revoke` before `…/access` (Add or Request), both before the release.
+    if let Some(target) = agent_access::revoke_target(&path) {
+        let (urn, user_id) = target?;
+        return agent_access::post_revoke(&state, &auth, &urn, &user_id, &headers, &body);
+    }
+    if let Some(urn) = agent_access::access_urn(&path) {
+        return agent_access::post_access(&state, &auth, &urn, &headers, &body);
+    }
     catalog_release::release_agent_wildcard(state, auth, path, headers, body).await
 }
 
@@ -643,6 +665,9 @@ async fn get_agent_wildcard(
         return permissions::get_agent_permissions(state, auth, kind, &rest, query).await;
     }
     require_catalog_read(&auth)?;
+    if let Some(urn) = agent_access::admins_urn(&rest) {
+        return agent_access::get_admins(&state, &auth, &urn);
+    }
     let rest = rest.trim_start_matches('/');
     if let Some(urn_raw) = rest.strip_suffix("/versions") {
         return catalog_release::versions_response(&state, &auth, "agents", urn_raw);
@@ -686,30 +711,48 @@ async fn get_agent_wildcard(
 
 /// `DELETE /v1/{agents|playbooks|skills/packages}/{urn}`: the catalog keeps every release, so
 /// nothing is deleted. The route exists so the answer is explicit: an installed row is refused as
-/// read-only (409, M2) and any other row as not deletable (405).
+/// read-only (409, M2) and any other row as not deletable (405). `agent` is true for an agent:
+/// one the access rule hides from the caller gets what a missing URN gets.
 pub(crate) async fn refuse_catalog_delete(
     state: &AppState,
     auth: &AuthContext,
     rest: &str,
     noun: &str,
+    agent: bool,
 ) -> Result<Response, ApiError> {
     state.pdp.authorize(auth, "PutCatalog", "catalog:write")?;
     let urn = percent_decode_path(rest.trim_start_matches('/'));
-    state.store.require_not_installed(&urn, noun)?;
-    Err(ApiError {
+    let not_deletable = || ApiError {
         status: StatusCode::METHOD_NOT_ALLOWED,
         code: vam_spec::v1::VamErrorCode::Unimplemented,
         message: format!("{noun} '{urn}' cannot be deleted: the catalog keeps every release"),
         retryable: false,
-    })
+    };
+    if agent {
+        // Agent access: Hidden gets exactly what a missing URN gets here (400 inside a
+        // marketplace domain, else the 405 below), never the installed row's 409.
+        state.store.refuse_hidden_agent(
+            &urn,
+            auth.owner_user_id(),
+            auth.has_users_admin(),
+            not_deletable,
+        )?;
+    }
+    state.store.require_not_installed(&urn, noun)?;
+    Err(not_deletable())
 }
 
 async fn delete_agent_wildcard(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(rest): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    refuse_catalog_delete(&state, &auth, &rest, "agent").await
+    // `DELETE …/access` withdraws or leaves, before the catalog's refusal to delete.
+    if let Some(urn) = agent_access::access_urn(&rest) {
+        return agent_access::delete_access(&state, &auth, &urn, &headers);
+    }
+    refuse_catalog_delete(&state, &auth, &rest, "agent", true).await
 }
 
 async fn delete_playbook_wildcard(
@@ -717,7 +760,7 @@ async fn delete_playbook_wildcard(
     auth: AuthContext,
     Path(rest): Path<String>,
 ) -> Result<Response, ApiError> {
-    refuse_catalog_delete(&state, &auth, &rest, "playbook").await
+    refuse_catalog_delete(&state, &auth, &rest, "playbook", false).await
 }
 
 async fn get_policy_wildcard(
@@ -1088,6 +1131,21 @@ async fn create_session(
         };
         let (code, json) = json_response("vam.v1.CreateSessionResponse", &resp)?;
         return Ok(json_http_response(code, json));
+    }
+
+    // Agent access: a new session on a Space bound to an agent is an admission. The boot that
+    // follows reads the agent without the rule (an admitted session is never killed by a
+    // revoke), so the check lives here. A replayed idempotency key returned above.
+    if let Some(bound) = state
+        .store
+        .get_space(auth.owner_user_id(), &workspace_id)
+        .ok()
+        .and_then(|space| space.agent_urn)
+        .filter(|urn| !urn.is_empty())
+    {
+        state
+            .store
+            .get_agent_visible(&bound, auth.owner_user_id(), auth.has_users_admin())?;
     }
 
     state
@@ -3824,7 +3882,7 @@ fn remerge_catalog_agent_into_inputs(
     let agent = store
         .run_owner_user_id(run_id)
         .ok()
-        .and_then(|owner| store.get_agent_visible(&agent_urn, &owner, false).ok())
+        .and_then(|owner| store.get_agent_admitted(&agent_urn, &owner, false).ok())
         .or_else(|| store.get_agent(&agent_urn).ok());
     let Some(agent) = agent else {
         return inputs;

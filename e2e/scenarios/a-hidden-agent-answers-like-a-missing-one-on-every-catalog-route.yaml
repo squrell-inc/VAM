@@ -1,0 +1,61 @@
+id: a-hidden-agent-answers-like-a-missing-one-on-every-catalog-route
+title: A hidden agent answers like a missing one on every catalog route
+description: >
+  A publisher releases an agent and restricts it to themselves. For a member and for another publisher, every catalog route (versions, outcomes, effective permissions, agent checks, release, release suggestion, delete) answers the hidden URN with the same status and message as a URN that does not exist. The same holds for an agent a marketplace install made hidden: a publisher's release, suggestion, delete and save on it are refused as for a missing URN under the same reserved domain.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-publisher, as: pub }
+  - { piece: org-publisher, as: pub2 }
+  - { piece: org-member, as: member }
+  - agent-inline-probe
+  - marketplace-access
+when:
+  - put-draft: { piece: agent-inline-probe, as: pub, status: 200 }
+  - identity-request: { as: pub, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 200, body: { version: { major: 1, minor: 0, patch: 0 } } }
+  - identity-request: { as: pub, credential: key, method: put, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/access-policy", status: 200, body: { visibility: restricted, mode: approval } }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/versions", status: 404, fields: { message: "agents '{{urn:agent-inline-probe:pub}}' has no versions visible to this caller" } }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/versions", status: 404, fields: { message: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' has no versions visible to this caller" } }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/outcomes", status: 404, fields: { message: "agents '{{urn:agent-inline-probe:pub}}' has no versions visible to this caller" } }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/outcomes", status: 404, fields: { message: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' has no versions visible to this caller" } }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/permissions/effective?version=1.0.0", status: 404, fields: { message: "agents '{{urn:agent-inline-probe:pub}}' 1.0.0 not found in catalog" } }
+  - identity-request: { as: member, credential: key, method: get, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/permissions/effective?version=1.0.0", status: 404, fields: { message: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' 1.0.0 not found in catalog" } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agent-checks", status: 404, fields: { message: "agents '{{urn:agent-inline-probe:pub}}' not found in catalog" }, body: { agentRef: { resourceId: { urn: "{{urn:agent-inline-probe:pub}}" } } } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agent-checks", status: 404, fields: { message: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' not found in catalog" }, body: { agentRef: { resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/no-such-agent" } } } }
+  - identity-request: { as: pub2, credential: key, method: get, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/versions", status: 404, fields: { message: "agents '{{urn:agent-inline-probe:pub}}' has no versions visible to this caller" } }
+  - identity-request: { as: pub2, credential: key, method: get, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/versions", status: 404, fields: { message: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' has no versions visible to this caller" } }
+  - identity-request: { as: pub2, credential: key, method: get, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/outcomes", status: 404, fields: { message: "agents '{{urn:agent-inline-probe:pub}}' has no versions visible to this caller" } }
+  - identity-request: { as: pub2, credential: key, method: get, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/outcomes", status: 404, fields: { message: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' has no versions visible to this caller" } }
+  - identity-request: { as: pub2, credential: key, method: get, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/permissions/effective?version=1.0.0", status: 404, fields: { message: "agents '{{urn:agent-inline-probe:pub}}' 1.0.0 not found in catalog" } }
+  - identity-request: { as: pub2, credential: key, method: get, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/permissions/effective?version=1.0.0", status: 404, fields: { message: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' 1.0.0 not found in catalog" } }
+  - identity-request: { as: pub2, credential: key, method: post, path: "/v1/agent-checks", status: 404, fields: { message: "agents '{{urn:agent-inline-probe:pub}}' not found in catalog" }, body: { agentRef: { resourceId: { urn: "{{urn:agent-inline-probe:pub}}" } } } }
+  - identity-request: { as: pub2, credential: key, method: post, path: "/v1/agent-checks", status: 404, fields: { message: "agents 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' not found in catalog" }, body: { agentRef: { resourceId: { urn: "urn:vam:agent:local.vam.dev/e2e/no-such-agent" } } } }
+  - identity-request: { as: pub2, credential: key, method: post, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release", status: 404, fields: { message: "agent '{{urn:agent-inline-probe:pub}}' not found" }, body: { version: { major: 1, minor: 1, patch: 0 } } }
+  - identity-request: { as: pub2, credential: key, method: post, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/release", status: 404, fields: { message: "agent 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' not found" }, body: { version: { major: 1, minor: 1, patch: 0 } } }
+  - identity-request: { as: pub2, credential: key, method: get, path: "/v1/agents/{{urn:agent-inline-probe:pub}}/release-suggestion", status: 404, fields: { message: "agent '{{urn:agent-inline-probe:pub}}' not found" } }
+  - identity-request: { as: pub2, credential: key, method: get, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent/release-suggestion", status: 404, fields: { message: "agent 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' not found" } }
+  - identity-request: { as: pub2, credential: key, method: delete, path: "/v1/agents/{{urn:agent-inline-probe:pub}}", status: 405, fields: { message: "agent '{{urn:agent-inline-probe:pub}}' cannot be deleted: the catalog keeps every release" } }
+  - identity-request: { as: pub2, credential: key, method: delete, path: "/v1/agents/urn%3Avam%3Aagent%3Alocal.vam.dev%2Fe2e%2Fno-such-agent", status: 405, fields: { message: "agent 'urn:vam:agent:local.vam.dev/e2e/no-such-agent' cannot be deleted: the catalog keeps every release" } }
+  - marketplace-add: { piece: marketplace-access, as: admin }
+  - marketplace-refresh: { marketplace: marketplace-access, as: admin }
+  - marketplace-install: { marketplace: marketplace-access, listing: quiet-notes, as: admin }
+then:
+  - identity-request: { as: pub2, credential: key, method: post, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fcommunity%2Fquiet-helper/release", status: 400, fields: { message: "agent URN 'urn:vam:agent:access.community.example/community/quiet-helper' is under the domain 'access.community.example' of the trusted marketplace 'Access', which only that marketplace may publish to; use your registry domain 'local.vam.dev'" }, body: { version: { major: 1, minor: 1, patch: 0 } } }
+  - identity-request: { as: pub2, credential: key, method: post, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fx%2Fno-such-agent/release", status: 400, fields: { message: "agent URN 'urn:vam:agent:access.community.example/x/no-such-agent' is under the domain 'access.community.example' of the trusted marketplace 'Access', which only that marketplace may publish to; use your registry domain 'local.vam.dev'" }, body: { version: { major: 1, minor: 1, patch: 0 } } }
+  - identity-request: { as: pub2, credential: key, method: get, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fcommunity%2Fquiet-helper/release-suggestion", status: 400, fields: { message: "agent URN 'urn:vam:agent:access.community.example/community/quiet-helper' is under the domain 'access.community.example' of the trusted marketplace 'Access', which only that marketplace may publish to; use your registry domain 'local.vam.dev'" } }
+  - identity-request: { as: pub2, credential: key, method: get, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fx%2Fno-such-agent/release-suggestion", status: 400, fields: { message: "agent URN 'urn:vam:agent:access.community.example/x/no-such-agent' is under the domain 'access.community.example' of the trusted marketplace 'Access', which only that marketplace may publish to; use your registry domain 'local.vam.dev'" } }
+  - identity-request: { as: pub2, credential: key, method: delete, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fcommunity%2Fquiet-helper", status: 400, fields: { message: "agent URN 'urn:vam:agent:access.community.example/community/quiet-helper' is under the domain 'access.community.example' of the trusted marketplace 'Access', which only that marketplace may publish to; use your registry domain 'local.vam.dev'" } }
+  - identity-request: { as: pub2, credential: key, method: delete, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fx%2Fno-such-agent", status: 400, fields: { message: "agent URN 'urn:vam:agent:access.community.example/x/no-such-agent' is under the domain 'access.community.example' of the trusted marketplace 'Access', which only that marketplace may publish to; use your registry domain 'local.vam.dev'" } }
+  - identity-request: { as: pub2, credential: key, method: put, path: /v1/agents, status: 400, fields: { message: "agent URN 'urn:vam:agent:access.community.example/community/quiet-helper' is under the domain 'access.community.example' of the trusted marketplace 'Access', which only that marketplace may publish to; use your registry domain 'local.vam.dev'" }, body: { spec: { resourceId: { urn: "urn:vam:agent:access.community.example/community/quiet-helper" }, displayName: x, description: x, role: Tester, systemInstructions: x } } }
+  - identity-request: { as: pub2, credential: key, method: put, path: /v1/agents, status: 400, fields: { message: "agent URN 'urn:vam:agent:access.community.example/x/no-such-agent' is under the domain 'access.community.example' of the trusted marketplace 'Access', which only that marketplace may publish to; use your registry domain 'local.vam.dev'" }, body: { spec: { resourceId: { urn: "urn:vam:agent:access.community.example/x/no-such-agent" }, displayName: x, description: x, role: Tester, systemInstructions: x } } }
+guards:
+  - vam:crates/vam-orchestrator/src/catalog_tier.rs
+  - vam:crates/vam-orchestrator/src/catalog_publish.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/api/catalog_release.rs
+  - vam:crates/vam-orchestrator/src/api/release_suggestion.rs
+  - vam:crates/vam-orchestrator/src/api/composition.rs
+  - vam:crates/vam-orchestrator/src/api/outcomes.rs
+  - vam:crates/vam-orchestrator/src/api/mod.rs
+status: active

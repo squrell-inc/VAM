@@ -70,6 +70,9 @@ pub struct ListingState {
     #[serde(rename = "ref")]
     pub git_ref: String,
     pub requires_node: String,
+    /// The access the listing's agents start with on a first install (the index's `access`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<vam_spec::marketplace::ListingAccess>,
     /// The commit the listing's tag is pinned to (set once the tag was read).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
@@ -598,6 +601,7 @@ mod tests {
             connector: None,
             git_ref: "v1".into(),
             requires_node: ">=0.1.0".into(),
+            access: None,
             commit: None,
             artifacts: vec![],
             summary: None,

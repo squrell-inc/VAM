@@ -1052,10 +1052,24 @@ impl SqliteWorkflowStore {
             .ok_or_else(|| release_no_draft_error(kind_noun(kind), urn))
     }
 
+    /// [`Self::publish_agent_draft_as`] for a caller the access rule never hides an agent
+    /// from (an org admin, or an internal write).
     pub fn publish_agent_draft_with_owner(
         &self,
         spec: &AgentSpec,
         owner_user_id: &str,
+    ) -> Result<AgentSpec, OrchestratorError> {
+        self.publish_agent_draft_as(spec, owner_user_id, true)
+    }
+
+    /// The `PUT /v1/agents` save in full mode. `org_admin` is `users:admin` on the key: an
+    /// installed agent the access rule hides from any other caller answers as a missing URN
+    /// would (agent access, see [`crate::catalog_tier::reject_caller_installed_agent`]).
+    pub fn publish_agent_draft_as(
+        &self,
+        spec: &AgentSpec,
+        owner_user_id: &str,
+        org_admin: bool,
     ) -> Result<AgentSpec, OrchestratorError> {
         let mut spec = spec.clone();
         apply_publish_permission_defaults(&mut spec);
@@ -1076,6 +1090,13 @@ impl SqliteWorkflowStore {
             .connection
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
+        crate::catalog_tier::reject_caller_installed_agent(
+            &connection,
+            urn,
+            owner,
+            org_admin,
+            false,
+        )?;
         let row = upsert_spec_draft(
             &connection,
             CatalogKind::Agent,
@@ -1107,6 +1128,19 @@ impl SqliteWorkflowStore {
         owner_user_id: &str,
         max_drafts: usize,
     ) -> Result<AgentSpec, OrchestratorError> {
+        self.publish_agent_draft_restricted_as(spec, owner_user_id, max_drafts, true)
+    }
+
+    /// [`Self::publish_agent_draft_restricted`] with the caller's `users:admin` flag, which
+    /// decides whether the access rule can hide an installed agent from them (as in
+    /// [`Self::publish_agent_draft_as`]).
+    pub fn publish_agent_draft_restricted_as(
+        &self,
+        spec: &AgentSpec,
+        owner_user_id: &str,
+        max_drafts: usize,
+        org_admin: bool,
+    ) -> Result<AgentSpec, OrchestratorError> {
         crate::member_draft::require_no_refused_fields(spec)?;
         let mut spec = spec.clone();
         apply_publish_permission_defaults(&mut spec);
@@ -1129,7 +1163,13 @@ impl SqliteWorkflowStore {
             .lock()
             .map_err(|_| OrchestratorError::StorageUnavailable)?;
         let table = CatalogKind::Agent.table();
-        crate::catalog_tier::reject_caller_installed_urn(&connection, urn, "agent")?;
+        crate::catalog_tier::reject_caller_installed_agent(
+            &connection,
+            urn,
+            owner,
+            org_admin,
+            true,
+        )?;
         if !crate::owner::caller_owns_any_row(&connection, table, urn, owner)? {
             crate::member_draft::require_own_namespace(&connection, owner, urn)?;
         }
@@ -1183,6 +1223,10 @@ impl SqliteWorkflowStore {
             bytes: frozen.bytes,
             digest: frozen.digest,
         };
+        // A6: the first release of a URN seeds its releaser as the agent's admin. A URN that
+        // already has a released row (including one released before the upgrade) seeds none.
+        let first_release =
+            latest_released_triple(&connection, CatalogKind::Agent.table(), urn)?.is_none();
         let row = release_spec_row(
             &connection,
             CatalogKind::Agent,
@@ -1191,6 +1235,10 @@ impl SqliteWorkflowStore {
             meta,
             Some(frozen),
         )?;
+        if first_release {
+            let admin = meta.released_by.unwrap_or(&row.owner_user_id);
+            crate::agent_access::seed_releaser_on(&connection, urn, admin)?;
+        }
         decode_agent(row)
     }
 
@@ -1792,6 +1840,116 @@ mod tests {
         );
         assert_eq!(store.catalog_row_count("agents", urn).expect("count"), 2);
         store.get_agent(urn).expect("released readable");
+    }
+
+    fn user_store() -> SqliteWorkflowStore {
+        let store = store();
+        for user in ["drafter", "releaser", "other"] {
+            store.create_user(user, user).expect("user");
+        }
+        store
+    }
+
+    #[test]
+    fn release_by_a_non_user_principal_still_succeeds_and_seeds_nobody() {
+        let store = store();
+        let urn = "urn:vam:agent:local.vam.dev/acme/a6-nonuser";
+        store
+            .publish_agent_draft_with_owner(&test_agent(urn, "one"), crate::users::LOCAL_USER_ID)
+            .expect("draft");
+        let meta = ReleaseMeta {
+            note: "",
+            released_by: Some("not-a-user"),
+        };
+        store
+            .release_agent_with_meta(urn, &bump(1), &meta)
+            .expect("release");
+        assert!(!store.is_agent_admin(urn, "not-a-user").expect("admin"));
+    }
+
+    fn bump(patch: i32) -> Version {
+        Version {
+            major: 1,
+            minor: 0,
+            patch,
+            prerelease: String::new(),
+            build: String::new(),
+        }
+    }
+
+    #[test]
+    fn first_release_seeds_releaser_as_agent_admin_and_later_ones_add_none() {
+        let store = user_store();
+        let urn = "urn:vam:agent:local.vam.dev/acme/a6-first";
+        store
+            .publish_agent_draft_with_owner(&test_agent(urn, "one"), "drafter")
+            .expect("draft");
+        let meta = ReleaseMeta {
+            note: "",
+            released_by: Some("releaser"),
+        };
+        store
+            .release_agent_with_meta(urn, &bump(1), &meta)
+            .expect("first release");
+        assert!(store.is_agent_admin(urn, "releaser").expect("admin"));
+        assert!(!store.is_agent_admin(urn, "drafter").expect("admin"));
+
+        // A second release by someone else seeds nobody.
+        store
+            .publish_agent_draft_with_owner(&test_agent(urn, "two"), "drafter")
+            .expect("draft 2");
+        let other = ReleaseMeta {
+            note: "",
+            released_by: Some("other"),
+        };
+        store
+            .release_agent_with_meta(urn, &bump(2), &other)
+            .expect("second release");
+        assert!(!store.is_agent_admin(urn, "other").expect("admin"));
+        // Re-releasing the same version and digest is an idempotent no-op, no seed either.
+        store
+            .release_agent_with_meta(urn, &bump(2), &other)
+            .expect("idempotent release");
+        assert!(!store.is_agent_admin(urn, "other").expect("admin"));
+        assert!(store.is_agent_admin(urn, "releaser").expect("admin"));
+    }
+
+    #[test]
+    fn first_release_without_released_by_seeds_draft_owner() {
+        let store = user_store();
+        let urn = "urn:vam:agent:local.vam.dev/acme/a6-owner";
+        store
+            .publish_agent_draft_with_owner(&test_agent(urn, "one"), "drafter")
+            .expect("draft");
+        store.release_agent(urn, &bump(1)).expect("release");
+        assert!(store.is_agent_admin(urn, "drafter").expect("admin"));
+    }
+
+    #[test]
+    fn urn_released_before_upgrade_gets_no_admin_on_next_release() {
+        let store = user_store();
+        let urn = "urn:vam:agent:local.vam.dev/acme/a6-legacy";
+        // A released row with no admin row: the state of every URN released before the upgrade.
+        store
+            .put_agent_released_with_owner(&test_agent(urn, "old"), crate::users::LOCAL_USER_ID)
+            .expect("legacy release");
+        assert!(!store
+            .is_agent_admin(urn, crate::users::LOCAL_USER_ID)
+            .expect("admin"));
+        store
+            .publish_agent_draft_with_owner(&test_agent(urn, "new"), crate::users::LOCAL_USER_ID)
+            .expect("draft");
+        let meta = ReleaseMeta {
+            note: "",
+            released_by: Some("releaser"),
+        };
+        store
+            .release_agent_with_meta(urn, &bump(5), &meta)
+            .expect("release");
+        assert!(!store.is_agent_admin(urn, "releaser").expect("admin"));
+        assert!(!store
+            .is_agent_admin(urn, crate::users::LOCAL_USER_ID)
+            .expect("admin"));
     }
 
     fn test_playbook(urn: &str, instruction: &str) -> PlaybookSpec {

@@ -113,7 +113,7 @@ pub(crate) fn load_session_agent(
         let (resolve_owner, mode) = run_resolve_context(store, spec, &session_owner);
         // A run recorded while its owner authored, booted after they stopped: refuse.
         require_no_draft_pins(spec, mode)?;
-        let agent = store.get_agent_at_version_visible(urn, version, &resolve_owner, false)?;
+        let agent = store.get_agent_at_version_admitted(urn, version, &resolve_owner, false)?;
         return Ok(SessionAgent {
             agent: Some(agent),
             draft_run,
@@ -123,7 +123,7 @@ pub(crate) fn load_session_agent(
         });
     }
 
-    let agent = match store.get_agent_visible(urn, &session_owner, false) {
+    let agent = match store.get_agent_admitted(urn, &session_owner, false) {
         Ok(spec) => Some(spec),
         Err(OrchestratorError::NotFound(_)) => match store.get_agent(urn) {
             Ok(spec) => Some(spec),
@@ -602,6 +602,51 @@ mod tests {
             .filter(|e| e.event_type == EVENT_POLICY_RESOLUTION)
             .map(|e| serde_json::from_str(&e.payload).expect("payload json"))
             .collect()
+    }
+
+    /// A6 seeds the releaser as the agent's admin; the session owner here is that user, so the
+    /// rows are cleared to make the owner an ordinary user who then loses access.
+    fn restrict_and_unseed(store: &SqliteWorkflowStore) {
+        store
+            .put_agent_access_policy(
+                AGENT,
+                crate::agent_access::Visibility::Restricted,
+                crate::agent_access::AccessMode::Approval,
+                LOCAL_USER_ID,
+            )
+            .expect("policy");
+        store
+            .connection
+            .lock()
+            .expect("lock")
+            .execute("DELETE FROM agent_admins", [])
+            .expect("clear admins");
+        assert!(
+            store
+                .get_agent_visible(AGENT, LOCAL_USER_ID, false)
+                .is_err(),
+            "an admission read now refuses the owner"
+        );
+    }
+
+    #[test]
+    fn a_session_admitted_before_a_revoke_still_loads_its_pinned_agent() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        release_agent(&store, &agent("one", None), ver(1, 0, 0));
+        bind_run(&store, Some(ver(1, 0, 0)), vec![]);
+        restrict_and_unseed(&store);
+        let loaded = load_session_agent(&store, SESSION, None).expect("admitted session loads");
+        assert_eq!(loaded.agent.expect("agent").display_name, "one");
+    }
+
+    #[test]
+    fn a_session_admitted_before_a_revoke_still_loads_its_unpinned_agent() {
+        let store = SqliteWorkflowStore::in_memory().expect("store");
+        release_agent(&store, &agent("one", None), ver(1, 0, 0));
+        bind_run(&store, None, vec![]);
+        restrict_and_unseed(&store);
+        let loaded = load_session_agent(&store, SESSION, None).expect("admitted session loads");
+        assert_eq!(loaded.agent.expect("agent").display_name, "one");
     }
 
     #[test]
