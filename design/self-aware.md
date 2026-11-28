@@ -155,6 +155,11 @@ On versions:
   fix card from the run's events.
 - Connector park: the `connection.needs_reauth` action is already a fix; S1
   sets `Denial{CONNECTOR_NOT_CONNECTED}` on it so clients draw one card type.
+- Triggered runs (proposed 2026-11-28, from the standup use case in
+  `design/long-work.md` §9.1): a denial or connector park in a run that a
+  schedule started names the schedule (`sch_…` and its title) in the
+  notification, because the parked run holds its Space and later fires queue
+  and then expire. The fix card offers the fix and "Pause schedule".
 
 **The model's line.** `denied_observation` (`agent.rs:2486-2496`) appends one
 line when a `Denial` with a fix is present:
@@ -384,6 +389,20 @@ release and blocks `exact` Apps with the S2 prompt to the App owner.
 Turning on `follow` is the human approval for those later automatic moves:
 it is the App owner's explicit opt-in, revocable by setting `exact`, and
 the App owner is notified on each move (`agent.updated`).
+
+**Which Apps follow (proposed, owner to confirm).** With C2 (one App per
+environment), prod Apps stay on `version_mode = exact`, the default; `follow`
+is recommended for staging Apps only, so a release reaches staging by itself
+and prod moves by a deliberate pin write (or the bulk upgrade above). The
+integrator docs (Apps P7, AS-7.3) and the TS SDK's App type say so. A
+follow-mode move on a client-facing App already notifies its owner (above);
+in addition, turning `follow` on for an App that looks like prod needs an
+explicit confirm (a second click in the app, a `--confirm-follow` flag in
+`vam apps`, a `confirm` field on the route). The App row has no environment
+field (Apps AS-0.1; C2 makes environment two Apps, not a column), so "looks
+like prod" is a host rule on the row: kind `shared` and a name that does not
+mark it staging (open question 11).
+
 Unlike the personal re-pin, an App pin move does not wait for live runs (it
 cannot wait on many Spaces): each live run finishes on the spec it was
 resolved with, and the S2 thread check runs per Space at its next run. A personal
@@ -479,7 +498,9 @@ notification-surface decisions are refused.
 App-pin routing through the seam lands with Apps P4 (AS-2.6).
 **Exit:** a shared App in `follow` mode moves on release; one write upgrades
 every Space; live runs finish on the old version; canary Spaces move first;
-rollback restores the previous pin.
+rollback restores the previous pin. The `follow` confirm for prod Apps
+(proposed, open question 11) joins the exit, and the tracker, only once the
+owner confirms it.
 
 | Scenario | Change | Layer | Given | Why |
 |---|---|---|---|---|
@@ -487,6 +508,8 @@ rollback restores the previous pin.
 | `app-upgrade-leaves-live-runs-on-the-old-version` | new | process | a shared App, a running task | Q10 |
 | `canary-spaces-get-the-new-version-first` | new | process | a shared App with three Spaces | canary |
 | `app-rollback-restores-the-previous-pin` | new | process | a shared App | rollback |
+| `a-new-app-pins-the-exact-version` | new (proposed) | process | a shared App | prod default `exact` |
+| `turning-on-follow-for-a-prod-app-needs-a-confirm` | new (proposed) | process | a shared App not named staging | follow confirm |
 
 ## What we are not building
 
@@ -533,6 +556,13 @@ rollback restores the previous pin.
     ("Workspace pins agent URN + version at create time")? **Yes: the pin is set at
     the first run and only the Space owner moves it, through
     `set_space_agent_version`; answer before S2 is broken down.**
+11. How does the host tell a prod App from a staging App for the `follow`
+    confirm (S4, proposed)? The App row has no environment field. **A name
+    rule in v1: a `shared` App whose name does not contain `staging` (case
+    insensitive) needs the confirm; no new column. Add an `environment`
+    field only if the pilot shows names are unreliable.** Either way prod
+    Apps default to `exact` and the docs recommend `follow` for staging
+    only.
 
 ## Implementer constraints
 

@@ -377,6 +377,38 @@ express; otherwise move the E5 slice forward. Build 5d only if a pilot task
 has independent items and its owner needs it faster than one loop can do
 it. 5e ships with whichever of 5a to 5d ships first.
 
+### 9.1 Recurring follow-ups are schedules, not one long task (proposed)
+
+Owner use case (2026-11-28): the agent opens a ticket for a teammate, then
+pings them every few hours, by priority and deadline, until it is done, and
+prepares a summary before a daily 4 PM call. This is days or weeks of
+time-driven checks with little work per check. Three shapes were compared:
+
+| Shape | Verdict |
+|---|---|
+| One long task per ticket, parked on `wait_until` with `recheck` (§6) | **No.** A ticket due in six weeks passes the 30-day ceiling (LW3); 200 wakes at most; a parked task keeps its Space (LW5), so N tickets need N Spaces; "nothing changed yet" trips the no-progress watchdog (§7); state sits in a conversation that compacts for weeks; 5c is not built. |
+| One standing `vam.schedule` sweep (cron in working hours, IANA timezone) that reads open tickets and pings the ones due | **Recommended.** On `main` today (`docs/src/content/docs/hosted/schedule.md`). Each fire is a short run within today's caps, with its own receipt; a crash costs one fire, caught up within the grace window; the grant is listed, revocable and expires (90 days default, `grant.expiring` 7 days ahead). |
+| A broker-side condition (E5) that fires on a ticket change | **Later, as an addition.** Good for "the assignee replied", cheaper than polling, but a missed ping is the absence of a change, which a condition does not express. E5 is not built. |
+
+Rules the sweep follows (playbook text, no new runtime piece):
+
+- Follow-up state lives in the ticket system (priority, due date, a marker
+  comment with the last ping time), not in the thread, so every fire is
+  idempotent and a compaction loses nothing (§5).
+- One sweep schedule, not one schedule per ticket: a triggered run cannot
+  create schedules (loop guard, `work-outside-chat` decision 6), so per-ticket
+  schedules would need a person's turn for every new ticket or due-date move.
+- The sweep never parks on a question: a parked run holds its Space and later
+  fires queue, then expire. It ends with a "needs you" line, which the
+  unattended-finish notification carries (§7).
+- The summary schedule targets a Space of its own, so the owner's chat in the
+  primary agent's Space does not queue it (`work-outside-chat` decision 7).
+
+**What this changes in Phase 5:** nothing in the slices. In §9, a pilot run
+that polls for days counts as demand for a schedule or for the E5 condition,
+not for 5c. `wait_until` stays for waits inside one task (minutes to hours).
+A sweep that outgrows one run (hundreds of tickets) is a 5a or 5d signal.
+
 ## 10. Locked decisions (proposed, owner to confirm)
 
 These add to the tracker's list; none changes an existing entry.

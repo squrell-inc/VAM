@@ -449,6 +449,7 @@ today), and only with `spaces:create` for shared Apps.
 | --- | --- | --- | --- | --- |
 | Alice chats | Login session | Her default App | `assistant` | Same as today |
 | "Summarise Jira daily at 6 PM" | Scheduler grant | Alice's App | Where she created it | Runs as Alice at 6 PM; queued behind her task if she is mid-run (amended 2026-10-29) |
+| "Prep the 4 PM standup and chase my tickets" (owner use case, added 2026-11-28, proposed) | Two scheduler grants: summary at 15:30 with a timezone; one sweep hourly in working hours | Alice's App | A "Standup" Space, not her default Space, so her chat does not queue the fires | Runs as Alice; pings go out as ticket comments under her Linear connection; replies are read from the ticket each sweep (`design/long-work.md` §9.1) |
 | Customers @mention a Slack bot | Bot grant with `spaces:create` | Support bot (shared) | Per channel or per person, broker's choice | Private history each; App's limited rights and secrets |
 | Website visitors (Mast) | Website key, or grant held by `mast.ui` | Site App (`idle_ttl`) | Hash of visitor cookie | Isolated; idle Spaces reaped ≤ 30 days |
 | Alice revokes the scheduler | — | — | — | Next broker request `DENIED` |
@@ -1116,9 +1117,36 @@ harness H2-H4 wait for it (D5).
 - **AS-6.1** to **AS-6.4** as in § Phases (Phase 6), with `spaces.keep`
   added here and the reaper deleting the `space_create_keys` row with the
   Space.
+- **AS-6.5 Expiry is visible (proposed, owner to confirm).** Space reads
+  (`GET` by id, list by App, the get-or-create response) return
+  `expiresAt`: `last_active_at + idle_ttl` for an `idle_ttl` App, null for
+  a `keep` App or a kept Space. `last_active_at` exists today
+  (`spaces.rs:121`, set by `touch_space`, `spaces.rs:418-421`). An App key
+  may set `keep` on its own App's Spaces (`PUT /v1/apps/{id}/spaces/{space_id}
+  {keep}`), so an integrator can keep a customer's history without asking
+  the App owner.
+- **AS-6.6 Per-Space usage (proposed, owner to confirm).** `GET
+  /v1/apps/{id}/usage?space_id=&since=&until=` returns, per Space: runs,
+  prompt and completion tokens, and estimated cost (currency and micro
+  amount). No new metering: cost and tokens per run are already persisted
+  in `run_metering` (`workflow.rs:543-550`: `spend_micro`, `token_count`,
+  `prompt_tokens`, `completion_tokens`), written from `SessionBudget`
+  (`vam-inference/src/budget.rs:41-51`). Receipts carry tokens, turns and
+  approvals but no cost (`ReceiptSpend`, `receipt.proto:224-229`), so the
+  route reads `run_metering`, not receipts. The `runs` table has no Space
+  column (`workflow.rs:462-472`; the Space is inside `spec_json` as
+  `RunSpec.space_id`, `workflow.proto:231`), so the route groups by the
+  `app_id`/`space_id` that AS-4.4 stamps on the run record. Read-only, App
+  key or App owner; it lets a client bill or cap its own customers. VAM
+  does not enforce per-Space caps in v1 (AS-6.4 quotas stay per App).
+- AS-6.5 and AS-6.6 join the P6 exit (and the tracker) only once the owner
+  confirms them (§9 Q9); until then the P6 exit above stands.
 
 | Scenario | Change | Layer | Given | Why |
 |---|---|---|---|---|
+| `a-space-read-shows-when-its-history-expires` | new (proposed) | process | `shared-app` with `idle_ttl` | AS-6.5 |
+| `an-app-key-keeps-its-own-space` | new (proposed) | process | `shared-app` with `idle_ttl` | AS-6.5 |
+| `an-app-reports-runs-tokens-and-cost-per-space` | new (proposed) | process | `shared-app`, two Spaces | AS-6.6 |
 | `an-idle-shared-space-is-reaped-within-its-ttl` | new | process | `shared-app` with `idle_ttl` | P6 exit |
 | `a-kept-space-is-never-reaped` | new | process | `shared-app` | per-Space `keep` |
 | `a-space-with-a-parked-run-is-not-reaped` | new | process | `shared-app`, `agent-with-guarded-tool` | AS-6.2 |
@@ -1137,6 +1165,21 @@ harness H2-H4 wait for it (D5).
 - **AS-7.3** Docs page (`docs/src/content/docs/integrations/`, sidebar in
   `docs/astro.config.mjs`): Apps, App keys, Spaces by ref, approvals,
   limits.
+- **AS-7.5 Kit additions (proposed, owner to confirm).** The SDK exposes
+  `expiresAt` and `keep` on Spaces (AS-6.5) and the per-Space usage read
+  (AS-6.6). The docs page (AS-7.3) and the example app also say:
+  - **One live task per Space.** A Space runs one task at a time (the "one
+    live task per workspace" rule, `design/long-work.md` §3); a message to
+    a busy Space waits. Run background jobs (nightly triage, reports) in
+    their own Space, not in a visitor's or employee's chat Space. No model
+    change until the pilot's "Workspace contention" signal
+    (`design/long-work.md` §9) says the rule blocks real use.
+  - **Approvals go to the App owner (D2).** A client-facing App's end
+    users cannot answer approvals in v1, so client pilots use read-only
+    playbooks; any tool that needs an approval waits for the App owner.
+  - **The App acts as its owner.** A shared App reads data through its own
+    bound secrets and connectors, never as the end user (§8); pilots use
+    org-wide read-only data.
 - **AS-7.4** Squrell-App Apps screens: list Apps, create (agent and version
   picker), keys (issue once, revoke), Spaces per App, pin and upgrade.
 
@@ -1145,6 +1188,7 @@ harness H2-H4 wait for it (D5).
 | `the-sdk-creates-a-space-runs-and-follows-events` | new | process | `shared-app` | AS-7.1 |
 | `the-sdk-answers-an-approval-and-the-run-resumes` | new | process | `shared-app`, `agent-with-guarded-tool` | AS-7.1 |
 | `the-example-app-gives-two-visitors-two-private-spaces` | new | process | `shared-app` | AS-7.2 |
+| `the-sdk-reads-a-spaces-usage-and-expiry` | new (proposed) | process | `shared-app` with `idle_ttl` | AS-7.5 |
 | `an-owner-creates-an-app-and-issues-a-key-in-the-app` | new | ui | Squrell-App | AS-7.4 |
 | `the-apps-screen-shows-each-apps-spaces-and-pin` | new | ui | Squrell-App | AS-7.4 |
 
@@ -1156,6 +1200,17 @@ harness H2-H4 wait for it (D5).
 - Environment promotion between Apps (`vam promote`, DX-92): staging and prod
   are two Apps; moving prod's pin is a manual pin write.
 - SDKs other than TypeScript before the pilot.
+- **Acting on behalf of the end user** (proposed, owner to confirm). A
+  shared App runs with its own bound secrets and connectors as its owner;
+  VAM never sees the integrator's user mapping, so an internal App cannot
+  read "my leave balance" or "my mailbox". Not built in v1; pilots use
+  org-wide read-only data. Planned direction: Q8 in §9.
+- **More than one live task per Space** (proposed, owner to confirm). The
+  rule stays; integrators are told to use a separate Space per background
+  job (AS-7.5) until the pilot's "Workspace contention" signal
+  (`design/long-work.md` §9) says otherwise.
+- **Per-Space caps enforced by VAM.** The usage read (AS-6.6) lets the
+  integrator cap its own customers; VAM's quotas stay per App (AS-6.4).
 
 ### 9. Open questions (each with a recommended answer)
 
@@ -1186,3 +1241,19 @@ harness H2-H4 wait for it (D5).
    only) and `expires_at` for `http` keys, with tests, before or in the same
    PR as `POST /v1/apps/{id}/keys`; no App key is issued from a build
    without it.
+8. **How does an App act on behalf of its end user?** (proposed, owner to
+   confirm; §8.) Direction: per run, the integrator's backend mints a
+   short-lived, narrowly scoped "on behalf of" token for the signed-in end
+   user (the same pattern as the planned browser widget token, D3) and
+   passes it with the run request. The host holds it for that run only and
+   carries a reference to it in the run's `CallerContext`
+   (`hosted_services.proto:130-141`, host-stamped), so connector calls use
+   the end user's delegated identity; it is never stored in the Space, the
+   thread log, the run record or a receipt, and never reaches the guest.
+   Recommended: a candidate phase after the pilot, designed together with
+   the D3 widget tokens; not in P2-P7.
+9. **Is the per-Space usage read (AS-6.6) and visible expiry (AS-6.5) in
+   v1?** Recommended: yes, in P6, with the SDK side in P7 (AS-7.5); both
+   read data that exists today (`run_metering`, `spaces.last_active_at`)
+   and add no metering. Cost is the estimate from model prices, not an
+   invoice; the docs say so.

@@ -92,7 +92,7 @@ Done phase sections are deleted; git history keeps them.
 ### Phase 1 — Curated bases and skill packages (I1)
 
 **Goal:** the node can hold `vam/python` and `vam/node` beside `vam/base:2`, each with its
-own manifest and golden snapshot (baked lazily, evicted under a disk budget);
+own manifest and golden snapshot (baked lazily today; baking at install is proposed, design I1 question 10; evicted under a disk budget);
 `requiresRuntime` is checked per image; a skill's hashed Python or JS lockfile is fetched on
 the host, cached by content hash and mounted read-only (DX-101, 101A, 101B, 102, 105).  
 **Depends on:** none (stays out of the hot files: works in `golden.rs`, `node_base.rs`,
@@ -108,7 +108,7 @@ within 2x of ~217 ms (`machine-base` escalation rule).
   manifests; `vam node init --image`; lane `base` input accepts them
 - [ ] Several images per node: image store, manifest map in `node_base.rs`,
   `status.images[]`; `VAM_ROOTFS_PATH` stays the default
-- [ ] Golden per (image, vCPU, memory): lazy bake on first use, LRU eviction under
+- [ ] Golden per (image, vCPU, memory): lazy bake on first use (bake at install proposed, design I1 question 10), LRU eviction under
   `VAMD_GOLDEN_MAX_BYTES`, default and in-use keys never evicted
 - [ ] `requiresRuntime` per image: release passes if any held image satisfies; refusal names
   the images

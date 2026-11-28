@@ -14,7 +14,8 @@ exactly one image and every VM gets the same size. After this lane:
 
 1. **I1.** VAM ships more curated bases (`vam/python`, `vam/node`) next to `vam/base:2`. A
    node can hold several images, each with its own manifest and its own golden snapshot,
-   baked when first needed and evicted when disk runs short. A skill brings its own
+   baked in the background when the image is installed or first named (proposed, §3.1),
+   never on a user's run, and evicted when disk runs short. A skill brings its own
    language packages from its native lockfile; the host fetches them by hash, caches them by
    content hash and mounts them read-only. Nothing installs inside the guest.
 2. **I2.** An image is a catalog artifact (`urn:vam:image:…`). An agent names one with
@@ -143,8 +144,8 @@ on the **inputs** (recipe digest, base digest, snapshot timestamp, package hashe
 the **resolved package list**. A node that builds a different package list from the same
 recipe refuses the image. The node-local ext4 digest is recorded per run in the receipt.
 
-Cost of C: each node builds each image once (minutes) and stores it. Mitigations: lazy
-golden bakes (I1), build on install rather than on first run (I3), and a node can build
+Cost of C: each node builds each image once (minutes) and stores it. Mitigations: golden
+bakes in the background off the run path (I1), build on install rather than on first run (I3), and a node can build
 images in the background after an admin enables a listing.
 
 ## 3. Phases
@@ -187,11 +188,24 @@ wants `vam/node` for every run points `VAM_ROOTFS_PATH` at it, as they can today
 
 **Golden per image and size.** `golden.rs` functions take `(image, vcpu, mem)` instead of
 reading the env and the constants. Startup bakes only the default image at the default size,
-as today. Any other key is baked on first use: that run boots cold (~250 ms) and a
-background bake follows, so the next run restores. Eviction is least recently used under
-`VAMD_GOLDEN_MAX_BYTES` (each key costs about its memory size plus the sparse data disk),
-never the default key and never a key a restore is using. I1 builds and unit-tests this;
-the lane exercises it once I2 selects images.
+as today (`warmup_golden_snapshot`, `golden.rs:622`, called before the API answers,
+`bin/vamd.rs:739`). Eviction is least recently used under `VAMD_GOLDEN_MAX_BYTES` (each key
+costs about its memory size plus the sparse data disk), never the default key and never a
+key a restore is using. I1 builds and unit-tests this; the lane exercises it once I2 selects
+images.
+
+**Pre-bake, not bake on first use (proposed, owner to confirm).** The first user of an
+image should never pay the bake. Other keys are baked in the background at two moments:
+when an image is installed on the node (`vam node init --image`, or admission in I3), for
+the default size; and, from I2, when an agent version naming it is released or an App
+pinning such a version is created (Apps P2), for the size that version resolves to. A run
+that still finds no golden (a size nobody named, or a bake not yet finished) boots cold
+(~250 ms) and does not start a second bake; it is the fallback, not the plan. Eviction
+stays consistent with this: from I2, a key named by an active App's pin is evicted only
+after every unnamed key, and if one is evicted it is re-baked in the background as soon as
+the budget allows, so a pinned App's next run restores. If named keys alone exceed
+`VAMD_GOLDEN_MAX_BYTES`, the node stops re-baking (no evict/bake loop) and `status.images[]`
+reports the key as not baked, so the operator raises the budget (open question 10).
 
 **`requiresRuntime` per image.** At skill release the check passes when any image on the
 node meets it, and the refusal names the images that would (`… needs node >=22; this
@@ -230,6 +244,8 @@ machine-base scenario's message changes accordingly.
 lockfile on a second agent hits the cache; a source-only package is refused at release; the
 node reports every image it holds; golden restore median within 2x of ~217 ms on the default
 image (the `machine-base` escalation rule).
+If open question 10 is confirmed, the exit adds: an installed image's golden snapshot is
+baked before its first run (proposed; the tracker's exit changes only then).
 
 **Scenario delta (I1)**
 
@@ -242,6 +258,7 @@ image (the `machine-base` escalation rule).
 | `skill-needing-a-runtime-the-base-lacks-is-refused-at-install` | changed: refusal names every image the node holds and which would satisfy | process | as today | `requiresRuntime` is per image |
 | `skill-uses-node-and-npm-packages-on-the-node-base` | new | firecracker | node whose default is `vam/node:1`, `skill-with-js-lockfile` (new) | the curated base boots and a JS dep resolves |
 | `skill-uses-python-pandas-and-git-on-the-standard-base` | unchanged (guard) | firecracker | as today | the default base is untouched |
+| `an-installed-image-is-baked-before-its-first-run` | new (proposed) | firecracker | node with `vam/base:2`, then `vam/node:1` installed | pre-bake: `status.images[]` shows the `vam/node:1` golden key baked with no run started |
 
 ### 3.2 I2 — Image artifact and per-run choice
 
@@ -315,6 +332,7 @@ released before I2 on a node whose default was `vam/node` still boots `vam/node`
 | `run-gets-the-vm-size-it-asked-for-within-the-cap` | new | firecracker | node with `VAMD_VM_MAX=2x1024`, agent asking 4 vCPU / 2048 | guest reports 1024 MiB, run records `vm.clamped: true` |
 | `receipt-names-the-image-the-run-booted` | new | process | `org-admin`, `agent-on-node-image` | receipt carries URN, version and digest |
 | `app-keeps-its-image-when-a-newer-image-is-released` | new | process | Apps P2 pieces, `agent-on-node-image` | decision 4: the image moves only with the agent version |
+| `an-apps-first-run-restores-and-an-evicted-snapshot-is-rebaked` | new (proposed) | firecracker | node with `vam/base:2` and `vam/node:1`, a small `VAMD_GOLDEN_MAX_BYTES`, Apps P2 pieces, `agent-on-node-image` | pre-bake on App create; a pinned key evicted under pressure is re-baked in the background |
 | `agent-released-before-i2-keeps-the-nodes-old-default-image` | new | firecracker | node with `VAM_ROOTFS_PATH` at `vam/node:1`, `agent-with-builtins` released before the upgrade | migration from a nonstandard default |
 
 ### 3.3 I3 — Vamfile Lite
@@ -366,7 +384,7 @@ recipe + lock -> check (grammar, lock matches, FROM per the rule above)
   -> tree out over a second drive -> host: mkfs.ext4 -d (fixed UUID, hash seed, time)
   -> inject vam-runtime as /sbin/init (last) -> manifest, packages.txt, SBOM (SPDX)
   -> TEST in a fresh VM, no network -> package list equals the listing's expected list
-  -> admitted: image released on this node, golden baked on first use
+  -> admitted: image released on this node, golden baked in the background now (§3.1)
 ```
 
 The builder VM is a Firecracker VM like any run (jailer, read-only kernel, no host
@@ -524,6 +542,13 @@ reasons:
    with `--frozen-lockfile`); refuse `yarn.lock` and `pnpm-lock.yaml` until asked.
 9. **Skills drive size.** Recommended: cap one skill's materialized packages at 512 MiB and
    the drive at 2 GiB, refuse at release above it; the breakdown checks current drive sizing.
+10. **When are golden snapshots baked, and what happens when pinned keys outgrow the
+    budget?** (proposed, owner to confirm; §3.1.) Recommended: in the background on image
+    install, and from I2 on agent release and App create, never on a user's run; keys named
+    by an active App pin are evicted last and re-baked after eviction; when named keys alone
+    exceed `VAMD_GOLDEN_MAX_BYTES` the node reports it and stops re-baking rather than
+    thrash. Alternative: keep bake on first use (one cold run per key) and only pre-bake the
+    default image.
 
 ## What we are not building
 
