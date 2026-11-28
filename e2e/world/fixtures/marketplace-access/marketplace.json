@@ -1,0 +1,63 @@
+{
+  "name": "Access",
+  "publisherDomain": "access.community.example",
+  "listings": [
+    {
+      "id": "open-notes",
+      "displayName": "Open notes",
+      "description": "An agent anyone in the org may add.",
+      "artifacts": [
+        {
+          "kind": "agent",
+          "path": "listings/open-notes/agents/open-helper"
+        }
+      ],
+      "ref": "open-notes-v1.0.0",
+      "requiresNode": ">=0.1.0",
+      "access": {
+        "default": {
+          "visibility": "org",
+          "mode": "open"
+        }
+      }
+    },
+    {
+      "id": "quiet-notes",
+      "displayName": "Quiet notes",
+      "description": "An agent hidden from members until an admin shares it.",
+      "artifacts": [
+        {
+          "kind": "agent",
+          "path": "listings/quiet-notes/agents/quiet-helper"
+        }
+      ],
+      "ref": "quiet-notes-v1.0.0",
+      "requiresNode": ">=0.1.0",
+      "access": {
+        "default": {
+          "visibility": "restricted",
+          "mode": "approval"
+        }
+      }
+    },
+    {
+      "id": "kept-notes",
+      "displayName": "Kept notes",
+      "description": "An agent whose update must keep the admin's access choice.",
+      "artifacts": [
+        {
+          "kind": "agent",
+          "path": "listings/kept-notes/agents/kept-helper"
+        }
+      ],
+      "ref": "kept-notes-v1.0.0",
+      "requiresNode": ">=0.1.0",
+      "access": {
+        "default": {
+          "visibility": "org",
+          "mode": "open"
+        }
+      }
+    }
+  ]
+}

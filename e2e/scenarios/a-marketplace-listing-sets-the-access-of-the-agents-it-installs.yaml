@@ -1,0 +1,35 @@
+id: a-marketplace-listing-sets-the-access-of-the-agents-it-installs
+title: A marketplace listing sets the access of the agents it installs
+description: >
+  A listing in an added marketplace names the access its agents start with. After a refresh the admin reads that default on each listing. An open listing installs org-visible and open, so a member sees it, adds it at once and chats with it. A restricted listing installs hidden, so the member neither lists it nor reads it, and is answered as for an agent that does not exist.
+tags: [members, permissions, connectors]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: member }
+  - marketplace-access
+when:
+  - marketplace-add: { piece: marketplace-access, as: admin }
+  - marketplace-refresh: { marketplace: marketplace-access, as: admin }
+  - expect: { listings: { marketplace: marketplace-access, listing: open-notes, as: admin, fields: { access.default.visibility: org, access.default.mode: open } } }
+  - expect: { listings: { marketplace: marketplace-access, listing: quiet-notes, as: admin, fields: { access.default.visibility: restricted, access.default.mode: approval } } }
+  - marketplace-install: { marketplace: marketplace-access, listing: open-notes, as: admin }
+  - marketplace-install: { marketplace: marketplace-access, listing: quiet-notes, as: admin }
+  - identity-request: { as: member, credential: key, path: "/v1/catalog/agents?pageSize=1000", status: 200, contains: "urn:vam:agent:access.community.example/community/open-helper", lacks: "urn:vam:agent:access.community.example/community/quiet-helper" }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fcommunity%2Fopen-helper/access", status: 200, body: { message: "please" }, fields: { request.state: approved } }
+  - chat: { text: "e2e-step:hi Hello", agent: "urn:vam:agent:access.community.example/community/open-helper", as: member }
+  - expect: { run: succeeded }
+then:
+  - identity-request: { as: member, credential: key, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fcommunity%2Fquiet-helper", status: 404, fields: { message: "agents 'urn:vam:agent:access.community.example/community/quiet-helper' not found in catalog" } }
+  - identity-request: { as: member, credential: key, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fcommunity%2Fno-such-agent", status: 404, fields: { message: "agents 'urn:vam:agent:access.community.example/community/no-such-agent' not found in catalog" } }
+guards:
+  - vam:crates/vam-spec/src/marketplace.rs
+  - vam:crates/vam-orchestrator/src/marketplace/import.rs
+  - vam:crates/vam-orchestrator/src/marketplace/mod.rs
+  - vam:crates/vam-orchestrator/src/marketplace/store.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+mock:
+  - when: { step: hi, stepStart: true }
+    reply: { text: Hello. }
+status: pending
+expectFail: { step: when.0, class: product }

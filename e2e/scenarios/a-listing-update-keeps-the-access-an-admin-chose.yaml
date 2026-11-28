@@ -1,0 +1,28 @@
+id: a-listing-update-keeps-the-access-an-admin-chose
+title: A listing update keeps the access an admin chose for the installed agent
+description: >
+  The admin installs a listing whose default is open, then sets the agent to need approval. The marketplace tags a newer release whose index says everyone may use it. After the refresh and the update the new release is installed, and the admin's choice stands: a member's request is still pending, not approved.
+tags: [members, permissions, connectors]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: member }
+  - marketplace-access
+when:
+  - marketplace-add: { piece: marketplace-access, as: admin }
+  - marketplace-refresh: { marketplace: marketplace-access, as: admin }
+  - marketplace-install: { marketplace: marketplace-access, listing: kept-notes, as: admin }
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fcommunity%2Fkept-helper/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - git-tag: { piece: marketplace-access, tag: kept-notes-v1.1.0, overlay: marketplace-access-update }
+  - marketplace-refresh: { marketplace: marketplace-access, as: admin }
+  - marketplace-update: { marketplace: marketplace-access, listing: kept-notes, as: admin }
+  - expect: { listings: { marketplace: marketplace-access, listing: kept-notes, as: admin, fields: { installed.ref: kept-notes-v1.1.0, updateAvailable: false } } }
+then:
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/urn%3Avam%3Aagent%3Aaccess.community.example%2Fcommunity%2Fkept-helper/access", status: 202, body: { message: "please" }, fields: { request.state: pending } }
+guards:
+  - vam:crates/vam-spec/src/marketplace.rs
+  - vam:crates/vam-orchestrator/src/marketplace/import.rs
+  - vam:crates/vam-orchestrator/src/marketplace/mod.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+status: pending
+expectFail: { step: when.0, class: product }

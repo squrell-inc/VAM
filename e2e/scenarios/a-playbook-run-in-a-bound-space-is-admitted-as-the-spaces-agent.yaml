@@ -1,0 +1,27 @@
+id: a-playbook-run-in-a-bound-space-is-admitted-as-the-spaces-agent
+title: A playbook run in a Space is admitted as the Space's agent, so a revoked or restricted agent refuses it
+description: >
+  The member gets access through a request and the admin's approval, and makes a Space bound to the agent. After the admin revokes the access, a run that names only a playbook and that Space is refused as agent access required, not run as an agent-less default. After the admin restricts the agent the same run is refused with the text of a missing agent.
+tags: [members, permissions]
+needs: process
+given:
+  - { piece: org-admin, as: admin }
+  - { piece: org-member, as: member }
+  - agent-plain
+  - playbook-one-step
+when:
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: org, mode: approval } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access", status: 202, body: { message: "please" }, remember: { field: request.requestId, as: acr } }
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/access-requests/{{acr}}/decide", status: 200, body: { decision: approve } }
+  - identity-request: { as: member, credential: key, method: post, path: "/v1/spaces", status: 200, body: { agentUrn: "{{urn:agent-plain}}", label: bound }, remember: { field: spaceId, as: sp } }
+  - identity-request: { as: admin, credential: key, method: post, path: "/v1/agents/{{urn:agent-plain}}/access/{member.userId}/revoke", status: 200, body: { reason: "left the team" } }
+  - identity-request: { as: member, credential: key, method: post, path: /v1/runs, status: 403, contains: "agent_access_required:", body: { spec: { playbookRef: { resourceId: { urn: "{{urn:playbook-one-step}}" } }, spaceId: "{{sp}}", inputs: { topic: e2e } } } }
+  - identity-request: { as: admin, credential: key, method: put, path: "/v1/agents/{{urn:agent-plain}}/access-policy", status: 200, body: { visibility: restricted, mode: approval } }
+then:
+  - identity-request: { as: member, credential: key, method: post, path: /v1/runs, status: 404, contains: "agents '{{urn:agent-plain}}' not found in catalog", body: { spec: { playbookRef: { resourceId: { urn: "{{urn:playbook-one-step}}" } }, spaceId: "{{sp}}", inputs: { topic: e2e } } } }
+guards:
+  - vam:crates/vam-orchestrator/src/api/run_start.rs
+  - vam:crates/vam-orchestrator/src/api/spaces.rs
+  - vam:crates/vam-orchestrator/src/agent_access.rs
+  - vam:crates/vam-orchestrator/src/catalog_resolve.rs
+status: active
