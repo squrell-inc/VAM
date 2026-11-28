@@ -838,6 +838,45 @@ fn check_scenario(
                         format!("{pos}: `cli` needs at least one argument"),
                     ));
                 }
+                match (x.exit, x.exit_code) {
+                    (None, None) => errors.push(CheckError::new(
+                        p,
+                        "cli",
+                        format!("{pos}: `cli` needs `exit` or `exitCode`"),
+                    )),
+                    (Some(crate::scenario::CliExit::Ok), Some(c)) if c != 0 => {
+                        errors.push(CheckError::new(
+                            p,
+                            "cli",
+                            format!("{pos}: `exit: ok` does not combine with `exitCode: {c}`"),
+                        ))
+                    }
+                    (Some(crate::scenario::CliExit::Fail), Some(0)) => {
+                        errors.push(CheckError::new(
+                            p,
+                            "cli",
+                            format!("{pos}: `exit: fail` does not combine with `exitCode: 0`"),
+                        ))
+                    }
+                    _ => {}
+                }
+                for text in x
+                    .args
+                    .iter()
+                    .chain(&x.contains)
+                    .chain(&x.absent)
+                    .chain(&x.matches)
+                {
+                    let _ = crate::engine::identity::expand_urns(text, false, |piece, who| {
+                        refer(errors, p, &pos, &aliases, Some(piece));
+                        refer_org(errors, p, &pos, &org_aliases, Some(who));
+                        Some(String::new())
+                    });
+                    refer_placeholders(errors, p, &pos, &org_aliases, text);
+                    for piece in crate::engine::identity::bare_urn_pieces(text) {
+                        refer(errors, p, &pos, &aliases, Some(piece));
+                    }
+                }
                 if x.root.from.is_some() == x.root.same {
                     errors.push(CheckError::new(
                         p,
